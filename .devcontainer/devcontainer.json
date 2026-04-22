@@ -1,0 +1,60 @@
+{
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".",
+    "args": {}
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "version": "latest"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/python/current/bin/python",
+        "python.formatting.autopep8Path": "/usr/local/py-utils/bin/autopep8",
+        "python.formatting.blackPath": "/usr/local/py-utils/bin/black",
+        "python.formatting.yapfPath": "/usr/local/py-utils/bin/yapf",
+        "go.useLanguageServer": true,
+        "go.gopath": "/go",
+        "go.coverOnSingleTest": true,
+        "go.coverOnSingleTestFile": true,
+        "go.coverOnTestPackage": true,
+        "go.lintTool": "golangci-lint",
+        "go.lintOnSave": "package",
+        "[go]": {
+          "editor.codeActionsOnSave": {
+            "source.organizeImports": true
+          }
+        },
+        "gopls": {
+          "usePlaceholders": false,
+          "staticcheck": true
+        }
+      },
+      "extensions": [
+        "hashicorp.terraform",
+        "hashicorp.hcl",
+        "ms-python.python",
+        "ms-python.pylint",
+        "ms-python.flake8",
+        "ms-python.mypy-type-checker",
+        "ms-python.black-formatter",
+        "ms-python.autopep8",
+        "ms-python.isort",
+        "ms-python.vscode-pylance",
+        "golang.Go"
+      ]
+    }
+  },
+  "mounts": [
+    "type=bind,source=${localEnv:HOME}/.aws,target=/home/vscode/.aws,consistency=cached",
+    "type=bind,source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,consistency=cached",
+    "type=bind,source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,readonly"
+  ],
+  "initializeCommand": "mkdir -p ~/{.aws,.ssh}"
+}

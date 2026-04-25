@@ -1,0 +1,9 @@
+# Binary
+ambiguous-agent
+
+# Test artifacts
+*.test
+test_output.txt
+
+# Environment
+.env

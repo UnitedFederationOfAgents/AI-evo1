@@ -7,3 +7,7 @@ test_output.txt
 
 # Environment
 .env
+
+# Local dependencies (built from other sub-projects)
+clauditable
+clod

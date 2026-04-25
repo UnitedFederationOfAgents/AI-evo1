@@ -33,7 +33,7 @@ const (
 const (
 	DefaultAgent       = "claude"
 	DefaultMode        = ModeRead
-	DefaultRecordsPath = "/workspaces/agent-records/"
+	DefaultRecordsPath = "/host-agent-files/agent-records"
 )
 
 // AgentConfig defines how to invoke a specific AI CLI agent
@@ -158,10 +158,36 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
-	modeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("220")).
-			Bold(true)
+	modeStyles = map[string]lipgloss.Style{
+		ModePrompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Bold(true),  // green
+		ModeRead:    lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true), // yellow
+		ModeWrite:   lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true), // orange
+		ModeExecute: lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true), // red
+	}
+
+	infoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("39"))
 )
+
+// resolveBinary finds a binary by checking PATH first, then the directory of
+// the running executable. Returns the resolved path and whether it came from
+// the local directory (not PATH).
+func resolveBinary(name string) (string, bool, error) {
+	if p, err := exec.LookPath(name); err == nil {
+		return p, false, nil
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return "", false, fmt.Errorf("%s not found on PATH and could not determine executable directory: %w", name, err)
+	}
+	localPath := filepath.Join(filepath.Dir(self), name)
+	if _, err := os.Stat(localPath); err == nil {
+		return localPath, true, nil
+	}
+
+	return "", false, fmt.Errorf("%s not found on PATH or in %s", name, filepath.Dir(self))
+}
 
 // getAgentStyle returns a styled text renderer for the given agent
 func getAgentStyle(agent string) lipgloss.Style {
@@ -321,9 +347,10 @@ Examples:
 		session = os.Getenv("AGENT_SESSION")
 	}
 	if session == "" {
-		// Auto-generate session based on current time
+		// Use local date format matching clauditable behavior
 		now := time.Now()
-		session = fmt.Sprintf("session-%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+		localDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		session = localDate.Format("2006-01-02")
 	}
 
 	// Get records path
@@ -349,7 +376,7 @@ Examples:
 
 	// Print invocation info with visual flare
 	agentStyled := getAgentStyle(agent)
-	modeStyled := modeStyle.Render(modeDescription(mode))
+	modeStyled := modeStyles[mode].Render(modeDescription(mode))
 
 	if model != "" {
 		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
@@ -429,16 +456,33 @@ func buildAgentArgs(config *AgentConfig, mode, model, prompt, sessionDir string,
 
 // invokeWithClauditable wraps the agent invocation with clauditable for record-keeping
 func invokeWithClauditable(agentCmd string, args []string, agent, model, sessionDir string) int {
-	// Check if clauditable is available
-	clauditablePath, err := exec.LookPath("clauditable")
+	// Resolve clauditable: prefer PATH, fall back to colocated binary
+	clauditablePath, isLocal, err := resolveBinary("clauditable")
 	if err != nil {
-		// Clauditable not found, invoke agent directly with warning
-		fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, invoking agent directly"))
-		return invokeAgent(agentCmd, args)
+		if os.Getenv("NO_CLAUDITABLE") == "true" {
+			fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, invoking agent directly (NO_CLAUDITABLE=true)"))
+			return invokeAgent(agentCmd, args)
+		}
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: clauditable not found"))
+		fmt.Fprintln(os.Stderr, sessionStyle.Render("clauditable is required for record-keeping. Install it or set NO_CLAUDITABLE=true to bypass."))
+		return 1
+	}
+	if isLocal {
+		fmt.Fprintln(os.Stderr, infoStyle.Render(fmt.Sprintf("INFO: using local clauditable at %s", clauditablePath)))
+	}
+
+	// Resolve agent command: prefer PATH, fall back to colocated binary
+	resolvedAgentCmd, agentIsLocal, err := resolveBinary(agentCmd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: agent binary '%s' not found", agentCmd)))
+		return 1
+	}
+	if agentIsLocal {
+		fmt.Fprintln(os.Stderr, infoStyle.Render(fmt.Sprintf("INFO: using local %s at %s", agentCmd, resolvedAgentCmd)))
 	}
 
 	// Build clauditable command: clauditable <agent-command> <args...>
-	clauditableArgs := append([]string{agentCmd}, args...)
+	clauditableArgs := append([]string{resolvedAgentCmd}, args...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
 
 	// Set environment variables for clauditable
@@ -469,7 +513,16 @@ func invokeWithClauditable(agentCmd string, args []string, agent, model, session
 
 // invokeAgent invokes the agent directly without clauditable wrapping
 func invokeAgent(agentCmd string, args []string) int {
-	cmd := exec.Command(agentCmd, args...)
+	resolvedCmd, isLocal, err := resolveBinary(agentCmd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: agent binary '%s' not found", agentCmd)))
+		return 1
+	}
+	if isLocal {
+		fmt.Fprintln(os.Stderr, infoStyle.Render(fmt.Sprintf("INFO: using local %s at %s", agentCmd, resolvedCmd)))
+	}
+
+	cmd := exec.Command(resolvedCmd, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

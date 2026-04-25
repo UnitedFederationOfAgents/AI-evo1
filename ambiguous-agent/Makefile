@@ -1,4 +1,4 @@
-.PHONY: build docker-build run clean test all
+.PHONY: build docker-build run clean test all deploy-dependencies-local
 
 BINARY_NAME=ambiguous-agent
 
@@ -15,7 +15,7 @@ docker-build:
 # Run with sample prompt (read mode by default)
 run: build
 	@echo "Running ambiguous-agent..."
-	./$(BINARY_NAME) -r -p "What files are in this directory?"
+	./$(BINARY_NAME) -r "What files are in this directory?"
 
 # Clean up build artifacts
 clean:
@@ -25,3 +25,12 @@ clean:
 # Run Go tests
 test:
 	go test -v ./...
+
+# Build and deploy local dependencies from other sub-projects
+deploy-dependencies-local:
+	@echo "Building clauditable..."
+	cd ../clauditable && go build -o ../ambiguous-agent/clauditable .
+	@echo "Building clod..."
+	cd ../clod && go build -o ../ambiguous-agent/clod .
+	@echo "Dependencies deployed to local directory"
+	@ls -la clauditable clod 2>/dev/null || true

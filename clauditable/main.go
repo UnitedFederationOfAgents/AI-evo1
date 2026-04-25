@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,33 +10,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"clauditable/pkg/records"
 )
 
 // Environment variable names
 const (
-	EnvAgentRecordsPath      = "AGENT_RECORDS_PATH"
-	EnvAgentSession          = "AGENT_SESSION"
+	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentSession            = "AGENT_SESSION"
 	EnvAgentConsolidateRecords = "AGENT_CONSOLIDATE_RECORDS"
+	EnvUFAAgent                = "UFA_AGENT"
+	EnvUFAModel                = "UFA_MODEL"
+	EnvUFAMetadata             = "UFA_METADATA"
 
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 )
-
-// Event represents a simple event record inspired by the sandbox/AI-sandboxing schema
-type Event struct {
-	Timestamp   string `json:"timestamp"`
-	EventType   string `json:"event_type"`
-	Command     string `json:"command"`
-	DurationMs  int64  `json:"duration_ms"`
-	ExitCode    int    `json:"exit_code"`
-	RecordPath  string `json:"record_path,omitempty"`
-}
-
-// RawRecord contains the full interaction record
-type RawRecord struct {
-	Event  Event  `json:"event"`
-	Stdout string `json:"stdout"`
-	Stderr string `json:"stderr"`
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -53,6 +40,9 @@ func main() {
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	session := getSession()
 	consolidate := getConsolidateRecords()
+	agent := os.Getenv(EnvUFAAgent)
+	model := os.Getenv(EnvUFAModel)
+	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
 
 	// Prepare the command
 	cmd := exec.Command(cmdName, cmdArgs...)
@@ -114,28 +104,29 @@ func main() {
 		fullCommand = cmdName + " " + strings.Join(cmdArgs, " ")
 	}
 
-	// Create event and record
+	// Create record using the pkg/records package
 	unixTimestamp := startTime.Unix()
-	event := Event{
-		Timestamp:  startTime.Format(time.RFC3339),
-		EventType:  "command_execution",
-		Command:    fullCommand,
-		DurationMs: duration.Milliseconds(),
-		ExitCode:   exitCode,
+	record := records.Record{
+		Event: records.Event{
+			Timestamp:  startTime.Format(time.RFC3339),
+			EventType:  "command_execution",
+			Agent:      agent,
+			Model:      model,
+			DurationMs: duration.Milliseconds(),
+			ExitCode:   exitCode,
+			Metadata:   metadata,
+		},
+		Command: fullCommand,
+		Stdout:  stdoutBuf.String(),
+		Stderr:  stderrBuf.String(),
 	}
 
-	rawRecord := RawRecord{
-		Event:  event,
-		Stdout: stdoutBuf.String(),
-		Stderr: stderrBuf.String(),
-	}
-
-	// Write the raw record
-	recordPath, err := writeRawRecord(recordsPath, session, unixTimestamp, rawRecord)
+	// Write the records
+	recordPath, err := writeRecord(recordsPath, session, unixTimestamp, &record)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write record: %v\n", err)
 	} else {
-		event.RecordPath = recordPath
+		record.Event.RecordPath = recordPath
 
 		// Consolidate if enabled
 		if consolidate {
@@ -158,11 +149,15 @@ func getEnvOrDefault(key, defaultValue string) string {
 
 // getSession returns the session identifier
 // Uses AGENT_SESSION if set, otherwise uses current date (auto-updates daily)
+// Note: Uses local time with proper timezone handling to avoid "tomorrow" date bugs
 func getSession() string {
 	if session := os.Getenv(EnvAgentSession); session != "" {
 		return session
 	}
-	return time.Now().Format("2006-01-02")
+	// Use local time but truncate to start of day to ensure consistency
+	now := time.Now()
+	localDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return localDate.Format("2006-01-02")
 }
 
 // getConsolidateRecords returns whether record consolidation is enabled
@@ -180,21 +175,67 @@ func getConsolidateRecords() bool {
 	return b
 }
 
-// writeRawRecord writes the raw record to <records-path>/<session>/<unix-timestamp>
-func writeRawRecord(recordsPath, session string, timestamp int64, record RawRecord) (string, error) {
+// parseMetadata parses the UFA_METADATA environment variable
+// Format: "key1=value1,key2=value2" or "key1=value1;key2=value2"
+// Returns nil if empty or unparseable
+func parseMetadata(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+
+	result := make(map[string]string)
+
+	// Support both comma and semicolon as separators
+	s = strings.ReplaceAll(s, ";", ",")
+	pairs := strings.Split(s, ",")
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			if key != "" {
+				result[key] = value
+			}
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// writeRecord writes both the session log entry and the raw file
+// Returns the record path (used for both the consolidated entry and raw file reference)
+func writeRecord(recordsPath, session string, timestamp int64, record *records.Record) (string, error) {
 	sessionDir := filepath.Join(recordsPath, session)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create session directory: %w", err)
 	}
 
-	recordFile := filepath.Join(sessionDir, fmt.Sprintf("%d", timestamp))
-	data, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal record: %w", err)
+	tsStr := fmt.Sprintf("%d", timestamp)
+	recordFile := filepath.Join(sessionDir, tsStr)
+	rawFile := filepath.Join(sessionDir, tsStr+"-raw.txt")
+
+	// Set record path in the event for reference (used for both purposes)
+	record.Event.RecordPath = recordFile
+
+	// Write the session log entry (will be consolidated later)
+	sessionLogContent := record.FormatSessionLog()
+	if err := os.WriteFile(recordFile, []byte(sessionLogContent), 0644); err != nil {
+		return "", fmt.Errorf("failed to write record file: %w", err)
 	}
 
-	if err := os.WriteFile(recordFile, data, 0644); err != nil {
-		return "", fmt.Errorf("failed to write record file: %w", err)
+	// Write the raw file (not consolidated, kept as permanent record)
+	rawContent := record.FormatRawFile()
+	if err := os.WriteFile(rawFile, []byte(rawContent), 0644); err != nil {
+		// Record file was written, log warning but don't fail
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write raw file: %v\n", err)
 	}
 
 	return recordFile, nil
@@ -211,7 +252,7 @@ func consolidateRecords(recordsPath, session string) error {
 		return fmt.Errorf("failed to read session directory: %w", err)
 	}
 
-	// Find all unix-timestamp files (numeric filenames)
+	// Find all unix-timestamp files (numeric filenames, not -raw.txt files)
 	var timestampFiles []string
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -219,6 +260,10 @@ func consolidateRecords(recordsPath, session string) error {
 		}
 		name := entry.Name()
 		if name == "session.log" {
+			continue
+		}
+		// Skip -raw.txt files (they are not consolidated)
+		if strings.HasSuffix(name, "-raw.txt") {
 			continue
 		}
 		// Check if filename is a valid unix timestamp (all digits)
@@ -253,20 +298,18 @@ func consolidateRecords(recordsPath, session string) error {
 			continue // Skip files we can't read
 		}
 
-		// Parse and re-encode as single-line JSON for JSONL format
-		var record RawRecord
-		if err := json.Unmarshal(data, &record); err != nil {
-			continue // Skip invalid JSON
-		}
-
-		line, err := json.Marshal(record)
-		if err != nil {
-			continue
-		}
-
-		// Write to session.log
-		if _, err := f.Write(append(line, '\n')); err != nil {
+		// Write the content directly to session.log
+		// The content is already in the correct format (JSON line + plaintext)
+		if _, err := f.Write(data); err != nil {
 			return fmt.Errorf("failed to write to session.log: %w", err)
+		}
+
+		// Ensure there's a blank line between entries for readability
+		if !strings.HasSuffix(string(data), "\n\n") {
+			if !strings.HasSuffix(string(data), "\n") {
+				f.Write([]byte("\n"))
+			}
+			f.Write([]byte("\n"))
 		}
 
 		// Delete the original file

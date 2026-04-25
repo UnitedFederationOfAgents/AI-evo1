@@ -1,10 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"clauditable/pkg/records"
 )
 
 func TestGetSession(t *testing.T) {
@@ -76,6 +78,7 @@ func TestIsUnixTimestamp(t *testing.T) {
 		{"session.log", false},
 		{"-123", false},
 		{"12.34", false},
+		{"1234567890-raw.txt", false},
 	}
 
 	for _, tt := range tests {
@@ -88,7 +91,85 @@ func TestIsUnixTimestamp(t *testing.T) {
 	}
 }
 
-func TestWriteRawRecord(t *testing.T) {
+func TestParseMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected map[string]string
+	}{
+		{
+			name:     "empty string",
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:  "single pair",
+			input: "key=value",
+			expected: map[string]string{
+				"key": "value",
+			},
+		},
+		{
+			name:  "multiple pairs comma separated",
+			input: "key1=value1,key2=value2",
+			expected: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+		},
+		{
+			name:  "multiple pairs semicolon separated",
+			input: "key1=value1;key2=value2",
+			expected: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+		},
+		{
+			name:  "with spaces",
+			input: "key1 = value1 , key2 = value2",
+			expected: map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+		},
+		{
+			name:     "invalid format no equals",
+			input:    "keyonly",
+			expected: nil,
+		},
+		{
+			name:  "value with equals sign",
+			input: "key=value=with=equals",
+			expected: map[string]string{
+				"key": "value=with=equals",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseMetadata(tt.input)
+			if tt.expected == nil {
+				if result != nil {
+					t.Errorf("expected nil, got %v", result)
+				}
+				return
+			}
+			if len(result) != len(tt.expected) {
+				t.Errorf("expected %d entries, got %d", len(tt.expected), len(result))
+				return
+			}
+			for k, v := range tt.expected {
+				if result[k] != v {
+					t.Errorf("expected %s=%s, got %s=%s", k, v, k, result[k])
+				}
+			}
+		})
+	}
+}
+
+func TestWriteRecord(t *testing.T) {
 	// Create a temporary directory
 	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
 	if err != nil {
@@ -96,45 +177,69 @@ func TestWriteRawRecord(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	record := RawRecord{
-		Event: Event{
+	record := &records.Record{
+		Event: records.Event{
 			Timestamp:  "2026-01-15T10:30:00Z",
 			EventType:  "command_execution",
-			Command:    "echo hello",
+			Agent:      "claude",
+			Model:      "opus-4",
 			DurationMs: 50,
 			ExitCode:   0,
 		},
-		Stdout: "hello\n",
-		Stderr: "",
+		Command: "echo hello",
+		Stdout:  "hello\n",
+		Stderr:  "",
 	}
 
-	recordPath, err := writeRawRecord(tmpDir, "test-session", 1705312200, record)
+	recordPath, err := writeRecord(tmpDir, "test-session", 1705312200, record)
 	if err != nil {
-		t.Fatalf("writeRawRecord failed: %v", err)
+		t.Fatalf("writeRecord failed: %v", err)
 	}
 
-	// Verify the file was created
-	expectedPath := filepath.Join(tmpDir, "test-session", "1705312200")
-	if recordPath != expectedPath {
-		t.Errorf("expected path %s, got %s", expectedPath, recordPath)
+	// Verify the record file was created
+	expectedRecordPath := filepath.Join(tmpDir, "test-session", "1705312200")
+	if recordPath != expectedRecordPath {
+		t.Errorf("expected record path %s, got %s", expectedRecordPath, recordPath)
 	}
 
-	// Verify file contents
-	data, err := os.ReadFile(recordPath)
+	// Verify the raw file was also created
+	expectedRawPath := filepath.Join(tmpDir, "test-session", "1705312200-raw.txt")
+	if _, err := os.Stat(expectedRawPath); os.IsNotExist(err) {
+		t.Error("expected raw file to be created")
+	}
+
+	// Verify record file contents (should have JSON + prefixed lines)
+	recordData, err := os.ReadFile(recordPath)
 	if err != nil {
 		t.Fatalf("failed to read record file: %v", err)
 	}
+	recordStr := string(recordData)
 
-	var readRecord RawRecord
-	if err := json.Unmarshal(data, &readRecord); err != nil {
-		t.Fatalf("failed to unmarshal record: %v", err)
+	if !strings.HasPrefix(recordStr, "{") {
+		t.Error("record file should start with JSON")
+	}
+	if !strings.Contains(recordStr, "IN>> echo hello") {
+		t.Error("record file should contain IN>> prefixed command")
+	}
+	if !strings.Contains(recordStr, "OUT>> hello") {
+		t.Error("record file should contain OUT>> prefixed output")
+	}
+	if !strings.Contains(recordStr, `"agent":"claude"`) {
+		t.Error("record file should contain agent in JSON")
 	}
 
-	if readRecord.Event.Command != "echo hello" {
-		t.Errorf("expected command 'echo hello', got '%s'", readRecord.Event.Command)
+	// Verify raw file contents
+	rawData, err := os.ReadFile(expectedRawPath)
+	if err != nil {
+		t.Fatalf("failed to read raw file: %v", err)
 	}
-	if readRecord.Stdout != "hello\n" {
-		t.Errorf("expected stdout 'hello\\n', got '%s'", readRecord.Stdout)
+	rawStr := string(rawData)
+
+	if !strings.HasPrefix(rawStr, "echo hello") {
+		t.Error("raw file should start with command")
+	}
+	if !strings.Contains(rawStr, records.ResponseSeparator) {
+		t.Error("raw file should contain response separator")
 	}
 }
 
@@ -152,27 +257,32 @@ func TestConsolidateRecords(t *testing.T) {
 		t.Fatalf("failed to create session dir: %v", err)
 	}
 
-	// Create two timestamp files
-	record1 := RawRecord{
-		Event: Event{
+	// Create two timestamp files using the new format
+	record1 := &records.Record{
+		Event: records.Event{
 			Timestamp: "2026-01-15T10:00:00Z",
 			EventType: "command_execution",
-			Command:   "echo first",
+			Agent:     "claude",
 		},
+		Command: "echo first",
+		Stdout:  "first\n",
 	}
-	record2 := RawRecord{
-		Event: Event{
+	record2 := &records.Record{
+		Event: records.Event{
 			Timestamp: "2026-01-15T10:01:00Z",
 			EventType: "command_execution",
-			Command:   "echo second",
+			Agent:     "claude",
 		},
+		Command: "echo second",
+		Stdout:  "second\n",
 	}
 
-	data1, _ := json.Marshal(record1)
-	data2, _ := json.Marshal(record2)
+	os.WriteFile(filepath.Join(sessionDir, "1705312800"), []byte(record1.FormatSessionLog()), 0644)
+	os.WriteFile(filepath.Join(sessionDir, "1705312860"), []byte(record2.FormatSessionLog()), 0644)
 
-	os.WriteFile(filepath.Join(sessionDir, "1705312800"), data1, 0644)
-	os.WriteFile(filepath.Join(sessionDir, "1705312860"), data2, 0644)
+	// Also create -raw.txt files (these should NOT be consolidated)
+	os.WriteFile(filepath.Join(sessionDir, "1705312800-raw.txt"), []byte("raw content 1"), 0644)
+	os.WriteFile(filepath.Join(sessionDir, "1705312860-raw.txt"), []byte("raw content 2"), 0644)
 
 	// Run consolidation
 	if err := consolidateRecords(tmpDir, session); err != nil {
@@ -188,31 +298,26 @@ func TestConsolidateRecords(t *testing.T) {
 
 	// Verify the log contains both records
 	logStr := string(logData)
-	if !contains(logStr, "echo first") {
+	if !strings.Contains(logStr, "echo first") {
 		t.Error("session.log should contain 'echo first'")
 	}
-	if !contains(logStr, "echo second") {
+	if !strings.Contains(logStr, "echo second") {
 		t.Error("session.log should contain 'echo second'")
 	}
 
-	// Verify original files were deleted
+	// Verify original timestamp files were deleted
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800")); !os.IsNotExist(err) {
 		t.Error("timestamp file should have been deleted after consolidation")
 	}
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860")); !os.IsNotExist(err) {
 		t.Error("timestamp file should have been deleted after consolidation")
 	}
-}
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	// Verify -raw.txt files were NOT deleted
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-raw.txt")); os.IsNotExist(err) {
+		t.Error("-raw.txt file should NOT have been deleted")
 	}
-	return false
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-raw.txt")); os.IsNotExist(err) {
+		t.Error("-raw.txt file should NOT have been deleted")
+	}
 }

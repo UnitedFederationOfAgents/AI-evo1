@@ -224,6 +224,7 @@ func main() {
 		writeMode  bool
 		execMode   bool
 		listAgents bool
+		listModels bool
 		addDirs    string
 		prompt     string
 		session    string
@@ -236,6 +237,7 @@ func main() {
 	flag.BoolVar(&writeMode, "w", false, "Write mode: read and write files")
 	flag.BoolVar(&execMode, "x", false, "Execute mode: full access including command execution")
 	flag.BoolVar(&listAgents, "list-agents", false, "List available agents")
+	flag.BoolVar(&listModels, "list-models", false, "List available models for an agent (use -a to specify agent)")
 	flag.StringVar(&addDirs, "add-dirs", "", "Colon-separated list of directories to add (for agent records access)")
 	flag.StringVar(&prompt, "prompt", "", "Prompt to send to the agent (alternative to positional argument)")
 	flag.StringVar(&session, "session", "", "Session identifier (default: AGENT_SESSION env var or auto-generated)")
@@ -246,6 +248,7 @@ func main() {
 Usage:
   ambiguous-agent [options] <prompt>
   ambiguous-agent --list-agents
+  ambiguous-agent --list-models [-a <agent>]
 
 Modes (mutually exclusive, default is -r):
   -p    Prompt mode: chat only, no file access
@@ -260,6 +263,7 @@ Options:
   -prompt <text>  Prompt text (alternative to positional argument)
   -session <id>   Session identifier (default: AGENT_SESSION or auto)
   --list-agents   List available agents and exit
+  --list-models   List available models for an agent (use -a to specify)
 
 Environment:
   AGENT_NAME          Default agent selection
@@ -273,6 +277,7 @@ Examples:
   ambiguous-agent -w -a gemini "Update the README with installation instructions"
   ambiguous-agent -x "Run the tests and fix any failures"
   ambiguous-agent --list-agents
+  ambiguous-agent --list-models -a grok
 
 `, DefaultRecordsPath)
 	}
@@ -282,6 +287,20 @@ Examples:
 	// Handle --list-agents
 	if listAgents {
 		printAgentList()
+		return
+	}
+
+	// Handle --list-models (requires agent to be determined first)
+	if listModels {
+		// Determine agent for model listing
+		listAgent := agent
+		if listAgent == "" {
+			listAgent = os.Getenv("AGENT_NAME")
+		}
+		if listAgent == "" {
+			listAgent = DefaultAgent
+		}
+		printModelList(listAgent)
 		return
 	}
 
@@ -571,6 +590,39 @@ func printAgentList() {
 	}
 	fmt.Println()
 	fmt.Println(sessionStyle.Render("Use -a <agent> to select an agent"))
+}
+
+// printModelList displays available models for a specific agent
+func printModelList(agent string) {
+	config, ok := agentConfigs[agent]
+	if !ok {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: unknown agent '%s'", agent)))
+		fmt.Fprintln(os.Stderr, sessionStyle.Render("Use --list-agents to see available agents"))
+		os.Exit(1)
+	}
+
+	agentStyled := getAgentStyle(agent)
+
+	if len(config.Models) == 0 {
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("Agent %s does not support model selection", agentStyled.Render(agent))))
+		fmt.Println(sessionStyle.Render("The agent uses its built-in default model"))
+		return
+	}
+
+	fmt.Println(sessionStyle.Render(fmt.Sprintf("Available models for %s:", agentStyled.Render(agent))))
+	fmt.Println()
+
+	for _, model := range config.Models {
+		prefix := "    "
+		suffix := ""
+		if model == config.DefaultModel {
+			suffix = " (default)"
+		}
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("%s%s%s", prefix, model, suffix)))
+	}
+
+	fmt.Println()
+	fmt.Println(sessionStyle.Render("Use -m <model> to select a model"))
 }
 
 // Ensure io is used (for future stdout/stderr handling if needed)

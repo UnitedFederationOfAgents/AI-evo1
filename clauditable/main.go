@@ -22,6 +22,7 @@ const (
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
+	EnvIsClauditable           = "IS_CLAUDITABLE" // Used to prevent double-wrapping
 
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 )
@@ -31,6 +32,28 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Usage: clauditable <command> [args...]")
 		os.Exit(1)
 	}
+
+	// Check for double-wrapping: if IS_CLAUDITABLE is already set, pass through
+	// without recording to prevent duplicate logging
+	if os.Getenv(EnvIsClauditable) == "true" {
+		// Already in clauditable context, pass through directly
+		cmdName := os.Args[1]
+		cmdArgs := os.Args[2:]
+		cmd := exec.Command(cmdName, cmdArgs...)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Set IS_CLAUDITABLE for child processes to detect
+	os.Setenv(EnvIsClauditable, "true")
 
 	// Extract command and args
 	cmdName := os.Args[1]

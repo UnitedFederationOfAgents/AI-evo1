@@ -1,0 +1,26 @@
+name: Test federation-command
+
+on:
+  push:
+    branches:
+      - test/federation-command
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: research/AI-evo1/federation-command
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run tests
+        run: make test

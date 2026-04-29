@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	cp "github.com/otiai10/copy"
 )
 
 // Mode constants for agent permission levels
@@ -230,6 +231,8 @@ func main() {
 		session    string
 	)
 
+	var provideRecords string
+
 	flag.StringVar(&agent, "a", "", "Select agent (default: claude, or AGENT_NAME env var)")
 	flag.StringVar(&model, "m", "", "Select model for agent (if supported)")
 	flag.BoolVar(&promptMode, "p", false, "Prompt mode: chat only, no file access")
@@ -241,6 +244,7 @@ func main() {
 	flag.StringVar(&addDirs, "add-dirs", "", "Colon-separated list of directories to add (for agent records access)")
 	flag.StringVar(&prompt, "prompt", "", "Prompt to send to the agent (alternative to positional argument)")
 	flag.StringVar(&session, "session", "", "Session identifier (default: AGENT_SESSION env var or auto-generated)")
+	flag.StringVar(&provideRecords, "provide-records", "", "Colon-separated session IDs to provide as context (copies to temp dir, use 'default' for current session)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `ambiguous-agent - Generic interface for AI coding agents
@@ -257,13 +261,15 @@ Modes (mutually exclusive, default is -r):
   -x    Execute mode: full access including command execution
 
 Options:
-  -a <agent>      Select agent (default: claude, or AGENT_NAME env var)
-  -m <model>      Select model for agent (if supported)
-  -add-dirs <dirs> Colon-separated directories to add for agent records access
-  -prompt <text>  Prompt text (alternative to positional argument)
-  -session <id>   Session identifier (default: AGENT_SESSION or auto)
-  --list-agents   List available agents and exit
-  --list-models   List available models for an agent (use -a to specify)
+  -a <agent>            Select agent (default: claude, or AGENT_NAME env var)
+  -m <model>            Select model for agent (if supported)
+  -add-dirs <dirs>      Colon-separated directories to add for agent records access
+  -prompt <text>        Prompt text (alternative to positional argument)
+  -session <id>         Session identifier (default: AGENT_SESSION or auto)
+  -provide-records <ids> Colon-separated session IDs to provide as context
+                         Use 'default' for current session, copies to temp dir
+  --list-agents         List available agents and exit
+  --list-models         List available models for an agent (use -a to specify)
 
 Environment:
   AGENT_NAME          Default agent selection
@@ -276,6 +282,8 @@ Examples:
   ambiguous-agent -r "What files are in this directory?"
   ambiguous-agent -w -a gemini "Update the README with installation instructions"
   ambiguous-agent -x "Run the tests and fix any failures"
+  ambiguous-agent -provide-records default "Continue from where we left off"
+  ambiguous-agent -provide-records "2026-04-27:2026-04-26" "Review yesterday's work"
   ambiguous-agent --list-agents
   ambiguous-agent --list-models -a grok
 
@@ -391,6 +399,27 @@ Examples:
 	sessionDir := filepath.Join(recordsPath, session)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to create session directory: %v\n", err)
+	}
+
+	// Handle record provision - copy session files to temp dir for agent context
+	var recordsTempDir string
+	if provideRecords != "" {
+		var err error
+		recordsTempDir, err = prepareRecordsForAgent(provideRecords, recordsPath, session)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error preparing records: %v", err)))
+			os.Exit(1)
+		}
+		// Schedule cleanup
+		defer func() {
+			if recordsTempDir != "" {
+				os.RemoveAll(recordsTempDir)
+				fmt.Println(sessionStyle.Render(fmt.Sprintf("cleaned up records temp dir: %s", recordsTempDir)))
+			}
+		}()
+		// Add temp dir to additional dirs for the agent
+		additionalDirs = append(additionalDirs, recordsTempDir)
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("● providing records from: %s", recordsTempDir)))
 	}
 
 	// Print invocation info with visual flare
@@ -623,6 +652,61 @@ func printModelList(agent string) {
 
 	fmt.Println()
 	fmt.Println(sessionStyle.Render("Use -m <model> to select a model"))
+}
+
+// prepareRecordsForAgent copies session record files to a temporary directory
+// for agent access. The caller is responsible for cleaning up the temp directory.
+// Sessions can be specified as colon-separated IDs, with "default" meaning the
+// current session (determined by AGENT_SESSION or the current date).
+func prepareRecordsForAgent(sessionIDs, recordsPath, currentSession string) (string, error) {
+	// Create temp directory
+	tempDir, err := os.MkdirTemp("", "agent-records-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	// Parse session IDs
+	ids := strings.Split(sessionIDs, ":")
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+
+		// Resolve "default" to current session
+		if id == "default" {
+			id = currentSession
+		}
+
+		// Source session directory
+		srcDir := filepath.Join(recordsPath, id)
+
+		// Check if source exists
+		info, err := os.Stat(srcDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Warning: session '%s' not found at %s, skipping\n", id, srcDir)
+				continue
+			}
+			return tempDir, fmt.Errorf("failed to stat session directory %s: %w", srcDir, err)
+		}
+		if !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "Warning: %s is not a directory, skipping\n", srcDir)
+			continue
+		}
+
+		// Destination directory (preserve session ID as subdirectory name)
+		dstDir := filepath.Join(tempDir, id)
+
+		// Copy the session directory
+		if err := cp.Copy(srcDir, dstDir); err != nil {
+			return tempDir, fmt.Errorf("failed to copy session %s: %w", id, err)
+		}
+
+		fmt.Printf("copied session '%s' to temp dir\n", id)
+	}
+
+	return tempDir, nil
 }
 
 // Ensure io is used (for future stdout/stderr handling if needed)

@@ -352,6 +352,7 @@ func main() {
 	fmt.Println(sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"))
 	fmt.Println(sessionStyle.Render("  type 'exit!' to end | 'agent <prompt>' to invoke AI"))
 	fmt.Println(sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"))
+	fmt.Println(sessionStyle.Render("  records: 'list-sessions' | 'provide-records <ids> <prompt>'"))
 	fmt.Println(sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"))
 	fmt.Println()
 
@@ -488,6 +489,17 @@ func main() {
 			continue
 		} else if line == "list-models" {
 			listModels(currentAgent, currentModel, sessionDir)
+			continue
+		} else if line == "list-sessions" {
+			listSessions(filepath.Dir(sessionDir), filepath.Base(sessionDir))
+			continue
+		} else if strings.HasPrefix(line, "provide-records ") {
+			args := strings.TrimPrefix(line, "provide-records ")
+			exitCode = runAgentWithRecords(args, currentAgent, currentModel, sessionDir)
+		} else if line == "provide-records" {
+			fmt.Println(errorStyle.Render("usage: provide-records <session-ids> [-p|-r|-w|-x] <prompt>"))
+			fmt.Println(sessionStyle.Render("  session-ids: colon-separated, use 'default' for current session"))
+			fmt.Println(sessionStyle.Render("  use 'list-sessions' to see available sessions"))
 			continue
 		} else if strings.HasPrefix(line, "agent ") {
 			prompt := strings.TrimPrefix(line, "agent ")
@@ -1323,4 +1335,195 @@ func checkContinuation(line string) (bool, rune) {
 	}
 
 	return false, 0
+}
+
+// listSessions displays available sessions in the records directory
+func listSessions(recordsPath string, currentSession string) {
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error reading records directory: %v", err)))
+		return
+	}
+
+	fmt.Println(sessionStyle.Render(fmt.Sprintf("available sessions in %s:", recordsPath)))
+	fmt.Println()
+
+	var sessions []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			sessions = append(sessions, entry.Name())
+		}
+	}
+
+	// Sort sessions in reverse order (most recent first)
+	sort.Sort(sort.Reverse(sort.StringSlice(sessions)))
+
+	for _, session := range sessions {
+		prefix := "    "
+		suffix := ""
+		if session == currentSession {
+			prefix = "  -> "
+			suffix = " (current)"
+		}
+		sessionPath := filepath.Join(recordsPath, session)
+
+		// Count files in session
+		files, _ := os.ReadDir(sessionPath)
+		fileCount := len(files)
+
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)", prefix, session, suffix, fileCount)))
+	}
+
+	fmt.Println()
+	fmt.Println(sessionStyle.Render("use 'provide-records <session-ids> <prompt>' to include session context"))
+}
+
+// runAgentWithRecords invokes an agent with record files from specified sessions
+// Format: provide-records <session-ids> [-p|-r|-w|-x] <prompt>
+// session-ids are colon-separated, "default" refers to current session
+func runAgentWithRecords(input string, agent string, model string, sessionDir string) int {
+	args := parseArgs(input)
+	if len(args) < 2 {
+		fmt.Println(errorStyle.Render("usage: provide-records <session-ids> [-p|-r|-w|-x] <prompt>"))
+		return 1
+	}
+
+	// First argument is session IDs
+	sessionIDs := args[0]
+	remainingArgs := args[1:]
+
+	// Parse mode flags and prompt from remaining args
+	mode := ModeRead // Default mode
+	var promptParts []string
+
+	for i := 0; i < len(remainingArgs); i++ {
+		switch remainingArgs[i] {
+		case "-p":
+			mode = ModePrompt
+		case "-r":
+			mode = ModeRead
+		case "-w":
+			mode = ModeWrite
+		case "-x":
+			mode = ModeExecute
+		default:
+			promptParts = append(promptParts, remainingArgs[i])
+		}
+	}
+
+	prompt := strings.Join(promptParts, " ")
+	if prompt == "" {
+		fmt.Println(errorStyle.Render("no prompt provided"))
+		return 1
+	}
+
+	// Check for double-wrapping
+	if os.Getenv(EnvIsClauditable) == "true" {
+		// Already in clauditable context, invoke ambiguous-agent directly
+		return runAgentWithRecordsDirect(prompt, sessionIDs, agent, model, mode, sessionDir)
+	}
+
+	// Find ambiguous-agent and clauditable
+	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
+		return 1
+	}
+
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, invoking agent directly"))
+		return runAgentWithRecordsDirect(prompt, sessionIDs, agent, model, mode, sessionDir)
+	}
+
+	// Build ambiguous-agent args with provide-records flag
+	var agentArgs []string
+	agentArgs = append(agentArgs, "-"+mode) // -p, -r, -w, or -x
+	agentArgs = append(agentArgs, "-a", agent)
+	if model != "" {
+		agentArgs = append(agentArgs, "-m", model)
+	}
+	agentArgs = append(agentArgs, "-provide-records", sessionIDs)
+	agentArgs = append(agentArgs, prompt)
+
+	// Wrap with clauditable
+	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
+	cmd := exec.Command(clauditablePath, clauditableArgs...)
+
+	env := os.Environ()
+	env = append(env,
+		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
+		EnvAgentSession+"="+filepath.Base(sessionDir),
+		"UFA_AGENT="+agent,
+		EnvIsClauditable+"=true",
+	)
+	if model != "" {
+		env = append(env, "UFA_MODEL="+model)
+	}
+	cmd.Env = env
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Display invocation message
+	color := agentColors[agent]
+	if color == "" {
+		color = lipgloss.Color("141")
+	}
+	agentNameStyle := lipgloss.NewStyle().Foreground(color).Bold(true)
+	modeStyled := modeStyles[mode].Render(modeDescription(mode))
+
+	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
+		sessionStyle.Render("invoking "),
+		agentNameStyle.Render(agent),
+		sessionStyle.Render(" in "),
+		modeStyled,
+		sessionStyle.Render(" mode with records from: "),
+		sessionStyle.Render(sessionIDs),
+	))
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code := exitErr.ExitCode()
+			fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited: %d", code)))
+			return code
+		}
+		fmt.Println(errorStyle.Render(fmt.Sprintf("agent error: %v", err)))
+		return 1
+	}
+
+	fmt.Println(successStyle.Render("agent completed"))
+	return 0
+}
+
+// runAgentWithRecordsDirect invokes ambiguous-agent directly with provide-records flag
+func runAgentWithRecordsDirect(prompt string, sessionIDs string, agent string, model string, mode string, sessionDir string) int {
+	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
+		return 1
+	}
+
+	var args []string
+	args = append(args, "-"+mode)
+	args = append(args, "-a", agent)
+	if model != "" {
+		args = append(args, "-m", model)
+	}
+	args = append(args, "-provide-records", sessionIDs)
+	args = append(args, prompt)
+
+	cmd := exec.Command(ambiguousAgentPath, args...)
+	cmd.Env = os.Environ()
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 1
+	}
+	return 0
 }

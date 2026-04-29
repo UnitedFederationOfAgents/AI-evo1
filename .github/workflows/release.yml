@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - release/*
+
+jobs:
+  test-all:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: research/AI-evo1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run all tests
+        run: make test-all
+
+      - name: Run all builds
+        run: make build-all
+
+  build-and-push:
+    needs: test-all
+    uses: ./.github/workflows/build-and-push.yml
+    with:
+      tag: latest
+      context: research/AI-evo1
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write

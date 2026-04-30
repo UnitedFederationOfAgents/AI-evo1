@@ -29,7 +29,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yml
     with:
       tag: latest
-      context: research/AI-evo1
+      context: .
     permissions:
       contents: read
       packages: write

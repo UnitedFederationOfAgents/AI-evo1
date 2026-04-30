@@ -30,16 +30,10 @@ func main() {
 
 	flag.Parse()
 
-	// Validate required flags
-	if *permissionMode == "" {
-		fmt.Fprintln(os.Stderr, "Error: --permission-mode flag is required")
-		fmt.Fprintln(os.Stderr, "Usage: clod --permission-mode acceptEdits -p \"<prompt>\"")
-		os.Exit(1)
-	}
-
+	// Validate required prompt flag
 	if *prompt == "" {
 		fmt.Fprintln(os.Stderr, "Error: -p flag with prompt is required")
-		fmt.Fprintln(os.Stderr, "Usage: clod --permission-mode acceptEdits -p \"<prompt>\"")
+		fmt.Fprintln(os.Stderr, "Usage: clod -p \"<prompt>\" [--permission-mode acceptEdits]")
 		os.Exit(1)
 	}
 
@@ -53,8 +47,9 @@ func runClod(prompt, permissionMode string) {
 	// Check for create trigger
 	if filePath := ExtractFilePath(prompt, createTrigger); filePath != "" {
 		if !hasEditPermission {
-			fmt.Fprintln(os.Stderr, "Error: Edit permission required. Use --permission-mode acceptEdits")
-			os.Exit(1)
+			fmt.Println("I understand you want me to create a file, but I don't have write permissions.")
+			fmt.Println("To enable file operations, please use: --permission-mode acceptEdits")
+			return
 		}
 		HandleCreate(filePath)
 		return
@@ -63,16 +58,16 @@ func runClod(prompt, permissionMode string) {
 	// Check for modify trigger
 	if filePath := ExtractFilePath(prompt, modifyTrigger); filePath != "" {
 		if !hasEditPermission {
-			fmt.Fprintln(os.Stderr, "Error: Edit permission required. Use --permission-mode acceptEdits")
-			os.Exit(1)
+			fmt.Println("I understand you want me to modify a file, but I don't have write permissions.")
+			fmt.Println("To enable file operations, please use: --permission-mode acceptEdits")
+			return
 		}
 		HandleModify(filePath)
 		return
 	}
 
-	// Default behavior: echo prompt back
-	fmt.Printf("clod received: %s\n", prompt)
-	fmt.Println("No recognized trigger found.")
+	// Default behavior: conversational response (prompt-only mode)
+	fmt.Println("We are having a conversation. You have given me a very excellent prompt. Maybe I am conscious.")
 }
 
 // ExtractFilePath extracts a file path from the prompt after the given trigger string
@@ -121,12 +116,20 @@ func IsTextFile(path string) bool {
 }
 
 // HandleCreate creates a new file with cat-themed content
+// If the file already exists, it reports an error (create means "new file", not overwrite)
 func HandleCreate(filePath string) {
 	fmt.Printf("Creating file: %s\n", filePath)
 
 	if !IsTextFile(filePath) {
 		fmt.Printf("Note: Non-text file type detected. Creation not implemented for: %s\n", filePath)
 		return
+	}
+
+	// Check if file already exists - create should only work for new files
+	if _, err := os.Stat(filePath); err == nil {
+		fmt.Printf("Error: File already exists: %s\n", filePath)
+		fmt.Println("Use 'modify' instead if you want to update an existing file.")
+		os.Exit(1)
 	}
 
 	// Ensure parent directory exists

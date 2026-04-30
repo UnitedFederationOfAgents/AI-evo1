@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -231,7 +232,8 @@ func main() {
 		session    string
 	)
 
-	var provideRecords string
+	// provideRecords supports multiple -provide-records flags
+	var provideRecordsList multiFlag
 
 	flag.StringVar(&agent, "a", "", "Select agent (default: claude, or AGENT_NAME env var)")
 	flag.StringVar(&model, "m", "", "Select model for agent (if supported)")
@@ -244,7 +246,7 @@ func main() {
 	flag.StringVar(&addDirs, "add-dirs", "", "Colon-separated list of directories to add (for agent records access)")
 	flag.StringVar(&prompt, "prompt", "", "Prompt to send to the agent (alternative to positional argument)")
 	flag.StringVar(&session, "session", "", "Session identifier (default: AGENT_SESSION env var or auto-generated)")
-	flag.StringVar(&provideRecords, "provide-records", "", "Colon-separated session IDs to provide as context (copies to temp dir, use 'default' for current session)")
+	flag.Var(&provideRecordsList, "provide-records", "Session ID to provide as context (can be repeated, use 'default' for current session)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, `ambiguous-agent - Generic interface for AI coding agents
@@ -266,7 +268,7 @@ Options:
   -add-dirs <dirs>      Colon-separated directories to add for agent records access
   -prompt <text>        Prompt text (alternative to positional argument)
   -session <id>         Session identifier (default: AGENT_SESSION or auto)
-  -provide-records <ids> Colon-separated session IDs to provide as context
+  -provide-records <id> Session ID to provide as context (can be repeated)
                          Use 'default' for current session, copies to temp dir
   --list-agents         List available agents and exit
   --list-models         List available models for an agent (use -a to specify)
@@ -283,7 +285,7 @@ Examples:
   ambiguous-agent -w -a gemini "Update the README with installation instructions"
   ambiguous-agent -x "Run the tests and fix any failures"
   ambiguous-agent -provide-records default "Continue from where we left off"
-  ambiguous-agent -provide-records "2026-04-27:2026-04-26" "Review yesterday's work"
+  ambiguous-agent -provide-records session1 -provide-records session2 "Review both sessions"
   ambiguous-agent --list-agents
   ambiguous-agent --list-models -a grok
 
@@ -403,9 +405,9 @@ Examples:
 
 	// Handle record provision - copy session files to temp dir for agent context
 	var recordsTempDir string
-	if provideRecords != "" {
+	if len(provideRecordsList) > 0 {
 		var err error
-		recordsTempDir, err = prepareRecordsForAgent(provideRecords, recordsPath, session)
+		recordsTempDir, err = prepareRecordsForAgent(provideRecordsList, recordsPath, session)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error preparing records: %v", err)))
 			os.Exit(1)
@@ -596,7 +598,7 @@ func printAgentList() {
 		// Build agent info line
 		info := agentStyled.Render(fmt.Sprintf("  %s", agent))
 
-		// Add model support indicator
+		// Add model support indicator (don't show static list, point to --list-models)
 		if len(config.Models) > 0 {
 			info += sessionStyle.Render(" (supports model selection)")
 		}
@@ -607,18 +609,10 @@ func printAgentList() {
 		}
 
 		fmt.Println(info)
-
-		// Show available models if any
-		if len(config.Models) > 0 {
-			modelsStr := strings.Join(config.Models, ", ")
-			if len(modelsStr) > 60 {
-				modelsStr = modelsStr[:57] + "..."
-			}
-			fmt.Println(sessionStyle.Render(fmt.Sprintf("    models: %s", modelsStr)))
-		}
 	}
 	fmt.Println()
 	fmt.Println(sessionStyle.Render("Use -a <agent> to select an agent"))
+	fmt.Println(sessionStyle.Render("Use --list-models -a <agent> to see available models"))
 }
 
 // printModelList displays available models for a specific agent
@@ -632,7 +626,10 @@ func printModelList(agent string) {
 
 	agentStyled := getAgentStyle(agent)
 
-	if len(config.Models) == 0 {
+	// Query models dynamically for agents that support it
+	models := queryModelsForAgent(agent, config)
+
+	if len(models) == 0 {
 		fmt.Println(sessionStyle.Render(fmt.Sprintf("Agent %s does not support model selection", agentStyled.Render(agent))))
 		fmt.Println(sessionStyle.Render("The agent uses its built-in default model"))
 		return
@@ -641,7 +638,7 @@ func printModelList(agent string) {
 	fmt.Println(sessionStyle.Render(fmt.Sprintf("Available models for %s:", agentStyled.Render(agent))))
 	fmt.Println()
 
-	for _, model := range config.Models {
+	for _, model := range models {
 		prefix := "    "
 		suffix := ""
 		if model == config.DefaultModel {
@@ -654,20 +651,110 @@ func printModelList(agent string) {
 	fmt.Println(sessionStyle.Render("Use -m <model> to select a model"))
 }
 
+// queryModelsForAgent queries the available models for an agent
+// For agents that support dynamic listing (opencode, grok), runs the appropriate command
+// For agents without dynamic listing support, returns an error message
+func queryModelsForAgent(agent string, config *AgentConfig) []string {
+	// First check if agent has any model support
+	if config.ModelFlag == "" {
+		return nil
+	}
+
+	// For agents that support dynamic model listing
+	switch agent {
+	case "opencode":
+		cmd := exec.Command("opencode", "models")
+		output, err := cmd.Output()
+		if err != nil {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("failed to query models from opencode: %v", err)))
+			fmt.Println(sessionStyle.Render("ensure 'opencode' is installed and available on PATH"))
+			return nil
+		}
+		// Parse output, one model per line
+		var models []string
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				models = append(models, line)
+			}
+		}
+		return models
+
+	case "grok":
+		cmd := exec.Command("grok", "models")
+		output, err := cmd.Output()
+		if err != nil {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("failed to query models from grok: %v", err)))
+			fmt.Println(sessionStyle.Render("ensure 'grok' is installed and available on PATH"))
+			return nil
+		}
+		return parseGrokModels(string(output))
+
+	default:
+		// For agents without dynamic model listing, explain how to get models
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("agent '%s' does not support dynamic model listing", agent)))
+		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
+		return nil
+	}
+}
+
+// parseGrokModels parses the output of 'grok models' command.
+// Format:
+// model-name — description
+//
+//	details line
+//	aliases: alias1 alias2 (optional)
+func parseGrokModels(output string) []string {
+	var models []string
+	lines := strings.Split(output, "\n")
+	i := 0
+	for i < len(lines) {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || !strings.Contains(line, " — ") {
+			i++
+			continue
+		}
+		parts := strings.SplitN(line, " — ", 2)
+		if len(parts) == 2 {
+			modelName := stripAnsiCodes(strings.TrimSpace(parts[0]))
+			models = append(models, modelName)
+			i++ // move past model line
+			if i < len(lines) {
+				// skip details line
+				i++
+			}
+			if i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "aliases: ") {
+				aliasesStr := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[i]), "aliases: "))
+				aliases := strings.Fields(aliasesStr)
+				models = append(models, aliases...)
+				i++
+			}
+		} else {
+			i++
+		}
+	}
+	return models
+}
+
+// stripAnsiCodes removes ANSI escape sequences from a string
+func stripAnsiCodes(s string) string {
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[mG]`)
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
 // prepareRecordsForAgent copies session record files to a temporary directory
 // for agent access. The caller is responsible for cleaning up the temp directory.
-// Sessions can be specified as colon-separated IDs, with "default" meaning the
+// Sessions are specified as a slice of IDs, with "default" meaning the
 // current session (determined by AGENT_SESSION or the current date).
-func prepareRecordsForAgent(sessionIDs, recordsPath, currentSession string) (string, error) {
+func prepareRecordsForAgent(sessionIDs []string, recordsPath, currentSession string) (string, error) {
 	// Create temp directory
 	tempDir, err := os.MkdirTemp("", "agent-records-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
-	// Parse session IDs
-	ids := strings.Split(sessionIDs, ":")
-	for _, id := range ids {
+	for _, id := range sessionIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
@@ -707,6 +794,18 @@ func prepareRecordsForAgent(sessionIDs, recordsPath, currentSession string) (str
 	}
 
 	return tempDir, nil
+}
+
+// multiFlag allows a flag to be specified multiple times
+type multiFlag []string
+
+func (f *multiFlag) String() string {
+	return strings.Join(*f, ", ")
+}
+
+func (f *multiFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
 }
 
 // Ensure io is used (for future stdout/stderr handling if needed)

@@ -51,7 +51,7 @@ type Record struct {
 	Stderr  string
 }
 
-// FormatSessionLog formats a Record for the session.log JSONL file.
+// FormatSessionLog formats a Record for the session.jsonl file.
 // Format: JSON metadata on first line, then IN>> prefixed command lines,
 // then OUT>> and ERR>> prefixed response lines, each up to MaxPreviewLines.
 func (r *Record) FormatSessionLog() string {

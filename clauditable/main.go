@@ -264,10 +264,10 @@ func writeRecord(recordsPath, session string, timestamp int64, record *records.R
 	return recordFile, nil
 }
 
-// consolidateRecords collects all unix-timestamp format logs and appends them to session.log
+// consolidateRecords collects all unix-timestamp format logs and appends them to session.jsonl
 func consolidateRecords(recordsPath, session string) error {
 	sessionDir := filepath.Join(recordsPath, session)
-	sessionLog := filepath.Join(sessionDir, "session.log")
+	sessionLog := filepath.Join(sessionDir, "session.jsonl")
 
 	// Read directory entries
 	entries, err := os.ReadDir(sessionDir)
@@ -282,7 +282,7 @@ func consolidateRecords(recordsPath, session string) error {
 			continue
 		}
 		name := entry.Name()
-		if name == "session.log" {
+		if name == "session.jsonl" {
 			continue
 		}
 		// Skip -raw.txt files (they are not consolidated)
@@ -306,10 +306,10 @@ func consolidateRecords(recordsPath, session string) error {
 		return ti < tj
 	})
 
-	// Open session.log for appending
+	// Open session.jsonl for appending
 	f, err := os.OpenFile(sessionLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to open session.log: %w", err)
+		return fmt.Errorf("failed to open session.jsonl: %w", err)
 	}
 	defer f.Close()
 
@@ -321,10 +321,10 @@ func consolidateRecords(recordsPath, session string) error {
 			continue // Skip files we can't read
 		}
 
-		// Write the content directly to session.log
+		// Write the content directly to session.jsonl
 		// The content is already in the correct format (JSON line + plaintext)
 		if _, err := f.Write(data); err != nil {
-			return fmt.Errorf("failed to write to session.log: %w", err)
+			return fmt.Errorf("failed to write to session.jsonl: %w", err)
 		}
 
 		// Ensure there's a blank line between entries for readability

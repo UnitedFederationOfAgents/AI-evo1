@@ -75,7 +75,7 @@ func TestIsUnixTimestamp(t *testing.T) {
 		{"", false},
 		{"abc", false},
 		{"123abc", false},
-		{"session.log", false},
+		{"session.jsonl", false},
 		{"-123", false},
 		{"12.34", false},
 		{"1234567890-raw.txt", false},
@@ -289,20 +289,20 @@ func TestConsolidateRecords(t *testing.T) {
 		t.Fatalf("consolidateRecords failed: %v", err)
 	}
 
-	// Verify session.log was created
-	sessionLog := filepath.Join(sessionDir, "session.log")
+	// Verify session.jsonl was created
+	sessionLog := filepath.Join(sessionDir, "session.jsonl")
 	logData, err := os.ReadFile(sessionLog)
 	if err != nil {
-		t.Fatalf("failed to read session.log: %v", err)
+		t.Fatalf("failed to read session.jsonl: %v", err)
 	}
 
 	// Verify the log contains both records
 	logStr := string(logData)
 	if !strings.Contains(logStr, "echo first") {
-		t.Error("session.log should contain 'echo first'")
+		t.Error("session.jsonl should contain 'echo first'")
 	}
 	if !strings.Contains(logStr, "echo second") {
-		t.Error("session.log should contain 'echo second'")
+		t.Error("session.jsonl should contain 'echo second'")
 	}
 
 	// Verify original timestamp files were deleted

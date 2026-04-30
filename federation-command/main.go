@@ -350,9 +350,9 @@ func main() {
 	fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
 	fmt.Println(sessionStyle.Render(fmt.Sprintf("  agent: %s | 'set-agent <name>' to change | 'list-agents' for options", currentAgent)))
 	fmt.Println(sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"))
-	fmt.Println(sessionStyle.Render("  type 'exit!' to end | 'agent <prompt>' to invoke AI"))
+	fmt.Println(sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"))
 	fmt.Println(sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"))
-	fmt.Println(sessionStyle.Render("  records: 'list-sessions' | 'provide-records <ids> <prompt>'"))
+	fmt.Println(sessionStyle.Render("  records: 'list-sessions' | add '-provide-records <id>' to agent command"))
 	fmt.Println(sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"))
 	fmt.Println()
 
@@ -410,7 +410,7 @@ func main() {
 			continue
 		}
 
-		if line == "exit!" {
+		if line == "exit" {
 			fmt.Println(exitStyle.Render("session ended."))
 			break
 		}
@@ -493,19 +493,11 @@ func main() {
 		} else if line == "list-sessions" {
 			listSessions(filepath.Dir(sessionDir), filepath.Base(sessionDir))
 			continue
-		} else if strings.HasPrefix(line, "provide-records ") {
-			args := strings.TrimPrefix(line, "provide-records ")
-			exitCode = runAgentWithRecords(args, currentAgent, currentModel, sessionDir)
-		} else if line == "provide-records" {
-			fmt.Println(errorStyle.Render("usage: provide-records <session-ids> [-p|-r|-w|-x] <prompt>"))
-			fmt.Println(sessionStyle.Render("  session-ids: colon-separated, use 'default' for current session"))
-			fmt.Println(sessionStyle.Render("  use 'list-sessions' to see available sessions"))
-			continue
 		} else if strings.HasPrefix(line, "agent ") {
 			prompt := strings.TrimPrefix(line, "agent ")
 			exitCode = runAgent(prompt, currentAgent, currentModel, sessionDir)
 		} else if line == "agent" {
-			fmt.Println(errorStyle.Render("usage: agent [-p|-r|-w|-x] <prompt>"))
+			fmt.Println(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"))
 			continue
 		} else {
 			// Regular command - wrap with clauditable using agent=none
@@ -546,33 +538,38 @@ func isValidAgent(name string) bool {
 // setModel validates and sets the model for the current agent
 func setModel(agent string, model string) error {
 	cfg, ok := agentModelConfigs[agent]
-	if !ok || len(cfg.Models) == 0 {
+	if !ok || cfg.ModelFlag == "" {
 		return fmt.Errorf("agent '%s' does not support model selection", agent)
 	}
 
 	var models []string
 
-	if agent == "opencode" || agent == "grok" {
-		// Query models dynamically from the tool
-		cmd := exec.Command(agent, "models")
+	// Query models dynamically for agents that support it
+	switch agent {
+	case "opencode":
+		cmd := exec.Command("opencode", "models")
 		output, err := cmd.Output()
 		if err != nil {
-			models = cfg.Models
-		} else {
-			if agent == "grok" {
-				models = parseGrokModels(string(output))
-			} else {
-				lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-				for _, line := range lines {
-					line = strings.TrimSpace(line)
-					if line != "" {
-						models = append(models, line)
-					}
-				}
+			return fmt.Errorf("failed to query models from opencode: %v - ensure it's installed", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				models = append(models, line)
 			}
 		}
-	} else {
-		models = cfg.Models
+	case "grok":
+		cmd := exec.Command("grok", "models")
+		output, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to query models from grok: %v - ensure it's installed", err)
+		}
+		models = parseGrokModels(string(output))
+	default:
+		// For agents without dynamic model listing, accept the model without validation
+		// The agent itself will validate when invoked
+		return nil
 	}
 
 	valid := false
@@ -694,38 +691,22 @@ func listModelsDirect(agent string, currentModel string) {
 	}
 }
 
-// listModelsFallback displays models using the local configuration when ambiguous-agent is unavailable
+// listModelsFallback displays an error when ambiguous-agent is unavailable
 func listModelsFallback(agent string, currentModel string) {
 	cfg, ok := agentModelConfigs[agent]
-	if !ok || len(cfg.Models) == 0 {
+	if !ok || cfg.ModelFlag == "" {
 		fmt.Println(sessionStyle.Render(fmt.Sprintf("agent '%s' does not support model selection", agent)))
 		fmt.Println(sessionStyle.Render("the agent uses its built-in default model"))
 		return
 	}
 
-	color := agentColors[agent]
-	if color == "" {
-		color = lipgloss.Color("141")
-	}
-	agentNameStyle := lipgloss.NewStyle().Foreground(color).Bold(true)
+	fmt.Println(errorStyle.Render("failed to query available models"))
+	fmt.Println(sessionStyle.Render(fmt.Sprintf("ensure '%s' is installed and available on PATH", agent)))
+	fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
 
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("available models for %s (fallback list):", agentNameStyle.Render(agent))))
-
-	for _, m := range cfg.Models {
-		prefix := "    "
-		suffix := ""
-		if m == currentModel {
-			prefix = "  -> "
-			suffix = " (selected)"
-		} else if m == cfg.DefaultModel {
-			suffix = " (default)"
-		}
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("%s%s%s", prefix, m, suffix)))
-	}
-
-	if currentModel == "" {
+	if currentModel != "" {
 		fmt.Println()
-		fmt.Println(sessionStyle.Render("no model explicitly set - using agent's built-in default"))
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("current selection: %s", currentModel)))
 	}
 }
 
@@ -990,9 +971,11 @@ func runCommandDirect(cmdLine string) int {
 // runAgent invokes an AI agent with the given prompt
 func runAgent(input string, agent string, model string, sessionDir string) int {
 	// Parse mode flags: -p (prompt), -r (read), -w (write), -x (execute)
+	// Also parse -provide-records flags
 	mode := ModeRead // Default mode
 	args := parseArgs(input)
 	var promptParts []string
+	var provideRecordsSessions []string
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -1004,6 +987,12 @@ func runAgent(input string, agent string, model string, sessionDir string) int {
 			mode = ModeWrite
 		case "-x":
 			mode = ModeExecute
+		case "-provide-records":
+			// Next arg is the session ID
+			if i+1 < len(args) {
+				i++
+				provideRecordsSessions = append(provideRecordsSessions, args[i])
+			}
 		default:
 			promptParts = append(promptParts, args[i])
 		}
@@ -1013,6 +1002,11 @@ func runAgent(input string, agent string, model string, sessionDir string) int {
 	if prompt == "" {
 		fmt.Println(errorStyle.Render("no prompt provided"))
 		return 1
+	}
+
+	// If provide-records was specified, use the records-aware invocation
+	if len(provideRecordsSessions) > 0 {
+		return runAgentWithRecordsInternal(prompt, provideRecordsSessions, agent, model, mode, sessionDir)
 	}
 
 	// Check for double-wrapping
@@ -1062,33 +1056,7 @@ func runAgent(input string, agent string, model string, sessionDir string) int {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Display invocation message
-	color := agentColors[agent]
-	if color == "" {
-		color = lipgloss.Color("141")
-	}
-	agentNameStyle := lipgloss.NewStyle().Foreground(color).Bold(true)
-	modeStyled := modeStyles[mode].Render(modeDescription(mode))
-
-	if model != "" {
-		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-			sessionStyle.Render("invoking "),
-			agentNameStyle.Render(agent),
-			sessionStyle.Render(" ("),
-			agentNameStyle.Render(model),
-			sessionStyle.Render(") in "),
-			modeStyled,
-			sessionStyle.Render(" mode..."),
-		))
-	} else {
-		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-			sessionStyle.Render("invoking "),
-			agentNameStyle.Render(agent),
-			sessionStyle.Render(" in "),
-			modeStyled,
-			sessionStyle.Render(" mode..."),
-		))
-	}
+	// Note: ambiguous-agent prints the invocation message, no need to duplicate here
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -1375,48 +1343,12 @@ func listSessions(recordsPath string, currentSession string) {
 	}
 
 	fmt.Println()
-	fmt.Println(sessionStyle.Render("use 'provide-records <session-ids> <prompt>' to include session context"))
+	fmt.Println(sessionStyle.Render("use 'agent -provide-records <id> [-p|-r|-w|-x] <prompt>' to include session context"))
 }
 
-// runAgentWithRecords invokes an agent with record files from specified sessions
-// Format: provide-records <session-ids> [-p|-r|-w|-x] <prompt>
-// session-ids are colon-separated, "default" refers to current session
-func runAgentWithRecords(input string, agent string, model string, sessionDir string) int {
-	args := parseArgs(input)
-	if len(args) < 2 {
-		fmt.Println(errorStyle.Render("usage: provide-records <session-ids> [-p|-r|-w|-x] <prompt>"))
-		return 1
-	}
-
-	// First argument is session IDs
-	sessionIDs := args[0]
-	remainingArgs := args[1:]
-
-	// Parse mode flags and prompt from remaining args
-	mode := ModeRead // Default mode
-	var promptParts []string
-
-	for i := 0; i < len(remainingArgs); i++ {
-		switch remainingArgs[i] {
-		case "-p":
-			mode = ModePrompt
-		case "-r":
-			mode = ModeRead
-		case "-w":
-			mode = ModeWrite
-		case "-x":
-			mode = ModeExecute
-		default:
-			promptParts = append(promptParts, remainingArgs[i])
-		}
-	}
-
-	prompt := strings.Join(promptParts, " ")
-	if prompt == "" {
-		fmt.Println(errorStyle.Render("no prompt provided"))
-		return 1
-	}
-
+// runAgentWithRecordsInternal invokes an agent with record files from specified sessions
+// This is the internal implementation called from runAgent when -provide-records is used
+func runAgentWithRecordsInternal(prompt string, sessionIDs []string, agent string, model string, mode string, sessionDir string) int {
 	// Check for double-wrapping
 	if os.Getenv(EnvIsClauditable) == "true" {
 		// Already in clauditable context, invoke ambiguous-agent directly
@@ -1436,14 +1368,16 @@ func runAgentWithRecords(input string, agent string, model string, sessionDir st
 		return runAgentWithRecordsDirect(prompt, sessionIDs, agent, model, mode, sessionDir)
 	}
 
-	// Build ambiguous-agent args with provide-records flag
+	// Build ambiguous-agent args with provide-records flags (one per session)
 	var agentArgs []string
 	agentArgs = append(agentArgs, "-"+mode) // -p, -r, -w, or -x
 	agentArgs = append(agentArgs, "-a", agent)
 	if model != "" {
 		agentArgs = append(agentArgs, "-m", model)
 	}
-	agentArgs = append(agentArgs, "-provide-records", sessionIDs)
+	for _, id := range sessionIDs {
+		agentArgs = append(agentArgs, "-provide-records", id)
+	}
 	agentArgs = append(agentArgs, prompt)
 
 	// Wrap with clauditable
@@ -1465,22 +1399,7 @@ func runAgentWithRecords(input string, agent string, model string, sessionDir st
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	// Display invocation message
-	color := agentColors[agent]
-	if color == "" {
-		color = lipgloss.Color("141")
-	}
-	agentNameStyle := lipgloss.NewStyle().Foreground(color).Bold(true)
-	modeStyled := modeStyles[mode].Render(modeDescription(mode))
-
-	fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-		sessionStyle.Render("invoking "),
-		agentNameStyle.Render(agent),
-		sessionStyle.Render(" in "),
-		modeStyled,
-		sessionStyle.Render(" mode with records from: "),
-		sessionStyle.Render(sessionIDs),
-	))
+	// Note: ambiguous-agent prints the invocation message, no need to duplicate here
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -1496,8 +1415,8 @@ func runAgentWithRecords(input string, agent string, model string, sessionDir st
 	return 0
 }
 
-// runAgentWithRecordsDirect invokes ambiguous-agent directly with provide-records flag
-func runAgentWithRecordsDirect(prompt string, sessionIDs string, agent string, model string, mode string, sessionDir string) int {
+// runAgentWithRecordsDirect invokes ambiguous-agent directly with provide-records flags
+func runAgentWithRecordsDirect(prompt string, sessionIDs []string, agent string, model string, mode string, sessionDir string) int {
 	ambiguousAgentPath, err := findBinary("ambiguous-agent")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
@@ -1510,7 +1429,9 @@ func runAgentWithRecordsDirect(prompt string, sessionIDs string, agent string, m
 	if model != "" {
 		args = append(args, "-m", model)
 	}
-	args = append(args, "-provide-records", sessionIDs)
+	for _, id := range sessionIDs {
+		args = append(args, "-provide-records", id)
+	}
 	args = append(args, prompt)
 
 	cmd := exec.Command(ambiguousAgentPath, args...)

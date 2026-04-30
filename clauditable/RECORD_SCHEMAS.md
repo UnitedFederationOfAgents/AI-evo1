@@ -9,7 +9,7 @@ This document describes the record and event schemas used by `clauditable` and r
 
 ## File Types
 
-### Session Log Entry (`session.log`)
+### Session Log Entry (`session.jsonl`)
 
 Each entry in the session log consists of:
 
@@ -50,7 +50,7 @@ Format:
 
 ### Temporary Record File (`<timestamp>`)
 
-A temporary file containing the formatted session log entry. This file is consolidated into `session.log` and then deleted when `AGENT_CONSOLIDATE_RECORDS` is true.
+A temporary file containing the formatted session log entry. This file is consolidated into `session.jsonl` and then deleted when `AGENT_CONSOLIDATE_RECORDS` is true.
 
 ## Event Schema
 
@@ -72,13 +72,13 @@ The `Event` structure contains metadata about a command execution. The command i
 ```
 <AGENT_RECORDS_PATH>/
 └── <session>/
-    ├── session.log           # Consolidated JSONL with plaintext previews
+    ├── session.jsonl           # Consolidated JSONL with plaintext previews
     ├── 1234567890-raw.txt    # Raw file (permanent, not consolidated)
     ├── 1234567891-raw.txt    # Another raw file
     └── ...
 ```
 
-When `AGENT_CONSOLIDATE_RECORDS=true` (default), temporary `<timestamp>` files are appended to `session.log` and deleted. The `-raw.txt` files are always preserved.
+When `AGENT_CONSOLIDATE_RECORDS=true` (default), temporary `<timestamp>` files are appended to `session.jsonl` and deleted. The `-raw.txt` files are always preserved.
 
 ## Environment Variables
 
@@ -86,7 +86,7 @@ When `AGENT_CONSOLIDATE_RECORDS=true` (default), temporary `<timestamp>` files a
 |----------|---------|-------------|
 | `AGENT_RECORDS_PATH` | `/host-agent-files/agent-records` | Root directory for all records |
 | `AGENT_SESSION` | Current date (YYYY-MM-DD) | Session identifier, auto-updates daily |
-| `AGENT_CONSOLIDATE_RECORDS` | `true` | Whether to consolidate temporary files into session.log |
+| `AGENT_CONSOLIDATE_RECORDS` | `true` | Whether to consolidate temporary files into session.jsonl |
 | `UFA_AGENT` | (none) | Agent identifier to include in events |
 | `UFA_MODEL` | (none) | Model identifier to include in events |
 | `UFA_METADATA` | (none) | Key-value metadata, format: `key1=value1,key2=value2` |

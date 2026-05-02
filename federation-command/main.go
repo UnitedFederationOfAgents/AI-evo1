@@ -344,7 +344,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error creating session log: %v\n", err)
 		os.Exit(1)
 	}
-	defer logFile.Close()
+	defer func() { logFile.Close() }()
 
 	// Print session info
 	fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
@@ -492,6 +492,50 @@ func main() {
 			continue
 		} else if line == "list-sessions" {
 			listSessions(filepath.Dir(sessionDir), filepath.Base(sessionDir))
+			continue
+		} else if strings.HasPrefix(line, "set-session ") {
+			newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+			newSessionDir := filepath.Join(recordsPath, newSessionID)
+			if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+				fmt.Println(errorStyle.Render(fmt.Sprintf("set-session: %v", err)))
+				continue
+			}
+			newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Println(errorStyle.Render(fmt.Sprintf("set-session: %v", err)))
+				continue
+			}
+			logFile.Close()
+			logFile = newLogFile
+			encoder = json.NewEncoder(logFile)
+			sessionID = newSessionID
+			sessionDir = newSessionDir
+			os.Setenv(EnvAgentSession, sessionID)
+			fmt.Println(successStyle.Render(fmt.Sprintf("session set to: %s", sessionDir)))
+			continue
+		} else if line == "set-session" {
+			fmt.Println(errorStyle.Render("usage: set-session <id>"))
+			continue
+		} else if line == "clear-session" {
+			now := time.Now()
+			newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+			newSessionDir := filepath.Join(recordsPath, newSessionID)
+			if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+				fmt.Println(errorStyle.Render(fmt.Sprintf("clear-session: %v", err)))
+				continue
+			}
+			newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				fmt.Println(errorStyle.Render(fmt.Sprintf("clear-session: %v", err)))
+				continue
+			}
+			logFile.Close()
+			logFile = newLogFile
+			encoder = json.NewEncoder(logFile)
+			sessionID = newSessionID
+			sessionDir = newSessionDir
+			os.Setenv(EnvAgentSession, sessionID)
+			fmt.Println(successStyle.Render(fmt.Sprintf("session reset to: %s", sessionDir)))
 			continue
 		} else if strings.HasPrefix(line, "agent ") {
 			prompt := strings.TrimPrefix(line, "agent ")

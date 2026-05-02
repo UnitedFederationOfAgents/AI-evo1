@@ -1,0 +1,11 @@
+# Binary
+heuristic-agent
+
+# Dependencies copied locally for testing
+clauditable
+ambiguous-agent
+clod
+
+# Test files
+*.test
+coverage.out

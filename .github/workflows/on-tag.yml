@@ -10,7 +10,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yml
     with:
       tag: ${{ github.ref_name }}
-      context: research/AI-evo1
+      context: .
     permissions:
       contents: read
       packages: write

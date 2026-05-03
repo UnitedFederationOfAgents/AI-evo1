@@ -1,6 +1,6 @@
 // federation-command is an interactive CLI shell for orchestrating AI agents.
 // It wraps all commands with clauditable for record-keeping and supports:
-// - Interactive readline-based input with multi-line support
+// - Interactive bubbletea-based input with multi-line support
 // - Agent selection and model configuration
 // - Mode-based invocation (-p/r/w/x for prompt/read/write/execute)
 // - Session recording and management
@@ -9,9 +9,9 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,9 +19,11 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/chzyer/readline"
 	"github.com/google/uuid"
 )
 
@@ -152,37 +154,6 @@ var (
 	}
 )
 
-// ShellCompleter implements readline.AutoCompleter for tab completion
-type ShellCompleter struct {
-	cwd *string // Pointer to track current working directory changes
-}
-
-// Do implements readline.AutoCompleter
-func (c *ShellCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) {
-	lineStr := string(line[:pos])
-
-	// Extract the word being completed (last space-separated token)
-	lastSpace := strings.LastIndex(lineStr, " ")
-	var prefix string
-	if lastSpace == -1 {
-		prefix = lineStr
-	} else {
-		prefix = lineStr[lastSpace+1:]
-	}
-
-	// Use filepath completion
-	candidates := completeFilepath(prefix, *c.cwd)
-
-	// Convert candidates to readline format
-	length = len(prefix)
-	for _, cand := range candidates {
-		suffix := []rune(cand[len(prefix):])
-		newLine = append(newLine, suffix)
-	}
-
-	return newLine, length
-}
-
 // completeFilepath returns filepath completion candidates for the given prefix
 func completeFilepath(prefix string, cwd string) []string {
 	if prefix == "" {
@@ -297,276 +268,909 @@ type CommandRecord struct {
 	ExitCode  int    `json:"exit"`
 }
 
-func main() {
-	// Handle --version flag
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("federation-command %s\n", Version)
-		return
-	}
+// ===== BUBBLETEA MODEL =====
 
-	recordsPath := os.Getenv(EnvAgentRecordsPath)
-	if recordsPath == "" {
-		recordsPath = DefaultRecordsPath
-	}
+type mlMode int
 
-	// Initialize current agent from environment or use default
+const (
+	mlNone mlMode = iota
+	mlHeredoc
+	mlContinuation
+)
+
+// appModel is the bubbletea model for the federation-command shell
+type appModel struct {
+	input        textinput.Model
+	cwd          string
+	oldCwd       string
+	currentAgent string
+	currentModel string
+	lastExitCode int
+	sessionID    string
+	sessionDir   string
+	recordsPath  string
+
+	logFile *os.File
+	encoder *json.Encoder
+
+	lastCmdTime time.Time
+
+	// History navigation
+	history      []string
+	historyIdx   int
+	historyStash string // saves current input when browsing history
+
+	// Multi-line input state
+	inMultiLine   bool
+	mlMode        mlMode
+	mlAccumulated string // accumulated text so far
+	mlDelim       string // heredoc delimiter
+	mlQuote       rune   // unclosed quote char (0 = backslash continuation)
+
+	quitting    bool
+	windowWidth int
+}
+
+// Bubbletea messages
+type cmdDoneMsg struct {
+	exitCode int
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
+type agentDoneMsg struct {
+	exitCode int
+	execErr  error
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
+type listModelsDoneMsg struct {
+	exitCode     int
+	currentModel string
+}
+
+func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
+	ti := textinput.New()
+	ti.Focus()
+	ti.PromptStyle = lipgloss.NewStyle() // pass-through: prompt is already ANSI-styled
+	ti.TextStyle = lipgloss.NewStyle()
+
+	cwd, _ := os.Getwd()
+
 	currentAgent := os.Getenv(EnvAgentName)
 	if currentAgent == "" {
 		currentAgent = DefaultAgent
 	}
-
-	// Initialize current model from environment
 	currentModel := os.Getenv(EnvAgentModel)
 
-	// Create session directory
-	// Use AGENT_SESSION if set, otherwise generate one with timestamp format
-	// Note: We use our own session format, not just date, to allow multiple sessions per day
-	now := time.Now()
-	sessionID := os.Getenv(EnvAgentSession)
-	if sessionID == "" {
-		// Generate session ID: date_time_unix (no "session-" prefix to match clauditable format)
-		sessionID = fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
-	}
-	sessionDir := filepath.Join(recordsPath, sessionID)
-
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "error creating session directory: %v\n", err)
-		os.Exit(1)
+	m := appModel{
+		input:        ti,
+		cwd:          cwd,
+		oldCwd:       cwd,
+		currentAgent: currentAgent,
+		currentModel: currentModel,
+		sessionID:    sessionID,
+		sessionDir:   sessionDir,
+		recordsPath:  recordsPath,
+		logFile:      logFile,
+		encoder:      encoder,
 	}
 
-	// Set environment for child processes
-	os.Setenv(EnvAgentRecordsPath, recordsPath)
-	os.Setenv(EnvAgentSession, sessionID)
+	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
+	m.history = loadHistory(historyFilePath())
+	m.historyIdx = len(m.history)
 
-	logPath := filepath.Join(sessionDir, "session.jsonl")
-	logFile, err := os.Create(logPath)
+	return m
+}
+
+func historyFilePath() string {
+	return filepath.Join(os.Getenv("HOME"), ".federation_records")
+}
+
+func loadHistory(path string) []string {
+	f, err := os.Open(path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating session log: %v\n", err)
-		os.Exit(1)
+		return nil
 	}
-	defer func() { logFile.Close() }()
+	defer f.Close()
 
-	// Print session info
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("  agent: %s | 'set-agent <name>' to change | 'list-agents' for options", currentAgent)))
-	fmt.Println(sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"))
-	fmt.Println(sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"))
-	fmt.Println(sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"))
-	fmt.Println(sessionStyle.Render("  records: 'list-sessions' | add '-provide-records <id>' to agent command"))
-	fmt.Println(sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"))
-	fmt.Println()
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
 
-	readlineRecords := filepath.Join(os.Getenv("HOME"), ".federation_records")
-	cwd, _ := os.Getwd()
-	oldCwd := cwd
-
-	completer := &ShellCompleter{cwd: &cwd}
-
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          buildPrompt(cwd, currentAgent, currentModel, 0),
-		HistoryFile:     readlineRecords,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		AutoComplete:    completer,
-	})
+func appendHistoryEntry(path, line string) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error initializing readline: %v\n", err)
-		os.Exit(1)
+		return
 	}
-	defer rl.Close()
+	defer f.Close()
+	fmt.Fprintln(f, line)
+}
 
-	var lastCommandTime time.Time
-	var lastExitCode int
-	encoder := json.NewEncoder(logFile)
-
-	for {
-		initialLine, err := rl.Readline()
-		if err == readline.ErrInterrupt {
-			if len(initialLine) == 0 {
-				break
+func longestCommonPrefix(strs []string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	prefix := strs[0]
+	for _, s := range strs[1:] {
+		for !strings.HasPrefix(s, prefix) {
+			if len(prefix) == 0 {
+				return ""
 			}
-			continue
+			prefix = prefix[:len(prefix)-1]
 		}
-		if err == io.EOF {
-			break
-		}
+	}
+	return prefix
+}
 
-		initialLine = strings.TrimSpace(initialLine)
-		if initialLine == "" {
-			continue
-		}
+func (m appModel) Init() tea.Cmd {
+	info := strings.Join([]string{
+		sessionStyle.Render("● session: " + m.sessionDir),
+		sessionStyle.Render("  agent: " + m.currentAgent + " | 'set-agent <name>' to change | 'list-agents' for options"),
+		sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"),
+		sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"),
+		sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"),
+		sessionStyle.Render("  records: 'list-sessions' | add '-provide-records <id>' to agent command"),
+		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
+		"",
+	}, "\n")
+	return tea.Batch(textinput.Blink, tea.Println(info))
+}
 
-		// Handle multi-line input
-		mainPrompt := buildPrompt(cwd, currentAgent, currentModel, lastExitCode)
-		line, err := readMultiLine(rl, initialLine, mainPrompt)
-		if err == readline.ErrInterrupt {
-			continue
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("input error: %v", err)))
-			continue
-		}
-
-		if line == "exit" {
-			fmt.Println(exitStyle.Render("session ended."))
-			break
-		}
-
-		// Calculate delta from last command
-		var deltaMs int64
-		commandTime := time.Now()
-		if !lastCommandTime.IsZero() {
-			deltaMs = commandTime.Sub(lastCommandTime).Milliseconds()
-		}
-		lastCommandTime = commandTime
-
-		var exitCode int
-
-		// Handle cd command
-		if line == "cd" || strings.HasPrefix(line, "cd ") {
-			target := strings.TrimSpace(strings.TrimPrefix(line, "cd"))
-			newDir, err := handleCd(target, cwd, oldCwd)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("cd: %v", err)))
-			} else {
-				oldCwd = cwd
-				cwd = newDir
-				rl.SetPrompt(buildPrompt(cwd, currentAgent, currentModel, lastExitCode))
+func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			if m.inMultiLine {
+				m.inMultiLine = false
+				m.mlAccumulated = ""
+				m.mlDelim = ""
+				m.mlQuote = 0
+				m.mlMode = mlNone
+				m.input.SetValue("")
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				return m, nil
 			}
-			continue
+			if m.input.Value() == "" {
+				m.quitting = true
+				return m, tea.Quit
+			}
+			m.input.SetValue("")
+			return m, nil
+
+		case tea.KeyCtrlD:
+			if m.input.Value() == "" && !m.inMultiLine {
+				m.quitting = true
+				return m, tea.Quit
+			}
+			return m, nil
+
+		case tea.KeyEnter:
+			return m.handleEnter()
+
+		case tea.KeyUp:
+			return m.handleHistoryUp()
+
+		case tea.KeyDown:
+			return m.handleHistoryDown()
+
+		case tea.KeyTab:
+			return m.handleTab()
 		}
 
-		// Handle export command
-		if line == "export" || strings.HasPrefix(line, "export ") {
-			arg := strings.TrimSpace(strings.TrimPrefix(line, "export"))
-			if err := handleExport(arg); err != nil {
-				fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("export: %v", err)))
-			}
-			continue
+	case cmdDoneMsg:
+		m.lastExitCode = msg.exitCode
+		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
+			m.cwd = newCwd
 		}
-
-		// Handle built-in commands
-		if strings.HasPrefix(line, "set-agent ") {
-			newAgent := strings.TrimSpace(strings.TrimPrefix(line, "set-agent "))
-			if isValidAgent(newAgent) {
-				currentAgent = newAgent
-				currentModel = ""
-				rl.SetPrompt(buildPrompt(cwd, currentAgent, currentModel, lastExitCode))
-				fmt.Println(successStyle.Render(fmt.Sprintf("agent set to: %s", currentAgent)))
-			} else {
-				fmt.Println(errorStyle.Render(fmt.Sprintf("unknown agent: %s", newAgent)))
-				fmt.Println(sessionStyle.Render(fmt.Sprintf("available: %s", strings.Join(availableAgents, ", "))))
-			}
-			continue
-		} else if line == "set-agent" {
-			fmt.Println(errorStyle.Render("usage: set-agent <name>"))
-			fmt.Println(sessionStyle.Render(fmt.Sprintf("available: %s", strings.Join(availableAgents, ", "))))
-			continue
-		} else if line == "list-agents" {
-			listAgents(currentAgent)
-			continue
-		} else if strings.HasPrefix(line, "set-model ") {
-			newModel := strings.TrimSpace(strings.TrimPrefix(line, "set-model "))
-			if err := setModel(currentAgent, newModel); err != nil {
-				fmt.Println(errorStyle.Render(err.Error()))
-			} else {
-				currentModel = newModel
-				rl.SetPrompt(buildPrompt(cwd, currentAgent, currentModel, lastExitCode))
-				fmt.Println(successStyle.Render(fmt.Sprintf("model set to: %s", currentModel)))
-			}
-			continue
-		} else if line == "set-model" {
-			fmt.Println(errorStyle.Render("usage: set-model <name>"))
-			fmt.Println(sessionStyle.Render("use 'list-models' to see available models for current agent"))
-			continue
-		} else if line == "clear-model" {
-			currentModel = ""
-			rl.SetPrompt(buildPrompt(cwd, currentAgent, currentModel, lastExitCode))
-			fmt.Println(successStyle.Render("model cleared - using agent's default"))
-			continue
-		} else if line == "list-models" {
-			listModels(currentAgent, currentModel, sessionDir)
-			continue
-		} else if line == "list-sessions" {
-			listSessions(filepath.Dir(sessionDir), filepath.Base(sessionDir))
-			continue
-		} else if strings.HasPrefix(line, "set-session ") {
-			newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
-			newSessionDir := filepath.Join(recordsPath, newSessionID)
-			if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-				fmt.Println(errorStyle.Render(fmt.Sprintf("set-session: %v", err)))
-				continue
-			}
-			newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-			if err != nil {
-				fmt.Println(errorStyle.Render(fmt.Sprintf("set-session: %v", err)))
-				continue
-			}
-			logFile.Close()
-			logFile = newLogFile
-			encoder = json.NewEncoder(logFile)
-			sessionID = newSessionID
-			sessionDir = newSessionDir
-			os.Setenv(EnvAgentSession, sessionID)
-			fmt.Println(successStyle.Render(fmt.Sprintf("session set to: %s", sessionDir)))
-			continue
-		} else if line == "set-session" {
-			fmt.Println(errorStyle.Render("usage: set-session <id>"))
-			continue
-		} else if line == "clear-session" {
-			now := time.Now()
-			newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
-			newSessionDir := filepath.Join(recordsPath, newSessionID)
-			if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-				fmt.Println(errorStyle.Render(fmt.Sprintf("clear-session: %v", err)))
-				continue
-			}
-			newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-			if err != nil {
-				fmt.Println(errorStyle.Render(fmt.Sprintf("clear-session: %v", err)))
-				continue
-			}
-			logFile.Close()
-			logFile = newLogFile
-			encoder = json.NewEncoder(logFile)
-			sessionID = newSessionID
-			sessionDir = newSessionDir
-			os.Setenv(EnvAgentSession, sessionID)
-			fmt.Println(successStyle.Render(fmt.Sprintf("session reset to: %s", sessionDir)))
-			continue
-		} else if strings.HasPrefix(line, "agent ") {
-			prompt := strings.TrimPrefix(line, "agent ")
-			exitCode = runAgent(prompt, currentAgent, currentModel, sessionDir)
-		} else if line == "agent" {
-			fmt.Println(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"))
-			continue
-		} else {
-			// Regular command - wrap with clauditable using agent=none
-			exitCode = runCommand(line, sessionDir)
-		}
-
-		lastExitCode = exitCode
-
-		// Write metadata record
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
-			Command:   line,
-			Timestamp: commandTime.Format(time.RFC3339),
-			DeltaMs:   deltaMs,
-			ExitCode:  exitCode,
+			Command:   msg.line,
+			Timestamp: msg.cmdTime.Format(time.RFC3339),
+			DeltaMs:   msg.deltaMs,
+			ExitCode:  msg.exitCode,
 		}
-		encoder.Encode(record)
+		m.encoder.Encode(record)
+		return m, nil
 
-		// Update prompt
-		newCwd, _ := os.Getwd()
-		if newCwd != cwd {
-			cwd = newCwd
+	case agentDoneMsg:
+		m.lastExitCode = msg.exitCode
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode)
+		record := CommandRecord{
+			ID:        uuid.New().String()[:8],
+			Command:   msg.line,
+			Timestamp: msg.cmdTime.Format(time.RFC3339),
+			DeltaMs:   msg.deltaMs,
+			ExitCode:  msg.exitCode,
 		}
-		rl.SetPrompt(buildPrompt(cwd, currentAgent, currentModel, lastExitCode))
+		m.encoder.Encode(record)
+		var postOutput string
+		if msg.execErr != nil {
+			if _, ok := msg.execErr.(*exec.ExitError); ok {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", msg.exitCode))
+			} else {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", msg.execErr))
+			}
+		} else {
+			postOutput = successStyle.Render("agent completed")
+		}
+		return m, tea.Println(postOutput)
+
+	case listModelsDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		var suffix string
+		if msg.currentModel != "" {
+			suffix = "\n" + sessionStyle.Render("current selection: "+msg.currentModel)
+		} else {
+			suffix = "\n" + sessionStyle.Render("no model explicitly set - using agent's built-in default")
+		}
+		return m, tea.Println(suffix)
+
+	case tea.WindowSizeMsg:
+		m.windowWidth = msg.Width
+		setPromptWidth(&m.input, m.input.Prompt, m.windowWidth)
+		return m, nil
 	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m appModel) View() string {
+	if m.quitting {
+		return ""
+	}
+	if m.windowWidth > 0 {
+		return wrapAtWidth(m.input.View(), m.windowWidth)
+	}
+	return m.input.View()
+}
+
+// wrapAtWidth inserts newlines so the rendered string fits within width visible
+// columns. ANSI escape sequences are treated as zero-width.
+func wrapAtWidth(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	i := 0
+	for i < len(s) {
+		// ANSI escape sequence — zero display width, copy verbatim
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && !((s[j] >= 'A' && s[j] <= 'Z') || (s[j] >= 'a' && s[j] <= 'z')) {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			b.WriteString(s[i:j])
+			i = j
+			continue
+		}
+		if s[i] == '\n' {
+			b.WriteByte('\n')
+			col = 0
+			i++
+			continue
+		}
+		if s[i] == '\r' {
+			b.WriteByte('\r')
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			if col >= width {
+				b.WriteByte('\n')
+				col = 0
+			}
+			b.WriteByte(s[i])
+			col++
+			i++
+			continue
+		}
+		if col >= width {
+			b.WriteByte('\n')
+			col = 0
+		}
+		b.WriteRune(r)
+		col++
+		i += size
+	}
+	return b.String()
+}
+
+func (m appModel) handleEnter() (appModel, tea.Cmd) {
+	line := m.input.Value()
+	// Capture prompt+line now so it persists in terminal scroll history.
+	echoLine := m.input.Prompt + line
+	m.input.SetValue("")
+
+	if m.inMultiLine {
+		echo := tea.Println(echoLine)
+		switch m.mlMode {
+		case mlHeredoc:
+			if strings.TrimSpace(line) == m.mlDelim {
+				accumulated := m.mlAccumulated
+				m.inMultiLine = false
+				m.mlAccumulated = ""
+				m.mlDelim = ""
+				m.mlMode = mlNone
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				newM, execCmd := m.executeCommand(accumulated)
+				return newM, tea.Sequence(echo, execCmd)
+			}
+			if m.mlAccumulated == "" {
+				m.mlAccumulated = line
+			} else {
+				m.mlAccumulated = m.mlAccumulated + "\n" + line
+			}
+			return m, echo
+
+		case mlContinuation:
+			var newAccumulated string
+			if m.mlQuote == 0 {
+				// Backslash continuation: strip trailing backslash, join with space
+				trimmed := strings.TrimSuffix(strings.TrimRight(m.mlAccumulated, " \t"), "\\")
+				newAccumulated = trimmed + " " + line
+			} else {
+				// Unclosed quote continuation: join with newline
+				newAccumulated = m.mlAccumulated + "\n" + line
+			}
+
+			needsMore, quoteChar := checkContinuation(newAccumulated)
+			if !needsMore {
+				m.inMultiLine = false
+				m.mlAccumulated = ""
+				m.mlQuote = 0
+				m.mlMode = mlNone
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				newM, execCmd := m.executeCommand(newAccumulated)
+				return newM, tea.Sequence(echo, execCmd)
+			}
+			m.mlAccumulated = newAccumulated
+			m.mlQuote = quoteChar
+			m.input.Prompt = continuationPromptFor(quoteChar)
+			return m, echo
+		}
+	}
+
+	// Not in multi-line mode
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return m, nil
+	}
+
+	echo := tea.Println(echoLine)
+
+	// Heredoc trigger
+	if strings.HasPrefix(line, "<<<") {
+		m.inMultiLine = true
+		m.mlMode = mlHeredoc
+		m.mlDelim = strings.TrimSpace(strings.TrimPrefix(line, "<<<"))
+		if m.mlDelim == "" {
+			m.mlDelim = "EOF"
+		}
+		m.mlAccumulated = ""
+		m.input.Prompt = continuationStyle.Render("  > ")
+		return m, echo
+	}
+
+	// Continuation check
+	needsMore, quoteChar := checkContinuation(line)
+	if needsMore {
+		m.inMultiLine = true
+		m.mlMode = mlContinuation
+		m.mlAccumulated = line
+		m.mlQuote = quoteChar
+		m.input.Prompt = continuationPromptFor(quoteChar)
+		return m, echo
+	}
+
+	newM, execCmd := m.executeCommand(line)
+	return newM, tea.Sequence(echo, execCmd)
+}
+
+func continuationPromptFor(quoteChar rune) string {
+	if quoteChar != 0 {
+		return continuationStyle.Render(string(quoteChar) + "> ")
+	}
+	return continuationStyle.Render("  > ")
+}
+
+func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
+	if len(m.history) == 0 || m.inMultiLine {
+		return m, nil
+	}
+	if m.historyIdx == len(m.history) {
+		m.historyStash = m.input.Value()
+	}
+	if m.historyIdx > 0 {
+		m.historyIdx--
+		m.input.SetValue(m.history[m.historyIdx])
+		m.input.CursorEnd()
+	}
+	return m, nil
+}
+
+func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		return m, nil
+	}
+	if m.historyIdx < len(m.history) {
+		m.historyIdx++
+		if m.historyIdx == len(m.history) {
+			m.input.SetValue(m.historyStash)
+		} else {
+			m.input.SetValue(m.history[m.historyIdx])
+		}
+		m.input.CursorEnd()
+	}
+	return m, nil
+}
+
+func (m appModel) handleTab() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		return m, nil
+	}
+
+	line := m.input.Value()
+	pos := m.input.Position()
+	lineRunes := []rune(line)
+	lineUpToCursor := string(lineRunes[:pos])
+
+	lastSpace := strings.LastIndex(lineUpToCursor, " ")
+	var prefix string
+	if lastSpace == -1 {
+		prefix = lineUpToCursor
+	} else {
+		prefix = lineUpToCursor[lastSpace+1:]
+	}
+
+	completions := completeFilepath(prefix, m.cwd)
+	if len(completions) == 0 {
+		return m, nil
+	}
+
+	prefixRunes := []rune(prefix)
+	prefixLen := len(prefixRunes)
+
+	if len(completions) == 1 {
+		completionRunes := []rune(completions[0])
+		newVal := string(lineRunes[:pos-prefixLen]) + completions[0] + string(lineRunes[pos:])
+		m.input.SetValue(newVal)
+		m.input.SetCursor(pos - prefixLen + len(completionRunes))
+		return m, nil
+	}
+
+	// Multiple completions: apply common prefix extension, then show list
+	common := longestCommonPrefix(completions)
+	if len([]rune(common)) > prefixLen {
+		commonRunes := []rune(common)
+		newVal := string(lineRunes[:pos-prefixLen]) + common + string(lineRunes[pos:])
+		m.input.SetValue(newVal)
+		m.input.SetCursor(pos - prefixLen + len(commonRunes))
+	}
+
+	output := strings.Join(completions, "  ")
+	return m, tea.Println(output)
+}
+
+func extractExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
+func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitCode int) {
+	record := CommandRecord{
+		ID:        uuid.New().String()[:8],
+		Command:   line,
+		Timestamp: cmdTime.Format(time.RFC3339),
+		DeltaMs:   deltaMs,
+		ExitCode:  exitCode,
+	}
+	m.encoder.Encode(record)
+}
+
+func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
+	// Add to history
+	m.history = append(m.history, line)
+	m.historyIdx = len(m.history)
+	m.historyStash = ""
+	appendHistoryEntry(historyFilePath(), line)
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+
+	// exit
+	if line == "exit" {
+		m.quitting = true
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(
+			tea.Println(exitStyle.Render("session ended.")),
+			tea.Quit,
+		)
+	}
+
+	// cd
+	if line == "cd" || strings.HasPrefix(line, "cd ") {
+		target := strings.TrimSpace(strings.TrimPrefix(line, "cd"))
+		newDir, cdOutput, err := handleCd(target, m.cwd, m.oldCwd)
+		var exitCode int
+		var output string
+		if err != nil {
+			exitCode = 1
+			output = errorStyle.Render("cd: " + err.Error())
+		} else {
+			m.oldCwd = m.cwd
+			m.cwd = newDir
+			if cdOutput != "" {
+				output = cdOutput
+			}
+		}
+		m.lastExitCode = exitCode
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.logRecord(line, cmdTime, deltaMs, exitCode)
+		if output != "" {
+			return m, tea.Println(output)
+		}
+		return m, nil
+	}
+
+	// export
+	if line == "export" || strings.HasPrefix(line, "export ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(line, "export"))
+		output, err := handleExport(arg)
+		var exitCode int
+		var printOutput string
+		if err != nil {
+			exitCode = 1
+			printOutput = errorStyle.Render("export: " + err.Error())
+		} else if output != "" {
+			printOutput = strings.TrimRight(output, "\n")
+		}
+		m.logRecord(line, cmdTime, deltaMs, exitCode)
+		if printOutput != "" {
+			return m, tea.Println(printOutput)
+		}
+		return m, nil
+	}
+
+	// set-agent <name>
+	if strings.HasPrefix(line, "set-agent ") {
+		newAgent := strings.TrimSpace(strings.TrimPrefix(line, "set-agent "))
+		var output string
+		var exitCode int
+		if isValidAgent(newAgent) {
+			m.currentAgent = newAgent
+			m.currentModel = ""
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			output = successStyle.Render("agent set to: " + m.currentAgent)
+		} else {
+			exitCode = 1
+			output = errorStyle.Render("unknown agent: "+newAgent) + "\n" +
+				sessionStyle.Render("available: "+strings.Join(availableAgents, ", "))
+		}
+		m.lastExitCode = exitCode
+		m.logRecord(line, cmdTime, deltaMs, exitCode)
+		return m, tea.Println(output)
+	}
+
+	if line == "set-agent" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		output := errorStyle.Render("usage: set-agent <name>") + "\n" +
+			sessionStyle.Render("available: "+strings.Join(availableAgents, ", "))
+		return m, tea.Println(output)
+	}
+
+	if line == "list-agents" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderAgents(m.currentAgent))
+	}
+
+	// set-model <name>
+	if strings.HasPrefix(line, "set-model ") {
+		newModel := strings.TrimSpace(strings.TrimPrefix(line, "set-model "))
+		var output string
+		var exitCode int
+		if err := setModel(m.currentAgent, newModel); err != nil {
+			exitCode = 1
+			output = errorStyle.Render(err.Error())
+		} else {
+			m.currentModel = newModel
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			output = successStyle.Render("model set to: " + m.currentModel)
+		}
+		m.lastExitCode = exitCode
+		m.logRecord(line, cmdTime, deltaMs, exitCode)
+		return m, tea.Println(output)
+	}
+
+	if line == "set-model" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		output := errorStyle.Render("usage: set-model <name>") + "\n" +
+			sessionStyle.Render("use 'list-models' to see available models for current agent")
+		return m, tea.Println(output)
+	}
+
+	if line == "clear-model" {
+		m.currentModel = ""
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("model cleared - using agent's default"))
+	}
+
+	if line == "list-models" {
+		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.sessionDir)
+		if cmd == nil {
+			m.logRecord(line, cmdTime, deltaMs, 0)
+			return m, tea.Println(fallbackText)
+		}
+		currentModel := m.currentModel
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return listModelsDoneMsg{exitCode: extractExitCode(err), currentModel: currentModel}
+		})
+	}
+
+	if line == "list-sessions" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
+	}
+
+	// set-session <id>
+	if strings.HasPrefix(line, "set-session ") {
+		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
+		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
+		}
+		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
+		}
+		m.logFile.Close()
+		m.logFile = newLogFile
+		m.encoder = json.NewEncoder(newLogFile)
+		m.sessionID = newSessionID
+		m.sessionDir = newSessionDir
+		os.Setenv(EnvAgentSession, newSessionID)
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
+	}
+
+	if line == "set-session" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: set-session <id>"))
+	}
+
+	if line == "clear-session" {
+		now := time.Now()
+		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
+		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("clear-session: " + err.Error()))
+		}
+		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("clear-session: " + err.Error()))
+		}
+		m.logFile.Close()
+		m.logFile = newLogFile
+		m.encoder = json.NewEncoder(newLogFile)
+		m.sessionID = newSessionID
+		m.sessionDir = newSessionDir
+		os.Setenv(EnvAgentSession, newSessionID)
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("session reset to: " + newSessionDir))
+	}
+
+	// agent <args>
+	if strings.HasPrefix(line, "agent ") {
+		prompt := strings.TrimPrefix(line, "agent ")
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.sessionDir)
+		if agentCmd == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errOutput)
+		}
+		return m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
+			return agentDoneMsg{
+				exitCode: extractExitCode(err),
+				execErr:  err,
+				line:     line,
+				cmdTime:  cmdTime,
+				deltaMs:  deltaMs,
+			}
+		})
+	}
+
+	if line == "agent" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"))
+	}
+
+	// Regular command - wrap with clauditable
+	runCmd := buildRunCmd(line, m.sessionDir)
+	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
+		return cmdDoneMsg{
+			exitCode: extractExitCode(err),
+			line:     line,
+			cmdTime:  cmdTime,
+			deltaMs:  deltaMs,
+		}
+	})
+}
+
+// buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
+// Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
+func buildRunCmd(cmdLine, sessionDir string) *exec.Cmd {
+	if os.Getenv(EnvIsClauditable) == "true" {
+		cmd := exec.Command("bash", "-c", cmdLine)
+		cmd.Env = os.Environ()
+		return cmd
+	}
+
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		cmd := exec.Command("bash", "-c", cmdLine)
+		cmd.Env = os.Environ()
+		return cmd
+	}
+
+	cmd := exec.Command(clauditablePath, "bash", "-c", cmdLine)
+	env := os.Environ()
+	env = append(env,
+		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
+		EnvAgentSession+"="+filepath.Base(sessionDir),
+		"UFA_AGENT=none",
+		EnvIsClauditable+"=true",
+	)
+	cmd.Env = env
+	return cmd
+}
+
+// buildAgentCmd builds an exec.Cmd for agent invocation, parsing mode flags and -provide-records.
+// Returns (nil, errMsg) if the invocation is invalid.
+// Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
+func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
+	mode := ModeRead
+	args := parseArgs(input)
+	var promptParts []string
+	var provideRecordsSessions []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-p":
+			mode = ModePrompt
+		case "-r":
+			mode = ModeRead
+		case "-w":
+			mode = ModeWrite
+		case "-x":
+			mode = ModeExecute
+		case "-provide-records":
+			if i+1 < len(args) {
+				i++
+				provideRecordsSessions = append(provideRecordsSessions, args[i])
+			}
+		default:
+			promptParts = append(promptParts, args[i])
+		}
+	}
+
+	prompt := strings.Join(promptParts, " ")
+	if prompt == "" {
+		return nil, errorStyle.Render("no prompt provided")
+	}
+
+	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	if err != nil {
+		return nil, errorStyle.Render("Error: ambiguous-agent not found")
+	}
+
+	var agentArgs []string
+	agentArgs = append(agentArgs, "-"+mode)
+	agentArgs = append(agentArgs, "-a", agent)
+	if model != "" {
+		agentArgs = append(agentArgs, "-m", model)
+	}
+	for _, id := range provideRecordsSessions {
+		agentArgs = append(agentArgs, "-provide-records", id)
+	}
+	agentArgs = append(agentArgs, prompt)
+
+	if os.Getenv(EnvIsClauditable) == "true" {
+		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
+	cmd := exec.Command(clauditablePath, clauditableArgs...)
+	env := os.Environ()
+	env = append(env,
+		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
+		EnvAgentSession+"="+filepath.Base(sessionDir),
+		"UFA_AGENT="+agent,
+		EnvIsClauditable+"=true",
+	)
+	if model != "" {
+		env = append(env, "UFA_MODEL="+model)
+	}
+	cmd.Env = env
+	return cmd, ""
+}
+
+// buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
+// Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
+func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, string) {
+	if os.Getenv(EnvIsClauditable) == "true" {
+		ambiguousAgentPath, err := findBinary("ambiguous-agent")
+		if err != nil {
+			return nil, renderModelsFallback(agent, currentModel)
+		}
+		cmd := exec.Command(ambiguousAgentPath, "--list-models", "-a", agent)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	if err != nil {
+		return nil, renderModelsFallback(agent, currentModel)
+	}
+
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		cmd := exec.Command(ambiguousAgentPath, "--list-models", "-a", agent)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	cmd := exec.Command(clauditablePath, ambiguousAgentPath, "--list-models", "-a", agent)
+	env := os.Environ()
+	env = append(env,
+		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
+		EnvAgentSession+"="+filepath.Base(sessionDir),
+		"UFA_AGENT=none",
+		EnvIsClauditable+"=true",
+	)
+	cmd.Env = env
+	return cmd, ""
 }
 
 // isValidAgent checks if the agent name is in the available agents list
@@ -612,7 +1216,6 @@ func setModel(agent string, model string) error {
 		models = parseGrokModels(string(output))
 	default:
 		// For agents without dynamic model listing, accept the model without validation
-		// The agent itself will validate when invoked
 		return nil
 	}
 
@@ -630,10 +1233,12 @@ func setModel(agent string, model string) error {
 	return nil
 }
 
-// listAgents displays available agents
-func listAgents(currentAgent string) {
-	fmt.Println(sessionStyle.Render("available agents:"))
+// renderAgents returns a styled string listing available agents
+func renderAgents(currentAgent string) string {
+	var b strings.Builder
+	b.WriteString(sessionStyle.Render("available agents:"))
 	for _, a := range availableAgents {
+		b.WriteString("\n")
 		color := agentColors[a]
 		if color == "" {
 			color = lipgloss.Color("141")
@@ -644,130 +1249,52 @@ func listAgents(currentAgent string) {
 			modelSupport = " (supports model selection)"
 		}
 		if a == currentAgent {
-			fmt.Println(agentNameStyle.Render(fmt.Sprintf("  -> %s (selected)%s", a, modelSupport)))
+			b.WriteString(agentNameStyle.Render(fmt.Sprintf("  -> %s (selected)%s", a, modelSupport)))
 		} else {
-			fmt.Println(agentNameStyle.Render(fmt.Sprintf("    %s%s", a, modelSupport)))
+			b.WriteString(agentNameStyle.Render(fmt.Sprintf("    %s%s", a, modelSupport)))
 		}
 	}
+	return b.String()
 }
 
-// listModels displays available models for an agent by calling ambiguous-agent
-// via clauditable for consistency and record-keeping
-func listModels(agent string, currentModel string, sessionDir string) {
-	// Check for double-wrapping
-	if os.Getenv(EnvIsClauditable) == "true" {
-		// Already in clauditable context, call ambiguous-agent directly
-		listModelsDirect(agent, currentModel)
-		return
-	}
-
-	// Find binaries
-	ambiguousAgentPath, err := findBinary("ambiguous-agent")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
-		listModelsFallback(agent, currentModel)
-		return
-	}
-
-	clauditablePath, err := findBinary("clauditable")
-	if err != nil {
-		// Fallback to direct call without clauditable
-		listModelsDirect(agent, currentModel)
-		return
-	}
-
-	// Call ambiguous-agent --list-models via clauditable
-	cmd := exec.Command(clauditablePath, ambiguousAgentPath, "--list-models", "-a", agent)
-
-	env := os.Environ()
-	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
-	)
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		// Fall back to direct call on error
-		listModelsFallback(agent, currentModel)
-		return
-	}
-
-	// Show current selection status (ambiguous-agent doesn't know about it)
-	if currentModel != "" {
-		fmt.Println()
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("current selection: %s", currentModel)))
-	} else {
-		fmt.Println()
-		fmt.Println(sessionStyle.Render("no model explicitly set - using agent's built-in default"))
-	}
-}
-
-// listModelsDirect calls ambiguous-agent directly without clauditable
-func listModelsDirect(agent string, currentModel string) {
-	ambiguousAgentPath, err := findBinary("ambiguous-agent")
-	if err != nil {
-		listModelsFallback(agent, currentModel)
-		return
-	}
-
-	cmd := exec.Command(ambiguousAgentPath, "--list-models", "-a", agent)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		listModelsFallback(agent, currentModel)
-		return
-	}
-
-	// Show current selection status
-	if currentModel != "" {
-		fmt.Println()
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("current selection: %s", currentModel)))
-	} else {
-		fmt.Println()
-		fmt.Println(sessionStyle.Render("no model explicitly set - using agent's built-in default"))
-	}
-}
-
-// listModelsFallback displays an error when ambiguous-agent is unavailable
-func listModelsFallback(agent string, currentModel string) {
+// renderModelsFallback returns a styled error string when ambiguous-agent is unavailable
+func renderModelsFallback(agent string, currentModel string) string {
+	var b strings.Builder
 	cfg, ok := agentModelConfigs[agent]
 	if !ok || cfg.ModelFlag == "" {
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("agent '%s' does not support model selection", agent)))
-		fmt.Println(sessionStyle.Render("the agent uses its built-in default model"))
-		return
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("agent '%s' does not support model selection", agent)))
+		b.WriteString("\n")
+		b.WriteString(sessionStyle.Render("the agent uses its built-in default model"))
+	} else {
+		b.WriteString(errorStyle.Render("failed to query available models"))
+		b.WriteString("\n")
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("ensure '%s' is installed and available on PATH", agent)))
+		b.WriteString("\n")
+		b.WriteString(sessionStyle.Render("consult the agent's documentation for available models"))
 	}
-
-	fmt.Println(errorStyle.Render("failed to query available models"))
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("ensure '%s' is installed and available on PATH", agent)))
-	fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
-
 	if currentModel != "" {
-		fmt.Println()
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("current selection: %s", currentModel)))
+		b.WriteString("\n\n")
+		b.WriteString(sessionStyle.Render("current selection: " + currentModel))
 	}
+	return b.String()
 }
 
-// handleCd processes a cd command
-func handleCd(target string, cwd string, oldCwd string) (string, error) {
+// handleCd processes a cd command. Returns (newCwd, printOutput, error).
+// printOutput is non-empty only for "cd -" which prints the target directory.
+func handleCd(target string, cwd string, oldCwd string) (string, string, error) {
 	home := os.Getenv("HOME")
 
 	var targetDir string
+	var printOutput string
 	switch {
 	case target == "" || target == "~":
 		targetDir = home
 	case target == "-":
 		if oldCwd == cwd {
-			return "", fmt.Errorf("OLDPWD not set")
+			return "", "", fmt.Errorf("OLDPWD not set")
 		}
 		targetDir = oldCwd
-		fmt.Println(targetDir)
+		printOutput = oldCwd
 	case strings.HasPrefix(target, "~/"):
 		targetDir = filepath.Join(home, target[2:])
 	default:
@@ -785,32 +1312,34 @@ func handleCd(target string, cwd string, oldCwd string) (string, error) {
 	targetDir = filepath.Clean(targetDir)
 
 	if err := os.Chdir(targetDir); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	newCwd, err := os.Getwd()
 	if err != nil {
-		return targetDir, nil
+		return targetDir, printOutput, nil
 	}
-	return newCwd, nil
+	return newCwd, printOutput, nil
 }
 
-// handleExport processes an export command
-func handleExport(arg string) error {
+// handleExport processes an export command. Returns (output, error).
+// output is non-empty when called with no arguments (lists environment).
+func handleExport(arg string) (string, error) {
 	if arg == "" {
+		var b strings.Builder
 		for _, env := range os.Environ() {
-			fmt.Printf("declare -x %s\n", env)
+			fmt.Fprintf(&b, "declare -x %s\n", env)
 		}
-		return nil
+		return b.String(), nil
 	}
 
 	assignments := parseExportArgs(arg)
 	for _, assignment := range assignments {
 		if err := processExportAssignment(assignment); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // parseExportArgs splits export arguments respecting quotes
@@ -955,212 +1484,10 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 	return prompt
 }
 
-// runCommand executes a shell command wrapped with clauditable (agent=none)
-func runCommand(cmdLine string, sessionDir string) int {
-	// Check for double-wrapping
-	if os.Getenv(EnvIsClauditable) == "true" {
-		// Already in clauditable context, run directly
-		return runCommandDirect(cmdLine)
-	}
-
-	// Find clauditable
-	clauditablePath, err := findBinary("clauditable")
-	if err != nil {
-		// Fallback to direct execution
-		fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, running directly"))
-		return runCommandDirect(cmdLine)
-	}
-
-	// Wrap with clauditable, setting agent to "none" for non-agentic commands
-	cmd := exec.Command(clauditablePath, "bash", "-c", cmdLine)
-
-	env := os.Environ()
-	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
-	)
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
-		}
-		return 1
-	}
-	return 0
-}
-
-// runCommandDirect executes a shell command directly without clauditable wrapping
-func runCommandDirect(cmdLine string) int {
-	cmd := exec.Command("bash", "-c", cmdLine)
-	cmd.Env = os.Environ()
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
-		}
-		return 1
-	}
-	return 0
-}
-
-// runAgent invokes an AI agent with the given prompt
-func runAgent(input string, agent string, model string, sessionDir string) int {
-	// Parse mode flags: -p (prompt), -r (read), -w (write), -x (execute)
-	// Also parse -provide-records flags
-	mode := ModeRead // Default mode
-	args := parseArgs(input)
-	var promptParts []string
-	var provideRecordsSessions []string
-
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-p":
-			mode = ModePrompt
-		case "-r":
-			mode = ModeRead
-		case "-w":
-			mode = ModeWrite
-		case "-x":
-			mode = ModeExecute
-		case "-provide-records":
-			// Next arg is the session ID
-			if i+1 < len(args) {
-				i++
-				provideRecordsSessions = append(provideRecordsSessions, args[i])
-			}
-		default:
-			promptParts = append(promptParts, args[i])
-		}
-	}
-
-	prompt := strings.Join(promptParts, " ")
-	if prompt == "" {
-		fmt.Println(errorStyle.Render("no prompt provided"))
-		return 1
-	}
-
-	// If provide-records was specified, use the records-aware invocation
-	if len(provideRecordsSessions) > 0 {
-		return runAgentWithRecordsInternal(prompt, provideRecordsSessions, agent, model, mode, sessionDir)
-	}
-
-	// Check for double-wrapping
-	if os.Getenv(EnvIsClauditable) == "true" {
-		// Already in clauditable context, invoke ambiguous-agent directly
-		return runAgentDirect(prompt, agent, model, mode, sessionDir)
-	}
-
-	// Find ambiguous-agent and clauditable
-	ambiguousAgentPath, err := findBinary("ambiguous-agent")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
-		return 1
-	}
-
-	clauditablePath, err := findBinary("clauditable")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, invoking agent directly"))
-		return runAgentDirect(prompt, agent, model, mode, sessionDir)
-	}
-
-	// Build ambiguous-agent args
-	var agentArgs []string
-	agentArgs = append(agentArgs, "-"+mode) // -p, -r, -w, or -x
-	agentArgs = append(agentArgs, "-a", agent)
-	if model != "" {
-		agentArgs = append(agentArgs, "-m", model)
-	}
-	agentArgs = append(agentArgs, prompt)
-
-	// Wrap with clauditable
-	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
-	cmd := exec.Command(clauditablePath, clauditableArgs...)
-
-	env := os.Environ()
-	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
-	)
-	if model != "" {
-		env = append(env, "UFA_MODEL="+model)
-	}
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Note: ambiguous-agent prints the invocation message, no need to duplicate here
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code := exitErr.ExitCode()
-			fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited: %d", code)))
-			return code
-		}
-		fmt.Println(errorStyle.Render(fmt.Sprintf("agent error: %v", err)))
-		return 1
-	}
-
-	fmt.Println(successStyle.Render("agent completed"))
-	return 0
-}
-
-// runAgentDirect invokes ambiguous-agent directly without clauditable wrapping
-func runAgentDirect(prompt string, agent string, model string, mode string, sessionDir string) int {
-	ambiguousAgentPath, err := findBinary("ambiguous-agent")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
-		return 1
-	}
-
-	var args []string
-	args = append(args, "-"+mode)
-	args = append(args, "-a", agent)
-	if model != "" {
-		args = append(args, "-m", model)
-	}
-	args = append(args, prompt)
-
-	cmd := exec.Command(ambiguousAgentPath, args...)
-	cmd.Env = os.Environ()
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
-		}
-		return 1
-	}
-	return 0
-}
-
-// modeDescription returns a human-readable description of the mode
-func modeDescription(mode string) string {
-	switch mode {
-	case ModePrompt:
-		return "prompt"
-	case ModeRead:
-		return "read"
-	case ModeWrite:
-		return "write"
-	case ModeExecute:
-		return "execute"
-	default:
-		return "unknown"
-	}
+// setPromptWidth sets the prompt on input. Width is intentionally left at 0
+// (unlimited) so View() can perform explicit wrapping via wrapAtWidth.
+func setPromptWidth(input *textinput.Model, prompt string, windowWidth int) {
+	input.Prompt = prompt
 }
 
 // findBinary finds a binary by checking PATH first, then the directory of the running executable
@@ -1251,66 +1578,6 @@ func parseGrokModels(output string) []string {
 	return models
 }
 
-// readMultiLine reads a potentially multi-line input
-func readMultiLine(rl *readline.Instance, initialLine string, mainPrompt string) (string, error) {
-	line := initialLine
-	continuationPrompt := continuationStyle.Render("  > ")
-
-	// Check for heredoc syntax: <<<DELIMITER
-	if strings.HasPrefix(line, "<<<") {
-		delimiter := strings.TrimSpace(strings.TrimPrefix(line, "<<<"))
-		if delimiter == "" {
-			delimiter = "EOF"
-		}
-		rl.SetPrompt(continuationPrompt)
-		var lines []string
-		for {
-			nextLine, err := rl.Readline()
-			if err != nil {
-				rl.SetPrompt(mainPrompt)
-				return "", err
-			}
-			if strings.TrimSpace(nextLine) == delimiter {
-				break
-			}
-			lines = append(lines, nextLine)
-		}
-		rl.SetPrompt(mainPrompt)
-		return strings.Join(lines, "\n"), nil
-	}
-
-	// Check for backslash continuation or unclosed quotes
-	for {
-		needsContinuation, quoteChar := checkContinuation(line)
-		if !needsContinuation {
-			break
-		}
-
-		if quoteChar != 0 {
-			rl.SetPrompt(continuationStyle.Render(string(quoteChar) + "> "))
-		} else {
-			rl.SetPrompt(continuationPrompt)
-		}
-
-		nextLine, err := rl.Readline()
-		if err != nil {
-			rl.SetPrompt(mainPrompt)
-			return "", err
-		}
-
-		if quoteChar == 0 && strings.HasSuffix(strings.TrimRight(line, " \t"), "\\") {
-			// Backslash at end of line escapes the newline, so we directly concatenate
-			// with a space (the backslash "eats" the newline in bash)
-			line = strings.TrimSuffix(strings.TrimRight(line, " \t"), "\\") + " " + nextLine
-		} else {
-			line = line + "\n" + nextLine
-		}
-	}
-
-	rl.SetPrompt(mainPrompt)
-	return line, nil
-}
-
 // checkContinuation determines if the line needs continuation
 func checkContinuation(line string) (bool, rune) {
 	trimmed := strings.TrimRight(line, " \t")
@@ -1351,16 +1618,32 @@ func checkContinuation(line string) (bool, rune) {
 	return false, 0
 }
 
-// listSessions displays available sessions in the records directory
-func listSessions(recordsPath string, currentSession string) {
+// modeDescription returns a human-readable description of the mode
+func modeDescription(mode string) string {
+	switch mode {
+	case ModePrompt:
+		return "prompt"
+	case ModeRead:
+		return "read"
+	case ModeWrite:
+		return "write"
+	case ModeExecute:
+		return "execute"
+	default:
+		return "unknown"
+	}
+}
+
+// renderSessions returns a styled string listing available sessions
+func renderSessions(recordsPath string, currentSession string) string {
+	var b strings.Builder
 	entries, err := os.ReadDir(recordsPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error reading records directory: %v", err)))
-		return
+		return errorStyle.Render(fmt.Sprintf("Error reading records directory: %v", err))
 	}
 
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("available sessions in %s:", recordsPath)))
-	fmt.Println()
+	b.WriteString(sessionStyle.Render(fmt.Sprintf("available sessions in %s:", recordsPath)))
+	b.WriteString("\n\n")
 
 	var sessions []string
 	for _, entry := range entries {
@@ -1368,8 +1651,6 @@ func listSessions(recordsPath string, currentSession string) {
 			sessions = append(sessions, entry.Name())
 		}
 	}
-
-	// Sort sessions in reverse order (most recent first)
 	sort.Sort(sort.Reverse(sort.StringSlice(sessions)))
 
 	for _, session := range sessions {
@@ -1380,117 +1661,60 @@ func listSessions(recordsPath string, currentSession string) {
 			suffix = " (current)"
 		}
 		sessionPath := filepath.Join(recordsPath, session)
-
-		// Count files in session
 		files, _ := os.ReadDir(sessionPath)
 		fileCount := len(files)
-
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)", prefix, session, suffix, fileCount)))
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)", prefix, session, suffix, fileCount)))
+		b.WriteString("\n")
 	}
 
-	fmt.Println()
-	fmt.Println(sessionStyle.Render("use 'agent -provide-records <id> [-p|-r|-w|-x] <prompt>' to include session context"))
+	b.WriteString("\n")
+	b.WriteString(sessionStyle.Render("use 'agent -provide-records <id> [-p|-r|-w|-x] <prompt>' to include session context"))
+	return b.String()
 }
 
-// runAgentWithRecordsInternal invokes an agent with record files from specified sessions
-// This is the internal implementation called from runAgent when -provide-records is used
-func runAgentWithRecordsInternal(prompt string, sessionIDs []string, agent string, model string, mode string, sessionDir string) int {
-	// Check for double-wrapping
-	if os.Getenv(EnvIsClauditable) == "true" {
-		// Already in clauditable context, invoke ambiguous-agent directly
-		return runAgentWithRecordsDirect(prompt, sessionIDs, agent, model, mode, sessionDir)
+func main() {
+	// Handle --version flag
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Printf("federation-command %s\n", Version)
+		return
 	}
 
-	// Find ambiguous-agent and clauditable
-	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	recordsPath := os.Getenv(EnvAgentRecordsPath)
+	if recordsPath == "" {
+		recordsPath = DefaultRecordsPath
+	}
+
+	// Create session directory
+	now := time.Now()
+	sessionID := os.Getenv(EnvAgentSession)
+	if sessionID == "" {
+		sessionID = fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+	}
+	sessionDir := filepath.Join(recordsPath, sessionID)
+
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "error creating session directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Setenv(EnvAgentRecordsPath, recordsPath)
+	os.Setenv(EnvAgentSession, sessionID)
+
+	logPath := filepath.Join(sessionDir, "session.jsonl")
+	logFile, err := os.Create(logPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
-		return 1
+		fmt.Fprintf(os.Stderr, "error creating session log: %v\n", err)
+		os.Exit(1)
 	}
+	defer logFile.Close()
 
-	clauditablePath, err := findBinary("clauditable")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, invoking agent directly"))
-		return runAgentWithRecordsDirect(prompt, sessionIDs, agent, model, mode, sessionDir)
+	encoder := json.NewEncoder(logFile)
+
+	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder)
+
+	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Build ambiguous-agent args with provide-records flags (one per session)
-	var agentArgs []string
-	agentArgs = append(agentArgs, "-"+mode) // -p, -r, -w, or -x
-	agentArgs = append(agentArgs, "-a", agent)
-	if model != "" {
-		agentArgs = append(agentArgs, "-m", model)
-	}
-	for _, id := range sessionIDs {
-		agentArgs = append(agentArgs, "-provide-records", id)
-	}
-	agentArgs = append(agentArgs, prompt)
-
-	// Wrap with clauditable
-	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
-	cmd := exec.Command(clauditablePath, clauditableArgs...)
-
-	env := os.Environ()
-	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
-	)
-	if model != "" {
-		env = append(env, "UFA_MODEL="+model)
-	}
-	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// Note: ambiguous-agent prints the invocation message, no need to duplicate here
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code := exitErr.ExitCode()
-			fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited: %d", code)))
-			return code
-		}
-		fmt.Println(errorStyle.Render(fmt.Sprintf("agent error: %v", err)))
-		return 1
-	}
-
-	fmt.Println(successStyle.Render("agent completed"))
-	return 0
-}
-
-// runAgentWithRecordsDirect invokes ambiguous-agent directly with provide-records flags
-func runAgentWithRecordsDirect(prompt string, sessionIDs []string, agent string, model string, mode string, sessionDir string) int {
-	ambiguousAgentPath, err := findBinary("ambiguous-agent")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: ambiguous-agent not found"))
-		return 1
-	}
-
-	var args []string
-	args = append(args, "-"+mode)
-	args = append(args, "-a", agent)
-	if model != "" {
-		args = append(args, "-m", model)
-	}
-	for _, id := range sessionIDs {
-		args = append(args, "-provide-records", id)
-	}
-	args = append(args, prompt)
-
-	cmd := exec.Command(ambiguousAgentPath, args...)
-	cmd.Env = os.Environ()
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode()
-		}
-		return 1
-	}
-	return 0
 }

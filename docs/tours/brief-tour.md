@@ -9,6 +9,7 @@ For component-specific documentation, see the tour documents in each sub-project
 - [clauditable/docs/brief-tour.md](../../clauditable/docs/brief-tour.md) - Record-keeping internals
 - [ambiguous-agent/docs/brief-tour.md](../../ambiguous-agent/docs/brief-tour.md) - Agent abstraction layer
 - [federation-command/docs/brief-tour.md](../../federation-command/docs/brief-tour.md) - Interactive shell features
+- [heuristic-agent/docs/brief-tour.md](../../heuristic-agent/docs/brief-tour.md) - Async agent orchestration with slopspaces
 
 ## Prerequisites
 
@@ -134,8 +135,9 @@ The AI-evo1 suite provides:
 2. **clauditable** - Transparent recording of any command execution
 3. **ambiguous-agent** - Uniform interface across different AI coding agents
 4. **federation-command** - Interactive orchestration with session management
+5. **heuristic-agent** - Async agent orchestration through slopspaces and work signals
 
-All components work together, with federation-command providing the primary user interface that leverages the others for agent abstraction and record-keeping.
+All components work together, with federation-command providing the primary user interface that leverages the others for agent abstraction and record-keeping. For background/async work, heuristic-agent manages slopspaces and processes work signals.
 
 ## Next Steps
 

@@ -1,0 +1,10 @@
+# Binary
+heuristic-agent
+
+# Local dependencies (built via deploy-dependencies-local)
+clauditable
+ambiguous-agent
+clod
+
+# Test artifacts
+*.test

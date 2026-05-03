@@ -1,7 +1,7 @@
 .PHONY: test test-all build-all clean-all
 
 # Sub-projects in this directory
-SUBPROJECTS = clauditable clod ambiguous-agent federation-command
+SUBPROJECTS = clauditable clod ambiguous-agent federation-command heuristic-agent
 
 # Run tests in all sub-projects
 test: test-all
@@ -34,6 +34,7 @@ clean-all:
 		echo ""; \
 		echo "=== Cleaning $$proj ==="; \
 		$(MAKE) -C $$proj clean || exit 1; \
+		$(MAKE) -C $$proj clean-local-dependencies 2>/dev/null || true; \
 	done
 	@echo ""
 	@echo "=== All sub-projects cleaned ==="

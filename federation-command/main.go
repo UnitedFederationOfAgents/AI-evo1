@@ -1299,7 +1299,9 @@ func readMultiLine(rl *readline.Instance, initialLine string, mainPrompt string)
 		}
 
 		if quoteChar == 0 && strings.HasSuffix(strings.TrimRight(line, " \t"), "\\") {
-			line = strings.TrimSuffix(strings.TrimRight(line, " \t"), "\\") + "\n" + nextLine
+			// Backslash at end of line escapes the newline, so we directly concatenate
+			// with a space (the backslash "eats" the newline in bash)
+			line = strings.TrimSuffix(strings.TrimRight(line, " \t"), "\\") + " " + nextLine
 		} else {
 			line = line + "\n" + nextLine
 		}

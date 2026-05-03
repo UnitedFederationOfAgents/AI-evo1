@@ -307,6 +307,13 @@ type appModel struct {
 	mlDelim       string // heredoc delimiter
 	mlQuote       rune   // unclosed quote char (0 = backslash continuation)
 
+	// Blinker state
+	blinker      Blinker
+	prevInputLen int // Track previous input length to detect changes
+
+	// Dynapane state
+	dynapane Dynapane
+
 	quitting    bool
 	windowWidth int
 }
@@ -357,6 +364,7 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		recordsPath:  recordsPath,
 		logFile:      logFile,
 		encoder:      encoder,
+		blinker:      NewBlinker(),
 	}
 
 	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
@@ -424,7 +432,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	return tea.Batch(textinput.Blink, tea.Println(info))
+	return tea.Batch(textinput.Blink, tea.Println(info), blinkerTickCmd())
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -440,14 +448,27 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mlMode = mlNone
 				m.input.SetValue("")
 				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
-				return m, nil
+				// Reset blinker to idle
+				m.blinker.SetState(BlinkerIdle)
+				m.prevInputLen = 0
+				m.input.Focus()
+				return m, blinkerTickCmd()
+			}
+			// Exit blinker select mode if active
+			if m.blinker.IsSelectMode() {
+				m.blinker.SetState(BlinkerIdle)
+				m.input.Focus()
+				return m, blinkerTickCmd()
 			}
 			if m.input.Value() == "" {
 				m.quitting = true
 				return m, tea.Quit
 			}
 			m.input.SetValue("")
-			return m, nil
+			m.prevInputLen = 0
+			// Reset blinker to idle after clearing input
+			m.blinker.SetState(BlinkerIdle)
+			return m, blinkerTickCmd()
 
 		case tea.KeyCtrlD:
 			if m.input.Value() == "" && !m.inMultiLine {
@@ -467,6 +488,23 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyTab:
 			return m.handleTab()
+
+		case tea.KeyLeft:
+			return m.handleLeft()
+
+		case tea.KeyRight:
+			return m.handleRight()
+
+		case tea.KeyBackspace:
+			return m.handleBackspace()
+
+		default:
+			// Handle other keys in blinker select mode
+			if m.blinker.IsSelectMode() {
+				// Flash the blinker to alert user they're in select mode
+				cmd := m.blinker.StartFlash()
+				return m, cmd
+			}
 		}
 
 	case cmdDoneMsg:
@@ -483,7 +521,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
-		return m, nil
+		// Reset blinker to idle state after command completes
+		m.blinker.SetState(BlinkerIdle)
+		m.prevInputLen = 0
+		return m, blinkerTickCmd()
 
 	case agentDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -506,7 +547,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
-		return m, tea.Println(postOutput)
+		// Reset blinker to idle state after agent completes
+		m.blinker.SetState(BlinkerIdle)
+		m.prevInputLen = 0
+		return m, tea.Batch(tea.Println(postOutput), blinkerTickCmd())
 
 	case listModelsDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -523,10 +567,35 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.windowWidth = msg.Width
 		setPromptWidth(&m.input, m.input.Prompt, m.windowWidth)
 		return m, nil
+
+	case BlinkerTickMsg:
+		cmd := m.blinker.Tick()
+		return m, cmd
+
+	case BlinkerFlashMsg:
+		cmd := m.blinker.Flash()
+		return m, cmd
+
+	case DynapaneTickMsg:
+		cmd := m.dynapane.Tick()
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+
+	// Track input changes to manage blinker state
+	currentLen := len(m.input.Value())
+	if currentLen != m.prevInputLen {
+		if currentLen > 0 {
+			// User has typed something - deactivate blinker
+			if m.blinker.State() != BlinkerInactive {
+				m.blinker.SetState(BlinkerInactive)
+			}
+		}
+		m.prevInputLen = currentLen
+	}
+
 	return m, cmd
 }
 
@@ -534,10 +603,14 @@ func (m appModel) View() string {
 	if m.quitting {
 		return ""
 	}
+	pane := m.dynapane.View(m.windowWidth)
+	blinkerSlot := m.blinker.View()
+	inputView := m.input.View()
+	combined := blinkerSlot + inputView
 	if m.windowWidth > 0 {
-		return wrapAtWidth(m.input.View(), m.windowWidth)
+		return pane + wrapAtWidth(combined, m.windowWidth)
 	}
-	return m.input.View()
+	return pane + combined
 }
 
 // wrapAtWidth inserts newlines so the rendered string fits within width visible
@@ -597,6 +670,12 @@ func wrapAtWidth(s string, width int) string {
 }
 
 func (m appModel) handleEnter() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash and do nothing
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	line := m.input.Value()
 	// Capture prompt+line now so it persists in terminal scroll history.
 	echoLine := m.input.Prompt + line
@@ -695,6 +774,12 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	if len(m.history) == 0 || m.inMultiLine {
 		return m, nil
 	}
@@ -705,11 +790,22 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 		m.historyIdx--
 		m.input.SetValue(m.history[m.historyIdx])
 		m.input.CursorEnd()
+		m.prevInputLen = len(m.input.Value())
+		// History item selected - deactivate blinker
+		if m.blinker.State() != BlinkerInactive {
+			m.blinker.SetState(BlinkerInactive)
+		}
 	}
 	return m, nil
 }
 
 func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	if m.inMultiLine {
 		return m, nil
 	}
@@ -721,11 +817,31 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 			m.input.SetValue(m.history[m.historyIdx])
 		}
 		m.input.CursorEnd()
+		m.prevInputLen = len(m.input.Value())
+
+		// If we're back to empty input (stash was empty), resume blinker
+		if m.input.Value() == "" {
+			if m.blinker.State() == BlinkerInactive {
+				m.blinker.SetState(BlinkerIdle)
+				return m, blinkerTickCmd()
+			}
+		} else {
+			// Has content - ensure blinker is inactive
+			if m.blinker.State() != BlinkerInactive {
+				m.blinker.SetState(BlinkerInactive)
+			}
+		}
 	}
 	return m, nil
 }
 
 func (m appModel) handleTab() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	if m.inMultiLine {
 		return m, nil
 	}
@@ -772,6 +888,127 @@ func (m appModel) handleTab() (appModel, tea.Cmd) {
 	return m, tea.Println(output)
 }
 
+func (m appModel) handleLeft() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		return m, cmd
+	}
+
+	inputVal := m.input.Value()
+	cursorPos := m.input.Position()
+
+	// If cursor is at position 0 and input is empty, handle blinker transitions
+	if cursorPos == 0 && inputVal == "" {
+		switch m.blinker.State() {
+		case BlinkerIdle:
+			// Enter blinker select mode - hide the text input cursor
+			m.blinker.SetState(BlinkerSelect)
+			m.input.Blur()
+			return m, blinkerTickCmd()
+		case BlinkerInactive:
+			// Resume idle blinking
+			m.blinker.SetState(BlinkerIdle)
+			return m, blinkerTickCmd()
+		case BlinkerSelect:
+			// Already in select mode, flash to indicate we can't go further left
+			cmd := m.blinker.StartFlash()
+			return m, cmd
+		}
+	}
+
+	// If cursor is at position 0 but there's text, just resume blinker if inactive
+	if cursorPos == 0 && inputVal != "" {
+		// Don't move cursor further left, but don't change blinker state
+		return m, nil
+	}
+
+	// Normal left arrow - move cursor
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	return m, cmd
+}
+
+func (m appModel) handleRight() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyRight})
+		return m, cmd
+	}
+
+	// If in blinker select mode, exit to idle mode and restore cursor
+	if m.blinker.IsSelectMode() {
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+		return m, tea.Batch(blinkerTickCmd(), textinput.Blink)
+	}
+
+	inputVal := m.input.Value()
+	cursorPos := m.input.Position()
+
+	// If there's no text, right arrow makes blinker inactive
+	if inputVal == "" {
+		if m.blinker.State() == BlinkerIdle {
+			m.blinker.SetState(BlinkerInactive)
+		}
+		return m, nil
+	}
+
+	// If cursor is at the end, just deactivate blinker if it was active
+	if cursorPos >= len([]rune(inputVal)) {
+		if m.blinker.State() != BlinkerInactive {
+			m.blinker.SetState(BlinkerInactive)
+		}
+		return m, nil
+	}
+
+	// Normal right arrow - move cursor and ensure blinker is inactive
+	if m.blinker.State() != BlinkerInactive {
+		m.blinker.SetState(BlinkerInactive)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyRight})
+	return m, cmd
+}
+
+func (m appModel) handleBackspace() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		return m, cmd
+	}
+
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
+	inputVal := m.input.Value()
+	cursorPos := m.input.Position()
+
+	// If already empty and at position 0, resume blinker idle
+	if inputVal == "" && cursorPos == 0 {
+		if m.blinker.State() == BlinkerInactive {
+			m.blinker.SetState(BlinkerIdle)
+			return m, blinkerTickCmd()
+		}
+		return m, nil
+	}
+
+	// Process the backspace
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+
+	// Check if we just emptied the input
+	if m.input.Value() == "" && m.blinker.State() == BlinkerInactive {
+		m.blinker.SetState(BlinkerIdle)
+		return m, tea.Batch(cmd, blinkerTickCmd())
+	}
+
+	return m, cmd
+}
+
 func extractExitCode(err error) int {
 	if err == nil {
 		return 0
@@ -800,12 +1037,22 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 	m.historyStash = ""
 	appendHistoryEntry(historyFilePath(), line)
 
+	// Dismiss any active dynapane on every command (re-activated below if this IS dynapane demo)
+	m.dynapane.Deactivate()
+
 	cmdTime := time.Now()
 	var deltaMs int64
 	if !m.lastCmdTime.IsZero() {
 		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
 	}
 	m.lastCmdTime = cmdTime
+
+	// dynapane demo
+	if line == "dynapane demo" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		cmd := m.dynapane.Activate()
+		return m, cmd
+	}
 
 	// exit
 	if line == "exit" {

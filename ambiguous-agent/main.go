@@ -552,6 +552,13 @@ func invokeWithClauditable(agentCmd string, args []string, agent, model, session
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	// Propagate working directory from parent process
+	// This is critical when invoked by heuristic-agent with a specific workdir
+	cwd, err := os.Getwd()
+	if err == nil {
+		cmd.Dir = cwd
+	}
+
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return exitErr.ExitCode()
@@ -576,6 +583,13 @@ func invokeAgent(agentCmd string, args []string) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	// Propagate working directory from parent process
+	// This is critical when invoked by heuristic-agent with a specific workdir
+	cwd, cwdErr := os.Getwd()
+	if cwdErr == nil {
+		cmd.Dir = cwd
+	}
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

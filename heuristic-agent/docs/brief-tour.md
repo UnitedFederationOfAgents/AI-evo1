@@ -122,6 +122,52 @@ printf '{"id":"%s","work_type":"in-place","work_location":"%s","agent_type":"age
   > /host-agent-files/work/ongoing/WORKING-task-$(date +%s).jsonl
 ```
 
+## Example: Agent-Worker with Slopspace
+
+This example demonstrates the full slopspace lifecycle: create, populate, deploy, work, and return.
+
+```bash
+# 1. Create a slopspace
+SLOP_ID=$(./heuristic-agent slopspace create | grep "Created" | awk '{print $3}')
+echo "Created slopspace: $SLOP_ID"
+
+# 2. Add a file to the write-space for the agent to work with
+mkdir -p /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files
+echo "TODO: implement feature X" > /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/CAT-TASK.txt
+
+# 3. Deploy the slopspace to agent-worker location
+./heuristic-agent slopspace deploy $SLOP_ID --agent-type agent-worker
+
+# 4. Verify deployment (files moved to /agent/agent-worker/)
+ls /agent/agent-worker/write-spaces/files/
+
+# 5. Create a work signal targeting the slopspace
+TS=$(date +%s)
+cat > /host-agent-files/work/ongoing/WORKING-slop-example-$TS.jsonl <<EOF
+{"id":"slop-example-$TS","work_type":"slopspace","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should modify the file write-spaces/files/CAT-TASK.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","updated_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
+
+# 6. Start the watch loop (or run it in another terminal beforehand)
+./heuristic-agent watch --agent-type agent-worker
+
+# 7. After work completes, return the slopspace
+./heuristic-agent slopspace return $SLOP_ID
+
+# 8. Check results in the slopspace
+cat /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/DONE.txt
+
+# 9. Clean up
+./heuristic-agent slopspace delete $SLOP_ID
+```
+
+Key points:
+- **Create** establishes empty read/write spaces (no agent-type binding)
+- **Populate** adds context files before deployment
+- **Deploy** moves spaces to `/agent/<agent-type>/` for agent access
+- **Work** happens via work signals; the agent sees files in its deploy path
+- **Return** moves write-spaces back; read-spaces are discarded and recreated
+- **Delete** removes the slopspace after completion
+
 ## Directory Structure
 
 ```

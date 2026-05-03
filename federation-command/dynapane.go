@@ -19,13 +19,16 @@ func dynapaneTickCmd() tea.Cmd {
 	})
 }
 
+// DynapaneRollUpDoneMsg is sent when the roll-up animation completes.
+type DynapaneRollUpDoneMsg struct{}
+
 type dynapaneState int
 
 const (
 	dynapaneInactive    dynapaneState = iota
 	dynapaneRollingDown               // expanding frame by frame
 	dynapaneActive                    // fully open, scrolling
-	dynapaneRollingUp                 // collapsing frame by frame
+	dynapaneRollingUp                 // collapsing frame by frame before command executes
 )
 
 // rollFrameCount is the number of content lines; also the number of roll animation steps.
@@ -70,14 +73,19 @@ func (d *Dynapane) Activate() tea.Cmd {
 	return dynapaneTickCmd()
 }
 
-// Deactivate begins the roll-up animation when fully open; otherwise hides instantly.
+// Deactivate immediately hides the pane.
 func (d *Dynapane) Deactivate() {
-	if d.state == dynapaneActive {
-		d.state = dynapaneRollingUp
-		d.rollFrame = 0
-	} else {
-		d.state = dynapaneInactive
+	d.state = dynapaneInactive
+}
+
+// StartRollUp begins the collapse animation. Returns nil if already inactive.
+func (d *Dynapane) StartRollUp() tea.Cmd {
+	if d.state == dynapaneInactive {
+		return nil
 	}
+	d.state = dynapaneRollingUp
+	d.rollFrame = rollFrameCount
+	return dynapaneTickCmd()
 }
 
 // IsActive returns true while the pane is visible (including during animation).
@@ -101,10 +109,10 @@ func (d *Dynapane) Tick() tea.Cmd {
 		d.scrollOffset++
 
 	case dynapaneRollingUp:
-		d.rollFrame++
-		if d.rollFrame > rollFrameCount {
+		d.rollFrame--
+		if d.rollFrame <= 0 {
 			d.state = dynapaneInactive
-			return nil
+			return func() tea.Msg { return DynapaneRollUpDoneMsg{} }
 		}
 	}
 
@@ -154,17 +162,15 @@ func (d *Dynapane) View(windowWidth int) string {
 	case dynapaneActive:
 		visibleLines = rollFrameCount
 	case dynapaneRollingUp:
-		// rolls back down: full at frame 0, one fewer per tick
-		visibleLines = rollFrameCount - d.rollFrame
-		if visibleLines < 0 {
-			visibleLines = 0
-		}
+		// rollFrame counts down from rollFrameCount to 0
+		visibleLines = d.rollFrame
 	}
 
-	var content string
-	if visibleLines > 0 {
-		content = strings.Join(allLines[:visibleLines], "\n")
+	if visibleLines == 0 {
+		return ""
 	}
+
+	content := strings.Join(allLines[:visibleLines], "\n")
 
 	pane := dynapaneBorderStyle.
 		Width(innerWidth).

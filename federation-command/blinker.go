@@ -11,9 +11,9 @@ import (
 type BlinkerState int
 
 const (
-	BlinkerIdle     BlinkerState = iota // Blinking with hollow grey block (default)
+	BlinkerIdle     BlinkerState = iota // Blinking with hollow grey circle (default)
 	BlinkerInactive                     // Blank, not blinking (user has typed)
-	BlinkerSelect                       // Blinking with solid grey block (blinker select mode)
+	BlinkerSelect                       // Blinking with solid grey circle (blinker select mode)
 )
 
 // Standard cursor blink interval (typical terminal cursor blink rate)
@@ -22,9 +22,10 @@ const BlinkInterval = 530 * time.Millisecond
 // Blinker manages the blinker slot state and rendering
 type Blinker struct {
 	state      BlinkerState
-	visible    bool // Whether the block character is currently visible (for blinking)
+	visible    bool // Whether the indicator is currently visible (for blinking)
 	flashing   bool // Whether we're in a flash state (for invalid key press in select mode)
 	flashCount int  // Number of remaining flash cycles
+	gen        int  // Generation counter; invalidates stale tick timers on state changes
 }
 
 // NewBlinker creates a new blinker in the default idle (blinking) state
@@ -35,58 +36,72 @@ func NewBlinker() Blinker {
 	}
 }
 
-// BlinkerTickMsg is sent on each blink interval
-type BlinkerTickMsg struct{}
+// BlinkerTickMsg is sent on each blink interval; gen must match the blinker's
+// current generation or the tick is ignored (stale from an old chain).
+type BlinkerTickMsg struct{ gen int }
 
 // BlinkerFlashMsg is sent during flash animation
 type BlinkerFlashMsg struct{}
 
-// blinkerTickCmd returns a command that sends BlinkerTickMsg after the blink interval
-func blinkerTickCmd() tea.Cmd {
+// tickCmd schedules the next tick, capturing the current generation.
+func (b *Blinker) tickCmd() tea.Cmd {
+	gen := b.gen
 	return tea.Tick(BlinkInterval, func(t time.Time) tea.Msg {
-		return BlinkerTickMsg{}
+		return BlinkerTickMsg{gen: gen}
 	})
 }
 
 // blinkerFlashCmd returns a command for flash animation (faster than normal blink)
 func blinkerFlashCmd() tea.Cmd {
-	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return BlinkerFlashMsg{}
 	})
 }
 
+// ResetTick starts a fresh tick chain by incrementing the generation, which
+// causes any already-scheduled BlinkerTickMsgs to be ignored when they arrive.
+// Returns nil if the blinker is currently inactive.
+func (b *Blinker) ResetTick() tea.Cmd {
+	b.gen++
+	if b.state == BlinkerInactive {
+		return nil
+	}
+	return b.tickCmd()
+}
+
 // Styles for the blinker
 var (
-	// Light blue brackets (like info commands displaying local binaries)
+	// Light blue brackets
 	blinkerBracketStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("117")) // Light blue
+				Foreground(lipgloss.Color("117"))
 
-	// Grey block characters
+	// Grey indicator characters
 	blinkerBlockStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("243")) // Grey
+				Foreground(lipgloss.Color("243"))
 
 	// Flash style - brighter to draw attention
 	blinkerFlashStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("255")) // Bright white
+				Foreground(lipgloss.Color("255"))
 )
 
-// Unicode block characters
+// Indicator characters — circles are reliably single-cell-wide in all terminals
 const (
-	HollowBlock = "▯" // U+25AF - hollow/white rectangle
-	SolidBlock  = "▮" // U+25AE - solid/black rectangle
+	HollowBlock = "○" // U+25CB WHITE CIRCLE  (idle)
+	SolidBlock  = "●" // U+25CF BLACK CIRCLE  (selected)
 )
 
-// Tick handles the blink tick, toggling visibility
+// Tick handles a blink tick, toggling visibility. The generation check is
+// performed by the Update() handler before calling this method; Tick() itself
+// continues the chain using the current generation.
 func (b *Blinker) Tick() tea.Cmd {
 	if b.state == BlinkerInactive {
 		return nil
 	}
-
 	b.visible = !b.visible
-	return blinkerTickCmd()
+	return b.tickCmd()
 }
 
-// Flash handles the flash animation for invalid key press in select mode
+// Flash handles the flash animation for an invalid key press in select mode
 func (b *Blinker) Flash() tea.Cmd {
 	if b.flashCount > 0 {
 		b.visible = !b.visible
@@ -95,14 +110,21 @@ func (b *Blinker) Flash() tea.Cmd {
 	}
 	b.flashing = false
 	b.visible = true
-	return blinkerTickCmd()
+	return b.ResetTick() // resume normal tick chain after flash
 }
 
 // StartFlash initiates a flash sequence (called when invalid key pressed in select mode)
 func (b *Blinker) StartFlash() tea.Cmd {
+	if b.flashing {
+		// Already flashing — reset the count but don't start a second chain
+		b.flashCount = 4
+		b.visible = false
+		return nil
+	}
 	b.flashing = true
-	b.flashCount = 6 // 3 full blink cycles
+	b.flashCount = 4 // 2 full blink cycles at 80 ms each = 320 ms
 	b.visible = false
+	b.gen++ // invalidate any running tick chain
 	return blinkerFlashCmd()
 }
 

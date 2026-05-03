@@ -312,7 +312,8 @@ type appModel struct {
 	prevInputLen int // Track previous input length to detect changes
 
 	// Dynapane state
-	dynapane Dynapane
+	dynapane   Dynapane
+	pendingCmd string // deferred command waiting for roll-up animation to finish
 
 	quitting    bool
 	windowWidth int
@@ -432,7 +433,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	return tea.Batch(textinput.Blink, tea.Println(info), blinkerTickCmd())
+	return tea.Batch(textinput.Blink, tea.Println(info), m.blinker.tickCmd())
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -448,17 +449,17 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mlMode = mlNone
 				m.input.SetValue("")
 				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
-				// Reset blinker to idle
+				// Reset blinker to idle (was inactive while typing multi-line)
 				m.blinker.SetState(BlinkerIdle)
 				m.prevInputLen = 0
 				m.input.Focus()
-				return m, blinkerTickCmd()
+				return m, m.blinker.ResetTick()
 			}
 			// Exit blinker select mode if active
 			if m.blinker.IsSelectMode() {
 				m.blinker.SetState(BlinkerIdle)
 				m.input.Focus()
-				return m, blinkerTickCmd()
+				return m, nil // tick chain is already running (select→idle, same gen)
 			}
 			if m.input.Value() == "" {
 				m.quitting = true
@@ -466,9 +467,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.SetValue("")
 			m.prevInputLen = 0
-			// Reset blinker to idle after clearing input
+			// Reset blinker to idle after clearing input (was inactive while typing)
 			m.blinker.SetState(BlinkerIdle)
-			return m, blinkerTickCmd()
+			return m, m.blinker.ResetTick()
 
 		case tea.KeyCtrlD:
 			if m.input.Value() == "" && !m.inMultiLine {
@@ -524,7 +525,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reset blinker to idle state after command completes
 		m.blinker.SetState(BlinkerIdle)
 		m.prevInputLen = 0
-		return m, blinkerTickCmd()
+		return m, m.blinker.ResetTick()
 
 	case agentDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -550,7 +551,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reset blinker to idle state after agent completes
 		m.blinker.SetState(BlinkerIdle)
 		m.prevInputLen = 0
-		return m, tea.Batch(tea.Println(postOutput), blinkerTickCmd())
+		return m, tea.Batch(tea.Println(postOutput), m.blinker.ResetTick())
 
 	case listModelsDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -569,6 +570,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case BlinkerTickMsg:
+		if msg.gen != m.blinker.gen {
+			return m, nil // stale tick from an old chain — discard
+		}
 		cmd := m.blinker.Tick()
 		return m, cmd
 
@@ -579,6 +583,14 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DynapaneTickMsg:
 		cmd := m.dynapane.Tick()
 		return m, cmd
+
+	case DynapaneRollUpDoneMsg:
+		if m.pendingCmd != "" {
+			line := m.pendingCmd
+			m.pendingCmd = ""
+			return m.executeCommandCore(line)
+		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -823,7 +835,7 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 		if m.input.Value() == "" {
 			if m.blinker.State() == BlinkerInactive {
 				m.blinker.SetState(BlinkerIdle)
-				return m, blinkerTickCmd()
+				return m, m.blinker.ResetTick()
 			}
 		} else {
 			// Has content - ensure blinker is inactive
@@ -902,14 +914,14 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 	if cursorPos == 0 && inputVal == "" {
 		switch m.blinker.State() {
 		case BlinkerIdle:
-			// Enter blinker select mode - hide the text input cursor
+			// Enter blinker select mode — tick chain is already running, no new one needed
 			m.blinker.SetState(BlinkerSelect)
 			m.input.Blur()
-			return m, blinkerTickCmd()
+			return m, nil
 		case BlinkerInactive:
-			// Resume idle blinking
+			// Resume idle blinking from stopped state
 			m.blinker.SetState(BlinkerIdle)
-			return m, blinkerTickCmd()
+			return m, m.blinker.ResetTick()
 		case BlinkerSelect:
 			// Already in select mode, flash to indicate we can't go further left
 			cmd := m.blinker.StartFlash()
@@ -937,10 +949,11 @@ func (m appModel) handleRight() (appModel, tea.Cmd) {
 	}
 
 	// If in blinker select mode, exit to idle mode and restore cursor
+	// Tick chain is still running (select→idle, same gen) so no new tick needed.
 	if m.blinker.IsSelectMode() {
 		m.blinker.SetState(BlinkerIdle)
 		m.input.Focus()
-		return m, tea.Batch(blinkerTickCmd(), textinput.Blink)
+		return m, textinput.Blink
 	}
 
 	inputVal := m.input.Value()
@@ -991,7 +1004,7 @@ func (m appModel) handleBackspace() (appModel, tea.Cmd) {
 	if inputVal == "" && cursorPos == 0 {
 		if m.blinker.State() == BlinkerInactive {
 			m.blinker.SetState(BlinkerIdle)
-			return m, blinkerTickCmd()
+			return m, m.blinker.ResetTick()
 		}
 		return m, nil
 	}
@@ -1003,7 +1016,7 @@ func (m appModel) handleBackspace() (appModel, tea.Cmd) {
 	// Check if we just emptied the input
 	if m.input.Value() == "" && m.blinker.State() == BlinkerInactive {
 		m.blinker.SetState(BlinkerIdle)
-		return m, tea.Batch(cmd, blinkerTickCmd())
+		return m, tea.Batch(cmd, m.blinker.ResetTick())
 	}
 
 	return m, cmd
@@ -1037,7 +1050,17 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 	m.historyStash = ""
 	appendHistoryEntry(historyFilePath(), line)
 
-	// Dismiss any active dynapane on every command (re-activated below if this IS dynapane demo)
+	// If dynapane is open, roll it up first then execute.
+	if m.dynapane.IsActive() && line != "dynapane demo" {
+		m.pendingCmd = line
+		return m, m.dynapane.StartRollUp()
+	}
+
+	return m.executeCommandCore(line)
+}
+
+func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
+	// Dismiss any active dynapane (re-activated below if this IS dynapane demo)
 	m.dynapane.Deactivate()
 
 	cmdTime := time.Now()

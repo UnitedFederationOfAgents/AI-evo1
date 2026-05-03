@@ -145,8 +145,8 @@ func TestBlinkerStartFlash(t *testing.T) {
 	if !b.flashing {
 		t.Error("expected flashing to be true after StartFlash")
 	}
-	if b.flashCount != 6 {
-		t.Errorf("expected flashCount to be 6, got %d", b.flashCount)
+	if b.flashCount != 4 {
+		t.Errorf("expected flashCount to be 4, got %d", b.flashCount)
 	}
 }
 

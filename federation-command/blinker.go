@@ -11,9 +11,10 @@ import (
 type BlinkerState int
 
 const (
-	BlinkerIdle     BlinkerState = iota // Blinking with hollow grey circle (default)
-	BlinkerInactive                     // Blank, not blinking (user has typed)
-	BlinkerSelect                       // Blinking with solid grey circle (blinker select mode)
+	BlinkerIdle      BlinkerState = iota // Blinking with hollow grey circle (default)
+	BlinkerInactive                      // Blank, not blinking (user has typed)
+	BlinkerSelect                        // Blinking with solid grey circle (blinker select mode)
+	BlinkerRidealong                     // Blinking red/blue for ridealong mode (always on)
 )
 
 // Standard cursor blink interval (typical terminal cursor blink rate)
@@ -21,11 +22,12 @@ const BlinkInterval = 530 * time.Millisecond
 
 // Blinker manages the blinker slot state and rendering
 type Blinker struct {
-	state      BlinkerState
-	visible    bool // Whether the indicator is currently visible (for blinking)
-	flashing   bool // Whether we're in a flash state (for invalid key press in select mode)
-	flashCount int  // Number of remaining flash cycles
-	gen        int  // Generation counter; invalidates stale tick timers on state changes
+	state         BlinkerState
+	visible       bool // Whether the indicator is currently visible (for blinking)
+	flashing      bool // Whether we're in a flash state (for invalid key press in select mode)
+	flashCount    int  // Number of remaining flash cycles
+	gen           int  // Generation counter; invalidates stale tick timers on state changes
+	ridealongBlue bool // For ridealong mode: toggles between red (false) and blue (true)
 }
 
 // NewBlinker creates a new blinker in the default idle (blinking) state
@@ -82,12 +84,19 @@ var (
 	// Flash style - brighter to draw attention
 	blinkerFlashStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("255"))
+
+	// Ridealong mode styles - alternates red/blue
+	blinkerRedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196"))
+
+	blinkerBlueStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
 const (
 	HollowBlock = "○" // U+25CB WHITE CIRCLE  (idle)
-	SolidBlock  = "●" // U+25CF BLACK CIRCLE  (selected)
+	SolidBlock  = "●" // U+25CF BLACK CIRCLE  (selected/ridealong)
 )
 
 // Tick handles a blink tick, toggling visibility. The generation check is
@@ -97,7 +106,13 @@ func (b *Blinker) Tick() tea.Cmd {
 	if b.state == BlinkerInactive {
 		return nil
 	}
-	b.visible = !b.visible
+	if b.state == BlinkerRidealong {
+		// In ridealong mode, toggle between red and blue (always visible)
+		b.ridealongBlue = !b.ridealongBlue
+		b.visible = true
+	} else {
+		b.visible = !b.visible
+	}
 	return b.tickCmd()
 }
 
@@ -148,6 +163,11 @@ func (b *Blinker) IsSelectMode() bool {
 	return b.state == BlinkerSelect
 }
 
+// IsRidealongMode returns true if the blinker is in ridealong mode
+func (b *Blinker) IsRidealongMode() bool {
+	return b.state == BlinkerRidealong
+}
+
 // View renders the blinker slot
 func (b *Blinker) View() string {
 	openBracket := blinkerBracketStyle.Render("[")
@@ -176,6 +196,13 @@ func (b *Blinker) View() string {
 			}
 		} else {
 			content = " "
+		}
+	case BlinkerRidealong:
+		// Always visible in ridealong mode, alternates red/blue
+		if b.ridealongBlue {
+			content = blinkerBlueStyle.Render(SolidBlock)
+		} else {
+			content = blinkerRedStyle.Render(SolidBlock)
 		}
 	}
 

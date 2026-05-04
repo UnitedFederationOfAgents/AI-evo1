@@ -315,6 +315,10 @@ type appModel struct {
 	dynapane   Dynapane
 	pendingCmd string // deferred command waiting for roll-up animation to finish
 
+	// Ridealong state
+	ridealong         *Ridealong
+	ridealongDynapane RidealongDynapane
+
 	quitting    bool
 	windowWidth int
 }
@@ -439,6 +443,11 @@ func (m appModel) Init() tea.Cmd {
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle ridealong mode first
+		if m.ridealong != nil && m.ridealong.IsActive() {
+			return m.handleRidealongKey(msg)
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.inMultiLine {
@@ -591,6 +600,40 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.executeCommandCore(line)
 		}
 		return m, nil
+
+	case RidealongDynapaneTickMsg:
+		cmd := m.ridealongDynapane.Tick()
+		return m, cmd
+
+	case ridealongCmdDoneMsg:
+		m.lastExitCode = msg.exitCode
+		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
+			m.cwd = newCwd
+		}
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+
+		// Log the command
+		record := CommandRecord{
+			ID:        uuid.New().String()[:8],
+			Command:   msg.line,
+			Timestamp: msg.cmdTime.Format(time.RFC3339),
+			DeltaMs:   msg.deltaMs,
+			ExitCode:  msg.exitCode,
+		}
+		m.encoder.Encode(record)
+
+		// Advance to the next command
+		if m.ridealong != nil && m.ridealong.IsActive() {
+			hasMore := m.ridealong.AdvanceCommand(msg.exitCode)
+			if hasMore {
+				// Update input to show next command
+				m.input.SetValue(m.ridealong.CurrentCommand())
+				return m, nil
+			}
+			// No more commands - exit ridealong mode
+			return m.exitRidealong()
+		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -615,7 +658,13 @@ func (m appModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	pane := m.dynapane.View(m.windowWidth)
+	// Show ridealong dynapane if active, otherwise regular dynapane
+	var pane string
+	if m.ridealongDynapane.IsActive() {
+		pane = m.ridealongDynapane.View(m.windowWidth)
+	} else {
+		pane = m.dynapane.View(m.windowWidth)
+	}
 	blinkerSlot := m.blinker.View()
 	inputView := m.input.View()
 	combined := blinkerSlot + inputView
@@ -1022,6 +1071,89 @@ func (m appModel) handleBackspace() (appModel, tea.Cmd) {
 	return m, cmd
 }
 
+// handleRidealongKey handles key presses in ridealong mode
+func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		// If exit is selected, exit ridealong mode
+		if m.ridealong.MenuSelection() == 1 {
+			return m.exitRidealong()
+		}
+		// Execute the current command
+		return m.executeRidealongCommand()
+
+	case tea.KeyUp:
+		m.ridealong.MenuUp()
+		return m, nil
+
+	case tea.KeyDown:
+		m.ridealong.MenuDown()
+		return m, nil
+
+	case tea.KeyCtrlC:
+		// Exit ridealong mode
+		return m.exitRidealong()
+
+	default:
+		// Flash the blinker to alert user they're in ridealong mode
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+}
+
+// exitRidealong exits ridealong mode and restores normal shell state
+func (m appModel) exitRidealong() (appModel, tea.Cmd) {
+	m.ridealong.Deactivate()
+	m.ridealong = nil
+	m.ridealongDynapane.Deactivate()
+	m.blinker.SetState(BlinkerIdle)
+	m.input.SetValue("")
+	m.input.Focus()
+	m.prevInputLen = 0
+	return m, tea.Batch(
+		tea.Println(sessionStyle.Render("ridealong ended")),
+		m.blinker.ResetTick(),
+	)
+}
+
+// executeRidealongCommand executes the current ridealong command
+func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
+	currentCmd := m.ridealong.CurrentCommand()
+	if currentCmd == "" {
+		return m.exitRidealong()
+	}
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+
+	// Echo the command being executed
+	echoLine := m.input.Prompt + currentCmd
+	echo := tea.Println(echoLine)
+
+	// Build and execute the command
+	runCmd := buildRunCmd(currentCmd, m.sessionDir)
+	return m, tea.Sequence(echo, tea.ExecProcess(runCmd, func(err error) tea.Msg {
+		return ridealongCmdDoneMsg{
+			exitCode: extractExitCode(err),
+			line:     currentCmd,
+			cmdTime:  cmdTime,
+			deltaMs:  deltaMs,
+		}
+	}))
+}
+
+// ridealongCmdDoneMsg is sent when a ridealong command completes
+type ridealongCmdDoneMsg struct {
+	exitCode int
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
 func extractExitCode(err error) int {
 	if err == nil {
 		return 0
@@ -1075,6 +1207,36 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		cmd := m.dynapane.Activate()
 		return m, cmd
+	}
+
+	// ridealong <file>
+	if strings.HasPrefix(line, "ridealong ") {
+		filePath := strings.TrimSpace(strings.TrimPrefix(line, "ridealong "))
+		if filePath == "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("usage: ridealong <file.md>"))
+		}
+		// Resolve relative paths
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(m.cwd, filePath)
+		}
+		ridealong, errMsg := NewRidealong(filePath)
+		if errMsg != "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render(errMsg))
+		}
+		m.ridealong = ridealong
+		m.blinker.SetState(BlinkerRidealong)
+		m.input.SetValue(ridealong.CurrentCommand())
+		m.input.Blur() // Disable normal input in ridealong mode
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		cmd := tea.Batch(m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
+		return m, cmd
+	}
+
+	if line == "ridealong" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: ridealong <file.md>"))
 	}
 
 	// exit

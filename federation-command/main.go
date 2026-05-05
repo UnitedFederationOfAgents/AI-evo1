@@ -642,7 +642,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Track input changes to manage blinker state
 	currentLen := len(m.input.Value())
 	if currentLen != m.prevInputLen {
-		if currentLen > 0 {
+		if currentLen > 0 && m.ridealong == nil {
 			// User has typed something - deactivate blinker
 			if m.blinker.State() != BlinkerInactive {
 				m.blinker.SetState(BlinkerInactive)

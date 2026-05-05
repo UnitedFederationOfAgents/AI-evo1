@@ -2,9 +2,22 @@
 
 ambiguous-agent provides a generic interface for invoking AI coding agents without knowing which agent/model will fulfill the request.
 
+This tour can be run as a ridealong from federation-command:
+```
+ridealong ambiguous-agent/docs/brief-tour.md
+```
+
+## Setup
+
+Navigate to the ambiguous-agent directory:
+
+```ridealong
+cd research/AI-evo1/ambiguous-agent
+```
+
 ## Listing Agents
 
-```bash
+```ridealong
 ./ambiguous-agent --list-agents
 ```
 
@@ -14,8 +27,11 @@ Available agents include: copilot, gemini, claude, opencode, codex, grok, clod
 
 For agents that support model selection:
 
-```bash
+```ridealong
 ./ambiguous-agent --list-models -a claude
+```
+
+```ridealong
 ./ambiguous-agent --list-models -a grok
 ```
 
@@ -28,21 +44,22 @@ For agents that support model selection:
 | `-w` | Write | Read and write files |
 | `-x` | Execute | Full access including commands |
 
-## Basic Invocation
+## Basic Invocation with clod
 
-```bash
-./ambiguous-agent -r -a claude "What files are here?"
-./ambiguous-agent -w -a gemini "Update the README"
-./ambiguous-agent -x -a clod "Run the tests"
+Using clod (the test agent) so this tour works without API keys:
+
+```ridealong
+./ambiguous-agent -p -a clod "Hello, are you conscious?"
 ```
 
-## Providing Session Context
+```ridealong
+./ambiguous-agent -w -a clod "Our nice agent should create the file /tmp/ambiguous-agent-tour.txt"
+```
 
-Copy previous session records for agent context:
+Verify the file was created:
 
-```bash
-./ambiguous-agent -provide-records default -r "Continue our work"
-./ambiguous-agent -provide-records session1 -provide-records session2 -r "Review both sessions"
+```ridealong
+cat /tmp/ambiguous-agent-tour.txt
 ```
 
 ## Environment Variables
@@ -56,9 +73,15 @@ Copy previous session records for agent context:
 | `AGENT_ADD_DIRS` | Additional directories to add |
 | `NO_CLAUDITABLE` | Skip clauditable wrapping |
 
+## Cleanup
+
+```ridealong
+rm -f /tmp/ambiguous-agent-tour.txt
+```
+
 ## Testing
 
-```bash
+```ridealong
 make test
 ```
 

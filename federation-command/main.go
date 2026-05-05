@@ -319,6 +319,10 @@ type appModel struct {
 	ridealong         *Ridealong
 	ridealongDynapane RidealongDynapane
 
+	// Visual log state (scrollback-log)
+	visualLogFile *os.File
+	visualLogPath string
+
 	quitting    bool
 	windowWidth int
 }
@@ -622,16 +626,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.encoder.Encode(record)
 
-		// Advance to the next command
+		// Advance to the next step (handles parent pop-up and dive entries)
 		if m.ridealong != nil && m.ridealong.IsActive() {
-			hasMore := m.ridealong.AdvanceCommand(msg.exitCode)
-			if hasMore {
-				// Update input to show next command and re-activate the panel
-				m.input.SetValue(m.ridealong.CurrentCommand())
-				return m, m.ridealongDynapane.Activate(m.ridealong)
-			}
-			// No more commands - exit ridealong mode
-			return m.exitRidealong()
+			return m.advanceRidealong(msg.exitCode)
 		}
 		return m, nil
 	}
@@ -743,7 +740,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 	m.input.SetValue("")
 
 	if m.inMultiLine {
-		echo := tea.Println(echoLine)
+		echo := m.printlnLogged(echoLine)
 		switch m.mlMode {
 		case mlHeredoc:
 			if strings.TrimSpace(line) == m.mlDelim {
@@ -797,7 +794,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 		return m, nil
 	}
 
-	echo := tea.Println(echoLine)
+	echo := m.printlnLogged(echoLine)
 
 	// Heredoc trigger
 	if strings.HasPrefix(line, "<<<") {
@@ -1116,8 +1113,61 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	)
 }
 
+// advanceRidealong advances the ridealong by one step after exitCode is recorded.
+// When the current ridealong exhausts its steps it pops up to the parent and
+// advances past the dive step that brought us here; this repeats until there is
+// no parent, at which point ridealong mode ends.  If the newly-current step is
+// a dive, enterDiveStep is called immediately.
+func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
+	hasMore := m.ridealong.AdvanceCommand(exitCode)
+	for !hasMore {
+		if m.ridealong.parent == nil {
+			return m.exitRidealong()
+		}
+		// Return to parent and advance past the dive step.
+		m.ridealong = m.ridealong.parent
+		hasMore = m.ridealong.AdvanceCommand(0)
+	}
+	if m.ridealong.IsDiveStep() {
+		return m.enterDiveStep()
+	}
+	m.input.SetValue(m.ridealong.CurrentCommand())
+	return m, m.ridealongDynapane.Activate(m.ridealong)
+}
+
+// enterDiveStep starts a child ridealong for the current dive step.
+// On parse failure it prints an error and skips past the dive step.
+func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
+	divePath := m.ridealong.CurrentDivePath()
+	steps, errMsg := parseRidealongSteps(divePath)
+	if errMsg != "" || len(steps) == 0 {
+		msg := errMsg
+		if msg == "" {
+			msg = "ridealong: no steps found in " + filepath.Base(divePath)
+		}
+		errPrint := tea.Println(errorStyle.Render(msg))
+		m2, advCmd := m.advanceRidealong(1)
+		return m2, tea.Batch(errPrint, advCmd)
+	}
+	child := &Ridealong{
+		filePath:     divePath,
+		steps:        steps,
+		currentIndex: 0,
+		prevExitCode: -1,
+		active:       true,
+		menuIndex:    0,
+		parent:       m.ridealong,
+	}
+	m.ridealong = child
+	m.input.SetValue(child.CurrentCommand())
+	return m, m.ridealongDynapane.Activate(child)
+}
+
 // executeRidealongCommand executes the current ridealong command
 func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
+	if m.ridealong.IsDiveStep() {
+		return m.enterDiveStep()
+	}
 	currentCmd := m.ridealong.CurrentCommand()
 	if currentCmd == "" {
 		return m.exitRidealong()
@@ -1135,10 +1185,10 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 
 	// Echo the command being executed
 	echoLine := m.input.Prompt + currentCmd
-	echo := tea.Println(echoLine)
+	echo := m.printlnLogged(echoLine)
 
 	// Build and execute the command
-	runCmd := buildRunCmd(currentCmd, m.sessionDir)
+	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
 	return m, tea.Sequence(echo, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -1165,6 +1215,17 @@ func extractExitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return 1
+}
+
+func (m appModel) writeVisualLog(text string) {
+	if m.visualLogFile != nil {
+		fmt.Fprintln(m.visualLogFile, stripAnsiCodes(text))
+	}
+}
+
+func (m appModel) printlnLogged(text string) tea.Cmd {
+	m.writeVisualLog(text)
+	return tea.Println(text)
 }
 
 func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitCode int) {
@@ -1452,8 +1513,50 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"))
 	}
 
+	// scrollback-log <filename>
+	if strings.HasPrefix(line, "scrollback-log ") {
+		filePath := strings.TrimSpace(strings.TrimPrefix(line, "scrollback-log "))
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(m.cwd, filePath)
+		}
+		if m.visualLogFile != nil {
+			m.visualLogFile.Close()
+			m.visualLogFile = nil
+			m.visualLogPath = ""
+		}
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("scrollback-log: " + err.Error()))
+		}
+		m.visualLogFile = f
+		m.visualLogPath = filePath
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("scrollback log started: " + filePath))
+	}
+
+	if line == "scrollback-log" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: scrollback-log <filename>"))
+	}
+
+	// clear-scrollback-log
+	if line == "clear-scrollback-log" {
+		if m.visualLogFile == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("clear-scrollback-log: no active scrollback log"))
+		}
+		path := m.visualLogPath
+		m.visualLogFile.Close()
+		m.visualLogFile = nil
+		m.visualLogPath = ""
+		os.Truncate(path, 0)
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("scrollback log cleared: " + path))
+	}
+
 	// Regular command - wrap with clauditable
-	runCmd := buildRunCmd(line, m.sessionDir)
+	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return cmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -1465,22 +1568,29 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 }
 
 // buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
+// If logPath is non-empty, command output is tee'd to that file (non-interactive commands only).
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildRunCmd(cmdLine, sessionDir string) *exec.Cmd {
+func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
+	actualCmd := cmdLine
+	if logPath != "" {
+		escapedPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
+		actualCmd = fmt.Sprintf("set -o pipefail; { %s; } 2>&1 | tee -a %s", cmdLine, escapedPath)
+	}
+
 	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command("bash", "-c", cmdLine)
+		cmd := exec.Command("bash", "-c", actualCmd)
 		cmd.Env = os.Environ()
 		return cmd
 	}
 
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
-		cmd := exec.Command("bash", "-c", cmdLine)
+		cmd := exec.Command("bash", "-c", actualCmd)
 		cmd.Env = os.Environ()
 		return cmd
 	}
 
-	cmd := exec.Command(clauditablePath, "bash", "-c", cmdLine)
+	cmd := exec.Command(clauditablePath, "bash", "-c", actualCmd)
 	env := os.Environ()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),

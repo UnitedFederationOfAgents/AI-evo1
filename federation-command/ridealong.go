@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -11,57 +12,171 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Ridealong represents an active ridealong session parsed from a markdown file.
-type Ridealong struct {
-	filePath     string   // Path to the ridealong file
-	commands     []string // Extracted bash commands from ridealong blocks
-	currentIndex int      // Index of the current command to execute
-	prevExitCode int      // Exit code of the last executed command (0 = success, -1 = none yet)
-	active       bool     // Whether ridealong mode is active
-	menuIndex    int      // 0 = execute command, 1 = exit
+// ridealongStepKind distinguishes shell commands from depth-first sub-file dives.
+type ridealongStepKind int
+
+const (
+	stepCommand ridealongStepKind = iota
+	stepDive
+)
+
+// ridealongStep is one item in a ridealong's ordered execution sequence.
+type ridealongStep struct {
+	kind  ridealongStepKind
+	value string // shell command text, or absolute path to sub-file
 }
 
-// ridealongBlockRegex matches ```ridealong code blocks in markdown
-var ridealongBlockRegex = regexp.MustCompile("(?ms)```ridealong\\s*\\n(.+?)```")
+// Ridealong represents an active ridealong session parsed from a markdown file.
+type Ridealong struct {
+	filePath     string
+	steps        []ridealongStep
+	currentIndex int
+	prevExitCode int // -1 = no command executed yet
+	active       bool
+	menuIndex    int        // 0 = execute command, 1 = exit
+	parent       *Ridealong // non-nil when this is a nested ridealong
+}
 
-// NewRidealong creates a new ridealong session from a file.
-// Returns nil and an error message if the file doesn't exist or has no ridealong blocks.
-func NewRidealong(filePath string) (*Ridealong, string) {
+// ridealongBlockOpenRegex matches the opening fence of a ```ridealong block.
+var ridealongBlockOpenRegex = regexp.MustCompile("^```ridealong\\s*$")
+
+// ridealongLinkRegex matches a markdown inline link [text](path).
+var ridealongLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+
+// ridealongContinuesMarker is the annotation signalling a depth-first dive.
+const ridealongContinuesMarker = "<!-- ride along continues -->"
+
+// parseContinuesLine inspects a single source line.  If it contains exactly one
+// markdown link and the ride-along-continues marker, it returns the resolved
+// absolute path of the linked file and true; otherwise it returns "", false.
+func parseContinuesLine(line, baseFilePath string) (string, bool) {
+	if !strings.Contains(line, ridealongContinuesMarker) {
+		return "", false
+	}
+	matches := ridealongLinkRegex.FindAllStringSubmatch(line, -1)
+	if len(matches) != 1 {
+		return "", false
+	}
+	linkPath := matches[0][2]
+	if !filepath.IsAbs(linkPath) {
+		linkPath = filepath.Join(filepath.Dir(baseFilePath), linkPath)
+	}
+	return linkPath, true
+}
+
+// extractContinuesLinks returns the absolute paths of every sub-file referenced
+// by <!-- ride along continues --> annotations in filePath.
+func extractContinuesLinks(filePath string) []string {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil
+	}
+	var links []string
+	for _, line := range strings.Split(string(content), "\n") {
+		if p, ok := parseContinuesLine(line, filePath); ok {
+			links = append(links, p)
+		}
+	}
+	return links
+}
+
+// hasCycle returns true when the ridealong dependency graph rooted at startPath
+// contains a cycle (uses standard DFS white/gray/black colouring).
+func hasCycle(startPath string) bool {
+	type visitState int
+	const (
+		white visitState = iota
+		gray
+		black
+	)
+	state := map[string]visitState{}
+
+	var dfs func(path string) bool
+	dfs = func(path string) bool {
+		switch state[path] {
+		case gray:
+			return true
+		case black:
+			return false
+		}
+		state[path] = gray
+		for _, link := range extractContinuesLinks(path) {
+			if dfs(link) {
+				return true
+			}
+		}
+		state[path] = black
+		return false
+	}
+	return dfs(startPath)
+}
+
+// parseRidealongSteps reads a markdown file and produces an ordered list of
+// steps: shell commands (from ```ridealong blocks) interleaved with depth-first
+// dive annotations (from <!-- ride along continues --> lines), preserving
+// document order throughout.
+func parseRidealongSteps(filePath string) ([]ridealongStep, string) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, "ridealong: cannot read file: " + err.Error()
 	}
 
-	matches := ridealongBlockRegex.FindAllStringSubmatch(string(content), -1)
-	if len(matches) == 0 {
-		return nil, "ridealong: no ```ridealong blocks found in file"
-	}
+	var steps []ridealongStep
+	inBlock := false
 
-	var commands []string
-	for _, match := range matches {
-		blockContent := strings.TrimSpace(match[1])
-		// Split block into individual commands (one per line, skip empty lines)
-		lines := strings.Split(blockContent, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				commands = append(commands, line)
+	for _, line := range strings.Split(string(content), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !inBlock {
+			if ridealongBlockOpenRegex.MatchString(trimmed) {
+				inBlock = true
+				continue
+			}
+			if p, ok := parseContinuesLine(line, filePath); ok {
+				steps = append(steps, ridealongStep{kind: stepDive, value: p})
+			}
+		} else {
+			if trimmed == "```" {
+				inBlock = false
+				continue
+			}
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+				steps = append(steps, ridealongStep{kind: stepCommand, value: trimmed})
 			}
 		}
 	}
+	return steps, ""
+}
 
-	if len(commands) == 0 {
-		return nil, "ridealong: no commands found in ridealong blocks"
+// NewRidealong creates a new top-level ridealong session from a markdown file.
+// Returns nil plus an error message when the file cannot be read, contains no
+// actionable steps, or has a cyclic dependency.
+func NewRidealong(filePath string) (*Ridealong, string) {
+	if hasCycle(filePath) {
+		return nil, "ridealong: cyclic dependency detected in " + filepath.Base(filePath)
 	}
-
+	steps, errMsg := parseRidealongSteps(filePath)
+	if errMsg != "" {
+		return nil, errMsg
+	}
+	if len(steps) == 0 {
+		return nil, "ridealong: no commands or links found in file"
+	}
 	return &Ridealong{
 		filePath:     filePath,
-		commands:     commands,
+		steps:        steps,
 		currentIndex: 0,
-		prevExitCode: -1, // -1 indicates no command has been executed yet
+		prevExitCode: -1,
 		active:       true,
 		menuIndex:    0,
 	}, ""
+}
+
+// stepDisplay returns the human-readable label used throughout the UI for a step.
+func (r *Ridealong) stepDisplay(s ridealongStep) string {
+	if s.kind == stepCommand {
+		return s.value
+	}
+	return "→ " + filepath.Base(s.value)
 }
 
 // IsActive returns whether ridealong mode is currently active.
@@ -76,62 +191,74 @@ func (r *Ridealong) Deactivate() {
 	}
 }
 
-// CurrentCommand returns the current command to be executed, or empty string if at end.
-func (r *Ridealong) CurrentCommand() string {
-	if r == nil || r.currentIndex >= len(r.commands) {
-		return ""
+// IsDiveStep returns true when the current step is a depth-first sub-file dive.
+func (r *Ridealong) IsDiveStep() bool {
+	if r == nil || r.currentIndex >= len(r.steps) {
+		return false
 	}
-	return r.commands[r.currentIndex]
+	return r.steps[r.currentIndex].kind == stepDive
 }
 
-// PreviousCommand returns the previous command and its exit code, or empty string if none.
+// CurrentDivePath returns the resolved file path for the current dive step.
+func (r *Ridealong) CurrentDivePath() string {
+	if r == nil || r.currentIndex >= len(r.steps) || r.steps[r.currentIndex].kind != stepDive {
+		return ""
+	}
+	return r.steps[r.currentIndex].value
+}
+
+// CurrentCommand returns the display label of the current step.
+func (r *Ridealong) CurrentCommand() string {
+	if r == nil || r.currentIndex >= len(r.steps) {
+		return ""
+	}
+	return r.stepDisplay(r.steps[r.currentIndex])
+}
+
+// PreviousCommand returns the display label and exit code of the most recently
+// completed step, or an empty string and -1 if no step has been completed yet.
 func (r *Ridealong) PreviousCommand() (string, int) {
 	if r == nil || r.currentIndex == 0 {
 		return "", -1
 	}
-	return r.commands[r.currentIndex-1], r.prevExitCode
+	return r.stepDisplay(r.steps[r.currentIndex-1]), r.prevExitCode
 }
 
-// NextCommand returns the next command after current, or "<end>" if at the last command.
+// NextCommand returns the display label of the step after the current one,
+// or "<end>" when the current step is the last.
 func (r *Ridealong) NextCommand() string {
-	if r == nil || r.currentIndex+1 >= len(r.commands) {
+	if r == nil || r.currentIndex+1 >= len(r.steps) {
 		return "<end>"
 	}
-	return r.commands[r.currentIndex+1]
+	return r.stepDisplay(r.steps[r.currentIndex+1])
 }
 
-// AdvanceCommand moves to the next command after recording the exit code.
-// Returns true if there are more commands, false if we've reached the end.
+// AdvanceCommand records exitCode and moves to the next step.
+// Returns true when more steps remain, false when all steps are exhausted.
 func (r *Ridealong) AdvanceCommand(exitCode int) bool {
 	if r == nil {
 		return false
 	}
 	r.prevExitCode = exitCode
 	r.currentIndex++
-	return r.currentIndex < len(r.commands)
+	return r.currentIndex < len(r.steps)
 }
 
-// MenuUp moves menu selection up (execute command -> exit wraps to end)
+// MenuUp moves menu selection toward "execute command".
 func (r *Ridealong) MenuUp() {
-	if r == nil {
-		return
-	}
-	if r.menuIndex > 0 {
+	if r != nil && r.menuIndex > 0 {
 		r.menuIndex--
 	}
 }
 
-// MenuDown moves menu selection down (exit -> execute command wraps to start)
+// MenuDown moves menu selection toward "exit".
 func (r *Ridealong) MenuDown() {
-	if r == nil {
-		return
-	}
-	if r.menuIndex < 1 {
+	if r != nil && r.menuIndex < 1 {
 		r.menuIndex++
 	}
 }
 
-// MenuSelection returns the current menu selection: 0 = execute, 1 = exit
+// MenuSelection returns the current menu index: 0 = execute, 1 = exit.
 func (r *Ridealong) MenuSelection() int {
 	if r == nil {
 		return 0
@@ -139,13 +266,24 @@ func (r *Ridealong) MenuSelection() int {
 	return r.menuIndex
 }
 
-// FileName returns just the filename portion of the ridealong file path
+// FileName returns the base filename of the ridealong file.
 func (r *Ridealong) FileName() string {
 	if r == nil {
 		return ""
 	}
-	parts := strings.Split(r.filePath, "/")
-	return parts[len(parts)-1]
+	return filepath.Base(r.filePath)
+}
+
+// DisplayTitle returns a breadcrumb title reflecting nesting depth.
+// e.g. "parent.md > child.md" when inside a sub-file.
+func (r *Ridealong) DisplayTitle() string {
+	if r == nil {
+		return ""
+	}
+	if r.parent == nil {
+		return r.FileName()
+	}
+	return r.parent.DisplayTitle() + " > " + r.FileName()
 }
 
 // ===== RIDEALONG DYNAPANE =====
@@ -250,11 +388,11 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 
 	r := rd.ridealong
 
-	// Title row: ◈ ridealong  ---    <filename>
+	// Title row: ◈ ridealong  ---    <breadcrumb title>
 	title := ridealongTitleStyle.Render("◈ ridealong")
 	separator := ridealongDividerStyle.Render("  ---    ")
-	fileName := ridealongFileStyle.Render(r.FileName())
-	titleRow := title + separator + fileName
+	fileLabel := ridealongFileStyle.Render(r.DisplayTitle())
+	titleRow := title + separator + fileLabel
 	// Pad to inner width
 	titleRowWidth := lipgloss.Width(titleRow)
 	if titleRowWidth < innerWidth {

@@ -2,6 +2,11 @@
 
 heuristic-agent manages asynchronous AI agent invocations through slopspaces and work signals. It is the spiritual successor to the legacy `agent-worker` and `heuristic-request` implementations.
 
+This tour can be run as a ridealong from federation-command:
+```
+ridealong heuristic-agent/docs/brief-tour.md
+```
+
 ## Core Concepts
 
 ### Slopspaces
@@ -10,12 +15,17 @@ Slopspaces are isolated workspaces that contain read-spaces (immutable context) 
 ### Work Signals
 Work signals are JSONL files that describe work to be done. They contain the agent configuration, prompt, and status tracking. Work signals are created in `/host-agent-files/work/ongoing/` and moved to `/host-agent-files/work/complete/` when finished.
 
-## Quick Start
+## Setup
+
+Navigate to the heuristic-agent directory:
+
+```ridealong
+cd research/AI-evo1/heuristic-agent
+```
 
 ### Building
 
-```bash
-cd research/AI-evo1/heuristic-agent
+```ridealong
 make build
 ```
 
@@ -23,25 +33,15 @@ make build
 
 Deploy the required dependencies (ambiguous-agent, clauditable, clod) locally:
 
-```bash
+```ridealong
 make deploy-dependencies-local
-```
-
-### Running the Watch Loop
-
-```bash
-# Agent-worker mode (default)
-./heuristic-agent watch --agent-type agent-worker
-
-# Heuristic-request mode
-./heuristic-agent watch --agent-type heuristic-request
 ```
 
 ## Slopspace Management
 
 ### Create a Slopspace
 
-```bash
+```ridealong
 ./heuristic-agent slopspace create
 ```
 
@@ -52,21 +52,9 @@ Created slopspace: fbf1df64-6f49-4914-8d55-6ade0c6c64b9
   Agent type will be specified at deploy time
 ```
 
-### Deploy a Slopspace
-
-Agent type is specified at deploy time, not creation time:
-
-```bash
-# Deploy to agent-worker location
-./heuristic-agent slopspace deploy fbf1df64-... --agent-type agent-worker
-
-# Deploy to heuristic-request location
-./heuristic-agent slopspace deploy fbf1df64-... --agent-type heuristic-request
-```
-
 ### List Slopspaces
 
-```bash
+```ridealong
 ./heuristic-agent slopspace list
 ```
 
@@ -77,11 +65,17 @@ ID                                    DEPLOYED AGENT      DEPLOYED  ITER
 fbf1df64-6f49-4914-8d55-6ade0c6c64b9  agent-worker        yes       1
 ```
 
-### Return and Delete
+### Running the Watch Loop
+
+**Note:** The watch loop runs continuously. For this ridealong, run the watch command in a separate terminal:
 
 ```bash
-./heuristic-agent slopspace return fbf1df64-...
-./heuristic-agent slopspace delete fbf1df64-...
+# Run in a separate terminal (not part of ridealong):
+# Agent-worker mode (default)
+./heuristic-agent watch --agent-type agent-worker
+
+# Heuristic-request mode
+./heuristic-agent watch --agent-type heuristic-request
 ```
 
 ## Work Signal Format
@@ -111,52 +105,62 @@ Subsequent lines are events:
 {"event_id": "...", "status_update": "processing", "comment": "Starting work", "timestamp": "..."}
 ```
 
-### Creating a Work Signal Manually
+## Example: Slopspace Lifecycle (Ridealong)
+
+This example demonstrates slopspace management without the watch loop. For full end-to-end testing with work signals, first start the watch loop in a separate terminal:
 
 ```bash
-printf '{"id":"%s","work_type":"in-place","work_location":"%s","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should create the file /tmp/heuristic-test.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"%s","updated_at":"%s"}\n' \
-  "$(cat /proc/sys/kernel/random/uuid)" \
-  "$(pwd)" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  > /host-agent-files/work/ongoing/WORKING-task-$(date +%s).jsonl
+# Run in a separate terminal (not part of ridealong):
+./heuristic-agent watch --agent-type agent-worker
 ```
 
-## Example: Agent-Worker with Slopspace
+Then run this ridealong to create and manage a slopspace:
 
-This example demonstrates the full slopspace lifecycle: create, populate, deploy, work, and return.
+Create a slopspace and capture its ID:
 
-```bash
-# 1. Create a slopspace
-SLOP_ID=$(./heuristic-agent slopspace create | grep "Created" | awk '{print $3}')
-echo "Created slopspace: $SLOP_ID"
+```ridealong
+SLOP_ID=$(./heuristic-agent slopspace create | grep "Created" | awk '{print $3}') && echo "Created slopspace: $SLOP_ID"
+```
 
-# 2. Add a file to the write-space for the agent to work with
-mkdir -p /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files
-echo "TODO: implement feature X" > /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/CAT-TASK.txt
+Add a file to the write-space for the agent to work with:
 
-# 3. Deploy the slopspace to agent-worker location
+```ridealong
+mkdir -p /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files && echo "TODO: implement feature X" > /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/CAT-TASK.txt
+```
+
+Deploy the slopspace to agent-worker location:
+
+```ridealong
 ./heuristic-agent slopspace deploy $SLOP_ID --agent-type agent-worker
+```
 
-# 4. Verify deployment (files moved to /agent/agent-worker/)
+Verify deployment (files moved to /agent/agent-worker/):
+
+```ridealong
 ls /agent/agent-worker/write-spaces/files/
+```
 
-# 5. Create a work signal targeting the slopspace
-TS=$(date +%s)
-cat > /host-agent-files/work/ongoing/WORKING-slop-example-$TS.jsonl <<EOF
-{"id":"slop-example-$TS","work_type":"slopspace","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should modify the file write-spaces/files/CAT-TASK.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","updated_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
-EOF
+Create a work signal targeting the slopspace (the watch loop will pick this up):
 
-# 6. Start the watch loop (or run it in another terminal beforehand)
-./heuristic-agent watch --agent-type agent-worker
+```ridealong
+TS=$(date +%s) && printf '{"id":"slop-example-%s","work_type":"slopspace","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should modify the file write-spaces/files/CAT-TASK.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"%s","updated_at":"%s"}\n' "$TS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /host-agent-files/work/ongoing/WORKING-slop-example-$TS.jsonl
+```
 
-# 7. After work completes, return the slopspace
-./heuristic-agent slopspace return $SLOP_ID
+Wait briefly for the watch loop to process, then return the slopspace:
 
-# 8. Check results in the slopspace
-cat /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/DONE.txt
+```ridealong
+sleep 15 && ./heuristic-agent slopspace return $SLOP_ID
+```
 
-# 9. Clean up
+Check results in the slopspace:
+
+```ridealong
+cat /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/DONE.txt 2>/dev/null || echo "DONE.txt not created (watch loop may not be running)"
+```
+
+Clean up the slopspace:
+
+```ridealong
 ./heuristic-agent slopspace delete $SLOP_ID
 ```
 
@@ -212,13 +216,13 @@ Key points:
 
 ## Testing
 
-```bash
+```ridealong
 make test
 ```
 
 ## Docker
 
-Build the Docker image from the AI-evo1 directory:
+Build the Docker image from the AI-evo1 directory (not part of ridealong - requires full docker setup):
 
 ```bash
 cd research/AI-evo1

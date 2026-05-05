@@ -2,7 +2,27 @@
 
 federation-command is an interactive CLI shell for orchestrating AI agents. It provides a readline-based interface with session management and record-keeping.
 
+This tour includes both:
+- **ridealong blocks**: For setup and testing (executable via `ridealong federation-command/docs/brief-tour.md`)
+- **federation-command blocks**: Commands to run once inside the shell
+
+## Setup
+
+Navigate to the federation-command directory:
+
+```ridealong
+cd research/AI-evo1/federation-command
+```
+
+Build federation-command:
+
+```ridealong
+make build
+```
+
 ## Starting the Shell
+
+Launch federation-command (this tour continues inside the shell):
 
 ```bash
 export AGENT_SESSION=my-session
@@ -11,38 +31,38 @@ export AGENT_SESSION=my-session
 
 ## Session Management
 
-Each shell instance creates a session directory for record-keeping:
+Once inside federation-command, each shell instance creates a session directory for record-keeping:
 
-```
+```federation-command
 list-sessions
 ```
 
 ## Agent Commands
 
-```
+```federation-command
 list-agents                    # Show available agents
-set-agent <name>               # Switch active agent
+set-agent clod                 # Switch to test agent
 list-models                    # Show models for current agent
-set-model <name>               # Set model override
-clear-model                    # Use agent's default model
 ```
 
 ## Invoking Agents
 
+With clod as the active agent:
+
+```federation-command
+agent -p "Hello, are you conscious?"
 ```
-agent -p <prompt>              # Prompt mode (chat only)
-agent -r <prompt>              # Read mode (default)
-agent -w <prompt>              # Write mode
-agent -x <prompt>              # Execute mode
+
+```federation-command
+agent -w "Our nice agent should create the file /tmp/fc-tour-test.txt"
 ```
 
 ## Providing Records Context
 
 Add `-provide-records <id>` to any agent command:
 
-```
+```federation-command
 agent -provide-records default -r "What did we do?"
-agent -provide-records "session1" -provide-records "session2" -r "Review sessions"
 ```
 
 Session IDs can include `default` for the current session.
@@ -53,20 +73,45 @@ Session IDs can include `default` for the current session.
 - Unclosed quotes: Continue until quote is closed
 - Heredoc: `<<<DELIMITER` ... `DELIMITER`
 
+## Visual Log (Scrollback Log)
+
+Capture terminal output as it would appear when scrolling back — without graphics like dynapanes or ridealong panels:
+
+```federation-command
+scrollback-log /tmp/session.log   # Start logging to file (off by default)
+```
+
+```federation-command
+ls                                # Commands run while logging is active
+```
+
+```federation-command
+clear-scrollback-log              # Stop and clear the log file
+```
+
+Only one log file is active at a time. Starting a new `scrollback-log` replaces the previous one.
+
 ## Shell Features
 
-Standard shell conveniences:
+Standard shell conveniences work inside federation-command:
 
-```
-cd <path>                      # Change directory
-export VAR=value               # Set environment variable
-ls, cat, etc                   # Regular commands (wrapped with clauditable)
+```federation-command
+ls                             # Regular commands (wrapped with clauditable)
+cat /tmp/fc-tour-test.txt      # View file created earlier
 exit                           # End session
+```
+
+## Cleanup
+
+After exiting federation-command:
+
+```ridealong
+rm -f /tmp/fc-tour-test.txt
 ```
 
 ## Testing
 
-```bash
+```ridealong
 make test
 ```
 

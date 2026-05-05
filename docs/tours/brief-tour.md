@@ -1,146 +1,149 @@
 # Brief Tour of AI-evo1
 
-This document provides a walkthrough of the AI-evo1 suite from the perspective of federation-command, demonstrating how the components integrate. Each code block can be executed in sequence to tell a story about how the system works.
+This document walks through the AI-evo1 suite component by component, building from primitives to the full integrated shell. Running this as a ridealong executes each sub-project tour in sequence:
+
+```
+ridealong docs/tours/brief-tour.md
+```
 
 For a more comprehensive and detailed tour, see [full-tour.md](full-tour.md).
 
-For component-specific documentation, see the tour documents in each sub-project:
-- [clod/docs/brief-tour.md](../../clod/docs/brief-tour.md) - Test agent details
-- [clauditable/docs/brief-tour.md](../../clauditable/docs/brief-tour.md) - Record-keeping internals
-- [ambiguous-agent/docs/brief-tour.md](../../ambiguous-agent/docs/brief-tour.md) - Agent abstraction layer
-- [federation-command/docs/brief-tour.md](../../federation-command/docs/brief-tour.md) - Interactive shell features
-- [heuristic-agent/docs/brief-tour.md](../../heuristic-agent/docs/brief-tour.md) - Async agent orchestration with slopspaces
-
 ## Prerequisites
 
-Start from the repository root:
+Navigate to the AI-evo1 directory:
 
-```bash
-cd "$(git rev-parse --show-toplevel)"
+```ridealong
+cd research/AI-evo1
 ```
 
 Ensure the suite is built:
 
-```bash
+```ridealong
 make build-all
 ```
 
-## Chapter 1: Starting a Session
+## Chapter 1: clod – The Test Agent
 
-Launch federation-command. This creates a session directory where all interactions will be recorded. We set a custom session name so we can reference it later:
+clod mimics real AI coding agents without making API calls. It is the foundation for exercising the rest of the suite during development and CI, with no API keys or costs required.
+
+```ridealong
+ridealong clod/docs/brief-tour.md
+```
+
+## Chapter 2: clauditable – Transparent Recording
+
+clauditable wraps any command and records its execution, capturing stdout/stderr with timestamps and metadata. Every agent invocation in the suite flows through clauditable, giving you a complete audit trail of what ran, when, and what it produced.
+
+```ridealong
+ridealong clauditable/docs/brief-tour.md
+```
+
+## Chapter 3: ambiguous-agent – Unified Agent Interface
+
+ambiguous-agent provides a single invocation interface across all supported AI coding agents. Switching from clod to claude, gemini, or copilot is a one-flag change — the rest of the invocation stays the same.
+
+```ridealong
+ridealong ambiguous-agent/docs/brief-tour.md
+```
+
+## Chapter 4: federation-command – Interactive Shell
+
+federation-command brings the previous three components together in an interactive, readline-based shell with session management and multi-line input. The sub-tour below covers setup and all rideable steps; the interactive shell session itself must be launched manually:
+
+```ridealong
+ridealong federation-command/docs/brief-tour.md
+```
+
+### Integration Demo (manual)
+
+With the shell launched, the following demonstrates how the components integrate end-to-end. Launch it:
 
 ```bash
 export AGENT_SESSION=tour-session
 ./federation-command/federation-command
 ```
 
-You'll see the session indicator showing where records are stored. The shell is now ready for commands.
+Inside the shell, list agents (backed by ambiguous-agent), switch to clod, run prompts with different permission modes (recorded by clauditable), then review session records:
 
-## Chapter 2: Exploring Available Agents
-
-Within the federation-command shell, list the available agents:
-
-```
+```federation-command
 list-agents
 ```
 
-You'll see agents like claude, gemini, copilot, and clod (our test agent). Notice which ones support model selection - use `list-models` to see options.
-
-## Chapter 3: Working with the Test Agent
-
-Set clod as the active agent for testing without API calls:
-
-```
+```federation-command
 set-agent clod
 ```
 
-Try a simple prompt-only interaction:
-
-```
+```federation-command
 agent -p Hello, are you conscious?
 ```
 
-Clod responds conversationally. Now try asking it to read:
-
-```
+```federation-command
 agent -r What files are in this directory?
 ```
 
-## Chapter 4: Understanding Permission Modes
-
-Try to make clod write a file without write permissions:
-
-```
-agent -r Our nice agent should create the file /tmp/tour-test.txt
-```
-
-Clod explains it can't write without permission. Now enable write mode:
-
-```
+```federation-command
 agent -w Our nice agent should create the file /tmp/tour-test.txt
 ```
 
-The file is created. You can verify outside the shell with `cat /tmp/tour-test.txt`.
-
-## Chapter 5: Session Records
-
-Every command has been recorded. List the sessions:
-
-```
+```federation-command
 list-sessions
 ```
 
-The current session shows file counts. Exit and examine the records:
-
-```
+```federation-command
 exit
 ```
 
-Now look at the session directory (default location):
+Inspect the records after exiting:
 
-```bash
-ls -la /host-agent-files/agent-records/tour-session/
+```ridealong
+ls -la /host-agent-files/agent-records/tour-session/ 2>/dev/null || echo "Session directory will be created when you run the tour"
 ```
 
-You'll find:
-- `session.jsonl` - Consolidated JSON lines with metadata
-- `*-raw.txt` - Full untruncated command outputs
-
-## Chapter 6: Continuing Work with Records
-
-Start a new session and provide previous session context:
+Start a second session and provide the first session's records as context:
 
 ```bash
 export AGENT_SESSION=tour-session-2
 ./federation-command/federation-command
 ```
 
-In the shell:
-
-```
-list-sessions
+```federation-command
 agent -provide-records tour-session -r What happened in our last session?
 ```
 
-The agent receives the session records as context. Multiple sessions can be provided:
-
+```federation-command
+exit
 ```
-agent -provide-records tour-session -provide-records tour-session-2 -r Summarize both sessions
+
+Cleanup:
+
+```ridealong
+rm -f /tmp/tour-test.txt
+```
+
+## Chapter 5: heuristic-agent – Async Orchestration
+
+heuristic-agent manages long-running, background AI work through slopspaces and work signals. Where federation-command is interactive, heuristic-agent handles tasks that run unattended.
+
+```ridealong
+ridealong heuristic-agent/docs/brief-tour.md
 ```
 
 ## Summary
 
-The AI-evo1 suite provides:
-1. **clod** - A test agent for CI/development without API costs
-2. **clauditable** - Transparent recording of any command execution
-3. **ambiguous-agent** - Uniform interface across different AI coding agents
-4. **federation-command** - Interactive orchestration with session management
-5. **heuristic-agent** - Async agent orchestration through slopspaces and work signals
+The AI-evo1 suite layers cleanly:
 
-All components work together, with federation-command providing the primary user interface that leverages the others for agent abstraction and record-keeping. For background/async work, heuristic-agent manages slopspaces and processes work signals.
+1. **clod** – Drop-in test agent; no API calls, no cost.
+2. **clauditable** – Wraps any command with transparent recording.
+3. **ambiguous-agent** – Single interface across all supported agents.
+4. **federation-command** – Interactive shell tying the three together with session management.
+5. **heuristic-agent** – Async orchestration for background agent work via slopspaces and work signals.
 
 ## Next Steps
 
-- Run `make test-all` to verify the full test suite passes
-- Explore the sub-project tour documents linked above
-- Check `.github/workflows/` for CI patterns
+Run the full test suite:
+
+```ridealong
+make test-all
+```
+
+Explore `.github/workflows/` for CI patterns, or open any sub-project tour directly to go deeper on a single component.

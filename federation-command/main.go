@@ -628,7 +628,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Advance to the next step (handles parent pop-up and dive entries)
 		if m.ridealong != nil && m.ridealong.IsActive() {
-			return m.advanceRidealong(msg.exitCode)
+			newM, advCmd := m.advanceRidealong(msg.exitCode)
+			if msg.postOutput != "" {
+				return newM, tea.Sequence(tea.Println(msg.postOutput), advCmd)
+			}
+			return newM, advCmd
 		}
 		return m, nil
 	}
@@ -1068,6 +1072,241 @@ func (m appModel) handleBackspace() (appModel, tea.Cmd) {
 	return m, cmd
 }
 
+// handleRidealongBuiltin intercepts federation-command built-in commands so they
+// run at the shell level (in-process) rather than in a subprocess, which would
+// discard state changes like cd, export, set-agent, etc.
+// Returns (true, updatedModel, cmd) when handled; (false, m, nil) otherwise.
+// The caller must prepend the echo Cmd before the returned cmd.
+func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs int64) (bool, appModel, tea.Cmd) {
+	mkDone := func(exitCode int, postOutput string) tea.Cmd {
+		return func() tea.Msg {
+			return ridealongCmdDoneMsg{exitCode: exitCode, line: line, cmdTime: cmdTime, deltaMs: deltaMs, postOutput: postOutput}
+		}
+	}
+	seqPrint := func(output string, exitCode int) tea.Cmd {
+		if output != "" {
+			return tea.Sequence(tea.Println(output), mkDone(exitCode, ""))
+		}
+		return mkDone(exitCode, "")
+	}
+
+	// ridealong (blocked — use <!-- ride along continues --> for nesting)
+	if line == "ridealong" || strings.HasPrefix(line, "ridealong ") {
+		return true, m, seqPrint(errorStyle.Render("ridealong: use <!-- ride along continues --> for nesting"), 1)
+	}
+
+	// exit
+	if line == "exit" {
+		m.quitting = true
+		return true, m, tea.Batch(
+			tea.Println(exitStyle.Render("session ended.")),
+			tea.Quit,
+		)
+	}
+
+	// cd
+	if line == "cd" || strings.HasPrefix(line, "cd ") {
+		target := strings.TrimSpace(strings.TrimPrefix(line, "cd"))
+		newDir, cdOutput, err := handleCd(target, m.cwd, m.oldCwd)
+		exitCode := 0
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("cd: "+err.Error()), 1)
+		}
+		m.oldCwd = m.cwd
+		m.cwd = newDir
+		m.lastExitCode = exitCode
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		return true, m, seqPrint(cdOutput, exitCode)
+	}
+
+	// export
+	if line == "export" || strings.HasPrefix(line, "export ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(line, "export"))
+		output, err := handleExport(arg)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("export: "+err.Error()), 1)
+		}
+		return true, m, seqPrint(strings.TrimRight(output, "\n"), 0)
+	}
+
+	// set-agent <name>
+	if strings.HasPrefix(line, "set-agent ") {
+		newAgent := strings.TrimSpace(strings.TrimPrefix(line, "set-agent "))
+		if isValidAgent(newAgent) {
+			m.currentAgent = newAgent
+			m.currentModel = ""
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			return true, m, seqPrint(successStyle.Render("agent set to: "+m.currentAgent), 0)
+		}
+		out := errorStyle.Render("unknown agent: "+newAgent) + "\n" +
+			sessionStyle.Render("available: "+strings.Join(availableAgents, ", "))
+		return true, m, seqPrint(out, 1)
+	}
+	if line == "set-agent" {
+		out := errorStyle.Render("usage: set-agent <name>") + "\n" +
+			sessionStyle.Render("available: "+strings.Join(availableAgents, ", "))
+		return true, m, seqPrint(out, 1)
+	}
+
+	// list-agents
+	if line == "list-agents" {
+		return true, m, seqPrint(renderAgents(m.currentAgent), 0)
+	}
+
+	// set-model <name>
+	if strings.HasPrefix(line, "set-model ") {
+		newModel := strings.TrimSpace(strings.TrimPrefix(line, "set-model "))
+		if err := setModel(m.currentAgent, newModel); err != nil {
+			return true, m, seqPrint(errorStyle.Render(err.Error()), 1)
+		}
+		m.currentModel = newModel
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		return true, m, seqPrint(successStyle.Render("model set to: "+m.currentModel), 0)
+	}
+	if line == "set-model" {
+		out := errorStyle.Render("usage: set-model <name>") + "\n" +
+			sessionStyle.Render("use 'list-models' to see available models for current agent")
+		return true, m, seqPrint(out, 1)
+	}
+
+	// clear-model
+	if line == "clear-model" {
+		m.currentModel = ""
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		return true, m, seqPrint(successStyle.Render("model cleared - using agent's default"), 0)
+	}
+
+	// list-models — runs a subprocess but advances ridealong when done
+	if line == "list-models" {
+		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.sessionDir)
+		if cmd == nil {
+			return true, m, seqPrint(fallbackText, 0)
+		}
+		return true, m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return ridealongCmdDoneMsg{exitCode: extractExitCode(err), line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		})
+	}
+
+	// list-sessions
+	if line == "list-sessions" {
+		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
+	}
+
+	// set-session <id>
+	if strings.HasPrefix(line, "set-session ") {
+		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
+		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
+		}
+		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
+		}
+		m.logFile.Close()
+		m.logFile = newLogFile
+		m.encoder = json.NewEncoder(newLogFile)
+		m.sessionID = newSessionID
+		m.sessionDir = newSessionDir
+		os.Setenv(EnvAgentSession, newSessionID)
+		return true, m, seqPrint(successStyle.Render("session set to: "+newSessionDir), 0)
+	}
+	if line == "set-session" {
+		return true, m, seqPrint(errorStyle.Render("usage: set-session <id>"), 1)
+	}
+
+	// clear-session
+	if line == "clear-session" {
+		now := time.Now()
+		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
+		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
+		}
+		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
+		}
+		m.logFile.Close()
+		m.logFile = newLogFile
+		m.encoder = json.NewEncoder(newLogFile)
+		m.sessionID = newSessionID
+		m.sessionDir = newSessionDir
+		os.Setenv(EnvAgentSession, newSessionID)
+		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
+	}
+
+	// agent <args> — runs subprocess but advances ridealong when done
+	if strings.HasPrefix(line, "agent ") {
+		prompt := strings.TrimPrefix(line, "agent ")
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.sessionDir)
+		if agentCmd == nil {
+			return true, m, seqPrint(errOutput, 1)
+		}
+		return true, m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
+			exitCode := extractExitCode(err)
+			var postOutput string
+			if err != nil {
+				if _, ok := err.(*exec.ExitError); ok {
+					postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", exitCode))
+				} else {
+					postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", err))
+				}
+			} else {
+				postOutput = successStyle.Render("agent completed")
+			}
+			return ridealongCmdDoneMsg{exitCode: exitCode, line: line, cmdTime: cmdTime, deltaMs: deltaMs, postOutput: postOutput}
+		})
+	}
+	if line == "agent" {
+		return true, m, seqPrint(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"), 1)
+	}
+
+	// scrollback-log <filename>
+	if strings.HasPrefix(line, "scrollback-log ") {
+		filePath := strings.TrimSpace(strings.TrimPrefix(line, "scrollback-log "))
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(m.cwd, filePath)
+		}
+		if m.visualLogFile != nil {
+			m.visualLogFile.Close()
+			m.visualLogFile = nil
+			m.visualLogPath = ""
+		}
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("scrollback-log: "+err.Error()), 1)
+		}
+		m.visualLogFile = f
+		m.visualLogPath = filePath
+		return true, m, seqPrint(successStyle.Render("scrollback log started: "+filePath), 0)
+	}
+	if line == "scrollback-log" {
+		return true, m, seqPrint(errorStyle.Render("usage: scrollback-log <filename>"), 1)
+	}
+
+	// clear-scrollback-log
+	if line == "clear-scrollback-log" {
+		if m.visualLogFile == nil {
+			return true, m, seqPrint(errorStyle.Render("clear-scrollback-log: no active scrollback log"), 1)
+		}
+		path := m.visualLogPath
+		m.visualLogFile.Close()
+		m.visualLogFile = nil
+		m.visualLogPath = ""
+		os.Truncate(path, 0)
+		return true, m, seqPrint(successStyle.Render("scrollback log cleared: "+path), 0)
+	}
+
+	// dynapane demo
+	if line == "dynapane demo" {
+		cmd := m.dynapane.Activate()
+		return true, m, tea.Sequence(cmd, mkDone(0, ""))
+	}
+
+	return false, m, nil
+}
+
 // handleRidealongKey handles key presses in ridealong mode
 func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	switch msg.Type {
@@ -1187,7 +1426,13 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	echoLine := m.input.Prompt + currentCmd
 	echo := m.printlnLogged(echoLine)
 
-	// Build and execute the command
+	// Handle federation-command built-ins at the shell level so state changes
+	// (cd, export, set-agent, etc.) take effect in the parent process.
+	if handled, newM, builtinCmd := m.handleRidealongBuiltin(currentCmd, cmdTime, deltaMs); handled {
+		return newM, tea.Sequence(echo, builtinCmd)
+	}
+
+	// Regular command — run via subprocess
 	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
 	return m, tea.Sequence(echo, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
@@ -1201,10 +1446,11 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 
 // ridealongCmdDoneMsg is sent when a ridealong command completes
 type ridealongCmdDoneMsg struct {
-	exitCode int
-	line     string
-	cmdTime  time.Time
-	deltaMs  int64
+	exitCode   int
+	line       string
+	cmdTime    time.Time
+	deltaMs    int64
+	postOutput string // optional message printed before advancing
 }
 
 func extractExitCode(err error) int {

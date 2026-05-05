@@ -12,7 +12,7 @@ ridealong clod/docs/brief-tour.md
 Navigate to the clod directory:
 
 ```ridealong
-cd research/AI-evo1/clod
+cd clod
 ```
 
 ## Prompt-Only Mode

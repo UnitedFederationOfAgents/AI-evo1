@@ -12,7 +12,7 @@ ridealong ambiguous-agent/docs/brief-tour.md
 Navigate to the ambiguous-agent directory:
 
 ```ridealong
-cd research/AI-evo1/ambiguous-agent
+cd ambiguous-agent
 ```
 
 ## Listing Agents

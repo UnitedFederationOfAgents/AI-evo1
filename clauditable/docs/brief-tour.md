@@ -12,7 +12,7 @@ ridealong clauditable/docs/brief-tour.md
 Navigate to the clauditable directory and set up environment:
 
 ```ridealong
-cd research/AI-evo1/clauditable
+cd clauditable
 ```
 
 ```ridealong

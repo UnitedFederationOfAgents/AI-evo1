@@ -10,12 +10,6 @@ For a more comprehensive and detailed tour, see [full-tour.md](full-tour.md).
 
 ## Prerequisites
 
-Navigate to the AI-evo1 directory:
-
-```ridealong
-cd research/AI-evo1
-```
-
 Ensure the suite is built:
 
 ```ridealong
@@ -26,32 +20,40 @@ make build-all
 
 clod mimics real AI coding agents without making API calls. It is the foundation for exercising the rest of the suite during development and CI, with no API keys or costs required.
 
+[clod brief tour](../../clod/docs/brief-tour.md) <!-- ride along continues -->
+
 ```ridealong
-ridealong clod/docs/brief-tour.md
+cd $(git rev-parse --show-toplevel)
 ```
 
 ## Chapter 2: clauditable – Transparent Recording
 
 clauditable wraps any command and records its execution, capturing stdout/stderr with timestamps and metadata. Every agent invocation in the suite flows through clauditable, giving you a complete audit trail of what ran, when, and what it produced.
 
+[clauditable brief tour](../../clauditable/docs/brief-tour.md) <!-- ride along continues -->
+
 ```ridealong
-ridealong clauditable/docs/brief-tour.md
+cd $(git rev-parse --show-toplevel)
 ```
 
 ## Chapter 3: ambiguous-agent – Unified Agent Interface
 
 ambiguous-agent provides a single invocation interface across all supported AI coding agents. Switching from clod to claude, gemini, or copilot is a one-flag change — the rest of the invocation stays the same.
 
+[ambiguous-agent brief tour](../../ambiguous-agent/docs/brief-tour.md) <!-- ride along continues -->
+
 ```ridealong
-ridealong ambiguous-agent/docs/brief-tour.md
+cd $(git rev-parse --show-toplevel)
 ```
 
 ## Chapter 4: federation-command – Interactive Shell
 
 federation-command brings the previous three components together in an interactive, readline-based shell with session management and multi-line input. The sub-tour below covers setup and all rideable steps; the interactive shell session itself must be launched manually:
 
+[federation-command brief tour](../../federation-command/docs/brief-tour.md) <!-- ride along continues -->
+
 ```ridealong
-ridealong federation-command/docs/brief-tour.md
+cd $(git rev-parse --show-toplevel)
 ```
 
 ### Integration Demo (manual)
@@ -124,8 +126,10 @@ rm -f /tmp/tour-test.txt
 
 heuristic-agent manages long-running, background AI work through slopspaces and work signals. Where federation-command is interactive, heuristic-agent handles tasks that run unattended.
 
+[heuristic-agent brief tour](../../heuristic-agent/docs/brief-tour.md) <!-- ride along continues -->
+
 ```ridealong
-ridealong heuristic-agent/docs/brief-tour.md
+cd $(git rev-parse --show-toplevel)
 ```
 
 ## Summary

@@ -20,7 +20,7 @@ Work signals are JSONL files that describe work to be done. They contain the age
 Navigate to the heuristic-agent directory:
 
 ```ridealong
-cd research/AI-evo1/heuristic-agent
+cd heuristic-agent
 ```
 
 ### Building

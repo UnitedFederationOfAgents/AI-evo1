@@ -11,7 +11,7 @@ This tour includes both:
 Navigate to the federation-command directory:
 
 ```ridealong
-cd research/AI-evo1/federation-command
+cd federation-command
 ```
 
 Build federation-command:

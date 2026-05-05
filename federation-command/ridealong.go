@@ -317,7 +317,7 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 		Width(innerWidth).
 		Render(content)
 
-	return "\n" + pane + "\n"
+	return pane + "\n"
 }
 
 // truncateCommand shortens a command string if it exceeds maxLen.

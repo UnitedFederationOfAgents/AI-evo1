@@ -626,9 +626,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ridealong != nil && m.ridealong.IsActive() {
 			hasMore := m.ridealong.AdvanceCommand(msg.exitCode)
 			if hasMore {
-				// Update input to show next command
+				// Update input to show next command and re-activate the panel
 				m.input.SetValue(m.ridealong.CurrentCommand())
-				return m, nil
+				return m, m.ridealongDynapane.Activate(m.ridealong)
 			}
 			// No more commands - exit ridealong mode
 			return m.exitRidealong()
@@ -1122,6 +1122,9 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	if currentCmd == "" {
 		return m.exitRidealong()
 	}
+
+	// Hide the panel while the command runs so it doesn't leak into scrollback
+	m.ridealongDynapane.Deactivate()
 
 	cmdTime := time.Now()
 	var deltaMs int64

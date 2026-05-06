@@ -169,6 +169,87 @@ func TestParseMetadata(t *testing.T) {
 	}
 }
 
+func TestVerbosityRelayAfterLine(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	relay := newVerbosityRelay(VerbosityManagementAfterLine, "tokens used")
+	relay.write(tmpFile, []byte("noisy line\nmore noise\n"))
+	relay.write(tmpFile, []byte("tokens"))
+	relay.write(tmpFile, []byte(" used\nremaining text\n"))
+
+	if _, err := tmpFile.Seek(0, 0); err != nil {
+		t.Fatalf("failed to seek temp file: %v", err)
+	}
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+
+	got := string(data)
+	want := "tokens used\nremaining text\n"
+	if got != want {
+		t.Errorf("verbosity relay output = %q, want %q", got, want)
+	}
+}
+
+func TestVerbosityRelayRequiresExactLine(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	relay := newVerbosityRelay(VerbosityManagementAfterLine, "tokens used")
+	relay.write(tmpFile, []byte("prefix tokens used\n"))
+	relay.write(tmpFile, []byte("tokens used suffix\n"))
+	relay.write(tmpFile, []byte("tokens used\nshown\n"))
+
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+
+	got := string(data)
+	want := "tokens used\nshown\n"
+	if got != want {
+		t.Errorf("verbosity relay output = %q, want %q", got, want)
+	}
+}
+
+func TestVerbosityRelayOff(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	relay := newVerbosityRelay("", "")
+	relay.write(tmpFile, []byte("all output\n"))
+
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+	if string(data) != "all output\n" {
+		t.Errorf("verbosity relay off output = %q", string(data))
+	}
+}
+
+func TestExpectedRawRecordPath(t *testing.T) {
+	got := expectedRawRecordPath("/records", "session", 1705312200)
+	want := filepath.Join("/records", "session", "1705312200-raw.txt")
+	if got != want {
+		t.Errorf("expectedRawRecordPath = %q, want %q", got, want)
+	}
+}
+
 func TestWriteRecord(t *testing.T) {
 	// Create a temporary directory
 	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")

@@ -10,8 +10,13 @@ import (
 func TestAgentConfigs(t *testing.T) {
 	// Verify all agents in availableAgents have configurations
 	for _, agent := range availableAgents {
-		if _, ok := agentConfigs[agent]; !ok {
+		config, ok := agentConfigs[agent]
+		if !ok {
 			t.Errorf("Agent %q in availableAgents but missing from agentConfigs", agent)
+			continue
+		}
+		if verbosityManagement(config) == "" {
+			t.Errorf("Agent %q has empty verbosity management default", agent)
 		}
 	}
 
@@ -21,6 +26,28 @@ func TestAgentConfigs(t *testing.T) {
 			if _, ok := config.ModeArgs[mode]; !ok {
 				t.Errorf("Agent %q missing ModeArgs for mode %q", name, mode)
 			}
+		}
+	}
+}
+
+func TestVerbosityManagementDefaults(t *testing.T) {
+	for _, agent := range availableAgents {
+		config := agentConfigs[agent]
+		if agent == "codex" {
+			if config.VerbosityManagement != VerbosityManagementAfterLine {
+				t.Errorf("codex VerbosityManagement = %q, want %q", config.VerbosityManagement, VerbosityManagementAfterLine)
+			}
+			if config.VerbosityManagementAfterLine != "tokens used" {
+				t.Errorf("codex VerbosityManagementAfterLine = %q, want %q", config.VerbosityManagementAfterLine, "tokens used")
+			}
+			continue
+		}
+
+		if verbosityManagement(config) != VerbosityManagementOff {
+			t.Errorf("%s VerbosityManagement = %q, want %q", agent, verbosityManagement(config), VerbosityManagementOff)
+		}
+		if config.VerbosityManagementAfterLine != "" {
+			t.Errorf("%s should not have a verbosity after-line argument, got %q", agent, config.VerbosityManagementAfterLine)
 		}
 	}
 }

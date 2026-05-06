@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -65,9 +66,13 @@ const (
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
+	EnvUFAVerbosityManagement  = "UFA_VERBOSITY_MANAGEMENT"
+	EnvUFAVerbosityAfterLine   = "UFA_VERBOSITY_AFTER_LINE"
 	EnvIsClauditable           = "IS_CLAUDITABLE" // Used to prevent double-wrapping
 
 	DefaultRecordsPath = "/host-agent-files/agent-records"
+
+	VerbosityManagementAfterLine = "after-line"
 )
 
 func main() {
@@ -109,6 +114,7 @@ func main() {
 	agent := os.Getenv(EnvUFAAgent)
 	model := os.Getenv(EnvUFAModel)
 	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
+	verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
 
 	// Prepare the command
 	cmd := exec.Command(cmdName, cmdArgs...)
@@ -117,6 +123,10 @@ func main() {
 	var stdoutBuf, stderrBuf strings.Builder
 
 	startTime := time.Now()
+	rawRecordPath := expectedRawRecordPath(recordsPath, session, startTime.Unix())
+	if verbosity.enabled {
+		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", rawRecordPath)
+	}
 	var err error
 
 	// When our stdout is a terminal, use a PTY for the child's stdout so that
@@ -145,9 +155,9 @@ func main() {
 			for {
 				n, readErr := ptm.Read(buf)
 				if n > 0 {
-					os.Stdout.Write(buf[:n])
 					stripped := bytes.ReplaceAll(buf[:n], []byte("\r\n"), []byte("\n"))
 					stdoutBuf.Write(stripped)
+					verbosity.write(os.Stdout, stripped)
 				}
 				if readErr != nil {
 					break
@@ -180,12 +190,20 @@ func main() {
 		done := make(chan struct{}, 2)
 		go func() {
 			teeReader := io.TeeReader(stdoutPipe, &stdoutBuf)
-			io.Copy(os.Stdout, teeReader)
+			if verbosity.enabled {
+				io.Copy(&verbosityWriter{relay: verbosity, out: os.Stdout}, teeReader)
+			} else {
+				io.Copy(os.Stdout, teeReader)
+			}
 			done <- struct{}{}
 		}()
 		go func() {
 			teeReader := io.TeeReader(stderrPipe, &stderrBuf)
-			io.Copy(os.Stderr, teeReader)
+			if verbosity.enabled {
+				io.Copy(&verbosityWriter{relay: verbosity, out: os.Stderr}, teeReader)
+			} else {
+				io.Copy(os.Stderr, teeReader)
+			}
 			done <- struct{}{}
 		}()
 		<-done
@@ -251,6 +269,73 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+type verbosityRelay struct {
+	enabled   bool
+	afterLine string
+	revealed  bool
+	pending   []byte
+	mu        sync.Mutex
+}
+
+type verbosityWriter struct {
+	relay *verbosityRelay
+	out   *os.File
+}
+
+func (w *verbosityWriter) Write(p []byte) (int, error) {
+	w.relay.write(w.out, p)
+	return len(p), nil
+}
+
+func newVerbosityRelay(mode, afterLine string) *verbosityRelay {
+	return &verbosityRelay{
+		enabled:   mode == VerbosityManagementAfterLine && afterLine != "",
+		afterLine: afterLine,
+	}
+}
+
+func (r *verbosityRelay) write(out *os.File, p []byte) {
+	if !r.enabled {
+		out.Write(p)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.revealed {
+		out.Write(p)
+		return
+	}
+
+	r.pending = append(r.pending, p...)
+	for {
+		lineEnd := bytes.IndexByte(r.pending, '\n')
+		if lineEnd < 0 {
+			return
+		}
+
+		lineWithEnding := append([]byte(nil), r.pending[:lineEnd+1]...)
+		r.pending = r.pending[lineEnd+1:]
+
+		line := strings.TrimSuffix(string(lineWithEnding), "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if line == r.afterLine {
+			out.Write(lineWithEnding)
+			r.revealed = true
+			if len(r.pending) > 0 {
+				out.Write(r.pending)
+				r.pending = nil
+			}
+			return
+		}
+	}
+}
+
+func expectedRawRecordPath(recordsPath, session string, timestamp int64) string {
+	return filepath.Join(recordsPath, session, fmt.Sprintf("%d-raw.txt", timestamp))
 }
 
 // getSession returns the session identifier

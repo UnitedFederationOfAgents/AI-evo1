@@ -40,13 +40,13 @@ const (
 
 // AgentConfig defines how to invoke a specific AI CLI agent
 type AgentConfig struct {
-	Command       string   // Base command to run (e.g., "claude", "gemini")
-	PromptFlag    string   // Flag to pass prompts (e.g., "-p")
-	AddDirFlag    string   // Flag to add directories (if supported)
-	ModelFlag     string   // Flag to specify model (if supported)
-	DefaultModel  string   // Default model for this agent
-	Models        []string // Available models for this agent
-	ModeArgs      map[string][]string // Arguments per mode
+	Command      string              // Base command to run (e.g., "claude", "gemini")
+	PromptFlag   string              // Flag to pass prompts (e.g., "-p")
+	AddDirFlag   string              // Flag to add directories (if supported)
+	ModelFlag    string              // Flag to specify model (if supported)
+	DefaultModel string              // Default model for this agent
+	Models       []string            // Available models for this agent
+	ModeArgs     map[string][]string // Arguments per mode
 }
 
 // agentConfigs maps agent names to their configuration
@@ -101,12 +101,14 @@ var agentConfigs = map[string]*AgentConfig{
 	},
 	"codex": {
 		Command:    "codex",
-		PromptFlag: "-p",
+		PromptFlag: "", // codex uses positional prompts; -p is --profile
+		AddDirFlag: "--add-dir",
+		ModelFlag:  "--model",
 		ModeArgs: map[string][]string{
 			ModePrompt:  {},
-			ModeRead:    {},
-			ModeWrite:   {},
-			ModeExecute: {"--full-auto"},
+			ModeRead:    {"--sandbox", "read-only"},
+			ModeWrite:   {"--sandbox", "workspace-write"},
+			ModeExecute: {"--sandbox", "danger-full-access", "--ask-for-approval", "never"},
 		},
 	},
 	"grok": {

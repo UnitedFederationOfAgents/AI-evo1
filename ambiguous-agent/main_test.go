@@ -255,3 +255,39 @@ func TestOpenCodePromptHandling(t *testing.T) {
 		t.Errorf("Last arg = %q, want %q", lastArg, "test prompt")
 	}
 }
+
+func TestCodexPromptHandling(t *testing.T) {
+	config := agentConfigs["codex"]
+	if config.PromptFlag != "" {
+		t.Errorf("codex should use positional prompts because -p is --profile, got %q", config.PromptFlag)
+	}
+	if config.AddDirFlag != "--add-dir" {
+		t.Errorf("codex AddDirFlag = %q, want %q", config.AddDirFlag, "--add-dir")
+	}
+	if config.ModelFlag != "--model" {
+		t.Errorf("codex ModelFlag = %q, want %q", config.ModelFlag, "--model")
+	}
+
+	args := buildAgentArgs(config, ModePrompt, "", "U up?", "/tmp/session", nil)
+	if strings.Contains(strings.Join(args, " "), "-p") {
+		t.Fatalf("codex args must not contain -p: %v", args)
+	}
+	if len(args) == 0 || args[len(args)-1] != "U up?" {
+		t.Fatalf("codex prompt should be the last positional arg, got: %v", args)
+	}
+
+	args = buildAgentArgs(config, ModeExecute, "gpt-5.2", "run tests", "/tmp/session", []string{"/extra"})
+	wantContains := []string{"--model", "gpt-5.2", "--sandbox", "danger-full-access", "--ask-for-approval", "never", "--add-dir", "/tmp/session", "/extra", "run tests"}
+	for _, want := range wantContains {
+		found := false
+		for _, arg := range args {
+			if arg == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected codex args to contain %q, got: %v", want, args)
+		}
+	}
+}

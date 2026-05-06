@@ -348,6 +348,21 @@ type listModelsDoneMsg struct {
 	currentModel string
 }
 
+// ridealongExecReadyMsg defers an ExecProcess command by one Update/View cycle so
+// the ridealong pane is fully erased from the terminal before the subprocess starts.
+type ridealongExecReadyMsg struct {
+	runCmd   *exec.Cmd
+	callback func(error) tea.Msg
+}
+
+// deferRidealongExec returns a Cmd that sends ridealongExecReadyMsg on the next
+// Update, giving Bubble Tea one render cycle to clear the now-inactive pane.
+func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return ridealongExecReadyMsg{runCmd: runCmd, callback: callback}
+	}
+}
+
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
 	ti := textinput.New()
 	ti.Focus()
@@ -635,6 +650,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return newM, advCmd
 		}
 		return m, nil
+
+	case ridealongExecReadyMsg:
+		return m, tea.ExecProcess(msg.runCmd, msg.callback)
 	}
 
 	var cmd tea.Cmd
@@ -1182,7 +1200,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		if cmd == nil {
 			return true, m, seqPrint(fallbackText, 0)
 		}
-		return true, m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return true, m, deferRidealongExec(cmd, func(err error) tea.Msg {
 			return ridealongCmdDoneMsg{exitCode: extractExitCode(err), line: line, cmdTime: cmdTime, deltaMs: deltaMs}
 		})
 	}
@@ -1243,7 +1261,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		if agentCmd == nil {
 			return true, m, seqPrint(errOutput, 1)
 		}
-		return true, m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
+		return true, m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
 			exitCode := extractExitCode(err)
 			var postOutput string
 			if err != nil {
@@ -1371,7 +1389,8 @@ func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
 		return m.enterDiveStep()
 	}
 	m.input.SetValue(m.ridealong.CurrentCommand())
-	return m, m.ridealongDynapane.Activate(m.ridealong)
+	m.blinker.SetState(BlinkerRidealong)
+	return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 }
 
 // enterDiveStep starts a child ridealong for the current dive step.
@@ -1399,7 +1418,8 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 	}
 	m.ridealong = child
 	m.input.SetValue(child.CurrentCommand())
-	return m, m.ridealongDynapane.Activate(child)
+	m.blinker.SetState(BlinkerRidealong)
+	return m, tea.Batch(m.ridealongDynapane.Activate(child), m.blinker.ResetTick())
 }
 
 // executeRidealongCommand executes the current ridealong command
@@ -1414,6 +1434,10 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 
 	// Hide the panel while the command runs so it doesn't leak into scrollback
 	m.ridealongDynapane.Deactivate()
+	// Clear input and suppress blinker so the TUI re-render between echo and
+	// ExecProcess doesn't bleed "[●]" into the terminal scrollback.
+	m.input.SetValue("")
+	m.blinker.SetState(BlinkerInactive)
 
 	cmdTime := time.Now()
 	var deltaMs int64
@@ -1434,7 +1458,7 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 
 	// Regular command — run via subprocess
 	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
-	return m, tea.Sequence(echo, tea.ExecProcess(runCmd, func(err error) tea.Msg {
+	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
 			exitCode: extractExitCode(err),
 			line:     currentCmd,
@@ -2070,6 +2094,22 @@ func renderModelsFallback(agent string, currentModel string) string {
 	return b.String()
 }
 
+// expandCommandSubst evaluates $(...) and backtick command substitutions in arg
+// by running them through bash. Returns the expanded string or an error.
+// No-ops if arg contains no substitution markers.
+func expandCommandSubst(arg, cwd string) (string, error) {
+	if !strings.Contains(arg, "$(") && !strings.Contains(arg, "`") {
+		return arg, nil
+	}
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("x=%s; printf '%%s' \"$x\"", arg))
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // handleCd processes a cd command. Returns (newCwd, printOutput, error).
 // printOutput is non-empty only for "cd -" which prints the target directory.
 func handleCd(target string, cwd string, oldCwd string) (string, string, error) {
@@ -2093,7 +2133,11 @@ func handleCd(target string, cwd string, oldCwd string) (string, string, error) 
 			(strings.HasPrefix(target, "'") && strings.HasSuffix(target, "'")) {
 			target = target[1 : len(target)-1]
 		}
-		targetDir = target
+		expanded, err := expandCommandSubst(target, cwd)
+		if err != nil {
+			return "", "", fmt.Errorf("command substitution failed: %w", err)
+		}
+		targetDir = expanded
 	}
 
 	if !filepath.IsAbs(targetDir) {

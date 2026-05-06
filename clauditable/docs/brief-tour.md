@@ -23,6 +23,10 @@ export AGENT_RECORDS_PATH=/tmp/clauditable-tour
 export AGENT_SESSION=tour-session
 ```
 
+```ridealong
+unset IS_CLAUDITABLE
+```
+
 ## Basic Usage
 
 Wrap any command for recording:

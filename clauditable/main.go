@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,10 +10,52 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"clauditable/pkg/records"
 )
+
+// openPTY opens a PTY master/slave pair. Returns (master, slave, error).
+// This lets child processes detect they are writing to a terminal and
+// enable color output (e.g., git status showing red/green text).
+func openPTY() (*os.File, *os.File, error) {
+	ptm, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Unlock the slave PTY
+	unlock := uint32(0)
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptm.Fd(), syscall.TIOCSPTLCK, uintptr(unsafe.Pointer(&unlock))); errno != 0 {
+		ptm.Close()
+		return nil, nil, errno
+	}
+
+	// Get the slave PTY index
+	var ptyno uint32
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptm.Fd(), syscall.TIOCGPTN, uintptr(unsafe.Pointer(&ptyno))); errno != 0 {
+		ptm.Close()
+		return nil, nil, errno
+	}
+
+	slavePath := fmt.Sprintf("/dev/pts/%d", ptyno)
+	pts, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		ptm.Close()
+		return nil, nil, err
+	}
+
+	return ptm, pts, nil
+}
+
+// isTerminal reports whether fd is connected to a terminal.
+func isTerminal(fd uintptr) bool {
+	var termios syscall.Termios
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCGETS, uintptr(unsafe.Pointer(&termios)))
+	return errno == 0
+}
 
 // Environment variable names
 const (
@@ -70,45 +113,85 @@ func main() {
 	// Prepare the command
 	cmd := exec.Command(cmdName, cmdArgs...)
 
-	// Create pipes for capturing output while relaying
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: failed to create stdout pipe: %v\n", err)
-		os.Exit(1)
-	}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: failed to create stderr pipe: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Connect stdin
-	cmd.Stdin = os.Stdin
-
 	// Capture buffers
 	var stdoutBuf, stderrBuf strings.Builder
 
-	// Start the command
 	startTime := time.Now()
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
-		os.Exit(1)
+	var err error
+
+	// When our stdout is a terminal, use a PTY for the child's stdout so that
+	// programs like git detect they're writing to a terminal and enable colors.
+	// Fall back to pipes if PTY allocation fails or stdout is not a terminal.
+	usingPTY := false
+	if isTerminal(os.Stdout.Fd()) {
+		ptm, pts, ptyErr := openPTY()
+		if ptyErr == nil {
+			usingPTY = true
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = pts
+			cmd.Stderr = pts
+
+			if err := cmd.Start(); err != nil {
+				pts.Close()
+				ptm.Close()
+				fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
+				os.Exit(1)
+			}
+			pts.Close() // parent doesn't need the slave after the child starts
+
+			// Relay PTY output to our terminal and capture for the record.
+			// PTY line discipline converts \n → \r\n; strip the extra \r for storage.
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := ptm.Read(buf)
+				if n > 0 {
+					os.Stdout.Write(buf[:n])
+					stripped := bytes.ReplaceAll(buf[:n], []byte("\r\n"), []byte("\n"))
+					stdoutBuf.Write(stripped)
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			ptm.Close()
+		}
 	}
 
-	// Tee stdout: copy to both os.Stdout and our buffer
-	go func() {
-		teeReader := io.TeeReader(stdoutPipe, &stdoutBuf)
-		io.Copy(os.Stdout, teeReader)
-	}()
+	if !usingPTY {
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable: failed to create stdout pipe: %v\n", err)
+			os.Exit(1)
+		}
 
-	// Tee stderr: copy to both os.Stderr and our buffer
-	go func() {
-		teeReader := io.TeeReader(stderrPipe, &stderrBuf)
-		io.Copy(os.Stderr, teeReader)
-	}()
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable: failed to create stderr pipe: %v\n", err)
+			os.Exit(1)
+		}
 
-	// Wait for command to complete
+		cmd.Stdin = os.Stdin
+
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
+			os.Exit(1)
+		}
+
+		done := make(chan struct{}, 2)
+		go func() {
+			teeReader := io.TeeReader(stdoutPipe, &stdoutBuf)
+			io.Copy(os.Stdout, teeReader)
+			done <- struct{}{}
+		}()
+		go func() {
+			teeReader := io.TeeReader(stderrPipe, &stderrBuf)
+			io.Copy(os.Stderr, teeReader)
+			done <- struct{}{}
+		}()
+		<-done
+		<-done
+	}
+
 	err = cmd.Wait()
 	duration := time.Since(startTime)
 

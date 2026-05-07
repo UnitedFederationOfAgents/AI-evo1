@@ -28,13 +28,16 @@ type ridealongStep struct {
 
 // Ridealong represents an active ridealong session parsed from a markdown file.
 type Ridealong struct {
-	filePath     string
-	steps        []ridealongStep
-	currentIndex int
-	prevExitCode int // -1 = no command executed yet
-	active       bool
-	menuIndex    int        // 0 = execute command, 1 = exit
-	parent       *Ridealong // non-nil when this is a nested ridealong
+	filePath          string
+	steps             []ridealongStep
+	currentIndex      int
+	prevExitCode      int // -1 = no command executed yet
+	active            bool
+	menuIndex         int
+	debug             bool
+	scrollbackLogPath string
+	lastStepReview    string
+	parent            *Ridealong // non-nil when this is a nested ridealong
 }
 
 // ridealongBlockOpenRegex matches the opening fence of a ```ridealong block.
@@ -171,6 +174,16 @@ func NewRidealong(filePath string) (*Ridealong, string) {
 	}, ""
 }
 
+// EnableDebug turns on the debug ridealong actions and records the scrollback
+// log file they should pass to the agent.
+func (r *Ridealong) EnableDebug(logPath string) {
+	if r == nil {
+		return
+	}
+	r.debug = true
+	r.scrollbackLogPath = logPath
+}
+
 // stepDisplay returns the human-readable label used throughout the UI for a step.
 func (r *Ridealong) stepDisplay(s ridealongStep) string {
 	if s.kind == stepCommand {
@@ -240,8 +253,30 @@ func (r *Ridealong) AdvanceCommand(exitCode int) bool {
 		return false
 	}
 	r.prevExitCode = exitCode
+	r.lastStepReview = ""
+	r.menuIndex = 0
 	r.currentIndex++
 	return r.currentIndex < len(r.steps)
+}
+
+type ridealongMenuAction int
+
+const (
+	ridealongActionExecute ridealongMenuAction = iota
+	ridealongActionReview
+	ridealongActionFixReviewed
+	ridealongActionFixLastStep
+	ridealongActionExit
+)
+
+func (r *Ridealong) menuItemCount() int {
+	if r != nil && r.debug {
+		if r.lastStepReview != "" {
+			return 3 // execute, fix issue, exit
+		}
+		return 4 // execute, review last step, fix issue from last step, exit
+	}
+	return 2
 }
 
 // MenuUp moves menu selection toward "execute command".
@@ -253,7 +288,7 @@ func (r *Ridealong) MenuUp() {
 
 // MenuDown moves menu selection toward "exit".
 func (r *Ridealong) MenuDown() {
-	if r != nil && r.menuIndex < 1 {
+	if r != nil && r.menuIndex < r.menuItemCount()-1 {
 		r.menuIndex++
 	}
 }
@@ -264,6 +299,44 @@ func (r *Ridealong) MenuSelection() int {
 		return 0
 	}
 	return r.menuIndex
+}
+
+func (r *Ridealong) MenuAction() ridealongMenuAction {
+	if r == nil {
+		return ridealongActionExecute
+	}
+	if !r.debug {
+		if r.menuIndex == 1 {
+			return ridealongActionExit
+		}
+		return ridealongActionExecute
+	}
+	switch r.menuIndex {
+	case 0:
+		return ridealongActionExecute
+	case 1:
+		if r.lastStepReview != "" {
+			return ridealongActionFixReviewed
+		}
+		return ridealongActionReview
+	case 2:
+		if r.lastStepReview != "" {
+			return ridealongActionExit
+		}
+		return ridealongActionFixLastStep
+	default:
+		return ridealongActionExit
+	}
+}
+
+func (r *Ridealong) CacheReview(review string) {
+	if r == nil {
+		return
+	}
+	r.lastStepReview = strings.TrimSpace(review)
+	if r.debug && r.lastStepReview != "" {
+		r.menuIndex = 1
+	}
 }
 
 // FileName returns the base filename of the ridealong file.
@@ -403,13 +476,23 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 	divider := ridealongDividerStyle.Render(strings.Repeat("─", innerWidth))
 
 	// Menu items
-	var executeItem, exitItem string
-	if r.menuIndex == 0 {
-		executeItem = ridealongMenuSelectedStyle.Render("◈ execute command")
-		exitItem = ridealongMenuStyle.Render("  exit")
-	} else {
-		executeItem = ridealongMenuStyle.Render("  execute command")
-		exitItem = ridealongMenuSelectedStyle.Render("◈ exit")
+	menuLabels := []string{"execute command"}
+	if r.debug {
+		if r.lastStepReview != "" {
+			menuLabels = append(menuLabels, "fix issue")
+		} else {
+			menuLabels = append(menuLabels, "review last step", "fix issue from last step")
+		}
+	}
+	menuLabels = append(menuLabels, "exit")
+
+	var menuLines []string
+	for i, label := range menuLabels {
+		if r.menuIndex == i {
+			menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ "+label))
+		} else {
+			menuLines = append(menuLines, ridealongMenuStyle.Render("  "+label))
+		}
 	}
 
 	// Command display section
@@ -423,7 +506,7 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 	} else {
 		prefix := "  "
 		if prevExitCode != 0 {
-			prefix = ridealongErrorCodeStyle.Render("["+fmt.Sprintf("%d", prevExitCode)+"] ")
+			prefix = ridealongErrorCodeStyle.Render("[" + fmt.Sprintf("%d", prevExitCode) + "] ")
 		}
 		prevCmdLine = prefix + ridealongPrevCmdStyle.Render(truncateCommand(prevCmd, innerWidth-10))
 	}
@@ -441,13 +524,9 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 	allLines := []string{
 		titleRow,
 		divider,
-		executeItem,
-		exitItem,
-		divider,
-		prevCmdLine,
-		currentCmdLine,
-		nextCmdLine,
 	}
+	allLines = append(allLines, menuLines...)
+	allLines = append(allLines, divider, prevCmdLine, currentCmdLine, nextCmdLine)
 
 	content := strings.Join(allLines, "\n")
 

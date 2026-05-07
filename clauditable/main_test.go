@@ -197,7 +197,7 @@ func TestVerbosityRelayAfterLine(t *testing.T) {
 	}
 }
 
-func TestVerbosityRelayRequiresExactLine(t *testing.T) {
+func TestVerbosityRelayRevealsOnContainingLine(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
 	if err != nil {
 		t.Fatalf("failed to create temp file: %v", err)
@@ -206,9 +206,8 @@ func TestVerbosityRelayRequiresExactLine(t *testing.T) {
 	defer tmpFile.Close()
 
 	relay := newVerbosityRelay(VerbosityManagementAfterLine, "tokens used")
-	relay.write(tmpFile, []byte("prefix tokens used\n"))
-	relay.write(tmpFile, []byte("tokens used suffix\n"))
-	relay.write(tmpFile, []byte("tokens used\nshown\n"))
+	relay.write(tmpFile, []byte("noisy line\n"))
+	relay.write(tmpFile, []byte("123 tokens used\nshown\n"))
 
 	data, err := os.ReadFile(tmpFile.Name())
 	if err != nil {
@@ -216,9 +215,46 @@ func TestVerbosityRelayRequiresExactLine(t *testing.T) {
 	}
 
 	got := string(data)
-	want := "tokens used\nshown\n"
+	want := "123 tokens used\nshown\n"
 	if got != want {
 		t.Errorf("verbosity relay output = %q, want %q", got, want)
+	}
+}
+
+func TestRunPassthroughAppliesVerbosityRelay(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "emit.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho noisy\necho '123 tokens used'\necho shown\n"), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	stdoutPath := filepath.Join(tmpDir, "stdout")
+	oldStdout := os.Stdout
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		t.Fatalf("failed to capture stdout: %v", err)
+	}
+	os.Stdout = stdoutFile
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	exitCode := runPassthrough(scriptPath, nil, newVerbosityRelay(VerbosityManagementAfterLine, "tokens used"))
+	if exitCode != 0 {
+		t.Fatalf("runPassthrough exitCode = %d, want 0", exitCode)
+	}
+	if err := stdoutFile.Close(); err != nil {
+		t.Fatalf("failed to close stdout capture: %v", err)
+	}
+
+	data, err := os.ReadFile(stdoutPath)
+	if err != nil {
+		t.Fatalf("failed to read stdout capture: %v", err)
+	}
+	got := string(data)
+	want := "123 tokens used\nshown\n"
+	if got != want {
+		t.Errorf("runPassthrough output = %q, want %q", got, want)
 	}
 }
 

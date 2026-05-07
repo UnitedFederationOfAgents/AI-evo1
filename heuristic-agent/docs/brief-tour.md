@@ -114,24 +114,23 @@ This example demonstrates slopspace management without the watch loop. For full 
 ./heuristic-agent watch --agent-type agent-worker
 ```
 
-Then run this ridealong to create and manage a slopspace:
+Then run this ridealong to create and manage a slopspace. The `export` builtin
+persists variables in the federation-command environment, so values set with
+`export VAR=$(...)` in one step are available as `$VAR` in all subsequent steps.
 
-Create a slopspace and capture its ID:
+Create the slopspace and export its ID:
 
 ```ridealong
-SLOP_ID=$(./heuristic-agent slopspace create | grep "Created" | awk '{print $3}') && echo "Created slopspace: $SLOP_ID"
+export SLOP_ID=$(./heuristic-agent slopspace create | awk '/Created slopspace:/ {print $3; exit}')
+echo "Created slopspace: $SLOP_ID"
 ```
 
-Add a file to the write-space for the agent to work with:
+Add a file to its write-space and deploy it to the agent-worker location:
 
 ```ridealong
-mkdir -p /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files && echo "TODO: implement feature X" > /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/CAT-TASK.txt
-```
-
-Deploy the slopspace to agent-worker location:
-
-```ridealong
-./heuristic-agent slopspace deploy $SLOP_ID --agent-type agent-worker
+mkdir -p "/host-agent-files/slopspaces/$SLOP_ID/write-spaces/files"
+echo "TODO: implement feature X" > "/host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/CAT-TASK.txt"
+./heuristic-agent slopspace deploy "$SLOP_ID" --agent-type agent-worker
 ```
 
 Verify deployment (files moved to /agent/agent-worker/):
@@ -149,19 +148,19 @@ TS=$(date +%s) && printf '{"id":"slop-example-%s","work_type":"slopspace","agent
 Wait briefly for the watch loop to process, then return the slopspace:
 
 ```ridealong
-sleep 15 && ./heuristic-agent slopspace return $SLOP_ID
+sleep 15 && ./heuristic-agent slopspace return "$SLOP_ID"
 ```
 
 Check results in the slopspace:
 
 ```ridealong
-cat /host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/DONE.txt 2>/dev/null || echo "DONE.txt not created (watch loop may not be running)"
+cat "/host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/DONE.txt" 2>/dev/null || echo "DONE.txt not created (watch loop may not be running)"
 ```
 
 Clean up the slopspace:
 
 ```ridealong
-./heuristic-agent slopspace delete $SLOP_ID
+./heuristic-agent slopspace delete "$SLOP_ID"
 ```
 
 Key points:

@@ -87,17 +87,8 @@ func main() {
 		// Already in clauditable context, pass through directly
 		cmdName := os.Args[1]
 		cmdArgs := os.Args[2:]
-		cmd := exec.Command(cmdName, cmdArgs...)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			}
-			os.Exit(1)
-		}
-		os.Exit(0)
+		verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
+		os.Exit(runPassthrough(cmdName, cmdArgs, verbosity))
 	}
 
 	// Set IS_CLAUDITABLE for child processes to detect
@@ -296,6 +287,58 @@ func newVerbosityRelay(mode, afterLine string) *verbosityRelay {
 	}
 }
 
+func runPassthrough(cmdName string, cmdArgs []string, verbosity *verbosityRelay) int {
+	cmd := exec.Command(cmdName, cmdArgs...)
+	cmd.Stdin = os.Stdin
+
+	if verbosity == nil || !verbosity.enabled {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				return exitErr.ExitCode()
+			}
+			return 1
+		}
+		return 0
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: failed to create stdout pipe: %v\n", err)
+		return 1
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: failed to create stderr pipe: %v\n", err)
+		return 1
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
+		return 1
+	}
+
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(&verbosityWriter{relay: verbosity, out: os.Stdout}, stdoutPipe)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(&verbosityWriter{relay: verbosity, out: os.Stderr}, stderrPipe)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 1
+	}
+	return 0
+}
+
 func (r *verbosityRelay) write(out *os.File, p []byte) {
 	if !r.enabled {
 		out.Write(p)
@@ -322,7 +365,7 @@ func (r *verbosityRelay) write(out *os.File, p []byte) {
 
 		line := strings.TrimSuffix(string(lineWithEnding), "\n")
 		line = strings.TrimSuffix(line, "\r")
-		if line == r.afterLine {
+		if strings.Contains(line, r.afterLine) {
 			out.Write(lineWithEnding)
 			r.revealed = true
 			if len(r.pending) > 0 {

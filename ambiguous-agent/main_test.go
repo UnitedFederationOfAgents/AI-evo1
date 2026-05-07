@@ -285,6 +285,9 @@ func TestOpenCodePromptHandling(t *testing.T) {
 
 func TestCodexPromptHandling(t *testing.T) {
 	config := agentConfigs["codex"]
+	if len(config.CommandArgs) != 1 || config.CommandArgs[0] != "exec" {
+		t.Fatalf("codex CommandArgs = %v, want [exec]", config.CommandArgs)
+	}
 	if config.PromptFlag != "" {
 		t.Errorf("codex should use positional prompts because -p is --profile, got %q", config.PromptFlag)
 	}
@@ -296,6 +299,9 @@ func TestCodexPromptHandling(t *testing.T) {
 	}
 
 	args := buildAgentArgs(config, ModePrompt, "", "U up?", "/tmp/session", nil)
+	if len(args) == 0 || args[0] != "exec" {
+		t.Fatalf("codex args should start with exec for non-interactive mode, got: %v", args)
+	}
 	if strings.Contains(strings.Join(args, " "), "-p") {
 		t.Fatalf("codex args must not contain -p: %v", args)
 	}
@@ -304,7 +310,10 @@ func TestCodexPromptHandling(t *testing.T) {
 	}
 
 	args = buildAgentArgs(config, ModeExecute, "gpt-5.2", "run tests", "/tmp/session", []string{"/extra"})
-	wantContains := []string{"--model", "gpt-5.2", "--sandbox", "danger-full-access", "--ask-for-approval", "never", "--add-dir", "/tmp/session", "/extra", "run tests"}
+	if len(args) == 0 || args[0] != "exec" {
+		t.Fatalf("codex execute args should start with exec, got: %v", args)
+	}
+	wantContains := []string{"exec", "--model", "gpt-5.2", "--sandbox", "danger-full-access", "--ask-for-approval", "never", "--add-dir", "/tmp/session", "/extra", "run tests"}
 	for _, want := range wantContains {
 		found := false
 		for _, arg := range args {

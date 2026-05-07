@@ -32,7 +32,7 @@ unset IS_CLAUDITABLE
 Wrap any command for recording:
 
 ```ridealong
-./clauditable echo "Hello, recorded world"
+AGENT_RECORDS_PATH=/tmp/clauditable-tour AGENT_SESSION=tour-session env -u IS_CLAUDITABLE ./clauditable echo "Hello, recorded world"
 ```
 
 ## Record Structure

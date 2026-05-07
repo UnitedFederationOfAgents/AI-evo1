@@ -355,6 +355,23 @@ type ridealongExecReadyMsg struct {
 	callback func(error) tea.Msg
 }
 
+type ridealongReviewDoneMsg struct {
+	exitCode  int
+	execErr   error
+	line      string
+	cmdTime   time.Time
+	deltaMs   int64
+	cachePath string
+}
+
+type ridealongFixDoneMsg struct {
+	exitCode int
+	execErr  error
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
 // deferRidealongExec returns a Cmd that sends ridealongExecReadyMsg on the next
 // Update, giving Bubble Tea one render cycle to clear the now-inactive pane.
 func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd {
@@ -427,6 +444,30 @@ func appendHistoryEntry(path, line string) {
 	}
 	defer f.Close()
 	fmt.Fprintln(f, line)
+}
+
+func createRidealongScrollbackLog(now time.Time) (*os.File, string, error) {
+	name := fmt.Sprintf("federation-command-ridealong-%s-%d.log", now.Format("20060102-150405"), now.UnixNano())
+	path := filepath.Join(os.TempDir(), name)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, path, nil
+}
+
+func parseRidealongCommand(line string) (filePath string, debug bool) {
+	args := strings.TrimSpace(strings.TrimPrefix(line, "ridealong"))
+	if args == "" {
+		return "", false
+	}
+	if args == "--debug" {
+		return "", true
+	}
+	if strings.HasPrefix(args, "--debug ") {
+		return strings.TrimSpace(strings.TrimPrefix(args, "--debug")), true
+	}
+	return args, false
 }
 
 func longestCommonPrefix(strs []string) string {
@@ -650,6 +691,48 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return newM, advCmd
 		}
 		return m, nil
+
+	case ridealongReviewDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		reviewText := ""
+		if b, err := os.ReadFile(msg.cachePath); err == nil {
+			reviewText = string(b)
+		}
+		_ = os.Remove(msg.cachePath)
+		var postOutput string
+		if msg.execErr != nil {
+			if _, ok := msg.execErr.(*exec.ExitError); ok {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", msg.exitCode))
+			} else {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", msg.execErr))
+			}
+		} else {
+			postOutput = successStyle.Render("review cached")
+		}
+		if m.ridealong != nil && m.ridealong.IsActive() && reviewText != "" {
+			m.ridealong.CacheReview(reviewText)
+		}
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(postOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+
+	case ridealongFixDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		var postOutput string
+		if msg.execErr != nil {
+			if _, ok := msg.execErr.(*exec.ExitError); ok {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", msg.exitCode))
+			} else {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", msg.execErr))
+			}
+		} else {
+			postOutput = successStyle.Render("agent completed")
+		}
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(postOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 
 	case ridealongExecReadyMsg:
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
@@ -1329,12 +1412,18 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
-		// If exit is selected, exit ridealong mode
-		if m.ridealong.MenuSelection() == 1 {
+		switch m.ridealong.MenuAction() {
+		case ridealongActionExit:
 			return m.exitRidealong()
+		case ridealongActionReview:
+			return m.reviewLastRidealongStep()
+		case ridealongActionFixReviewed:
+			return m.fixReviewedRidealongIssue()
+		case ridealongActionFixLastStep:
+			return m.fixLastRidealongStep()
+		default:
+			return m.executeRidealongCommand()
 		}
-		// Execute the current command
-		return m.executeRidealongCommand()
 
 	case tea.KeyUp:
 		m.ridealong.MenuUp()
@@ -1357,6 +1446,11 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 
 // exitRidealong exits ridealong mode and restores normal shell state
 func (m appModel) exitRidealong() (appModel, tea.Cmd) {
+	if m.ridealong != nil && m.ridealong.debug && m.visualLogPath == m.ridealong.scrollbackLogPath && m.visualLogFile != nil {
+		m.visualLogFile.Close()
+		m.visualLogFile = nil
+		m.visualLogPath = ""
+	}
 	m.ridealong.Deactivate()
 	m.ridealong = nil
 	m.ridealongDynapane.Deactivate()
@@ -1416,10 +1510,79 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 		menuIndex:    0,
 		parent:       m.ridealong,
 	}
+	if m.ridealong.debug {
+		child.EnableDebug(m.ridealong.scrollbackLogPath)
+	}
 	m.ridealong = child
 	m.input.SetValue(child.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
 	return m, tea.Batch(m.ridealongDynapane.Activate(child), m.blinker.ResetTick())
+}
+
+func (m appModel) prepareRidealongAgentRun() (appModel, time.Time, int64) {
+	m.ridealongDynapane.Deactivate()
+	m.input.SetValue("")
+	m.blinker.SetState(BlinkerInactive)
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+	return m, cmdTime, deltaMs
+}
+
+func (m appModel) reviewLastRidealongStep() (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
+		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
+	}
+	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
+	prompt := "Explain what happened in the last step of the ridealong with scrollback log " + m.ridealong.scrollbackLogPath
+	line := "agent -p " + shellQuote(prompt)
+	cachePath := filepath.Join(os.TempDir(), fmt.Sprintf("federation-command-ridealong-review-%s-%d.log", time.Now().Format("20060102-150405"), time.Now().UnixNano()))
+	agentCmd, errOutput := buildAgentPromptCmd(ModePrompt, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	}
+	runCmd := teeCommand(agentCmd, cachePath)
+	return m, deferRidealongExec(runCmd, func(err error) tea.Msg {
+		return ridealongReviewDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs, cachePath: cachePath}
+	})
+}
+
+func (m appModel) fixReviewedRidealongIssue() (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
+		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
+	}
+	if strings.TrimSpace(m.ridealong.lastStepReview) == "" {
+		return m.reviewLastRidealongStep()
+	}
+	review := m.ridealong.lastStepReview
+	prompt := "Fix the issue identified in the last ridealong step using scrollback log " + m.ridealong.scrollbackLogPath + "\n\nReview of the last step:\n" + review
+	return m.runRidealongFixPrompt(prompt)
+}
+
+func (m appModel) fixLastRidealongStep() (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
+		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
+	}
+	prompt := "Fix the last issue you can see in the last step of the scrollback log " + m.ridealong.scrollbackLogPath
+	return m.runRidealongFixPrompt(prompt)
+}
+
+func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
+	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
+	line := "agent -w " + shellQuote(prompt)
+	agentCmd, errOutput := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	}
+	return m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
+		return ridealongFixDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+	})
 }
 
 // executeRidealongCommand executes the current ridealong command
@@ -1543,12 +1706,12 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, cmd
 	}
 
-	// ridealong <file>
+	// ridealong [--debug] <file>
 	if strings.HasPrefix(line, "ridealong ") {
-		filePath := strings.TrimSpace(strings.TrimPrefix(line, "ridealong "))
+		filePath, debugRidealong := parseRidealongCommand(line)
 		if filePath == "" {
 			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("usage: ridealong <file.md>"))
+			return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] <file.md>"))
 		}
 		// Resolve relative paths
 		if !filepath.IsAbs(filePath) {
@@ -1559,18 +1722,35 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render(errMsg))
 		}
+		var debugMsg tea.Cmd
+		if debugRidealong {
+			if m.visualLogFile != nil {
+				m.visualLogFile.Close()
+				m.visualLogFile = nil
+				m.visualLogPath = ""
+			}
+			f, logPath, err := createRidealongScrollbackLog(cmdTime)
+			if err != nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ridealong debug: " + err.Error()))
+			}
+			m.visualLogFile = f
+			m.visualLogPath = logPath
+			ridealong.EnableDebug(logPath)
+			debugMsg = tea.Println(successStyle.Render("ridealong debug scrollback log: " + logPath))
+		}
 		m.ridealong = ridealong
 		m.blinker.SetState(BlinkerRidealong)
 		m.input.SetValue(ridealong.CurrentCommand())
 		m.input.Blur() // Disable normal input in ridealong mode
 		m.logRecord(line, cmdTime, deltaMs, 0)
-		cmd := tea.Batch(m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
+		cmd := tea.Batch(debugMsg, m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
 		return m, cmd
 	}
 
 	if line == "ridealong" {
 		m.logRecord(line, cmdTime, deltaMs, 1)
-		return m, tea.Println(errorStyle.Render("usage: ridealong <file.md>"))
+		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] <file.md>"))
 	}
 
 	// exit
@@ -1951,6 +2131,70 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	return cmd, ""
 }
 
+func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.Cmd, string) {
+	if strings.TrimSpace(prompt) == "" {
+		return nil, errorStyle.Render("no prompt provided")
+	}
+
+	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	if err != nil {
+		return nil, errorStyle.Render("Error: ambiguous-agent not found")
+	}
+
+	agentArgs := []string{"-" + mode, "-a", agent}
+	if model != "" {
+		agentArgs = append(agentArgs, "-m", model)
+	}
+	agentArgs = append(agentArgs, prompt)
+
+	if os.Getenv(EnvIsClauditable) == "true" {
+		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
+	cmd := exec.Command(clauditablePath, clauditableArgs...)
+	env := os.Environ()
+	env = append(env,
+		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
+		EnvAgentSession+"="+filepath.Base(sessionDir),
+		"UFA_AGENT="+agent,
+		EnvIsClauditable+"=true",
+	)
+	if model != "" {
+		env = append(env, "UFA_MODEL="+model)
+	}
+	cmd.Env = env
+	return cmd, ""
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {
+	var quotedArgs []string
+	for _, arg := range cmd.Args {
+		quotedArgs = append(quotedArgs, shellQuote(arg))
+	}
+	teeCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s", strings.Join(quotedArgs, " "), shellQuote(outputPath)))
+	if cmd.Env != nil {
+		teeCmd.Env = cmd.Env
+	} else {
+		teeCmd.Env = os.Environ()
+	}
+	teeCmd.Dir = cmd.Dir
+	return teeCmd
+}
+
 // buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
 func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, string) {
@@ -2177,16 +2421,19 @@ func handleExport(arg string) (string, error) {
 	return "", nil
 }
 
-// parseExportArgs splits export arguments respecting quotes
+// parseExportArgs splits export arguments respecting quotes and command substitution.
 func parseExportArgs(input string) []string {
 	var args []string
 	var current strings.Builder
 	inQuote := false
 	quoteChar := rune(0)
+	parenDepth := 0
+	runes := []rune(input)
 
-	for _, r := range input {
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		switch {
-		case !inQuote && (r == '"' || r == '\''):
+		case !inQuote && parenDepth == 0 && (r == '"' || r == '\''):
 			inQuote = true
 			quoteChar = r
 			current.WriteRune(r)
@@ -2194,7 +2441,16 @@ func parseExportArgs(input string) []string {
 			inQuote = false
 			quoteChar = 0
 			current.WriteRune(r)
-		case !inQuote && r == ' ':
+		case !inQuote && r == '$' && i+1 < len(runes) && runes[i+1] == '(':
+			parenDepth++
+			current.WriteRune(r)
+		case !inQuote && parenDepth > 0 && r == '(':
+			parenDepth++
+			current.WriteRune(r)
+		case !inQuote && parenDepth > 0 && r == ')':
+			parenDepth--
+			current.WriteRune(r)
+		case !inQuote && parenDepth == 0 && r == ' ':
 			if current.Len() > 0 {
 				args = append(args, current.String())
 				current.Reset()
@@ -2211,7 +2467,9 @@ func parseExportArgs(input string) []string {
 	return args
 }
 
-// processExportAssignment handles a single VAR=value assignment
+// processExportAssignment handles a single VAR=value assignment.
+// If the value contains command substitution ($(...) or backticks) it is
+// evaluated via bash so that the result is captured in the process environment.
 func processExportAssignment(assignment string) error {
 	eqIdx := strings.Index(assignment, "=")
 	if eqIdx == -1 {
@@ -2226,6 +2484,15 @@ func processExportAssignment(assignment string) error {
 	}
 	if !isValidVarName(name) {
 		return fmt.Errorf("'%s': not a valid identifier", name)
+	}
+
+	if strings.Contains(value, "$(") || strings.Contains(value, "`") {
+		script := assignment + "\nprintf '%s' \"$" + name + "\""
+		out, err := exec.Command("bash", "-c", script).Output()
+		if err != nil {
+			return fmt.Errorf("command substitution failed: %v", err)
+		}
+		return os.Setenv(name, string(out))
 	}
 
 	if len(value) >= 2 {
@@ -2508,10 +2775,12 @@ func renderSessions(recordsPath string, currentSession string) string {
 }
 
 func main() {
-	// Handle --version flag
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("federation-command %s\n", Version)
-		return
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--version", "-v":
+			fmt.Printf("federation-command %s\n", Version)
+			return
+		}
 	}
 
 	recordsPath := os.Getenv(EnvAgentRecordsPath)

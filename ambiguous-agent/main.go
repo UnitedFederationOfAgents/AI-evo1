@@ -41,6 +41,7 @@ const (
 // AgentConfig defines how to invoke a specific AI CLI agent
 type AgentConfig struct {
 	Command                      string              // Base command to run (e.g., "claude", "gemini")
+	CommandArgs                  []string            // Arguments that must immediately follow the command
 	PromptFlag                   string              // Flag to pass prompts (e.g., "-p")
 	AddDirFlag                   string              // Flag to add directories (if supported)
 	ModelFlag                    string              // Flag to specify model (if supported)
@@ -108,6 +109,7 @@ var agentConfigs = map[string]*AgentConfig{
 	},
 	"codex": {
 		Command:                      "codex",
+		CommandArgs:                  []string{"exec"},
 		PromptFlag:                   "", // codex uses positional prompts; -p is --profile
 		AddDirFlag:                   "--add-dir",
 		ModelFlag:                    "--model",
@@ -479,6 +481,8 @@ Examples:
 // buildAgentArgs constructs the command-line arguments for the agent
 func buildAgentArgs(config *AgentConfig, mode, model, prompt, sessionDir string, additionalDirs []string) []string {
 	var args []string
+
+	args = append(args, config.CommandArgs...)
 
 	// Add model flag if specified and supported
 	if model != "" && config.ModelFlag != "" {

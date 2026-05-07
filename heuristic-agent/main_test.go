@@ -111,6 +111,44 @@ func TestBackoffLevels(t *testing.T) {
 	}
 }
 
+func TestRequiredSlopspaceID(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+		ok   bool
+	}{
+		{
+			name: "present",
+			args: []string{"deploy", "abc123", "--agent-type", "agent-worker"},
+			want: "abc123",
+			ok:   true,
+		},
+		{
+			name: "missing",
+			args: []string{"deploy"},
+			ok:   false,
+		},
+		{
+			name: "flag is not id",
+			args: []string{"deploy", "--agent-type", "agent-worker"},
+			ok:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := requiredSlopspaceID(tt.args)
+			if ok != tt.ok {
+				t.Fatalf("requiredSlopspaceID() ok = %v, want %v", ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("requiredSlopspaceID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewWorker(t *testing.T) {
 	cfg := types.DefaultConfig()
 	cfg.WorkerID = "test1234"

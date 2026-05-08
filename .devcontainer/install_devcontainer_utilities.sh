@@ -25,6 +25,9 @@ export NVM_DIR="/usr/local/share/nvm"
 nvm install v22.19.0
 npm install -g @anthropic-ai/claude-code
 
+mkdir -p /AI-evo1-dev/bin /agent /host-agent-files
+chmod 777 /AI-evo1-dev /AI-evo1-dev/bin /agent /host-agent-files
+
 echo 'source /scripts/configure_devcontainer_environment.sh' >>/home/vscode/.bashrc
 
 echo 'source /scripts/devcontainer_runtime_startup.sh' >>/home/vscode/.bashrc

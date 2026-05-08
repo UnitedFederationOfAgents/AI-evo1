@@ -1,4 +1,4 @@
-.PHONY: build docker-build run clean test all deploy-dependencies-local clean-local-dependencies
+.PHONY: build docker-build run clean test all deploy-dev-binary
 
 BINARY_NAME=federation-command
 
@@ -26,19 +26,10 @@ clean:
 test:
 	go test -v ./...
 
-# Build and deploy local dependencies from other sub-projects
-deploy-dependencies-local:
-	@echo "Building clauditable..."
-	cd ../clauditable && go build -o ../federation-command/clauditable .
-	@echo "Building ambiguous-agent..."
-	cd ../ambiguous-agent && go build -o ../federation-command/ambiguous-agent .
-	@echo "Building clod (for testing)..."
-	cd ../clod && go build -o ../federation-command/clod .
-	@echo "Dependencies deployed to local directory"
-	@ls -la clauditable ambiguous-agent clod 2>/dev/null || true
+DEV_BIN_DIR=/AI-evo1-dev/bin
 
-# Clean local dependencies
-clean-local-dependencies:
-	@echo "Cleaning local dependencies..."
-	rm -f clauditable ambiguous-agent clod
-	@echo "Local dependencies cleaned"
+# Build and deploy this binary to the shared dev bin directory
+deploy-dev-binary: build
+	@mkdir -p $(DEV_BIN_DIR)
+	cp $(BINARY_NAME) $(DEV_BIN_DIR)/$(BINARY_NAME)
+	@echo "$(BINARY_NAME) deployed to $(DEV_BIN_DIR)"

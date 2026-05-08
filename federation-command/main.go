@@ -143,6 +143,10 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
+	devWarningStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")).
+				Bold(true)
+
 	continuationStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
 
@@ -509,7 +513,12 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	return tea.Batch(textinput.Blink, tea.Println(info), m.blinker.tickCmd())
+	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd()}
+	if devBins := devBinaries(); len(devBins) > 0 {
+		devNotice := devWarningStyle.Render("⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): " + strings.Join(devBins, ", "))
+		cmds = append(cmds, tea.Println(devNotice))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -2696,6 +2705,25 @@ func findBinary(name string) (string, error) {
 	}
 
 	return "", fmt.Errorf("%s not found on PATH or in %s", name, filepath.Dir(self))
+}
+
+// devBinaries returns the names of binaries running from /AI-evo1-dev/bin
+func devBinaries() []string {
+	const devBinDir = "/AI-evo1-dev/bin"
+	var bins []string
+	if self, err := os.Executable(); err == nil {
+		if strings.HasPrefix(filepath.Clean(self), devBinDir) {
+			bins = append(bins, "federation-command")
+		}
+	}
+	for _, dep := range []string{"clauditable", "ambiguous-agent"} {
+		if p, err := exec.LookPath(dep); err == nil {
+			if strings.HasPrefix(filepath.Clean(p), devBinDir) {
+				bins = append(bins, dep)
+			}
+		}
+	}
+	return bins
 }
 
 // parseArgs splits a string into arguments, respecting quoted strings

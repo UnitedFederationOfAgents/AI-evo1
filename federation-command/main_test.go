@@ -79,7 +79,7 @@ func TestParseRidealongCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
-			filePath, debug := parseRidealongCommand(tt.line)
+			filePath, debug, _ := parseRidealongCommand(tt.line)
 			if filePath != tt.filePath {
 				t.Errorf("parseRidealongCommand(%q) filePath = %q, want %q", tt.line, filePath, tt.filePath)
 			}

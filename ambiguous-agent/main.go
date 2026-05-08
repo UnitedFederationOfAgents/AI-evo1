@@ -732,8 +732,10 @@ func queryModelsForAgent(agent string, config *AgentConfig) []string {
 		return parseGrokModels(string(output))
 
 	default:
-		// For agents without dynamic model listing, explain how to get models
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("agent '%s' does not support dynamic model listing", agent)))
+		// For agents without dynamic model listing, use the static list from config
+		if len(config.Models) > 0 {
+			return config.Models
+		}
 		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
 		return nil
 	}

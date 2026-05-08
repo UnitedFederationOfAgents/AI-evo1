@@ -29,6 +29,7 @@ type ridealongStep struct {
 // Ridealong represents an active ridealong session parsed from a markdown file.
 type Ridealong struct {
 	filePath          string
+	startPath         string // working directory when the ridealong was launched
 	steps             []ridealongStep
 	currentIndex      int
 	prevExitCode      int // -1 = no command executed yet
@@ -37,7 +38,19 @@ type Ridealong struct {
 	debug             bool
 	scrollbackLogPath string
 	lastStepReview    string
+	fixingIssue       bool // true after fix is selected; clears on step advance
 	parent            *Ridealong // non-nil when this is a nested ridealong
+
+	// waypoint state
+	waypoints          map[string]int // name → step index
+	waypointOrder      []string       // waypoint names in document order
+	waypointMenuActive bool
+	waypointMenuIndex  int
+
+	// autoplay state
+	autoplay      bool
+	autoplayTick  int       // increments on each dynapane tick; used for animation only
+	autoplayStart time.Time // wall-clock time when the current countdown began
 }
 
 // ridealongBlockOpenRegex matches the opening fence of a ```ridealong block.
@@ -46,11 +59,14 @@ var ridealongBlockOpenRegex = regexp.MustCompile("^```ridealong\\s*$")
 // ridealongLinkRegex matches a markdown inline link [text](path).
 var ridealongLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 
+// ridealongWaypointRegex matches <!-- ridealong waypoint NAME --> comments.
+var ridealongWaypointRegex = regexp.MustCompile(`<!--\s*ridealong\s+waypoint\s+(\S+)\s*-->`)
+
 // ridealongContinuesMarker is the annotation signalling a depth-first dive.
-const ridealongContinuesMarker = "<!-- ride along continues -->"
+const ridealongContinuesMarker = "<!-- ridealong continues -->"
 
 // parseContinuesLine inspects a single source line.  If it contains exactly one
-// markdown link and the ride-along-continues marker, it returns the resolved
+// markdown link and the ridealong-continues marker, it returns the resolved
 // absolute path of the linked file and true; otherwise it returns "", false.
 func parseContinuesLine(line, baseFilePath string) (string, bool) {
 	if !strings.Contains(line, ridealongContinuesMarker) {
@@ -68,7 +84,7 @@ func parseContinuesLine(line, baseFilePath string) (string, bool) {
 }
 
 // extractContinuesLinks returns the absolute paths of every sub-file referenced
-// by <!-- ride along continues --> annotations in filePath.
+// by <!-- ridealong continues --> annotations in filePath.
 func extractContinuesLinks(filePath string) []string {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -114,17 +130,28 @@ func hasCycle(startPath string) bool {
 	return dfs(startPath)
 }
 
-// parseRidealongSteps reads a markdown file and produces an ordered list of
-// steps: shell commands (from ```ridealong blocks) interleaved with depth-first
-// dive annotations (from <!-- ride along continues --> lines), preserving
-// document order throughout.
-func parseRidealongSteps(filePath string) ([]ridealongStep, string) {
+// ridealongParseResult holds the output of a full ridealong file parse.
+type ridealongParseResult struct {
+	steps         []ridealongStep
+	waypoints     map[string]int
+	waypointOrder []string
+	errMsg        string
+}
+
+// parseRidealong reads a markdown file and returns steps, waypoints, and any error.
+// Steps are shell commands (from ```ridealong blocks) interleaved with depth-first
+// dive annotations (from <!-- ridealong continues --> lines), in document order.
+// Waypoints are recorded from <!-- ridealong waypoint NAME --> comments and map
+// each name to the index of the next step after the comment.
+func parseRidealong(filePath string) ridealongParseResult {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, "ridealong: cannot read file: " + err.Error()
+		return ridealongParseResult{errMsg: "ridealong: cannot read file: " + err.Error()}
 	}
 
 	var steps []ridealongStep
+	waypoints := map[string]int{}
+	var waypointOrder []string
 	inBlock := false
 
 	for _, line := range strings.Split(string(content), "\n") {
@@ -136,6 +163,14 @@ func parseRidealongSteps(filePath string) ([]ridealongStep, string) {
 			}
 			if p, ok := parseContinuesLine(line, filePath); ok {
 				steps = append(steps, ridealongStep{kind: stepDive, value: p})
+				continue
+			}
+			if m := ridealongWaypointRegex.FindStringSubmatch(trimmed); m != nil {
+				name := m[1]
+				if _, exists := waypoints[name]; !exists {
+					waypoints[name] = len(steps)
+					waypointOrder = append(waypointOrder, name)
+				}
 			}
 		} else {
 			if trimmed == "```" {
@@ -147,7 +182,18 @@ func parseRidealongSteps(filePath string) ([]ridealongStep, string) {
 			}
 		}
 	}
-	return steps, ""
+	return ridealongParseResult{
+		steps:         steps,
+		waypoints:     waypoints,
+		waypointOrder: waypointOrder,
+	}
+}
+
+// parseRidealongSteps is a convenience wrapper around parseRidealong for callers
+// that only need the step list and error message.
+func parseRidealongSteps(filePath string) ([]ridealongStep, string) {
+	r := parseRidealong(filePath)
+	return r.steps, r.errMsg
 }
 
 // NewRidealong creates a new top-level ridealong session from a markdown file.
@@ -157,21 +203,39 @@ func NewRidealong(filePath string) (*Ridealong, string) {
 	if hasCycle(filePath) {
 		return nil, "ridealong: cyclic dependency detected in " + filepath.Base(filePath)
 	}
-	steps, errMsg := parseRidealongSteps(filePath)
-	if errMsg != "" {
-		return nil, errMsg
+	result := parseRidealong(filePath)
+	if result.errMsg != "" {
+		return nil, result.errMsg
 	}
-	if len(steps) == 0 {
+	if len(result.steps) == 0 {
 		return nil, "ridealong: no commands or links found in file"
 	}
 	return &Ridealong{
-		filePath:     filePath,
-		steps:        steps,
-		currentIndex: 0,
-		prevExitCode: -1,
-		active:       true,
-		menuIndex:    0,
+		filePath:      filePath,
+		steps:         result.steps,
+		currentIndex:  0,
+		prevExitCode:  -1,
+		active:        true,
+		menuIndex:     0,
+		waypoints:     result.waypoints,
+		waypointOrder: result.waypointOrder,
 	}, ""
+}
+
+// JumpToWaypoint moves the ridealong to the step indicated by the named waypoint.
+// Returns false if the waypoint name is not found.
+func (r *Ridealong) JumpToWaypoint(name string) bool {
+	if r == nil {
+		return false
+	}
+	idx, ok := r.waypoints[name]
+	if !ok {
+		return false
+	}
+	r.currentIndex = idx
+	r.prevExitCode = -1
+	r.menuIndex = 0
+	return true
 }
 
 // EnableDebug turns on the debug ridealong actions and records the scrollback
@@ -182,6 +246,69 @@ func (r *Ridealong) EnableDebug(logPath string) {
 	}
 	r.debug = true
 	r.scrollbackLogPath = logPath
+}
+
+// RootStartPath returns the startPath of the topmost ridealong in the chain.
+func (r *Ridealong) RootStartPath() string {
+	for r != nil && r.parent != nil {
+		r = r.parent
+	}
+	if r == nil {
+		return ""
+	}
+	return r.startPath
+}
+
+// EnableAutoplay activates autoplay on this ridealong, resetting the countdown.
+func (r *Ridealong) EnableAutoplay() {
+	if r == nil {
+		return
+	}
+	r.autoplay = true
+	r.autoplayTick = 0
+	r.autoplayStart = time.Now()
+}
+
+// AutoplayDeactivate deactivates autoplay on this ridealong and all ancestors.
+func (r *Ridealong) AutoplayDeactivate() {
+	for r != nil {
+		r.autoplay = false
+		r = r.parent
+	}
+}
+
+// ResetAutoplayCountdown resets the countdown for the next step.
+func (r *Ridealong) ResetAutoplayCountdown() {
+	if r != nil {
+		r.autoplayTick = 0
+		r.autoplayStart = time.Now()
+	}
+}
+
+// TickAutoplay increments the animation tick and returns true when 3 seconds
+// have elapsed since the countdown started.
+func (r *Ridealong) TickAutoplay() bool {
+	if r == nil || !r.autoplay {
+		return false
+	}
+	r.autoplayTick++
+	return time.Since(r.autoplayStart) >= 3*time.Second
+}
+
+// CountdownDisplay returns the formatted countdown string (e.g. "3..") or "" if
+// autoplay is not active.
+func (r *Ridealong) CountdownDisplay() string {
+	if r == nil || !r.autoplay {
+		return ""
+	}
+	elapsed := time.Since(r.autoplayStart).Seconds()
+	state := int(elapsed * 4) // 4 display states per second
+	if state >= 12 {
+		state = 11
+	}
+	num := 3 - state/4
+	dots := strings.Repeat(".", state%4)
+	return fmt.Sprintf("%d%s", num, dots)
 }
 
 // stepDisplay returns the human-readable label used throughout the UI for a step.
@@ -254,46 +381,105 @@ func (r *Ridealong) AdvanceCommand(exitCode int) bool {
 	}
 	r.prevExitCode = exitCode
 	r.lastStepReview = ""
+	r.fixingIssue = false
 	r.menuIndex = 0
 	r.currentIndex++
+	if r.autoplay {
+		r.autoplayTick = 0
+		r.autoplayStart = time.Now()
+	}
 	return r.currentIndex < len(r.steps)
+}
+
+// StartFix marks that a fix action is in progress, hiding debug menu options
+// until the next step is executed.
+func (r *Ridealong) StartFix() {
+	if r == nil {
+		return
+	}
+	r.fixingIssue = true
+	r.menuIndex = 0
 }
 
 type ridealongMenuAction int
 
 const (
-	ridealongActionExecute ridealongMenuAction = iota
+	ridealongActionExecute    ridealongMenuAction = iota
 	ridealongActionReview
 	ridealongActionFixReviewed
 	ridealongActionFixLastStep
+	ridealongActionWaypoint
+	ridealongActionAutoplay
 	ridealongActionExit
 )
 
-func (r *Ridealong) menuItemCount() int {
-	if r != nil && r.debug {
+// menuItem is used internally to build the ordered menu list.
+type ridealongMenuItem struct {
+	label   string
+	isDebug bool
+	action  ridealongMenuAction
+}
+
+// buildMenuItems constructs the current ordered list of menu items.
+func (r *Ridealong) buildMenuItems() []ridealongMenuItem {
+	items := []ridealongMenuItem{{"execute command", false, ridealongActionExecute}}
+	if r.debug && !r.fixingIssue {
 		if r.lastStepReview != "" {
-			return 3 // execute, fix issue, exit
+			items = append(items, ridealongMenuItem{"fix issue", true, ridealongActionFixReviewed})
+		} else {
+			items = append(items,
+				ridealongMenuItem{"review last step", true, ridealongActionReview},
+				ridealongMenuItem{"fix issue from last step", true, ridealongActionFixLastStep},
+			)
 		}
-		return 4 // execute, review last step, fix issue from last step, exit
 	}
-	return 2
+	if len(r.waypointOrder) > 0 {
+		items = append(items, ridealongMenuItem{"waypoint", false, ridealongActionWaypoint})
+	}
+	items = append(items, ridealongMenuItem{"autoplay", false, ridealongActionAutoplay})
+	items = append(items, ridealongMenuItem{"exit", false, ridealongActionExit})
+	return items
+}
+
+func (r *Ridealong) menuItemCount() int {
+	if r == nil {
+		return 2
+	}
+	if r.waypointMenuActive {
+		return len(r.waypointOrder) + 1 // waypoints + cancel
+	}
+	return len(r.buildMenuItems())
 }
 
 // MenuUp moves menu selection toward "execute command".
 func (r *Ridealong) MenuUp() {
-	if r != nil && r.menuIndex > 0 {
+	if r == nil {
+		return
+	}
+	if r.waypointMenuActive {
+		if r.waypointMenuIndex > 0 {
+			r.waypointMenuIndex--
+		}
+	} else if r.menuIndex > 0 {
 		r.menuIndex--
 	}
 }
 
 // MenuDown moves menu selection toward "exit".
 func (r *Ridealong) MenuDown() {
-	if r != nil && r.menuIndex < r.menuItemCount()-1 {
+	if r == nil {
+		return
+	}
+	if r.waypointMenuActive {
+		if r.waypointMenuIndex < len(r.waypointOrder) {
+			r.waypointMenuIndex++
+		}
+	} else if r.menuIndex < r.menuItemCount()-1 {
 		r.menuIndex++
 	}
 }
 
-// MenuSelection returns the current menu index: 0 = execute, 1 = exit.
+// MenuSelection returns the current menu index.
 func (r *Ridealong) MenuSelection() int {
 	if r == nil {
 		return 0
@@ -301,32 +487,16 @@ func (r *Ridealong) MenuSelection() int {
 	return r.menuIndex
 }
 
+// MenuAction returns the action for the currently selected menu item.
 func (r *Ridealong) MenuAction() ridealongMenuAction {
 	if r == nil {
 		return ridealongActionExecute
 	}
-	if !r.debug {
-		if r.menuIndex == 1 {
-			return ridealongActionExit
-		}
-		return ridealongActionExecute
+	items := r.buildMenuItems()
+	if r.menuIndex >= 0 && r.menuIndex < len(items) {
+		return items[r.menuIndex].action
 	}
-	switch r.menuIndex {
-	case 0:
-		return ridealongActionExecute
-	case 1:
-		if r.lastStepReview != "" {
-			return ridealongActionFixReviewed
-		}
-		return ridealongActionReview
-	case 2:
-		if r.lastStepReview != "" {
-			return ridealongActionExit
-		}
-		return ridealongActionFixLastStep
-	default:
-		return ridealongActionExit
-	}
+	return ridealongActionExit
 }
 
 func (r *Ridealong) CacheReview(review string) {
@@ -396,12 +566,30 @@ func (rd *RidealongDynapane) IsActive() bool {
 	return rd.active
 }
 
-// Tick handles dynapane ticks (for potential animations).
+// Tick handles dynapane ticks (for animations and autoplay countdown).
 func (rd *RidealongDynapane) Tick() tea.Cmd {
 	if !rd.active {
 		return nil
 	}
 	return ridealongDynapaneTickCmd()
+}
+
+// autoplay color palette — cycles across letters for the glowing effect.
+var autoplayColors = []lipgloss.Color{
+	"99", "105", "111", "117", "123", "129", "135", "141",
+}
+
+// renderAutoplayText renders "autoplaying..." with per-character color cycling
+// offset by the current tick so the colors appear to scroll.
+func renderAutoplayText(tick int) string {
+	text := "autoplaying..."
+	var sb strings.Builder
+	for i, ch := range text {
+		colorIdx := (i + tick/2) % len(autoplayColors)
+		style := lipgloss.NewStyle().Foreground(autoplayColors[colorIdx]).Bold(true)
+		sb.WriteString(style.Render(string(ch)))
+	}
+	return sb.String()
 }
 
 // Styles for ridealong dynapane
@@ -428,6 +616,13 @@ var (
 	ridealongMenuStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
 
+	ridealongMenuDebugSelectedStyle = lipgloss.NewStyle().
+						Foreground(lipgloss.Color("208")).
+						Bold(true)
+
+	ridealongMenuDebugStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("136"))
+
 	ridealongPrevCmdStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
 
@@ -441,6 +636,18 @@ var (
 	ridealongErrorCodeStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("196")).
 				Bold(true)
+
+	ridealongCountdownStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220")).
+				Bold(true)
+
+	ridealongHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
+
+	ridealongWaypointHeaderStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("141")).
+					Bold(true)
 )
 
 // View renders the ridealong dynapane.
@@ -462,36 +669,69 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 	r := rd.ridealong
 
 	// Title row: ◈ ridealong  ---    <breadcrumb title>
-	title := ridealongTitleStyle.Render("◈ ridealong")
+	title := ridealongTitleStyle.Render("🚔 ridealong")
 	separator := ridealongDividerStyle.Render("  ---    ")
 	fileLabel := ridealongFileStyle.Render(r.DisplayTitle())
 	titleRow := title + separator + fileLabel
-	// Pad to inner width
 	titleRowWidth := lipgloss.Width(titleRow)
 	if titleRowWidth < innerWidth {
 		titleRow += strings.Repeat(" ", innerWidth-titleRowWidth)
 	}
 
-	// Divider
 	divider := ridealongDividerStyle.Render(strings.Repeat("─", innerWidth))
 
-	// Menu items
-	menuLabels := []string{"execute command"}
-	if r.debug {
-		if r.lastStepReview != "" {
-			menuLabels = append(menuLabels, "fix issue")
-		} else {
-			menuLabels = append(menuLabels, "review last step", "fix issue from last step")
-		}
-	}
-	menuLabels = append(menuLabels, "exit")
-
 	var menuLines []string
-	for i, label := range menuLabels {
-		if r.menuIndex == i {
-			menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ "+label))
+
+	if r.waypointMenuActive {
+		// Waypoint sub-menu
+		menuLines = append(menuLines, ridealongWaypointHeaderStyle.Render("  select a waypoint:"))
+		for i, name := range r.waypointOrder {
+			if r.waypointMenuIndex == i {
+				menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ "+name))
+			} else {
+				menuLines = append(menuLines, ridealongMenuStyle.Render("  "+name))
+			}
+		}
+		cancelIdx := len(r.waypointOrder)
+		if r.waypointMenuIndex == cancelIdx {
+			menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ cancel"))
 		} else {
-			menuLines = append(menuLines, ridealongMenuStyle.Render("  "+label))
+			menuLines = append(menuLines, ridealongMenuStyle.Render("  cancel"))
+		}
+	} else {
+		// Normal menu
+		items := r.buildMenuItems()
+		for i, item := range items {
+			selected := r.menuIndex == i
+
+			if item.action == ridealongActionAutoplay && r.autoplay {
+				// Animated autoplay item with countdown
+				animText := renderAutoplayText(r.autoplayTick)
+				countdown := ridealongCountdownStyle.Render(" [" + r.CountdownDisplay() + "]")
+				if selected {
+					menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ ")+animText+countdown)
+				} else {
+					menuLines = append(menuLines, ridealongMenuStyle.Render("  ")+animText+countdown)
+				}
+			} else {
+				label := item.label
+				if selected {
+					if item.isDebug {
+						menuLines = append(menuLines, ridealongMenuDebugSelectedStyle.Render("◈ "+label))
+					} else {
+						menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ "+label))
+					}
+				} else {
+					if item.isDebug {
+						menuLines = append(menuLines, ridealongMenuDebugStyle.Render("  "+label))
+					} else {
+						menuLines = append(menuLines, ridealongMenuStyle.Render("  "+label))
+					}
+				}
+			}
+		}
+		if r.autoplay {
+			menuLines = append(menuLines, ridealongHintStyle.Render("  ◂ press left to exit autoplay"))
 		}
 	}
 

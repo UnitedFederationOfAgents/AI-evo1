@@ -20,7 +20,8 @@ make build-all
 
 clod mimics real AI coding agents without making API calls. It is the foundation for exercising the rest of the suite during development and CI, with no API keys or costs required.
 
-[clod brief tour](../../clod/docs/brief-tour.md) <!-- ride along continues -->
+<!-- ridealong waypoint clod -->
+[clod brief tour](../../clod/docs/brief-tour.md) <!-- ridealong continues -->
 
 ```ridealong
 cd $(git rev-parse --show-toplevel)
@@ -30,7 +31,8 @@ cd $(git rev-parse --show-toplevel)
 
 clauditable wraps any command and records its execution, capturing stdout/stderr with timestamps and metadata. Every agent invocation in the suite flows through clauditable, giving you a complete audit trail of what ran, when, and what it produced.
 
-[clauditable brief tour](../../clauditable/docs/brief-tour.md) <!-- ride along continues -->
+<!-- ridealong waypoint clauditable -->
+[clauditable brief tour](../../clauditable/docs/brief-tour.md) <!-- ridealong continues -->
 
 ```ridealong
 cd $(git rev-parse --show-toplevel)
@@ -40,7 +42,8 @@ cd $(git rev-parse --show-toplevel)
 
 ambiguous-agent provides a single invocation interface across all supported AI coding agents. Switching from clod to claude, gemini, or copilot is a one-flag change — the rest of the invocation stays the same.
 
-[ambiguous-agent brief tour](../../ambiguous-agent/docs/brief-tour.md) <!-- ride along continues -->
+<!-- ridealong waypoint ambiguous-agent -->
+[ambiguous-agent brief tour](../../ambiguous-agent/docs/brief-tour.md) <!-- ridealong continues -->
 
 ```ridealong
 cd $(git rev-parse --show-toplevel)
@@ -50,7 +53,8 @@ cd $(git rev-parse --show-toplevel)
 
 federation-command brings the previous three components together in an interactive, readline-based shell with session management and multi-line input. The sub-tour below covers setup and all rideable steps; the interactive shell session itself must be launched manually:
 
-[federation-command brief tour](../../federation-command/docs/brief-tour.md) <!-- ride along continues -->
+<!-- ridealong waypoint federation-command -->
+[federation-command brief tour](../../federation-command/docs/brief-tour.md) <!-- ridealong continues -->
 
 ```ridealong
 cd $(git rev-parse --show-toplevel)
@@ -61,7 +65,7 @@ cd $(git rev-parse --show-toplevel)
 With the shell launched, the following demonstrates how the components integrate end-to-end. Launch it:
 
 ```bash
-export AGENT_SESSION=tour-session
+export AGENT_SESSION=tour-session-$(date +%Y-%m-%d)
 ./federation-command/federation-command
 ```
 
@@ -98,18 +102,18 @@ exit
 Inspect the records after exiting:
 
 ```ridealong
-ls -la /host-agent-files/agent-records/tour-session/ 2>/dev/null || echo "Session directory will be created when you run the tour"
+ls -la /host-agent-files/agent-records/tour-session-$(date +%Y-%m-%d)/ 2>/dev/null || echo "Session directory will be created when you run the tour"
 ```
 
 Start a second session and provide the first session's records as context:
 
 ```bash
-export AGENT_SESSION=tour-session-2
+export AGENT_SESSION=tour-session-$(date +%Y-%m-%d)-2
 ./federation-command/federation-command
 ```
 
 ```federation-command
-agent -provide-records tour-session -r What happened in our last session?
+agent -provide-records tour-session-$(date +%Y-%m-%d) -r What happened in our last session?
 ```
 
 ```federation-command
@@ -126,7 +130,8 @@ rm -f /tmp/tour-test.txt
 
 heuristic-agent manages long-running, background AI work through slopspaces and work signals. Where federation-command is interactive, heuristic-agent handles tasks that run unattended.
 
-[heuristic-agent brief tour](../../heuristic-agent/docs/brief-tour.md) <!-- ride along continues -->
+<!-- ridealong waypoint heuristic-agent -->
+[heuristic-agent brief tour](../../heuristic-agent/docs/brief-tour.md) <!-- ridealong continues -->
 
 ```ridealong
 cd $(git rev-parse --show-toplevel)

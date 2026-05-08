@@ -41,8 +41,12 @@ make deploy-dependencies-local
 
 ### Create a Slopspace
 
+The `export` builtin persists variables in the federation-command environment,
+so `$SLOP_ID` will be available in all subsequent ridealong steps.
+
 ```ridealong
-./heuristic-agent slopspace create
+export SLOP_ID=$(./heuristic-agent slopspace create | awk '/Created slopspace:/ {print $3; exit}')
+echo "Created slopspace: $SLOP_ID"
 ```
 
 Output:
@@ -114,16 +118,8 @@ This example demonstrates slopspace management without the watch loop. For full 
 ./heuristic-agent watch --agent-type agent-worker
 ```
 
-Then run this ridealong to create and manage a slopspace. The `export` builtin
-persists variables in the federation-command environment, so values set with
-`export VAR=$(...)` in one step are available as `$VAR` in all subsequent steps.
-
-Create the slopspace and export its ID:
-
-```ridealong
-export SLOP_ID=$(./heuristic-agent slopspace create | awk '/Created slopspace:/ {print $3; exit}')
-echo "Created slopspace: $SLOP_ID"
-```
+Then run this ridealong to manage the slopspace created above (`$SLOP_ID` is
+already set from the "Create a Slopspace" step).
 
 Add a file to its write-space and deploy it to the agent-worker location:
 
@@ -145,10 +141,10 @@ Create a work signal targeting the slopspace (the watch loop will pick this up):
 TS=$(date +%s) && printf '{"id":"slop-example-%s","work_type":"slopspace","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should modify the file write-spaces/files/CAT-TASK.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"%s","updated_at":"%s"}\n' "$TS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /host-agent-files/work/ongoing/WORKING-slop-example-$TS.jsonl
 ```
 
-Wait briefly for the watch loop to process, then return the slopspace:
+Wait briefly for the watch loop to process, then return the slopspace if the watch loop hasn't already done so:
 
 ```ridealong
-sleep 15 && ./heuristic-agent slopspace return "$SLOP_ID"
+sleep 15 && (./heuristic-agent slopspace return "$SLOP_ID" || echo "Slopspace already returned by watch loop - OK")
 ```
 
 Check results in the slopspace:

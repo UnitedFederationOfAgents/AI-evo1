@@ -446,9 +446,16 @@ func appendHistoryEntry(path, line string) {
 	fmt.Fprintln(f, line)
 }
 
-func createRidealongScrollbackLog(now time.Time) (*os.File, string, error) {
+func createRidealongScrollbackLog(now time.Time, startPath string) (*os.File, string, error) {
 	name := fmt.Sprintf("federation-command-ridealong-%s-%d.log", now.Format("20060102-150405"), now.UnixNano())
-	path := filepath.Join(os.TempDir(), name)
+	dir := os.TempDir()
+	if startPath != "" {
+		scratchDir := filepath.Join(startPath, "ignored-scratch")
+		if info, err := os.Stat(scratchDir); err == nil && info.IsDir() {
+			dir = scratchDir
+		}
+	}
+	path := filepath.Join(dir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, "", err
@@ -456,18 +463,23 @@ func createRidealongScrollbackLog(now time.Time) (*os.File, string, error) {
 	return f, path, nil
 }
 
-func parseRidealongCommand(line string) (filePath string, debug bool) {
+func parseRidealongCommand(line string) (filePath string, debug bool, waypoint string) {
 	args := strings.TrimSpace(strings.TrimPrefix(line, "ridealong"))
-	if args == "" {
-		return "", false
+	parts := strings.Fields(args)
+	for i := 0; i < len(parts); i++ {
+		switch parts[i] {
+		case "--debug":
+			debug = true
+		case "--waypoint":
+			if i+1 < len(parts) {
+				waypoint = parts[i+1]
+				i++
+			}
+		default:
+			filePath = parts[i]
+		}
 	}
-	if args == "--debug" {
-		return "", true
-	}
-	if strings.HasPrefix(args, "--debug ") {
-		return strings.TrimSpace(strings.TrimPrefix(args, "--debug")), true
-	}
-	return args, false
+	return
 }
 
 func longestCommonPrefix(strs []string) string {
@@ -663,6 +675,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RidealongDynapaneTickMsg:
 		cmd := m.ridealongDynapane.Tick()
+		// Autoplay: only tick when dynapane is still active (prevents double-fire).
+		if cmd != nil && m.ridealong != nil && m.ridealong.autoplay {
+			if m.ridealong.TickAutoplay() {
+				newM, execCmd := m.executeRidealongCommand()
+				return newM, tea.Batch(cmd, execCmd)
+			}
+		}
 		return m, cmd
 
 	case ridealongCmdDoneMsg:
@@ -681,6 +700,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+
+		// Deactivate autoplay on non-zero exit code.
+		if msg.exitCode != 0 && m.ridealong != nil {
+			m.ridealong.AutoplayDeactivate()
+		}
 
 		// Advance to the next step (handles parent pop-up and dive entries)
 		if m.ridealong != nil && m.ridealong.IsActive() {
@@ -1191,9 +1215,9 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return mkDone(exitCode, "")
 	}
 
-	// ridealong (blocked — use <!-- ride along continues --> for nesting)
+	// ridealong (blocked — use <!-- ridealong continues --> for nesting)
 	if line == "ridealong" || strings.HasPrefix(line, "ridealong ") {
-		return true, m, seqPrint(errorStyle.Render("ridealong: use <!-- ride along continues --> for nesting"), 1)
+		return true, m, seqPrint(errorStyle.Render("ridealong: use <!-- ridealong continues --> for nesting"), 1)
 	}
 
 	// exit
@@ -1412,6 +1436,9 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEnter:
+		if m.ridealong.waypointMenuActive {
+			return m.handleWaypointMenuSelect()
+		}
 		switch m.ridealong.MenuAction() {
 		case ridealongActionExit:
 			return m.exitRidealong()
@@ -1421,6 +1448,17 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 			return m.fixReviewedRidealongIssue()
 		case ridealongActionFixLastStep:
 			return m.fixLastRidealongStep()
+		case ridealongActionWaypoint:
+			m.ridealong.waypointMenuActive = true
+			m.ridealong.waypointMenuIndex = 0
+			return m, nil
+		case ridealongActionAutoplay:
+			if m.ridealong.autoplay {
+				m.ridealong.AutoplayDeactivate()
+			} else {
+				m.ridealong.EnableAutoplay()
+			}
+			return m, nil
 		default:
 			return m.executeRidealongCommand()
 		}
@@ -1433,6 +1471,20 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 		m.ridealong.MenuDown()
 		return m, nil
 
+	case tea.KeyLeft:
+		// Exit autoplay or waypoint sub-menu
+		if m.ridealong.waypointMenuActive {
+			m.ridealong.waypointMenuActive = false
+			m.ridealong.waypointMenuIndex = 0
+			return m, nil
+		}
+		if m.ridealong.autoplay {
+			m.ridealong.AutoplayDeactivate()
+			return m, nil
+		}
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+
 	case tea.KeyCtrlC:
 		// Exit ridealong mode
 		return m.exitRidealong()
@@ -1442,6 +1494,23 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 		cmd := m.blinker.StartFlash()
 		return m, cmd
 	}
+}
+
+// handleWaypointMenuSelect handles Enter in the waypoint sub-menu.
+func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
+	r := m.ridealong
+	if r.waypointMenuIndex < len(r.waypointOrder) {
+		name := r.waypointOrder[r.waypointMenuIndex]
+		r.JumpToWaypoint(name)
+	}
+	r.waypointMenuActive = false
+	r.waypointMenuIndex = 0
+	if m.ridealong.IsDiveStep() {
+		return m.enterDiveStep()
+	}
+	m.input.SetValue(r.CurrentCommand())
+	m.blinker.SetState(BlinkerRidealong)
+	return m, tea.Batch(m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
 }
 
 // exitRidealong exits ridealong mode and restores normal shell state
@@ -1491,9 +1560,9 @@ func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
 // On parse failure it prints an error and skips past the dive step.
 func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 	divePath := m.ridealong.CurrentDivePath()
-	steps, errMsg := parseRidealongSteps(divePath)
-	if errMsg != "" || len(steps) == 0 {
-		msg := errMsg
+	result := parseRidealong(divePath)
+	if result.errMsg != "" || len(result.steps) == 0 {
+		msg := result.errMsg
 		if msg == "" {
 			msg = "ridealong: no steps found in " + filepath.Base(divePath)
 		}
@@ -1502,13 +1571,17 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 		return m2, tea.Batch(errPrint, advCmd)
 	}
 	child := &Ridealong{
-		filePath:     divePath,
-		steps:        steps,
-		currentIndex: 0,
-		prevExitCode: -1,
-		active:       true,
-		menuIndex:    0,
-		parent:       m.ridealong,
+		filePath:      divePath,
+		startPath:     m.ridealong.startPath,
+		steps:         result.steps,
+		currentIndex:  0,
+		prevExitCode:  -1,
+		active:        true,
+		menuIndex:     0,
+		parent:        m.ridealong,
+		waypoints:     result.waypoints,
+		waypointOrder: result.waypointOrder,
+		autoplay:      m.ridealong.autoplay,
 	}
 	if m.ridealong.debug {
 		child.EnableDebug(m.ridealong.scrollbackLogPath)
@@ -1546,6 +1619,9 @@ func (m appModel) reviewLastRidealongStep() (appModel, tea.Cmd) {
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 	}
+	if sp := m.ridealong.RootStartPath(); sp != "" {
+		agentCmd.Dir = sp
+	}
 	runCmd := teeCommand(agentCmd, cachePath)
 	return m, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongReviewDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs, cachePath: cachePath}
@@ -1560,6 +1636,7 @@ func (m appModel) fixReviewedRidealongIssue() (appModel, tea.Cmd) {
 		return m.reviewLastRidealongStep()
 	}
 	review := m.ridealong.lastStepReview
+	m.ridealong.StartFix()
 	prompt := "Fix the issue identified in the last ridealong step using scrollback log " + m.ridealong.scrollbackLogPath + "\n\nReview of the last step:\n" + review
 	return m.runRidealongFixPrompt(prompt)
 }
@@ -1568,6 +1645,7 @@ func (m appModel) fixLastRidealongStep() (appModel, tea.Cmd) {
 	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
 		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
 	}
+	m.ridealong.StartFix()
 	prompt := "Fix the last issue you can see in the last step of the scrollback log " + m.ridealong.scrollbackLogPath
 	return m.runRidealongFixPrompt(prompt)
 }
@@ -1579,6 +1657,9 @@ func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
 	if agentCmd == nil {
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	}
+	if sp := m.ridealong.RootStartPath(); sp != "" {
+		agentCmd.Dir = sp
 	}
 	return m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
 		return ridealongFixDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
@@ -1706,12 +1787,12 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, cmd
 	}
 
-	// ridealong [--debug] <file>
+	// ridealong [--debug] [--waypoint NAME] <file>
 	if strings.HasPrefix(line, "ridealong ") {
-		filePath, debugRidealong := parseRidealongCommand(line)
+		filePath, debugRidealong, waypointName := parseRidealongCommand(line)
 		if filePath == "" {
 			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] <file.md>"))
+			return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
 		}
 		// Resolve relative paths
 		if !filepath.IsAbs(filePath) {
@@ -1722,6 +1803,13 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render(errMsg))
 		}
+		ridealong.startPath = m.cwd
+		if waypointName != "" {
+			if !ridealong.JumpToWaypoint(waypointName) {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ridealong: waypoint not found: " + waypointName))
+			}
+		}
 		var debugMsg tea.Cmd
 		if debugRidealong {
 			if m.visualLogFile != nil {
@@ -1729,7 +1817,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 				m.visualLogFile = nil
 				m.visualLogPath = ""
 			}
-			f, logPath, err := createRidealongScrollbackLog(cmdTime)
+			f, logPath, err := createRidealongScrollbackLog(cmdTime, m.cwd)
 			if err != nil {
 				m.logRecord(line, cmdTime, deltaMs, 1)
 				return m, tea.Println(errorStyle.Render("ridealong debug: " + err.Error()))
@@ -1750,7 +1838,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "ridealong" {
 		m.logRecord(line, cmdTime, deltaMs, 1)
-		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] <file.md>"))
+		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
 	}
 
 	// exit

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"heuristic-agent/pkg/executor"
@@ -176,10 +177,10 @@ func runSlopspace(cfg *types.Config, args []string) {
 		fmt.Println("  Agent type will be specified at deploy time")
 
 	case "deploy":
-		if len(args) < 2 {
+		id, ok := requiredSlopspaceID(args)
+		if !ok {
 			log.Fatal("slopspace deploy requires an ID")
 		}
-		id := args[1]
 
 		// Parse remaining args for --agent-type
 		fs := flag.NewFlagSet("deploy", flag.ExitOnError)
@@ -202,10 +203,10 @@ func runSlopspace(cfg *types.Config, args []string) {
 		fmt.Printf("Deployed slopspace %s to %s\n", id, cfg.DeployPathForAgentType(at))
 
 	case "return":
-		if len(args) < 2 {
+		id, ok := requiredSlopspaceID(args)
+		if !ok {
 			log.Fatal("slopspace return requires an ID")
 		}
-		id := args[1]
 		if err := mgr.Return(id); err != nil {
 			log.Fatalf("Failed to return slopspace: %v", err)
 		}
@@ -235,10 +236,10 @@ func runSlopspace(cfg *types.Config, args []string) {
 		}
 
 	case "delete":
-		if len(args) < 2 {
+		id, ok := requiredSlopspaceID(args)
+		if !ok {
 			log.Fatal("slopspace delete requires an ID")
 		}
-		id := args[1]
 		if err := mgr.Delete(id); err != nil {
 			log.Fatalf("Failed to delete slopspace: %v", err)
 		}
@@ -281,6 +282,13 @@ func runSlopspace(cfg *types.Config, args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown slopspace subcommand: %s\n", args[0])
 		os.Exit(1)
 	}
+}
+
+func requiredSlopspaceID(args []string) (string, bool) {
+	if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+		return "", false
+	}
+	return args[1], true
 }
 
 // Worker handles the watch loop for processing work signals.

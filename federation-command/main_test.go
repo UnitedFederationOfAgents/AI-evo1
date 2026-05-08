@@ -63,6 +63,33 @@ func TestVersionShortFlag(t *testing.T) {
 	}
 }
 
+func TestParseRidealongCommand(t *testing.T) {
+	tests := []struct {
+		line     string
+		filePath string
+		debug    bool
+	}{
+		{"ridealong tour.md", "tour.md", false},
+		{"ridealong docs/tours/brief-tour.md", "docs/tours/brief-tour.md", false},
+		{"ridealong --debug tour.md", "tour.md", true},
+		{"ridealong --debug docs/tours/brief-tour.md", "docs/tours/brief-tour.md", true},
+		{"ridealong --debug", "", true},
+		{"ridealong", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.line, func(t *testing.T) {
+			filePath, debug, _ := parseRidealongCommand(tt.line)
+			if filePath != tt.filePath {
+				t.Errorf("parseRidealongCommand(%q) filePath = %q, want %q", tt.line, filePath, tt.filePath)
+			}
+			if debug != tt.debug {
+				t.Errorf("parseRidealongCommand(%q) debug = %v, want %v", tt.line, debug, tt.debug)
+			}
+		})
+	}
+}
+
 // TestIsValidAgent verifies agent validation
 func TestIsValidAgent(t *testing.T) {
 	tests := []struct {
@@ -178,9 +205,9 @@ func TestParseArgs(t *testing.T) {
 // TestCheckContinuation verifies multi-line input detection
 func TestCheckContinuation(t *testing.T) {
 	tests := []struct {
-		line         string
-		needsCont    bool
-		quoteChar    rune
+		line      string
+		needsCont bool
+		quoteChar rune
 	}{
 		{`echo hello`, false, 0},
 		{`echo hello \`, true, 0},

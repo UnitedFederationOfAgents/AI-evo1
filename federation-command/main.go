@@ -307,6 +307,22 @@ type appModel struct {
 	mlDelim       string // heredoc delimiter
 	mlQuote       rune   // unclosed quote char (0 = backslash continuation)
 
+	// Blinker state
+	blinker      Blinker
+	prevInputLen int // Track previous input length to detect changes
+
+	// Dynapane state
+	dynapane   Dynapane
+	pendingCmd string // deferred command waiting for roll-up animation to finish
+
+	// Ridealong state
+	ridealong         *Ridealong
+	ridealongDynapane RidealongDynapane
+
+	// Visual log state (scrollback-log)
+	visualLogFile *os.File
+	visualLogPath string
+
 	quitting    bool
 	windowWidth int
 }
@@ -330,6 +346,38 @@ type agentDoneMsg struct {
 type listModelsDoneMsg struct {
 	exitCode     int
 	currentModel string
+}
+
+// ridealongExecReadyMsg defers an ExecProcess command by one Update/View cycle so
+// the ridealong pane is fully erased from the terminal before the subprocess starts.
+type ridealongExecReadyMsg struct {
+	runCmd   *exec.Cmd
+	callback func(error) tea.Msg
+}
+
+type ridealongReviewDoneMsg struct {
+	exitCode  int
+	execErr   error
+	line      string
+	cmdTime   time.Time
+	deltaMs   int64
+	cachePath string
+}
+
+type ridealongFixDoneMsg struct {
+	exitCode int
+	execErr  error
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
+// deferRidealongExec returns a Cmd that sends ridealongExecReadyMsg on the next
+// Update, giving Bubble Tea one render cycle to clear the now-inactive pane.
+func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		return ridealongExecReadyMsg{runCmd: runCmd, callback: callback}
+	}
 }
 
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
@@ -357,6 +405,7 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		recordsPath:  recordsPath,
 		logFile:      logFile,
 		encoder:      encoder,
+		blinker:      NewBlinker(),
 	}
 
 	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
@@ -397,6 +446,42 @@ func appendHistoryEntry(path, line string) {
 	fmt.Fprintln(f, line)
 }
 
+func createRidealongScrollbackLog(now time.Time, startPath string) (*os.File, string, error) {
+	name := fmt.Sprintf("federation-command-ridealong-%s-%d.log", now.Format("20060102-150405"), now.UnixNano())
+	dir := os.TempDir()
+	if startPath != "" {
+		scratchDir := filepath.Join(startPath, "ignored-scratch")
+		if info, err := os.Stat(scratchDir); err == nil && info.IsDir() {
+			dir = scratchDir
+		}
+	}
+	path := filepath.Join(dir, name)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, path, nil
+}
+
+func parseRidealongCommand(line string) (filePath string, debug bool, waypoint string) {
+	args := strings.TrimSpace(strings.TrimPrefix(line, "ridealong"))
+	parts := strings.Fields(args)
+	for i := 0; i < len(parts); i++ {
+		switch parts[i] {
+		case "--debug":
+			debug = true
+		case "--waypoint":
+			if i+1 < len(parts) {
+				waypoint = parts[i+1]
+				i++
+			}
+		default:
+			filePath = parts[i]
+		}
+	}
+	return
+}
+
 func longestCommonPrefix(strs []string) string {
 	if len(strs) == 0 {
 		return ""
@@ -424,12 +509,17 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	return tea.Batch(textinput.Blink, tea.Println(info))
+	return tea.Batch(textinput.Blink, tea.Println(info), m.blinker.tickCmd())
 }
 
 func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle ridealong mode first
+		if m.ridealong != nil && m.ridealong.IsActive() {
+			return m.handleRidealongKey(msg)
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.inMultiLine {
@@ -440,14 +530,27 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mlMode = mlNone
 				m.input.SetValue("")
 				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
-				return m, nil
+				// Reset blinker to idle (was inactive while typing multi-line)
+				m.blinker.SetState(BlinkerIdle)
+				m.prevInputLen = 0
+				m.input.Focus()
+				return m, m.blinker.ResetTick()
+			}
+			// Exit blinker select mode if active
+			if m.blinker.IsSelectMode() {
+				m.blinker.SetState(BlinkerIdle)
+				m.input.Focus()
+				return m, nil // tick chain is already running (select→idle, same gen)
 			}
 			if m.input.Value() == "" {
 				m.quitting = true
 				return m, tea.Quit
 			}
 			m.input.SetValue("")
-			return m, nil
+			m.prevInputLen = 0
+			// Reset blinker to idle after clearing input (was inactive while typing)
+			m.blinker.SetState(BlinkerIdle)
+			return m, m.blinker.ResetTick()
 
 		case tea.KeyCtrlD:
 			if m.input.Value() == "" && !m.inMultiLine {
@@ -467,6 +570,23 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case tea.KeyTab:
 			return m.handleTab()
+
+		case tea.KeyLeft:
+			return m.handleLeft()
+
+		case tea.KeyRight:
+			return m.handleRight()
+
+		case tea.KeyBackspace:
+			return m.handleBackspace()
+
+		default:
+			// Handle other keys in blinker select mode
+			if m.blinker.IsSelectMode() {
+				// Flash the blinker to alert user they're in select mode
+				cmd := m.blinker.StartFlash()
+				return m, cmd
+			}
 		}
 
 	case cmdDoneMsg:
@@ -483,7 +603,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
-		return m, nil
+		// Reset blinker to idle state after command completes
+		m.blinker.SetState(BlinkerIdle)
+		m.prevInputLen = 0
+		return m, m.blinker.ResetTick()
 
 	case agentDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -506,7 +629,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
-		return m, tea.Println(postOutput)
+		// Reset blinker to idle state after agent completes
+		m.blinker.SetState(BlinkerIdle)
+		m.prevInputLen = 0
+		return m, tea.Batch(tea.Println(postOutput), m.blinker.ResetTick())
 
 	case listModelsDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -523,10 +649,134 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.windowWidth = msg.Width
 		setPromptWidth(&m.input, m.input.Prompt, m.windowWidth)
 		return m, nil
+
+	case BlinkerTickMsg:
+		if msg.gen != m.blinker.gen {
+			return m, nil // stale tick from an old chain — discard
+		}
+		cmd := m.blinker.Tick()
+		return m, cmd
+
+	case BlinkerFlashMsg:
+		cmd := m.blinker.Flash()
+		return m, cmd
+
+	case DynapaneTickMsg:
+		cmd := m.dynapane.Tick()
+		return m, cmd
+
+	case DynapaneRollUpDoneMsg:
+		if m.pendingCmd != "" {
+			line := m.pendingCmd
+			m.pendingCmd = ""
+			return m.executeCommandCore(line)
+		}
+		return m, nil
+
+	case RidealongDynapaneTickMsg:
+		cmd := m.ridealongDynapane.Tick()
+		// Autoplay: only tick when dynapane is still active (prevents double-fire).
+		if cmd != nil && m.ridealong != nil && m.ridealong.autoplay {
+			if m.ridealong.TickAutoplay() {
+				newM, execCmd := m.executeRidealongCommand()
+				return newM, tea.Batch(cmd, execCmd)
+			}
+		}
+		return m, cmd
+
+	case ridealongCmdDoneMsg:
+		m.lastExitCode = msg.exitCode
+		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
+			m.cwd = newCwd
+		}
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+
+		// Log the command
+		record := CommandRecord{
+			ID:        uuid.New().String()[:8],
+			Command:   msg.line,
+			Timestamp: msg.cmdTime.Format(time.RFC3339),
+			DeltaMs:   msg.deltaMs,
+			ExitCode:  msg.exitCode,
+		}
+		m.encoder.Encode(record)
+
+		// Deactivate autoplay on non-zero exit code.
+		if msg.exitCode != 0 && m.ridealong != nil {
+			m.ridealong.AutoplayDeactivate()
+		}
+
+		// Advance to the next step (handles parent pop-up and dive entries)
+		if m.ridealong != nil && m.ridealong.IsActive() {
+			newM, advCmd := m.advanceRidealong(msg.exitCode)
+			if msg.postOutput != "" {
+				return newM, tea.Sequence(tea.Println(msg.postOutput), advCmd)
+			}
+			return newM, advCmd
+		}
+		return m, nil
+
+	case ridealongReviewDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		reviewText := ""
+		if b, err := os.ReadFile(msg.cachePath); err == nil {
+			reviewText = string(b)
+		}
+		_ = os.Remove(msg.cachePath)
+		var postOutput string
+		if msg.execErr != nil {
+			if _, ok := msg.execErr.(*exec.ExitError); ok {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", msg.exitCode))
+			} else {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", msg.execErr))
+			}
+		} else {
+			postOutput = successStyle.Render("review cached")
+		}
+		if m.ridealong != nil && m.ridealong.IsActive() && reviewText != "" {
+			m.ridealong.CacheReview(reviewText)
+		}
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(postOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+
+	case ridealongFixDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		var postOutput string
+		if msg.execErr != nil {
+			if _, ok := msg.execErr.(*exec.ExitError); ok {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", msg.exitCode))
+			} else {
+				postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", msg.execErr))
+			}
+		} else {
+			postOutput = successStyle.Render("agent completed")
+		}
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(postOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+
+	case ridealongExecReadyMsg:
+		return m, tea.ExecProcess(msg.runCmd, msg.callback)
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+
+	// Track input changes to manage blinker state
+	currentLen := len(m.input.Value())
+	if currentLen != m.prevInputLen {
+		if currentLen > 0 && m.ridealong == nil {
+			// User has typed something - deactivate blinker
+			if m.blinker.State() != BlinkerInactive {
+				m.blinker.SetState(BlinkerInactive)
+			}
+		}
+		m.prevInputLen = currentLen
+	}
+
 	return m, cmd
 }
 
@@ -534,10 +784,20 @@ func (m appModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	if m.windowWidth > 0 {
-		return wrapAtWidth(m.input.View(), m.windowWidth)
+	// Show ridealong dynapane if active, otherwise regular dynapane
+	var pane string
+	if m.ridealongDynapane.IsActive() {
+		pane = m.ridealongDynapane.View(m.windowWidth)
+	} else {
+		pane = m.dynapane.View(m.windowWidth)
 	}
-	return m.input.View()
+	blinkerSlot := m.blinker.View()
+	inputView := m.input.View()
+	combined := blinkerSlot + inputView
+	if m.windowWidth > 0 {
+		return pane + wrapAtWidth(combined, m.windowWidth)
+	}
+	return pane + combined
 }
 
 // wrapAtWidth inserts newlines so the rendered string fits within width visible
@@ -597,13 +857,19 @@ func wrapAtWidth(s string, width int) string {
 }
 
 func (m appModel) handleEnter() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash and do nothing
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	line := m.input.Value()
 	// Capture prompt+line now so it persists in terminal scroll history.
 	echoLine := m.input.Prompt + line
 	m.input.SetValue("")
 
 	if m.inMultiLine {
-		echo := tea.Println(echoLine)
+		echo := m.printlnLogged(echoLine)
 		switch m.mlMode {
 		case mlHeredoc:
 			if strings.TrimSpace(line) == m.mlDelim {
@@ -657,7 +923,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 		return m, nil
 	}
 
-	echo := tea.Println(echoLine)
+	echo := m.printlnLogged(echoLine)
 
 	// Heredoc trigger
 	if strings.HasPrefix(line, "<<<") {
@@ -695,6 +961,12 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	if len(m.history) == 0 || m.inMultiLine {
 		return m, nil
 	}
@@ -705,11 +977,22 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 		m.historyIdx--
 		m.input.SetValue(m.history[m.historyIdx])
 		m.input.CursorEnd()
+		m.prevInputLen = len(m.input.Value())
+		// History item selected - deactivate blinker
+		if m.blinker.State() != BlinkerInactive {
+			m.blinker.SetState(BlinkerInactive)
+		}
 	}
 	return m, nil
 }
 
 func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	if m.inMultiLine {
 		return m, nil
 	}
@@ -721,11 +1004,31 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 			m.input.SetValue(m.history[m.historyIdx])
 		}
 		m.input.CursorEnd()
+		m.prevInputLen = len(m.input.Value())
+
+		// If we're back to empty input (stash was empty), resume blinker
+		if m.input.Value() == "" {
+			if m.blinker.State() == BlinkerInactive {
+				m.blinker.SetState(BlinkerIdle)
+				return m, m.blinker.ResetTick()
+			}
+		} else {
+			// Has content - ensure blinker is inactive
+			if m.blinker.State() != BlinkerInactive {
+				m.blinker.SetState(BlinkerInactive)
+			}
+		}
 	}
 	return m, nil
 }
 
 func (m appModel) handleTab() (appModel, tea.Cmd) {
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
 	if m.inMultiLine {
 		return m, nil
 	}
@@ -772,6 +1075,652 @@ func (m appModel) handleTab() (appModel, tea.Cmd) {
 	return m, tea.Println(output)
 }
 
+func (m appModel) handleLeft() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		return m, cmd
+	}
+
+	inputVal := m.input.Value()
+	cursorPos := m.input.Position()
+
+	// If cursor is at position 0 and input is empty, handle blinker transitions
+	if cursorPos == 0 && inputVal == "" {
+		switch m.blinker.State() {
+		case BlinkerIdle:
+			// Enter blinker select mode — tick chain is already running, no new one needed
+			m.blinker.SetState(BlinkerSelect)
+			m.input.Blur()
+			return m, nil
+		case BlinkerInactive:
+			// Resume idle blinking from stopped state
+			m.blinker.SetState(BlinkerIdle)
+			return m, m.blinker.ResetTick()
+		case BlinkerSelect:
+			// Already in select mode, flash to indicate we can't go further left
+			cmd := m.blinker.StartFlash()
+			return m, cmd
+		}
+	}
+
+	// If cursor is at position 0 but there's text, just resume blinker if inactive
+	if cursorPos == 0 && inputVal != "" {
+		// Don't move cursor further left, but don't change blinker state
+		return m, nil
+	}
+
+	// Normal left arrow - move cursor
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	return m, cmd
+}
+
+func (m appModel) handleRight() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyRight})
+		return m, cmd
+	}
+
+	// If in blinker select mode, exit to idle mode and restore cursor
+	// Tick chain is still running (select→idle, same gen) so no new tick needed.
+	if m.blinker.IsSelectMode() {
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+		return m, textinput.Blink
+	}
+
+	inputVal := m.input.Value()
+	cursorPos := m.input.Position()
+
+	// If there's no text, right arrow makes blinker inactive
+	if inputVal == "" {
+		if m.blinker.State() == BlinkerIdle {
+			m.blinker.SetState(BlinkerInactive)
+		}
+		return m, nil
+	}
+
+	// If cursor is at the end, just deactivate blinker if it was active
+	if cursorPos >= len([]rune(inputVal)) {
+		if m.blinker.State() != BlinkerInactive {
+			m.blinker.SetState(BlinkerInactive)
+		}
+		return m, nil
+	}
+
+	// Normal right arrow - move cursor and ensure blinker is inactive
+	if m.blinker.State() != BlinkerInactive {
+		m.blinker.SetState(BlinkerInactive)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyRight})
+	return m, cmd
+}
+
+func (m appModel) handleBackspace() (appModel, tea.Cmd) {
+	if m.inMultiLine {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		return m, cmd
+	}
+
+	// If in blinker select mode, flash
+	if m.blinker.IsSelectMode() {
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+
+	inputVal := m.input.Value()
+	cursorPos := m.input.Position()
+
+	// If already empty and at position 0, resume blinker idle
+	if inputVal == "" && cursorPos == 0 {
+		if m.blinker.State() == BlinkerInactive {
+			m.blinker.SetState(BlinkerIdle)
+			return m, m.blinker.ResetTick()
+		}
+		return m, nil
+	}
+
+	// Process the backspace
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+
+	// Check if we just emptied the input
+	if m.input.Value() == "" && m.blinker.State() == BlinkerInactive {
+		m.blinker.SetState(BlinkerIdle)
+		return m, tea.Batch(cmd, m.blinker.ResetTick())
+	}
+
+	return m, cmd
+}
+
+// handleRidealongBuiltin intercepts federation-command built-in commands so they
+// run at the shell level (in-process) rather than in a subprocess, which would
+// discard state changes like cd, export, set-agent, etc.
+// Returns (true, updatedModel, cmd) when handled; (false, m, nil) otherwise.
+// The caller must prepend the echo Cmd before the returned cmd.
+func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs int64) (bool, appModel, tea.Cmd) {
+	mkDone := func(exitCode int, postOutput string) tea.Cmd {
+		return func() tea.Msg {
+			return ridealongCmdDoneMsg{exitCode: exitCode, line: line, cmdTime: cmdTime, deltaMs: deltaMs, postOutput: postOutput}
+		}
+	}
+	seqPrint := func(output string, exitCode int) tea.Cmd {
+		if output != "" {
+			return tea.Sequence(tea.Println(output), mkDone(exitCode, ""))
+		}
+		return mkDone(exitCode, "")
+	}
+
+	// ridealong (blocked — use <!-- ridealong continues --> for nesting)
+	if line == "ridealong" || strings.HasPrefix(line, "ridealong ") {
+		return true, m, seqPrint(errorStyle.Render("ridealong: use <!-- ridealong continues --> for nesting"), 1)
+	}
+
+	// exit
+	if line == "exit" {
+		m.quitting = true
+		return true, m, tea.Batch(
+			tea.Println(exitStyle.Render("session ended.")),
+			tea.Quit,
+		)
+	}
+
+	// cd
+	if line == "cd" || strings.HasPrefix(line, "cd ") {
+		target := strings.TrimSpace(strings.TrimPrefix(line, "cd"))
+		newDir, cdOutput, err := handleCd(target, m.cwd, m.oldCwd)
+		exitCode := 0
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("cd: "+err.Error()), 1)
+		}
+		m.oldCwd = m.cwd
+		m.cwd = newDir
+		m.lastExitCode = exitCode
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		return true, m, seqPrint(cdOutput, exitCode)
+	}
+
+	// export
+	if line == "export" || strings.HasPrefix(line, "export ") {
+		arg := strings.TrimSpace(strings.TrimPrefix(line, "export"))
+		output, err := handleExport(arg)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("export: "+err.Error()), 1)
+		}
+		return true, m, seqPrint(strings.TrimRight(output, "\n"), 0)
+	}
+
+	// set-agent <name>
+	if strings.HasPrefix(line, "set-agent ") {
+		newAgent := strings.TrimSpace(strings.TrimPrefix(line, "set-agent "))
+		if isValidAgent(newAgent) {
+			m.currentAgent = newAgent
+			m.currentModel = ""
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			return true, m, seqPrint(successStyle.Render("agent set to: "+m.currentAgent), 0)
+		}
+		out := errorStyle.Render("unknown agent: "+newAgent) + "\n" +
+			sessionStyle.Render("available: "+strings.Join(availableAgents, ", "))
+		return true, m, seqPrint(out, 1)
+	}
+	if line == "set-agent" {
+		out := errorStyle.Render("usage: set-agent <name>") + "\n" +
+			sessionStyle.Render("available: "+strings.Join(availableAgents, ", "))
+		return true, m, seqPrint(out, 1)
+	}
+
+	// list-agents
+	if line == "list-agents" {
+		return true, m, seqPrint(renderAgents(m.currentAgent), 0)
+	}
+
+	// set-model <name>
+	if strings.HasPrefix(line, "set-model ") {
+		newModel := strings.TrimSpace(strings.TrimPrefix(line, "set-model "))
+		if err := setModel(m.currentAgent, newModel); err != nil {
+			return true, m, seqPrint(errorStyle.Render(err.Error()), 1)
+		}
+		m.currentModel = newModel
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		return true, m, seqPrint(successStyle.Render("model set to: "+m.currentModel), 0)
+	}
+	if line == "set-model" {
+		out := errorStyle.Render("usage: set-model <name>") + "\n" +
+			sessionStyle.Render("use 'list-models' to see available models for current agent")
+		return true, m, seqPrint(out, 1)
+	}
+
+	// clear-model
+	if line == "clear-model" {
+		m.currentModel = ""
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		return true, m, seqPrint(successStyle.Render("model cleared - using agent's default"), 0)
+	}
+
+	// list-models — runs a subprocess but advances ridealong when done
+	if line == "list-models" {
+		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.sessionDir)
+		if cmd == nil {
+			return true, m, seqPrint(fallbackText, 0)
+		}
+		return true, m, deferRidealongExec(cmd, func(err error) tea.Msg {
+			return ridealongCmdDoneMsg{exitCode: extractExitCode(err), line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		})
+	}
+
+	// list-sessions
+	if line == "list-sessions" {
+		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
+	}
+
+	// set-session <id>
+	if strings.HasPrefix(line, "set-session ") {
+		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
+		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
+		}
+		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
+		}
+		m.logFile.Close()
+		m.logFile = newLogFile
+		m.encoder = json.NewEncoder(newLogFile)
+		m.sessionID = newSessionID
+		m.sessionDir = newSessionDir
+		os.Setenv(EnvAgentSession, newSessionID)
+		return true, m, seqPrint(successStyle.Render("session set to: "+newSessionDir), 0)
+	}
+	if line == "set-session" {
+		return true, m, seqPrint(errorStyle.Render("usage: set-session <id>"), 1)
+	}
+
+	// clear-session
+	if line == "clear-session" {
+		now := time.Now()
+		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
+		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
+		}
+		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
+		}
+		m.logFile.Close()
+		m.logFile = newLogFile
+		m.encoder = json.NewEncoder(newLogFile)
+		m.sessionID = newSessionID
+		m.sessionDir = newSessionDir
+		os.Setenv(EnvAgentSession, newSessionID)
+		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
+	}
+
+	// agent <args> — runs subprocess but advances ridealong when done
+	if strings.HasPrefix(line, "agent ") {
+		prompt := strings.TrimPrefix(line, "agent ")
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.sessionDir)
+		if agentCmd == nil {
+			return true, m, seqPrint(errOutput, 1)
+		}
+		return true, m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
+			exitCode := extractExitCode(err)
+			var postOutput string
+			if err != nil {
+				if _, ok := err.(*exec.ExitError); ok {
+					postOutput = errorStyle.Render(fmt.Sprintf("agent exited: %d", exitCode))
+				} else {
+					postOutput = errorStyle.Render(fmt.Sprintf("agent error: %v", err))
+				}
+			} else {
+				postOutput = successStyle.Render("agent completed")
+			}
+			return ridealongCmdDoneMsg{exitCode: exitCode, line: line, cmdTime: cmdTime, deltaMs: deltaMs, postOutput: postOutput}
+		})
+	}
+	if line == "agent" {
+		return true, m, seqPrint(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"), 1)
+	}
+
+	// scrollback-log <filename>
+	if strings.HasPrefix(line, "scrollback-log ") {
+		filePath := strings.TrimSpace(strings.TrimPrefix(line, "scrollback-log "))
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(m.cwd, filePath)
+		}
+		if m.visualLogFile != nil {
+			m.visualLogFile.Close()
+			m.visualLogFile = nil
+			m.visualLogPath = ""
+		}
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return true, m, seqPrint(errorStyle.Render("scrollback-log: "+err.Error()), 1)
+		}
+		m.visualLogFile = f
+		m.visualLogPath = filePath
+		return true, m, seqPrint(successStyle.Render("scrollback log started: "+filePath), 0)
+	}
+	if line == "scrollback-log" {
+		return true, m, seqPrint(errorStyle.Render("usage: scrollback-log <filename>"), 1)
+	}
+
+	// clear-scrollback-log
+	if line == "clear-scrollback-log" {
+		if m.visualLogFile == nil {
+			return true, m, seqPrint(errorStyle.Render("clear-scrollback-log: no active scrollback log"), 1)
+		}
+		path := m.visualLogPath
+		m.visualLogFile.Close()
+		m.visualLogFile = nil
+		m.visualLogPath = ""
+		os.Truncate(path, 0)
+		return true, m, seqPrint(successStyle.Render("scrollback log cleared: "+path), 0)
+	}
+
+	// dynapane demo
+	if line == "dynapane demo" {
+		cmd := m.dynapane.Activate()
+		return true, m, tea.Sequence(cmd, mkDone(0, ""))
+	}
+
+	return false, m, nil
+}
+
+// handleRidealongKey handles key presses in ridealong mode
+func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEnter:
+		if m.ridealong.waypointMenuActive {
+			return m.handleWaypointMenuSelect()
+		}
+		switch m.ridealong.MenuAction() {
+		case ridealongActionExit:
+			return m.exitRidealong()
+		case ridealongActionReview:
+			return m.reviewLastRidealongStep()
+		case ridealongActionFixReviewed:
+			return m.fixReviewedRidealongIssue()
+		case ridealongActionFixLastStep:
+			return m.fixLastRidealongStep()
+		case ridealongActionWaypoint:
+			m.ridealong.waypointMenuActive = true
+			m.ridealong.waypointMenuIndex = 0
+			return m, nil
+		case ridealongActionAutoplay:
+			if m.ridealong.autoplay {
+				m.ridealong.AutoplayDeactivate()
+			} else {
+				m.ridealong.EnableAutoplay()
+			}
+			return m, nil
+		default:
+			return m.executeRidealongCommand()
+		}
+
+	case tea.KeyUp:
+		m.ridealong.MenuUp()
+		return m, nil
+
+	case tea.KeyDown:
+		m.ridealong.MenuDown()
+		return m, nil
+
+	case tea.KeyLeft:
+		// Exit autoplay or waypoint sub-menu
+		if m.ridealong.waypointMenuActive {
+			m.ridealong.waypointMenuActive = false
+			m.ridealong.waypointMenuIndex = 0
+			return m, nil
+		}
+		if m.ridealong.autoplay {
+			m.ridealong.AutoplayDeactivate()
+			return m, nil
+		}
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+
+	case tea.KeyCtrlC:
+		// Exit ridealong mode
+		return m.exitRidealong()
+
+	default:
+		// Flash the blinker to alert user they're in ridealong mode
+		cmd := m.blinker.StartFlash()
+		return m, cmd
+	}
+}
+
+// handleWaypointMenuSelect handles Enter in the waypoint sub-menu.
+func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
+	r := m.ridealong
+	if r.waypointMenuIndex < len(r.waypointOrder) {
+		name := r.waypointOrder[r.waypointMenuIndex]
+		r.JumpToWaypoint(name)
+	}
+	r.waypointMenuActive = false
+	r.waypointMenuIndex = 0
+	if m.ridealong.IsDiveStep() {
+		return m.enterDiveStep()
+	}
+	m.input.SetValue(r.CurrentCommand())
+	m.blinker.SetState(BlinkerRidealong)
+	return m, tea.Batch(m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
+}
+
+// exitRidealong exits ridealong mode and restores normal shell state
+func (m appModel) exitRidealong() (appModel, tea.Cmd) {
+	if m.ridealong != nil && m.ridealong.debug && m.visualLogPath == m.ridealong.scrollbackLogPath && m.visualLogFile != nil {
+		m.visualLogFile.Close()
+		m.visualLogFile = nil
+		m.visualLogPath = ""
+	}
+	m.ridealong.Deactivate()
+	m.ridealong = nil
+	m.ridealongDynapane.Deactivate()
+	m.blinker.SetState(BlinkerIdle)
+	m.input.SetValue("")
+	m.input.Focus()
+	m.prevInputLen = 0
+	return m, tea.Batch(
+		tea.Println(sessionStyle.Render("ridealong ended")),
+		m.blinker.ResetTick(),
+	)
+}
+
+// advanceRidealong advances the ridealong by one step after exitCode is recorded.
+// When the current ridealong exhausts its steps it pops up to the parent and
+// advances past the dive step that brought us here; this repeats until there is
+// no parent, at which point ridealong mode ends.  If the newly-current step is
+// a dive, enterDiveStep is called immediately.
+func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
+	hasMore := m.ridealong.AdvanceCommand(exitCode)
+	for !hasMore {
+		if m.ridealong.parent == nil {
+			return m.exitRidealong()
+		}
+		// Return to parent and advance past the dive step.
+		m.ridealong = m.ridealong.parent
+		hasMore = m.ridealong.AdvanceCommand(0)
+	}
+	if m.ridealong.IsDiveStep() {
+		return m.enterDiveStep()
+	}
+	m.input.SetValue(m.ridealong.CurrentCommand())
+	m.blinker.SetState(BlinkerRidealong)
+	return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+}
+
+// enterDiveStep starts a child ridealong for the current dive step.
+// On parse failure it prints an error and skips past the dive step.
+func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
+	divePath := m.ridealong.CurrentDivePath()
+	result := parseRidealong(divePath)
+	if result.errMsg != "" || len(result.steps) == 0 {
+		msg := result.errMsg
+		if msg == "" {
+			msg = "ridealong: no steps found in " + filepath.Base(divePath)
+		}
+		errPrint := tea.Println(errorStyle.Render(msg))
+		m2, advCmd := m.advanceRidealong(1)
+		return m2, tea.Batch(errPrint, advCmd)
+	}
+	child := &Ridealong{
+		filePath:      divePath,
+		startPath:     m.ridealong.startPath,
+		steps:         result.steps,
+		currentIndex:  0,
+		prevExitCode:  -1,
+		active:        true,
+		menuIndex:     0,
+		parent:        m.ridealong,
+		waypoints:     result.waypoints,
+		waypointOrder: result.waypointOrder,
+		autoplay:      m.ridealong.autoplay,
+	}
+	if m.ridealong.debug {
+		child.EnableDebug(m.ridealong.scrollbackLogPath)
+	}
+	m.ridealong = child
+	m.input.SetValue(child.CurrentCommand())
+	m.blinker.SetState(BlinkerRidealong)
+	return m, tea.Batch(m.ridealongDynapane.Activate(child), m.blinker.ResetTick())
+}
+
+func (m appModel) prepareRidealongAgentRun() (appModel, time.Time, int64) {
+	m.ridealongDynapane.Deactivate()
+	m.input.SetValue("")
+	m.blinker.SetState(BlinkerInactive)
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+	return m, cmdTime, deltaMs
+}
+
+func (m appModel) reviewLastRidealongStep() (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
+		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
+	}
+	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
+	prompt := "Explain what happened in the last step of the ridealong with scrollback log " + m.ridealong.scrollbackLogPath
+	line := "agent -p " + shellQuote(prompt)
+	cachePath := filepath.Join(os.TempDir(), fmt.Sprintf("federation-command-ridealong-review-%s-%d.log", time.Now().Format("20060102-150405"), time.Now().UnixNano()))
+	agentCmd, errOutput := buildAgentPromptCmd(ModePrompt, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	}
+	if sp := m.ridealong.RootStartPath(); sp != "" {
+		agentCmd.Dir = sp
+	}
+	runCmd := teeCommand(agentCmd, cachePath)
+	return m, deferRidealongExec(runCmd, func(err error) tea.Msg {
+		return ridealongReviewDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs, cachePath: cachePath}
+	})
+}
+
+func (m appModel) fixReviewedRidealongIssue() (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
+		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
+	}
+	if strings.TrimSpace(m.ridealong.lastStepReview) == "" {
+		return m.reviewLastRidealongStep()
+	}
+	review := m.ridealong.lastStepReview
+	m.ridealong.StartFix()
+	prompt := "Fix the issue identified in the last ridealong step using scrollback log " + m.ridealong.scrollbackLogPath + "\n\nReview of the last step:\n" + review
+	return m.runRidealongFixPrompt(prompt)
+}
+
+func (m appModel) fixLastRidealongStep() (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.debug || m.ridealong.scrollbackLogPath == "" {
+		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
+	}
+	m.ridealong.StartFix()
+	prompt := "Fix the last issue you can see in the last step of the scrollback log " + m.ridealong.scrollbackLogPath
+	return m.runRidealongFixPrompt(prompt)
+}
+
+func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
+	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
+	line := "agent -w " + shellQuote(prompt)
+	agentCmd, errOutput := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	}
+	if sp := m.ridealong.RootStartPath(); sp != "" {
+		agentCmd.Dir = sp
+	}
+	return m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
+		return ridealongFixDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+	})
+}
+
+// executeRidealongCommand executes the current ridealong command
+func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
+	if m.ridealong.IsDiveStep() {
+		return m.enterDiveStep()
+	}
+	currentCmd := m.ridealong.CurrentCommand()
+	if currentCmd == "" {
+		return m.exitRidealong()
+	}
+
+	// Hide the panel while the command runs so it doesn't leak into scrollback
+	m.ridealongDynapane.Deactivate()
+	// Clear input and suppress blinker so the TUI re-render between echo and
+	// ExecProcess doesn't bleed "[●]" into the terminal scrollback.
+	m.input.SetValue("")
+	m.blinker.SetState(BlinkerInactive)
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+
+	// Echo the command being executed
+	echoLine := m.input.Prompt + currentCmd
+	echo := m.printlnLogged(echoLine)
+
+	// Handle federation-command built-ins at the shell level so state changes
+	// (cd, export, set-agent, etc.) take effect in the parent process.
+	if handled, newM, builtinCmd := m.handleRidealongBuiltin(currentCmd, cmdTime, deltaMs); handled {
+		return newM, tea.Sequence(echo, builtinCmd)
+	}
+
+	// Regular command — run via subprocess
+	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
+	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
+		return ridealongCmdDoneMsg{
+			exitCode: extractExitCode(err),
+			line:     currentCmd,
+			cmdTime:  cmdTime,
+			deltaMs:  deltaMs,
+		}
+	}))
+}
+
+// ridealongCmdDoneMsg is sent when a ridealong command completes
+type ridealongCmdDoneMsg struct {
+	exitCode   int
+	line       string
+	cmdTime    time.Time
+	deltaMs    int64
+	postOutput string // optional message printed before advancing
+}
+
 func extractExitCode(err error) int {
 	if err == nil {
 		return 0
@@ -780,6 +1729,17 @@ func extractExitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return 1
+}
+
+func (m appModel) writeVisualLog(text string) {
+	if m.visualLogFile != nil {
+		fmt.Fprintln(m.visualLogFile, stripAnsiCodes(text))
+	}
+}
+
+func (m appModel) printlnLogged(text string) tea.Cmd {
+	m.writeVisualLog(text)
+	return tea.Println(text)
 }
 
 func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitCode int) {
@@ -800,12 +1760,86 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 	m.historyStash = ""
 	appendHistoryEntry(historyFilePath(), line)
 
+	// If dynapane is open, roll it up first then execute.
+	if m.dynapane.IsActive() && line != "dynapane demo" {
+		m.pendingCmd = line
+		return m, m.dynapane.StartRollUp()
+	}
+
+	return m.executeCommandCore(line)
+}
+
+func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
+	// Dismiss any active dynapane (re-activated below if this IS dynapane demo)
+	m.dynapane.Deactivate()
+
 	cmdTime := time.Now()
 	var deltaMs int64
 	if !m.lastCmdTime.IsZero() {
 		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
 	}
 	m.lastCmdTime = cmdTime
+
+	// dynapane demo
+	if line == "dynapane demo" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		cmd := m.dynapane.Activate()
+		return m, cmd
+	}
+
+	// ridealong [--debug] [--waypoint NAME] <file>
+	if strings.HasPrefix(line, "ridealong ") {
+		filePath, debugRidealong, waypointName := parseRidealongCommand(line)
+		if filePath == "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
+		}
+		// Resolve relative paths
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(m.cwd, filePath)
+		}
+		ridealong, errMsg := NewRidealong(filePath)
+		if errMsg != "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render(errMsg))
+		}
+		ridealong.startPath = m.cwd
+		if waypointName != "" {
+			if !ridealong.JumpToWaypoint(waypointName) {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ridealong: waypoint not found: " + waypointName))
+			}
+		}
+		var debugMsg tea.Cmd
+		if debugRidealong {
+			if m.visualLogFile != nil {
+				m.visualLogFile.Close()
+				m.visualLogFile = nil
+				m.visualLogPath = ""
+			}
+			f, logPath, err := createRidealongScrollbackLog(cmdTime, m.cwd)
+			if err != nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ridealong debug: " + err.Error()))
+			}
+			m.visualLogFile = f
+			m.visualLogPath = logPath
+			ridealong.EnableDebug(logPath)
+			debugMsg = tea.Println(successStyle.Render("ridealong debug scrollback log: " + logPath))
+		}
+		m.ridealong = ridealong
+		m.blinker.SetState(BlinkerRidealong)
+		m.input.SetValue(ridealong.CurrentCommand())
+		m.input.Blur() // Disable normal input in ridealong mode
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		cmd := tea.Batch(debugMsg, m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
+		return m, cmd
+	}
+
+	if line == "ridealong" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
+	}
 
 	// exit
 	if line == "exit" {
@@ -1017,8 +2051,50 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(errorStyle.Render("usage: agent [-p|-r|-w|-x] [-provide-records <id>...] <prompt>"))
 	}
 
+	// scrollback-log <filename>
+	if strings.HasPrefix(line, "scrollback-log ") {
+		filePath := strings.TrimSpace(strings.TrimPrefix(line, "scrollback-log "))
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(m.cwd, filePath)
+		}
+		if m.visualLogFile != nil {
+			m.visualLogFile.Close()
+			m.visualLogFile = nil
+			m.visualLogPath = ""
+		}
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("scrollback-log: " + err.Error()))
+		}
+		m.visualLogFile = f
+		m.visualLogPath = filePath
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("scrollback log started: " + filePath))
+	}
+
+	if line == "scrollback-log" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: scrollback-log <filename>"))
+	}
+
+	// clear-scrollback-log
+	if line == "clear-scrollback-log" {
+		if m.visualLogFile == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("clear-scrollback-log: no active scrollback log"))
+		}
+		path := m.visualLogPath
+		m.visualLogFile.Close()
+		m.visualLogFile = nil
+		m.visualLogPath = ""
+		os.Truncate(path, 0)
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("scrollback log cleared: " + path))
+	}
+
 	// Regular command - wrap with clauditable
-	runCmd := buildRunCmd(line, m.sessionDir)
+	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return cmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -1030,22 +2106,29 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 }
 
 // buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
+// If logPath is non-empty, command output is tee'd to that file (non-interactive commands only).
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildRunCmd(cmdLine, sessionDir string) *exec.Cmd {
+func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
+	actualCmd := cmdLine
+	if logPath != "" {
+		escapedPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
+		actualCmd = fmt.Sprintf("set -o pipefail; { %s; } 2>&1 | tee -a %s", cmdLine, escapedPath)
+	}
+
 	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command("bash", "-c", cmdLine)
+		cmd := exec.Command("bash", "-c", actualCmd)
 		cmd.Env = os.Environ()
 		return cmd
 	}
 
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
-		cmd := exec.Command("bash", "-c", cmdLine)
+		cmd := exec.Command("bash", "-c", actualCmd)
 		cmd.Env = os.Environ()
 		return cmd
 	}
 
-	cmd := exec.Command(clauditablePath, "bash", "-c", cmdLine)
+	cmd := exec.Command(clauditablePath, "bash", "-c", actualCmd)
 	env := os.Environ()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
@@ -1134,6 +2217,70 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	}
 	cmd.Env = env
 	return cmd, ""
+}
+
+func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.Cmd, string) {
+	if strings.TrimSpace(prompt) == "" {
+		return nil, errorStyle.Render("no prompt provided")
+	}
+
+	ambiguousAgentPath, err := findBinary("ambiguous-agent")
+	if err != nil {
+		return nil, errorStyle.Render("Error: ambiguous-agent not found")
+	}
+
+	agentArgs := []string{"-" + mode, "-a", agent}
+	if model != "" {
+		agentArgs = append(agentArgs, "-m", model)
+	}
+	agentArgs = append(agentArgs, prompt)
+
+	if os.Getenv(EnvIsClauditable) == "true" {
+		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
+		cmd.Env = os.Environ()
+		return cmd, ""
+	}
+
+	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
+	cmd := exec.Command(clauditablePath, clauditableArgs...)
+	env := os.Environ()
+	env = append(env,
+		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
+		EnvAgentSession+"="+filepath.Base(sessionDir),
+		"UFA_AGENT="+agent,
+		EnvIsClauditable+"=true",
+	)
+	if model != "" {
+		env = append(env, "UFA_MODEL="+model)
+	}
+	cmd.Env = env
+	return cmd, ""
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {
+	var quotedArgs []string
+	for _, arg := range cmd.Args {
+		quotedArgs = append(quotedArgs, shellQuote(arg))
+	}
+	teeCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s", strings.Join(quotedArgs, " "), shellQuote(outputPath)))
+	if cmd.Env != nil {
+		teeCmd.Env = cmd.Env
+	} else {
+		teeCmd.Env = os.Environ()
+	}
+	teeCmd.Dir = cmd.Dir
+	return teeCmd
 }
 
 // buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
@@ -1279,6 +2426,22 @@ func renderModelsFallback(agent string, currentModel string) string {
 	return b.String()
 }
 
+// expandCommandSubst evaluates $(...) and backtick command substitutions in arg
+// by running them through bash. Returns the expanded string or an error.
+// No-ops if arg contains no substitution markers.
+func expandCommandSubst(arg, cwd string) (string, error) {
+	if !strings.Contains(arg, "$(") && !strings.Contains(arg, "`") {
+		return arg, nil
+	}
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("x=%s; printf '%%s' \"$x\"", arg))
+	cmd.Dir = cwd
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // handleCd processes a cd command. Returns (newCwd, printOutput, error).
 // printOutput is non-empty only for "cd -" which prints the target directory.
 func handleCd(target string, cwd string, oldCwd string) (string, string, error) {
@@ -1302,7 +2465,11 @@ func handleCd(target string, cwd string, oldCwd string) (string, string, error) 
 			(strings.HasPrefix(target, "'") && strings.HasSuffix(target, "'")) {
 			target = target[1 : len(target)-1]
 		}
-		targetDir = target
+		expanded, err := expandCommandSubst(target, cwd)
+		if err != nil {
+			return "", "", fmt.Errorf("command substitution failed: %w", err)
+		}
+		targetDir = expanded
 	}
 
 	if !filepath.IsAbs(targetDir) {
@@ -1342,16 +2509,19 @@ func handleExport(arg string) (string, error) {
 	return "", nil
 }
 
-// parseExportArgs splits export arguments respecting quotes
+// parseExportArgs splits export arguments respecting quotes and command substitution.
 func parseExportArgs(input string) []string {
 	var args []string
 	var current strings.Builder
 	inQuote := false
 	quoteChar := rune(0)
+	parenDepth := 0
+	runes := []rune(input)
 
-	for _, r := range input {
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		switch {
-		case !inQuote && (r == '"' || r == '\''):
+		case !inQuote && parenDepth == 0 && (r == '"' || r == '\''):
 			inQuote = true
 			quoteChar = r
 			current.WriteRune(r)
@@ -1359,7 +2529,16 @@ func parseExportArgs(input string) []string {
 			inQuote = false
 			quoteChar = 0
 			current.WriteRune(r)
-		case !inQuote && r == ' ':
+		case !inQuote && r == '$' && i+1 < len(runes) && runes[i+1] == '(':
+			parenDepth++
+			current.WriteRune(r)
+		case !inQuote && parenDepth > 0 && r == '(':
+			parenDepth++
+			current.WriteRune(r)
+		case !inQuote && parenDepth > 0 && r == ')':
+			parenDepth--
+			current.WriteRune(r)
+		case !inQuote && parenDepth == 0 && r == ' ':
 			if current.Len() > 0 {
 				args = append(args, current.String())
 				current.Reset()
@@ -1376,7 +2555,9 @@ func parseExportArgs(input string) []string {
 	return args
 }
 
-// processExportAssignment handles a single VAR=value assignment
+// processExportAssignment handles a single VAR=value assignment.
+// If the value contains command substitution ($(...) or backticks) it is
+// evaluated via bash so that the result is captured in the process environment.
 func processExportAssignment(assignment string) error {
 	eqIdx := strings.Index(assignment, "=")
 	if eqIdx == -1 {
@@ -1391,6 +2572,15 @@ func processExportAssignment(assignment string) error {
 	}
 	if !isValidVarName(name) {
 		return fmt.Errorf("'%s': not a valid identifier", name)
+	}
+
+	if strings.Contains(value, "$(") || strings.Contains(value, "`") {
+		script := assignment + "\nprintf '%s' \"$" + name + "\""
+		out, err := exec.Command("bash", "-c", script).Output()
+		if err != nil {
+			return fmt.Errorf("command substitution failed: %v", err)
+		}
+		return os.Setenv(name, string(out))
 	}
 
 	if len(value) >= 2 {
@@ -1673,10 +2863,12 @@ func renderSessions(recordsPath string, currentSession string) string {
 }
 
 func main() {
-	// Handle --version flag
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("federation-command %s\n", Version)
-		return
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--version", "-v":
+			fmt.Printf("federation-command %s\n", Version)
+			return
+		}
 	}
 
 	recordsPath := os.Getenv(EnvAgentRecordsPath)

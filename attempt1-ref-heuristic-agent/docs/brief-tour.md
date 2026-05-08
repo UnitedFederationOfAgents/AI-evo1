@@ -1,6 +1,13 @@
-# heuristic-agent Tour
+# heuristic-agent Tour (Reference Implementation)
 
 heuristic-agent manages asynchronous AI agent invocations through two core abstractions: **slopspaces** (isolated working directories) and **work signals** (JSONL task files).
+
+This is the reference implementation (`attempt1-ref-heuristic-agent`). For the current implementation, see [../../heuristic-agent/docs/brief-tour.md](../../heuristic-agent/docs/brief-tour.md).
+
+This tour can be run as a ridealong from federation-command:
+```
+ridealong attempt1-ref-heuristic-agent/docs/brief-tour.md
+```
 
 ## Concepts
 
@@ -12,67 +19,57 @@ heuristic-agent manages asynchronous AI agent invocations through two core abstr
 - `agent-worker` — general-purpose coding agent tasks
 - `heuristic-request` — tasks routed to a heuristic/planning agent
 
+## Setup
+
+Navigate to the heuristic-agent directory:
+
+```ridealong
+cd research/AI-evo1/attempt1-ref-heuristic-agent
+```
+
 ## Building
 
-```bash
-cd heuristic-agent
+```ridealong
 make build
+```
+
+## Managing Slopspaces
+
+Create a slopspace (returns an ID):
+
+```ridealong
+./heuristic-agent slopspace create
+```
+
+List all slopspaces and their deployment status:
+
+```ridealong
+./heuristic-agent slopspace list
+```
+
+Check what's currently deployed:
+
+```ridealong
+./heuristic-agent slopspace status
 ```
 
 ## Watching for Work
 
-Start a worker that polls for incoming signals every 10 seconds:
+**Note:** The watch command runs as a continuous loop. For this ridealong, we demonstrate slopspace management only. To test the full watch loop, run this command in a separate terminal:
 
 ```bash
+# Run in a separate terminal (not part of ridealong):
 ./heuristic-agent watch
 ```
 
 For the heuristic-request role:
 
 ```bash
+# Run in a separate terminal (not part of ridealong):
 ./heuristic-agent watch --agent-type heuristic-request
 ```
 
 The worker logs its ID and directories on startup. When idle it backs off progressively (30s → 5m → 1h → 24h) to reduce log noise.
-
-## Managing Slopspaces
-
-Create a slopspace (returns an ID):
-
-```bash
-./heuristic-agent slopspace create
-./heuristic-agent slopspace create --agent-type heuristic-request
-```
-
-List all slopspaces and their deployment status:
-
-```bash
-./heuristic-agent slopspace list
-```
-
-Deploy a slopspace — symlinks it to the live agent path (`/agent/<type>`):
-
-```bash
-./heuristic-agent slopspace deploy <id>
-```
-
-Check what's currently deployed:
-
-```bash
-./heuristic-agent slopspace status
-```
-
-Return a slopspace after the agent finishes (increments the iteration counter):
-
-```bash
-./heuristic-agent slopspace return <id>
-```
-
-Delete a slopspace entirely:
-
-```bash
-./heuristic-agent slopspace delete <id>
-```
 
 ## Work Signal Flow
 
@@ -95,7 +92,7 @@ When the worker picks up a signal it:
 
 ## Testing
 
-```bash
+```ridealong
 make test
 ```
 

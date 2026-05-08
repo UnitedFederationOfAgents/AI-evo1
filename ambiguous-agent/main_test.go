@@ -10,8 +10,13 @@ import (
 func TestAgentConfigs(t *testing.T) {
 	// Verify all agents in availableAgents have configurations
 	for _, agent := range availableAgents {
-		if _, ok := agentConfigs[agent]; !ok {
+		config, ok := agentConfigs[agent]
+		if !ok {
 			t.Errorf("Agent %q in availableAgents but missing from agentConfigs", agent)
+			continue
+		}
+		if verbosityManagement(config) == "" {
+			t.Errorf("Agent %q has empty verbosity management default", agent)
 		}
 	}
 
@@ -21,6 +26,28 @@ func TestAgentConfigs(t *testing.T) {
 			if _, ok := config.ModeArgs[mode]; !ok {
 				t.Errorf("Agent %q missing ModeArgs for mode %q", name, mode)
 			}
+		}
+	}
+}
+
+func TestVerbosityManagementDefaults(t *testing.T) {
+	for _, agent := range availableAgents {
+		config := agentConfigs[agent]
+		if agent == "codex" {
+			if config.VerbosityManagement != VerbosityManagementAfterLine {
+				t.Errorf("codex VerbosityManagement = %q, want %q", config.VerbosityManagement, VerbosityManagementAfterLine)
+			}
+			if config.VerbosityManagementAfterLine != "tokens used" {
+				t.Errorf("codex VerbosityManagementAfterLine = %q, want %q", config.VerbosityManagementAfterLine, "tokens used")
+			}
+			continue
+		}
+
+		if verbosityManagement(config) != VerbosityManagementOff {
+			t.Errorf("%s VerbosityManagement = %q, want %q", agent, verbosityManagement(config), VerbosityManagementOff)
+		}
+		if config.VerbosityManagementAfterLine != "" {
+			t.Errorf("%s should not have a verbosity after-line argument, got %q", agent, config.VerbosityManagementAfterLine)
 		}
 	}
 }
@@ -253,5 +280,50 @@ func TestOpenCodePromptHandling(t *testing.T) {
 	lastArg := args[len(args)-1]
 	if lastArg != "test prompt" {
 		t.Errorf("Last arg = %q, want %q", lastArg, "test prompt")
+	}
+}
+
+func TestCodexPromptHandling(t *testing.T) {
+	config := agentConfigs["codex"]
+	if len(config.CommandArgs) != 1 || config.CommandArgs[0] != "exec" {
+		t.Fatalf("codex CommandArgs = %v, want [exec]", config.CommandArgs)
+	}
+	if config.PromptFlag != "" {
+		t.Errorf("codex should use positional prompts because -p is --profile, got %q", config.PromptFlag)
+	}
+	if config.AddDirFlag != "--add-dir" {
+		t.Errorf("codex AddDirFlag = %q, want %q", config.AddDirFlag, "--add-dir")
+	}
+	if config.ModelFlag != "--model" {
+		t.Errorf("codex ModelFlag = %q, want %q", config.ModelFlag, "--model")
+	}
+
+	args := buildAgentArgs(config, ModePrompt, "", "U up?", "/tmp/session", nil)
+	if len(args) == 0 || args[0] != "exec" {
+		t.Fatalf("codex args should start with exec for non-interactive mode, got: %v", args)
+	}
+	if strings.Contains(strings.Join(args, " "), "-p") {
+		t.Fatalf("codex args must not contain -p: %v", args)
+	}
+	if len(args) == 0 || args[len(args)-1] != "U up?" {
+		t.Fatalf("codex prompt should be the last positional arg, got: %v", args)
+	}
+
+	args = buildAgentArgs(config, ModeExecute, "gpt-5.2", "run tests", "/tmp/session", []string{"/extra"})
+	if len(args) == 0 || args[0] != "exec" {
+		t.Fatalf("codex execute args should start with exec, got: %v", args)
+	}
+	wantContains := []string{"exec", "--model", "gpt-5.2", "--sandbox", "danger-full-access", "--ask-for-approval", "never", "--add-dir", "/tmp/session", "/extra", "run tests"}
+	for _, want := range wantContains {
+		found := false
+		for _, arg := range args {
+			if arg == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected codex args to contain %q, got: %v", want, args)
+		}
 	}
 }

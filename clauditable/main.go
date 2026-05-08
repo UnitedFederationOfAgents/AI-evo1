@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,10 +10,53 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"clauditable/pkg/records"
 )
+
+// openPTY opens a PTY master/slave pair. Returns (master, slave, error).
+// This lets child processes detect they are writing to a terminal and
+// enable color output (e.g., git status showing red/green text).
+func openPTY() (*os.File, *os.File, error) {
+	ptm, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Unlock the slave PTY
+	unlock := uint32(0)
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptm.Fd(), syscall.TIOCSPTLCK, uintptr(unsafe.Pointer(&unlock))); errno != 0 {
+		ptm.Close()
+		return nil, nil, errno
+	}
+
+	// Get the slave PTY index
+	var ptyno uint32
+	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, ptm.Fd(), syscall.TIOCGPTN, uintptr(unsafe.Pointer(&ptyno))); errno != 0 {
+		ptm.Close()
+		return nil, nil, errno
+	}
+
+	slavePath := fmt.Sprintf("/dev/pts/%d", ptyno)
+	pts, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		ptm.Close()
+		return nil, nil, err
+	}
+
+	return ptm, pts, nil
+}
+
+// isTerminal reports whether fd is connected to a terminal.
+func isTerminal(fd uintptr) bool {
+	var termios syscall.Termios
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCGETS, uintptr(unsafe.Pointer(&termios)))
+	return errno == 0
+}
 
 // Environment variable names
 const (
@@ -22,9 +66,13 @@ const (
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
+	EnvUFAVerbosityManagement  = "UFA_VERBOSITY_MANAGEMENT"
+	EnvUFAVerbosityAfterLine   = "UFA_VERBOSITY_AFTER_LINE"
 	EnvIsClauditable           = "IS_CLAUDITABLE" // Used to prevent double-wrapping
 
 	DefaultRecordsPath = "/host-agent-files/agent-records"
+
+	VerbosityManagementAfterLine = "after-line"
 )
 
 func main() {
@@ -39,17 +87,8 @@ func main() {
 		// Already in clauditable context, pass through directly
 		cmdName := os.Args[1]
 		cmdArgs := os.Args[2:]
-		cmd := exec.Command(cmdName, cmdArgs...)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			}
-			os.Exit(1)
-		}
-		os.Exit(0)
+		verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
+		os.Exit(runPassthrough(cmdName, cmdArgs, verbosity))
 	}
 
 	// Set IS_CLAUDITABLE for child processes to detect
@@ -66,49 +105,102 @@ func main() {
 	agent := os.Getenv(EnvUFAAgent)
 	model := os.Getenv(EnvUFAModel)
 	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
+	verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
 
 	// Prepare the command
 	cmd := exec.Command(cmdName, cmdArgs...)
 
-	// Create pipes for capturing output while relaying
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: failed to create stdout pipe: %v\n", err)
-		os.Exit(1)
-	}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: failed to create stderr pipe: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Connect stdin
-	cmd.Stdin = os.Stdin
-
 	// Capture buffers
 	var stdoutBuf, stderrBuf strings.Builder
 
-	// Start the command
 	startTime := time.Now()
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
-		os.Exit(1)
+	rawRecordPath := expectedRawRecordPath(recordsPath, session, startTime.Unix())
+	if verbosity.enabled {
+		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", rawRecordPath)
+	}
+	var err error
+
+	// When our stdout is a terminal, use a PTY for the child's stdout so that
+	// programs like git detect they're writing to a terminal and enable colors.
+	// Fall back to pipes if PTY allocation fails or stdout is not a terminal.
+	usingPTY := false
+	if isTerminal(os.Stdout.Fd()) {
+		ptm, pts, ptyErr := openPTY()
+		if ptyErr == nil {
+			usingPTY = true
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = pts
+			cmd.Stderr = pts
+
+			if err := cmd.Start(); err != nil {
+				pts.Close()
+				ptm.Close()
+				fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
+				os.Exit(1)
+			}
+			pts.Close() // parent doesn't need the slave after the child starts
+
+			// Relay PTY output to our terminal and capture for the record.
+			// PTY line discipline converts \n → \r\n; strip the extra \r for storage.
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := ptm.Read(buf)
+				if n > 0 {
+					stripped := bytes.ReplaceAll(buf[:n], []byte("\r\n"), []byte("\n"))
+					stdoutBuf.Write(stripped)
+					verbosity.write(os.Stdout, stripped)
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			ptm.Close()
+		}
 	}
 
-	// Tee stdout: copy to both os.Stdout and our buffer
-	go func() {
-		teeReader := io.TeeReader(stdoutPipe, &stdoutBuf)
-		io.Copy(os.Stdout, teeReader)
-	}()
+	if !usingPTY {
+		stdoutPipe, err := cmd.StdoutPipe()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable: failed to create stdout pipe: %v\n", err)
+			os.Exit(1)
+		}
 
-	// Tee stderr: copy to both os.Stderr and our buffer
-	go func() {
-		teeReader := io.TeeReader(stderrPipe, &stderrBuf)
-		io.Copy(os.Stderr, teeReader)
-	}()
+		stderrPipe, err := cmd.StderrPipe()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable: failed to create stderr pipe: %v\n", err)
+			os.Exit(1)
+		}
 
-	// Wait for command to complete
+		cmd.Stdin = os.Stdin
+
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
+			os.Exit(1)
+		}
+
+		done := make(chan struct{}, 2)
+		go func() {
+			teeReader := io.TeeReader(stdoutPipe, &stdoutBuf)
+			if verbosity.enabled {
+				io.Copy(&verbosityWriter{relay: verbosity, out: os.Stdout}, teeReader)
+			} else {
+				io.Copy(os.Stdout, teeReader)
+			}
+			done <- struct{}{}
+		}()
+		go func() {
+			teeReader := io.TeeReader(stderrPipe, &stderrBuf)
+			if verbosity.enabled {
+				io.Copy(&verbosityWriter{relay: verbosity, out: os.Stderr}, teeReader)
+			} else {
+				io.Copy(os.Stderr, teeReader)
+			}
+			done <- struct{}{}
+		}()
+		<-done
+		<-done
+	}
+
 	err = cmd.Wait()
 	duration := time.Since(startTime)
 
@@ -168,6 +260,125 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+type verbosityRelay struct {
+	enabled   bool
+	afterLine string
+	revealed  bool
+	pending   []byte
+	mu        sync.Mutex
+}
+
+type verbosityWriter struct {
+	relay *verbosityRelay
+	out   *os.File
+}
+
+func (w *verbosityWriter) Write(p []byte) (int, error) {
+	w.relay.write(w.out, p)
+	return len(p), nil
+}
+
+func newVerbosityRelay(mode, afterLine string) *verbosityRelay {
+	return &verbosityRelay{
+		enabled:   mode == VerbosityManagementAfterLine && afterLine != "",
+		afterLine: afterLine,
+	}
+}
+
+func runPassthrough(cmdName string, cmdArgs []string, verbosity *verbosityRelay) int {
+	cmd := exec.Command(cmdName, cmdArgs...)
+	cmd.Stdin = os.Stdin
+
+	if verbosity == nil || !verbosity.enabled {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				return exitErr.ExitCode()
+			}
+			return 1
+		}
+		return 0
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: failed to create stdout pipe: %v\n", err)
+		return 1
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: failed to create stderr pipe: %v\n", err)
+		return 1
+	}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
+		return 1
+	}
+
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(&verbosityWriter{relay: verbosity, out: os.Stdout}, stdoutPipe)
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(&verbosityWriter{relay: verbosity, out: os.Stderr}, stderrPipe)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode()
+		}
+		return 1
+	}
+	return 0
+}
+
+func (r *verbosityRelay) write(out *os.File, p []byte) {
+	if !r.enabled {
+		out.Write(p)
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.revealed {
+		out.Write(p)
+		return
+	}
+
+	r.pending = append(r.pending, p...)
+	for {
+		lineEnd := bytes.IndexByte(r.pending, '\n')
+		if lineEnd < 0 {
+			return
+		}
+
+		lineWithEnding := append([]byte(nil), r.pending[:lineEnd+1]...)
+		r.pending = r.pending[lineEnd+1:]
+
+		line := strings.TrimSuffix(string(lineWithEnding), "\n")
+		line = strings.TrimSuffix(line, "\r")
+		if strings.Contains(line, r.afterLine) {
+			out.Write(lineWithEnding)
+			r.revealed = true
+			if len(r.pending) > 0 {
+				out.Write(r.pending)
+				r.pending = nil
+			}
+			return
+		}
+	}
+}
+
+func expectedRawRecordPath(recordsPath, session string, timestamp int64) string {
+	return filepath.Join(recordsPath, session, fmt.Sprintf("%d-raw.txt", timestamp))
 }
 
 // getSession returns the session identifier

@@ -40,14 +40,22 @@ const (
 
 // AgentConfig defines how to invoke a specific AI CLI agent
 type AgentConfig struct {
-	Command       string   // Base command to run (e.g., "claude", "gemini")
-	PromptFlag    string   // Flag to pass prompts (e.g., "-p")
-	AddDirFlag    string   // Flag to add directories (if supported)
-	ModelFlag     string   // Flag to specify model (if supported)
-	DefaultModel  string   // Default model for this agent
-	Models        []string // Available models for this agent
-	ModeArgs      map[string][]string // Arguments per mode
+	Command                      string              // Base command to run (e.g., "claude", "gemini")
+	CommandArgs                  []string            // Arguments that must immediately follow the command
+	PromptFlag                   string              // Flag to pass prompts (e.g., "-p")
+	AddDirFlag                   string              // Flag to add directories (if supported)
+	ModelFlag                    string              // Flag to specify model (if supported)
+	DefaultModel                 string              // Default model for this agent
+	Models                       []string            // Available models for this agent
+	ModeArgs                     map[string][]string // Arguments per mode
+	VerbosityManagement          string              // Output management mode: off or after-line
+	VerbosityManagementAfterLine string              // Line that ends suppression for after-line mode
 }
+
+const (
+	VerbosityManagementOff       = "off"
+	VerbosityManagementAfterLine = "after-line"
+)
 
 // agentConfigs maps agent names to their configuration
 var agentConfigs = map[string]*AgentConfig{
@@ -100,13 +108,18 @@ var agentConfigs = map[string]*AgentConfig{
 		},
 	},
 	"codex": {
-		Command:    "codex",
-		PromptFlag: "-p",
+		Command:                      "codex",
+		CommandArgs:                  []string{"exec"},
+		PromptFlag:                   "", // codex uses positional prompts; -p is --profile
+		AddDirFlag:                   "--add-dir",
+		ModelFlag:                    "--model",
+		VerbosityManagement:          VerbosityManagementAfterLine,
+		VerbosityManagementAfterLine: "tokens used",
 		ModeArgs: map[string][]string{
 			ModePrompt:  {},
-			ModeRead:    {},
-			ModeWrite:   {},
-			ModeExecute: {"--full-auto"},
+			ModeRead:    {"--sandbox", "read-only"},
+			ModeWrite:   {"--sandbox", "workspace-write"},
+			ModeExecute: {"--sandbox", "danger-full-access", "--ask-for-approval", "never"},
 		},
 	},
 	"grok": {
@@ -453,7 +466,7 @@ Examples:
 	args := buildAgentArgs(config, mode, model, prompt, sessionDir, additionalDirs)
 
 	// Wrap with clauditable
-	exitCode := invokeWithClauditable(config.Command, args, agent, model, sessionDir)
+	exitCode := invokeWithClauditable(config, args, agent, model, sessionDir)
 
 	// Print completion status
 	if exitCode == 0 {
@@ -468,6 +481,8 @@ Examples:
 // buildAgentArgs constructs the command-line arguments for the agent
 func buildAgentArgs(config *AgentConfig, mode, model, prompt, sessionDir string, additionalDirs []string) []string {
 	var args []string
+
+	args = append(args, config.CommandArgs...)
 
 	// Add model flag if specified and supported
 	if model != "" && config.ModelFlag != "" {
@@ -505,13 +520,13 @@ func buildAgentArgs(config *AgentConfig, mode, model, prompt, sessionDir string,
 }
 
 // invokeWithClauditable wraps the agent invocation with clauditable for record-keeping
-func invokeWithClauditable(agentCmd string, args []string, agent, model, sessionDir string) int {
+func invokeWithClauditable(config *AgentConfig, args []string, agent, model, sessionDir string) int {
 	// Resolve clauditable: prefer PATH, fall back to colocated binary
 	clauditablePath, isLocal, err := resolveBinary("clauditable")
 	if err != nil {
 		if os.Getenv("NO_CLAUDITABLE") == "true" {
 			fmt.Fprintln(os.Stderr, sessionStyle.Render("Warning: clauditable not found, invoking agent directly (NO_CLAUDITABLE=true)"))
-			return invokeAgent(agentCmd, args)
+			return invokeAgent(config.Command, args)
 		}
 		fmt.Fprintln(os.Stderr, errorStyle.Render("Error: clauditable not found"))
 		fmt.Fprintln(os.Stderr, sessionStyle.Render("clauditable is required for record-keeping. Install it or set NO_CLAUDITABLE=true to bypass."))
@@ -522,13 +537,13 @@ func invokeWithClauditable(agentCmd string, args []string, agent, model, session
 	}
 
 	// Resolve agent command: prefer PATH, fall back to colocated binary
-	resolvedAgentCmd, agentIsLocal, err := resolveBinary(agentCmd)
+	resolvedAgentCmd, agentIsLocal, err := resolveBinary(config.Command)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: agent binary '%s' not found", agentCmd)))
+		fmt.Fprintln(os.Stderr, errorStyle.Render(fmt.Sprintf("Error: agent binary '%s' not found", config.Command)))
 		return 1
 	}
 	if agentIsLocal {
-		fmt.Fprintln(os.Stderr, infoStyle.Render(fmt.Sprintf("INFO: using local %s at %s", agentCmd, resolvedAgentCmd)))
+		fmt.Fprintln(os.Stderr, infoStyle.Render(fmt.Sprintf("INFO: using local %s at %s", config.Command, resolvedAgentCmd)))
 	}
 
 	// Build clauditable command: clauditable <agent-command> <args...>
@@ -541,7 +556,11 @@ func invokeWithClauditable(agentCmd string, args []string, agent, model, session
 		"AGENT_SESSION="+filepath.Base(sessionDir),
 		"AGENT_RECORDS_PATH="+filepath.Dir(sessionDir),
 		"UFA_AGENT="+agent,
+		"UFA_VERBOSITY_MANAGEMENT="+verbosityManagement(config),
 	)
+	if config.VerbosityManagement == VerbosityManagementAfterLine {
+		env = append(env, "UFA_VERBOSITY_AFTER_LINE="+config.VerbosityManagementAfterLine)
+	}
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
 	}
@@ -566,6 +585,13 @@ func invokeWithClauditable(agentCmd string, args []string, agent, model, session
 		return 1
 	}
 	return 0
+}
+
+func verbosityManagement(config *AgentConfig) string {
+	if config == nil || config.VerbosityManagement == "" {
+		return VerbosityManagementOff
+	}
+	return config.VerbosityManagement
 }
 
 // invokeAgent invokes the agent directly without clauditable wrapping
@@ -706,8 +732,10 @@ func queryModelsForAgent(agent string, config *AgentConfig) []string {
 		return parseGrokModels(string(output))
 
 	default:
-		// For agents without dynamic model listing, explain how to get models
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("agent '%s' does not support dynamic model listing", agent)))
+		// For agents without dynamic model listing, use the static list from config
+		if len(config.Models) > 0 {
+			return config.Models
+		}
 		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
 		return nil
 	}

@@ -16,12 +16,12 @@ docker-build:
 
 # Run watch loop in agent-worker mode (default)
 run: build
-	@echo "Starting heuristic-agent watch loop..."
+	@echo "Starting heuristic-agent (agent-worker) watch loop..."
 	./$(BINARY_NAME) watch --agent-type agent-worker
 
 # Run watch loop in heuristic-request mode
 run-heuristic: build
-	@echo "Starting heuristic-agent watch loop (heuristic-request mode)..."
+	@echo "Starting heuristic-agent (heuristic-request) watch loop..."
 	./$(BINARY_NAME) watch --agent-type heuristic-request
 
 # Clean up build artifacts

@@ -101,7 +101,7 @@ func TestFormatPromptForAgent(t *testing.T) {
 		Prompt: "Implement the feature described in FEATURE.md",
 	}
 
-	workdir := "/agent/agent-worker/write-spaces/primary"
+	workdir := "/agent/agent-worker/writespaces/primary"
 
 	prompt := FormatPromptForAgent(signal, workdir)
 
@@ -115,7 +115,7 @@ func TestFormatPromptForAgent(t *testing.T) {
 	}
 
 	// Check it contains the working directory
-	if !contains(prompt, "Working Directory: /agent/agent-worker/write-spaces/primary") {
+	if !contains(prompt, "Working Directory: /agent/agent-worker/writespaces/primary") {
 		t.Error("expected prompt to contain working directory")
 	}
 

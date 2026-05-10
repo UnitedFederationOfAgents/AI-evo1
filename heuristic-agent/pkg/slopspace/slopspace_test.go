@@ -131,7 +131,7 @@ func TestManagerDeployAndReturn(t *testing.T) {
 		t.Fatalf("failed to create slopspace: %v", err)
 	}
 
-	// Create a test file in write-spaces
+	// Create a test file in writespaces
 	testFile := filepath.Join(metadata.RootPath, WriteSpacesDir, "test.txt")
 	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)

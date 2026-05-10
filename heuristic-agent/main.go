@@ -10,6 +10,16 @@
 //	heuristic-agent slopspace list
 //	heuristic-agent slopspace delete <id>
 //	heuristic-agent slopspace status [--agent-type <type>]
+//	heuristic-agent slopspace add-readspace repo <id> <owner/repo> [--ref <branch|tag|commit>]
+//	heuristic-agent slopspace add-writespace repo <id> <owner/repo> --ref <branch>
+//	heuristic-agent slopspace write <id> all
+//	heuristic-agent slopspace write repo <id> <owner/repo>
+//	heuristic-agent readspace repo clone <owner/repo>
+//	heuristic-agent readspace repo delete <owner/repo>
+//	heuristic-agent readspace repo list
+//	heuristic-agent writespace repo clone <owner/repo>
+//	heuristic-agent writespace repo delete <owner/repo>
+//	heuristic-agent writespace repo list
 package main
 
 import (
@@ -21,9 +31,11 @@ import (
 	"time"
 
 	"heuristic-agent/pkg/executor"
+	"heuristic-agent/pkg/readspace"
 	"heuristic-agent/pkg/slopspace"
 	"heuristic-agent/pkg/types"
 	"heuristic-agent/pkg/worksignal"
+	"heuristic-agent/pkg/writespace"
 
 	"github.com/google/uuid"
 )
@@ -53,6 +65,10 @@ func main() {
 		runWatch(cfg, os.Args[2:])
 	case "slopspace":
 		runSlopspace(cfg, os.Args[2:])
+	case "readspace":
+		runReadspace(cfg, os.Args[2:])
+	case "writespace":
+		runWritespace(cfg, os.Args[2:])
 	case "version":
 		fmt.Printf("heuristic-agent %s\n", version)
 	case "check-deps":
@@ -76,7 +92,9 @@ Usage:
 
 Commands:
   watch       Start the watch loop for processing work signals
-  slopspace   Manage slopspaces (create, deploy, return, list, delete)
+  slopspace   Manage slopspaces (create, deploy, return, list, delete, add-readspace, add-writespace, write)
+  readspace   Manage readspaces (repo clone, repo delete, repo list)
+  writespace  Manage writespaces (repo clone, repo delete, repo list)
   version     Print version information
   check-deps  Verify dependencies (ambiguous-agent, clauditable) are available
   help        Print this help message
@@ -105,11 +123,44 @@ Slopspace commands:
   heuristic-agent slopspace status [--agent-type <type>]
     Show currently deployed slopspace for agent type
 
+  heuristic-agent slopspace add-readspace repo <id> <owner/repo> [--ref <branch|tag|commit>]
+    Add a repository from readspaces to a slopspace (copies repo, switches to ref, deletes .git)
+
+  heuristic-agent slopspace add-writespace repo <id> <owner/repo> --ref <branch>
+    Add a repository from writespaces to a slopspace (copies repo, creates new branch, moves .git to secure location)
+
+  heuristic-agent slopspace write <id> all
+    Push changes from all writespace repos in a slopspace
+
+  heuristic-agent slopspace write repo <id> <owner/repo>
+    Push changes from a specific writespace repo in a slopspace
+
+Readspace commands:
+  heuristic-agent readspace repo clone <owner/repo>
+    Clone a repository into the readspaces directory (or update if exists)
+
+  heuristic-agent readspace repo delete <owner/repo>
+    Delete a repository from the readspaces directory
+
+  heuristic-agent readspace repo list
+    List all repositories in the readspaces directory
+
+Writespace commands:
+  heuristic-agent writespace repo clone <owner/repo>
+    Clone a repository into the writespaces directory (or update if exists)
+
+  heuristic-agent writespace repo delete <owner/repo>
+    Delete a repository from the writespaces directory
+
+  heuristic-agent writespace repo list
+    List all repositories in the writespaces directory
+
 Environment variables:
   SLOPSPACES_DIR        Slopspaces directory (default: /host-agent-files/slopspaces)
   WORK_SIGNALS_DIR      Work signals directory (default: /host-agent-files/work)
   AGENT_SLOPSPACE_ROOT  Agent workspace root (default: /agent)
-  AGENT_RECORDS_PATH    Agent records path (default: /host-agent-files/agent-records)`)
+  AGENT_RECORDS_PATH    Agent records path (default: /host-agent-files/agent-records)
+  TF_VAR_github_pat     GitHub Personal Access Token for cloning repos`)
 }
 
 func loadConfig() *types.Config {
@@ -159,11 +210,13 @@ func runWatch(cfg *types.Config, args []string) {
 
 func runSlopspace(cfg *types.Config, args []string) {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "slopspace subcommand required: create, deploy, return, list, delete, status")
+		fmt.Fprintln(os.Stderr, "slopspace subcommand required: create, deploy, return, list, delete, status, add-readspace, add-writespace, write")
 		os.Exit(1)
 	}
 
 	mgr := slopspace.NewManager(cfg)
+	readspaceMgr := readspace.NewManager(cfg)
+	writespaceMgr := writespace.NewManager(cfg)
 
 	switch args[0] {
 	case "create":
@@ -278,10 +331,150 @@ func runSlopspace(cfg *types.Config, args []string) {
 			fmt.Printf("  Deploy Path: %s\n", cfg.DeployPathForAgentType(at))
 		}
 
+	case "add-readspace":
+		// slopspace add-readspace repo <id> <owner/repo> [--ref <ref>]
+		if len(args) < 4 || args[1] != "repo" {
+			log.Fatal("Usage: slopspace add-readspace repo <slopspace-id> <owner/repo> [--ref <branch|tag|commit>]")
+		}
+		slopspaceID := args[2]
+		ownerRepo := args[3]
+
+		// Parse --ref flag
+		fs := flag.NewFlagSet("add-readspace", flag.ExitOnError)
+		ref := fs.String("ref", "", "Branch, tag, or commit to checkout")
+		fs.Parse(args[4:])
+
+		// Validate owner/repo format
+		parts := strings.SplitN(ownerRepo, "/", 2)
+		if len(parts) != 2 {
+			log.Fatalf("Invalid owner/repo format: %s (expected owner/repo)", ownerRepo)
+		}
+		owner, repo := parts[0], parts[1]
+
+		// Get the source repo from readspaces
+		repoMeta, err := readspaceMgr.Get(ownerRepo)
+		if err != nil {
+			log.Fatalf("Repository not found in readspaces: %s\nRun 'readspace repo clone %s' first", ownerRepo, ownerRepo)
+		}
+
+		// Add to slopspace
+		if err := mgr.AddReadspaceRepo(slopspaceID, owner, repo, *ref, repoMeta.RootPath); err != nil {
+			log.Fatalf("Failed to add readspace repo: %v", err)
+		}
+		fmt.Printf("Added %s to slopspace %s readspaces\n", ownerRepo, slopspaceID)
+		if *ref != "" {
+			fmt.Printf("  Checked out ref: %s\n", *ref)
+		}
+
+	case "add-writespace":
+		// slopspace add-writespace repo <id> <owner/repo> --ref <branch>
+		if len(args) < 4 || args[1] != "repo" {
+			log.Fatal("Usage: slopspace add-writespace repo <slopspace-id> <owner/repo> --ref <branch>")
+		}
+		slopspaceID := args[2]
+		ownerRepo := args[3]
+
+		// Parse --ref flag
+		fs := flag.NewFlagSet("add-writespace", flag.ExitOnError)
+		ref := fs.String("ref", "", "Branch to create (required; prevents accidental use of main)")
+		fs.Parse(args[4:])
+
+		if *ref == "" {
+			log.Fatal("--ref is required for add-writespace to prevent accidental use of main")
+		}
+
+		// Validate owner/repo format
+		parts := strings.SplitN(ownerRepo, "/", 2)
+		if len(parts) != 2 {
+			log.Fatalf("Invalid owner/repo format: %s (expected owner/repo)", ownerRepo)
+		}
+		owner, repo := parts[0], parts[1]
+
+		// Get the source repo from writespaces
+		repoMeta, err := writespaceMgr.Get(ownerRepo)
+		if err != nil {
+			log.Fatalf("Repository not found in writespaces: %s\nRun 'writespace repo clone %s' first", ownerRepo, ownerRepo)
+		}
+
+		// Add to slopspace
+		if err := mgr.AddWritespaceRepo(slopspaceID, owner, repo, *ref, repoMeta.RootPath); err != nil {
+			log.Fatalf("Failed to add writespace repo: %v", err)
+		}
+		fmt.Printf("Added %s to slopspace %s writespaces\n", ownerRepo, slopspaceID)
+		fmt.Printf("  Created branch: %s\n", *ref)
+		fmt.Println("  .git directory moved to writespaces-secure (will not be deployed to agent)")
+
+	case "write":
+		// slopspace write <id> all
+		// slopspace write repo <id> <owner/repo>
+		if len(args) < 2 {
+			log.Fatal("Usage: slopspace write <slopspace-id> all | slopspace write repo <slopspace-id> <owner/repo>")
+		}
+
+		if args[1] == "all" {
+			// slopspace write <id> all
+			if len(args) < 3 {
+				log.Fatal("Usage: slopspace write <slopspace-id> all")
+			}
+			slopspaceID := args[2]
+
+			// Parse optional --message flag
+			fs := flag.NewFlagSet("write-all", flag.ExitOnError)
+			message := fs.String("message", "", "Commit message")
+			fs.Parse(args[3:])
+
+			if err := mgr.WriteAllRepoChanges(slopspaceID, *message); err != nil {
+				log.Fatalf("Failed to write changes: %v", err)
+			}
+			fmt.Printf("Pushed changes from all writespace repos in slopspace %s\n", slopspaceID)
+		} else if args[1] == "repo" {
+			// slopspace write repo <id> <owner/repo>
+			if len(args) < 4 {
+				log.Fatal("Usage: slopspace write repo <slopspace-id> <owner/repo> [--message <msg>]")
+			}
+			slopspaceID := args[2]
+			ownerRepo := args[3]
+
+			// Parse optional --message flag
+			fs := flag.NewFlagSet("write-repo", flag.ExitOnError)
+			message := fs.String("message", "", "Commit message")
+			fs.Parse(args[4:])
+
+			parts := strings.SplitN(ownerRepo, "/", 2)
+			if len(parts) != 2 {
+				log.Fatalf("Invalid owner/repo format: %s", ownerRepo)
+			}
+
+			if err := mgr.WriteRepoChanges(slopspaceID, parts[0], parts[1], *message); err != nil {
+				log.Fatalf("Failed to write changes: %v", err)
+			}
+			fmt.Printf("Pushed changes from %s in slopspace %s\n", ownerRepo, slopspaceID)
+		} else {
+			// Assume slopspace write <id> all format with id as args[1]
+			slopspaceID := args[1]
+			if len(args) < 3 || args[2] != "all" {
+				log.Fatal("Usage: slopspace write <slopspace-id> all | slopspace write repo <slopspace-id> <owner/repo>")
+			}
+
+			// Parse optional --message flag
+			fs := flag.NewFlagSet("write-all", flag.ExitOnError)
+			message := fs.String("message", "", "Commit message")
+			fs.Parse(args[3:])
+
+			if err := mgr.WriteAllRepoChanges(slopspaceID, *message); err != nil {
+				log.Fatalf("Failed to write changes: %v", err)
+			}
+			fmt.Printf("Pushed changes from all writespace repos in slopspace %s\n", slopspaceID)
+		}
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown slopspace subcommand: %s\n", args[0])
 		os.Exit(1)
 	}
+
+	// Silence unused variable warnings
+	_ = readspaceMgr
+	_ = writespaceMgr
 }
 
 func requiredSlopspaceID(args []string) (string, bool) {
@@ -289,6 +482,136 @@ func requiredSlopspaceID(args []string) (string, bool) {
 		return "", false
 	}
 	return args[1], true
+}
+
+func runReadspace(cfg *types.Config, args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "readspace subcommand required: repo clone, repo delete, repo list")
+		os.Exit(1)
+	}
+
+	if args[0] != "repo" {
+		fmt.Fprintln(os.Stderr, "readspace subcommand must be 'repo'")
+		os.Exit(1)
+	}
+
+	mgr := readspace.NewManager(cfg)
+
+	switch args[1] {
+	case "clone":
+		if len(args) < 3 {
+			log.Fatal("Usage: readspace repo clone <owner/repo>")
+		}
+		ownerRepo := args[2]
+
+		metadata, err := mgr.CloneRepo(ownerRepo)
+		if err != nil {
+			log.Fatalf("Failed to clone repository: %v", err)
+		}
+		fmt.Printf("Cloned %s/%s to readspaces\n", metadata.Owner, metadata.Repo)
+		fmt.Printf("  Path: %s\n", metadata.RootPath)
+		fmt.Printf("  Branch: %s\n", metadata.Branch)
+
+	case "delete":
+		if len(args) < 3 {
+			log.Fatal("Usage: readspace repo delete <owner/repo>")
+		}
+		ownerRepo := args[2]
+
+		if err := mgr.Delete(ownerRepo); err != nil {
+			log.Fatalf("Failed to delete repository: %v", err)
+		}
+		fmt.Printf("Deleted %s from readspaces\n", ownerRepo)
+
+	case "list":
+		repos, err := mgr.List()
+		if err != nil {
+			log.Fatalf("Failed to list repositories: %v", err)
+		}
+
+		if len(repos) == 0 {
+			fmt.Println("No repositories in readspaces")
+			return
+		}
+
+		fmt.Printf("%-30s  %-12s  %-20s\n", "REPOSITORY", "BRANCH", "UPDATED")
+		fmt.Println("------------------------------------------------------------------------")
+		for _, r := range repos {
+			fmt.Printf("%-30s  %-12s  %-20s\n",
+				r.Owner+"/"+r.Repo,
+				r.Branch,
+				r.UpdatedAt.Format("2006-01-02 15:04:05"))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown readspace repo subcommand: %s\n", args[1])
+		os.Exit(1)
+	}
+}
+
+func runWritespace(cfg *types.Config, args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "writespace subcommand required: repo clone, repo delete, repo list")
+		os.Exit(1)
+	}
+
+	if args[0] != "repo" {
+		fmt.Fprintln(os.Stderr, "writespace subcommand must be 'repo'")
+		os.Exit(1)
+	}
+
+	mgr := writespace.NewManager(cfg)
+
+	switch args[1] {
+	case "clone":
+		if len(args) < 3 {
+			log.Fatal("Usage: writespace repo clone <owner/repo>")
+		}
+		ownerRepo := args[2]
+
+		metadata, err := mgr.CloneRepo(ownerRepo)
+		if err != nil {
+			log.Fatalf("Failed to clone repository: %v", err)
+		}
+		fmt.Printf("Cloned %s/%s to writespaces\n", metadata.Owner, metadata.Repo)
+		fmt.Printf("  Path: %s\n", metadata.RootPath)
+		fmt.Printf("  Branch: %s\n", metadata.Branch)
+
+	case "delete":
+		if len(args) < 3 {
+			log.Fatal("Usage: writespace repo delete <owner/repo>")
+		}
+		ownerRepo := args[2]
+
+		if err := mgr.Delete(ownerRepo); err != nil {
+			log.Fatalf("Failed to delete repository: %v", err)
+		}
+		fmt.Printf("Deleted %s from writespaces\n", ownerRepo)
+
+	case "list":
+		repos, err := mgr.List()
+		if err != nil {
+			log.Fatalf("Failed to list repositories: %v", err)
+		}
+
+		if len(repos) == 0 {
+			fmt.Println("No repositories in writespaces")
+			return
+		}
+
+		fmt.Printf("%-30s  %-12s  %-20s\n", "REPOSITORY", "BRANCH", "UPDATED")
+		fmt.Println("------------------------------------------------------------------------")
+		for _, r := range repos {
+			fmt.Printf("%-30s  %-12s  %-20s\n",
+				r.Owner+"/"+r.Repo,
+				r.Branch,
+				r.UpdatedAt.Format("2006-01-02 15:04:05"))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown writespace repo subcommand: %s\n", args[1])
+		os.Exit(1)
+	}
 }
 
 // Worker handles the watch loop for processing work signals.

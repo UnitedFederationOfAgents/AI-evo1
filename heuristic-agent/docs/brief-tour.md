@@ -10,7 +10,7 @@ ridealong heuristic-agent/docs/brief-tour.md
 ## Core Concepts
 
 ### Slopspaces
-Slopspaces are isolated workspaces that contain read-spaces (immutable context) and write-spaces (agent output). Key design decision: **slopspaces are not tied to an agent type at creation time** - the agent type is specified during deployment.
+Slopspaces are isolated workspaces that contain readspaces (immutable context) and writespaces (agent output). Key design decision: **slopspaces are not tied to an agent type at creation time** - the agent type is specified during deployment.
 
 ### Work Signals
 Work signals are JSONL files that describe work to be done. They contain the agent configuration, prompt, and status tracking. Work signals are created in `/host-agent-files/work/ongoing/` and moved to `/host-agent-files/work/complete/` when finished.
@@ -124,21 +124,24 @@ already set from the "Create a Slopspace" step).
 Add a file to its write-space and deploy it to the agent-worker location:
 
 ```ridealong
-mkdir -p "/host-agent-files/slopspaces/$SLOP_ID/write-spaces/files"
-echo "TODO: implement feature X" > "/host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/CAT-TASK.txt"
+mkdir -p "/host-agent-files/slopspaces/$SLOP_ID/writespaces/files"
+echo "TODO: implement feature X" > "/host-agent-files/slopspaces/$SLOP_ID/writespaces/files/CAT-TASK.txt"
 ./heuristic-agent slopspace deploy "$SLOP_ID" --agent-type agent-worker
 ```
 
 Verify deployment (files moved to /agent/agent-worker/):
 
 ```ridealong
-ls /agent/agent-worker/write-spaces/files/
+ls /agent/agent-worker/writespaces/files/
 ```
 
 Create a work signal targeting the slopspace (the watch loop will pick this up):
 
 ```ridealong
-TS=$(date +%s) && printf '{"id":"slop-example-%s","work_type":"slopspace","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should modify the file write-spaces/files/CAT-TASK.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"%s","updated_at":"%s"}\n' "$TS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /host-agent-files/work/ongoing/WORKING-slop-example-$TS.jsonl
+TS=$(date +%s)
+cat > /host-agent-files/work/ongoing/WORKING-slop-example-$TS.jsonl << EOF
+{"id":"slop-example-${TS}","work_type":"slopspace","agent_type":"agent-worker","role":"task","prompt":"Our nice agent should modify the file writespaces/files/CAT-TASK.txt","agent":"clod","model":"sonnet","status":"pending","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","updated_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+EOF
 ```
 
 Wait briefly for the watch loop to process, then return the slopspace if the watch loop hasn't already done so:
@@ -150,7 +153,7 @@ sleep 15 && (./heuristic-agent slopspace return "$SLOP_ID" || echo "Slopspace al
 Check results in the slopspace:
 
 ```ridealong
-cat "/host-agent-files/slopspaces/$SLOP_ID/write-spaces/files/DONE.txt" 2>/dev/null || echo "DONE.txt not created (watch loop may not be running)"
+cat "/host-agent-files/slopspaces/$SLOP_ID/writespaces/files/DONE.txt" 2>/dev/null || echo "DONE.txt not created (watch loop may not be running)"
 ```
 
 Clean up the slopspace:
@@ -164,7 +167,7 @@ Key points:
 - **Populate** adds context files before deployment
 - **Deploy** moves spaces to `/agent/<agent-type>/` for agent access
 - **Work** happens via work signals; the agent sees files in its deploy path
-- **Return** moves write-spaces back; read-spaces are discarded and recreated
+- **Return** moves writespaces back; readspaces are discarded and recreated
 - **Delete** removes the slopspace after completion
 
 ## Directory Structure
@@ -173,12 +176,12 @@ Key points:
 /host-agent-files/
 ├── slopspaces/
 │   └── <slopspace-id>/
-│       ├── read-spaces/       # Immutable from agent perspective
+│       ├── readspaces/       # Immutable from agent perspective
 │       │   ├── agent-records/
 │       │   ├── dtt-images/
 │       │   ├── repos/
 │       │   └── files/
-│       ├── write-spaces/      # Changes reflected outside
+│       ├── writespaces/      # Changes reflected outside
 │       │   ├── agent-records/
 │       │   ├── dtt-canvas/
 │       │   ├── repos/
@@ -192,12 +195,12 @@ Key points:
 /agent/
 ├── agent-worker/              # Deployed agent-worker slopspace
 │   ├── SLOPSPACE_ID           # Marker file with slopspace ID
-│   ├── read-spaces/
-│   └── write-spaces/
+│   ├── readspaces/
+│   └── writespaces/
 └── heuristic-request/         # Deployed heuristic-request slopspace
     ├── SLOPSPACE_ID
-    ├── read-spaces/
-    └── write-spaces/
+    ├── readspaces/
+    └── writespaces/
 ```
 
 ## Environment Variables

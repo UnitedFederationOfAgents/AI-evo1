@@ -38,7 +38,8 @@ type Ridealong struct {
 	debug             bool
 	scrollbackLogPath string
 	lastStepReview    string
-	fixingIssue       bool // true after fix is selected; clears on step advance
+	fixingIssue       bool       // true after fix is selected; clears on step advance
+	autoProposeFix    bool       // when true, review+propose fix runs automatically on step failure
 	parent            *Ridealong // non-nil when this is a nested ridealong
 
 	// waypoint state
@@ -51,10 +52,28 @@ type Ridealong struct {
 	autoplay      bool
 	autoplayTick  int       // increments on each dynapane tick; used for animation only
 	autoplayStart time.Time // wall-clock time when the current countdown began
+
+	// custom command sub-menu state
+	customCmdMenuActive bool
+	customCmdText       string
 }
 
 // ridealongBlockOpenRegex matches the opening fence of a ```ridealong block.
 var ridealongBlockOpenRegex = regexp.MustCompile("^```ridealong\\s*$")
+
+// heredocRegex extracts the delimiter word from a shell heredoc opener (<<WORD or <<-WORD,
+// with optional surrounding quotes around the word).
+var heredocRegex = regexp.MustCompile(`<<-?\s*['"]?(\w+)['"]?\s*$`)
+
+// detectHeredocDelim returns the heredoc delimiter word and true when line opens a
+// heredoc; otherwise returns "", false.
+func detectHeredocDelim(line string) (string, bool) {
+	m := heredocRegex.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
 
 // ridealongLinkRegex matches a markdown inline link [text](path).
 var ridealongLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
@@ -154,6 +173,10 @@ func parseRidealong(filePath string) ridealongParseResult {
 	var waypointOrder []string
 	inBlock := false
 
+	var inHeredoc bool
+	var heredocDelim string
+	var heredocBuf strings.Builder
+
 	for _, line := range strings.Split(string(content), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if !inBlock {
@@ -174,11 +197,38 @@ func parseRidealong(filePath string) ridealongParseResult {
 			}
 		} else {
 			if trimmed == "```" {
+				// Emit any unclosed heredoc as-is before closing the block.
+				if inHeredoc {
+					steps = append(steps, ridealongStep{kind: stepCommand, value: heredocBuf.String()})
+					inHeredoc = false
+					heredocBuf.Reset()
+					heredocDelim = ""
+				}
 				inBlock = false
 				continue
 			}
+
+			if inHeredoc {
+				heredocBuf.WriteByte('\n')
+				heredocBuf.WriteString(line)
+				if strings.TrimSpace(line) == heredocDelim {
+					steps = append(steps, ridealongStep{kind: stepCommand, value: heredocBuf.String()})
+					inHeredoc = false
+					heredocBuf.Reset()
+					heredocDelim = ""
+				}
+				continue
+			}
+
 			if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-				steps = append(steps, ridealongStep{kind: stepCommand, value: trimmed})
+				if delim, ok := detectHeredocDelim(trimmed); ok {
+					inHeredoc = true
+					heredocDelim = delim
+					heredocBuf.Reset()
+					heredocBuf.WriteString(trimmed)
+				} else {
+					steps = append(steps, ridealongStep{kind: stepCommand, value: trimmed})
+				}
 			}
 		}
 	}
@@ -401,13 +451,54 @@ func (r *Ridealong) StartFix() {
 	r.menuIndex = 0
 }
 
+// ToggleAutoProposeFix flips the autoProposeFix flag.
+func (r *Ridealong) ToggleAutoProposeFix() {
+	if r != nil {
+		r.autoProposeFix = !r.autoProposeFix
+	}
+}
+
+// OpenCustomCmdMenu opens the custom command sub-menu.
+func (r *Ridealong) OpenCustomCmdMenu() {
+	if r == nil {
+		return
+	}
+	r.customCmdMenuActive = true
+	r.customCmdText = ""
+}
+
+// CloseCustomCmdMenu closes the custom command sub-menu.
+func (r *Ridealong) CloseCustomCmdMenu() {
+	if r != nil {
+		r.customCmdMenuActive = false
+	}
+}
+
+// CustomCmdAppend appends s to the custom command text.
+func (r *Ridealong) CustomCmdAppend(s string) {
+	if r != nil {
+		r.customCmdText += s
+	}
+}
+
+// CustomCmdBackspace removes the last rune from the custom command text.
+func (r *Ridealong) CustomCmdBackspace() {
+	if r == nil || len(r.customCmdText) == 0 {
+		return
+	}
+	runes := []rune(r.customCmdText)
+	r.customCmdText = string(runes[:len(runes)-1])
+}
+
 type ridealongMenuAction int
 
 const (
-	ridealongActionExecute    ridealongMenuAction = iota
+	ridealongActionExecute ridealongMenuAction = iota
+	ridealongActionCustomCommand
 	ridealongActionReview
 	ridealongActionFixReviewed
 	ridealongActionFixLastStep
+	ridealongActionAutoProposeFix
 	ridealongActionWaypoint
 	ridealongActionAutoplay
 	ridealongActionExit
@@ -422,14 +513,25 @@ type ridealongMenuItem struct {
 
 // buildMenuItems constructs the current ordered list of menu items.
 func (r *Ridealong) buildMenuItems() []ridealongMenuItem {
-	items := []ridealongMenuItem{{"execute command", false, ridealongActionExecute}}
+	items := []ridealongMenuItem{
+		{"execute command", false, ridealongActionExecute},
+		{"insert custom command", false, ridealongActionCustomCommand},
+	}
 	if r.debug && !r.fixingIssue {
+		autoFixLabel := "auto propose fix on failure [off]"
+		if r.autoProposeFix {
+			autoFixLabel = "auto propose fix on failure [on]"
+		}
 		if r.lastStepReview != "" {
-			items = append(items, ridealongMenuItem{"fix issue", true, ridealongActionFixReviewed})
+			items = append(items,
+				ridealongMenuItem{"fix issue(s)", true, ridealongActionFixReviewed},
+				ridealongMenuItem{autoFixLabel, true, ridealongActionAutoProposeFix},
+			)
 		} else {
 			items = append(items,
-				ridealongMenuItem{"review last step", true, ridealongActionReview},
+				ridealongMenuItem{"review last step + propose fix", true, ridealongActionReview},
 				ridealongMenuItem{"fix issue from last step", true, ridealongActionFixLastStep},
+				ridealongMenuItem{autoFixLabel, true, ridealongActionAutoProposeFix},
 			)
 		}
 	}
@@ -617,8 +719,8 @@ var (
 				Foreground(lipgloss.Color("243"))
 
 	ridealongMenuDebugSelectedStyle = lipgloss.NewStyle().
-						Foreground(lipgloss.Color("208")).
-						Bold(true)
+					Foreground(lipgloss.Color("208")).
+					Bold(true)
 
 	ridealongMenuDebugStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("136"))
@@ -698,6 +800,11 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 		} else {
 			menuLines = append(menuLines, ridealongMenuStyle.Render("  cancel"))
 		}
+	} else if r.customCmdMenuActive {
+		// Custom command sub-menu
+		menuLines = append(menuLines, ridealongWaypointHeaderStyle.Render("  custom command:"))
+		menuLines = append(menuLines, ridealongMenuSelectedStyle.Render("◈ "+r.customCmdText+"_"))
+		menuLines = append(menuLines, ridealongHintStyle.Render("  enter=execute  esc=cancel"))
 	} else {
 		// Normal menu
 		items := r.buildMenuItems()
@@ -777,8 +884,13 @@ func (rd *RidealongDynapane) View(windowWidth int) string {
 	return pane + "\n"
 }
 
-// truncateCommand shortens a command string if it exceeds maxLen.
+// truncateCommand shortens a command string for display. Multi-line commands
+// (heredocs) are collapsed to their first line. The result is then capped at maxLen.
 func truncateCommand(cmd string, maxLen int) string {
+	// Collapse multi-line commands to their first line for display.
+	if idx := strings.IndexByte(cmd, '\n'); idx >= 0 {
+		cmd = cmd[:idx] + " ..."
+	}
 	if len(cmd) <= maxLen {
 		return cmd
 	}

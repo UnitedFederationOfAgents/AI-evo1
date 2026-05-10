@@ -376,6 +376,13 @@ type ridealongFixDoneMsg struct {
 	deltaMs  int64
 }
 
+type ridealongCustomCmdDoneMsg struct {
+	exitCode int
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
 // deferRidealongExec returns a Cmd that sends ridealongExecReadyMsg on the next
 // Update, giving Bubble Tea one render cycle to clear the now-inactive pane.
 func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd {
@@ -744,6 +751,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("review cached")
 		}
+		if reviewText != "" {
+			m.writeVisualLog(reviewText)
+		}
+		m.writeVisualLog(postOutput)
 		if m.ridealong != nil && m.ridealong.IsActive() && reviewText != "" {
 			m.ridealong.CacheReview(reviewText)
 		}
@@ -764,8 +775,19 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
+		m.writeVisualLog(postOutput)
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(postOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+
+	case ridealongCustomCmdDoneMsg:
+		m.lastExitCode = msg.exitCode
+		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
+			m.cwd = newCwd
+		}
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 
 	case ridealongExecReadyMsg:
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
@@ -929,7 +951,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 	// Not in multi-line mode
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return m, nil
+		return m, tea.Println("")
 	}
 
 	echo := m.printlnLogged(echoLine)
@@ -1443,6 +1465,9 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 // handleRidealongKey handles key presses in ridealong mode
 func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	if m.ridealong.customCmdMenuActive {
+		return m.handleCustomCmdKey(msg)
+	}
 	switch msg.Type {
 	case tea.KeyEnter:
 		if m.ridealong.waypointMenuActive {
@@ -1451,12 +1476,18 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 		switch m.ridealong.MenuAction() {
 		case ridealongActionExit:
 			return m.exitRidealong()
+		case ridealongActionCustomCommand:
+			m.ridealong.OpenCustomCmdMenu()
+			return m, nil
 		case ridealongActionReview:
 			return m.reviewLastRidealongStep()
 		case ridealongActionFixReviewed:
 			return m.fixReviewedRidealongIssue()
 		case ridealongActionFixLastStep:
 			return m.fixLastRidealongStep()
+		case ridealongActionAutoProposeFix:
+			m.ridealong.ToggleAutoProposeFix()
+			return m, nil
 		case ridealongActionWaypoint:
 			m.ridealong.waypointMenuActive = true
 			m.ridealong.waypointMenuIndex = 0
@@ -1505,6 +1536,84 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	}
 }
 
+// handleCustomCmdKey handles key presses while the custom command sub-menu is open.
+func (m appModel) handleCustomCmdKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	r := m.ridealong
+	switch msg.Type {
+	case tea.KeyEnter:
+		text := strings.TrimSpace(r.customCmdText)
+		if text == "" {
+			return m, nil
+		}
+		return m.executeRidealongCustomCmd(text)
+	case tea.KeyEsc:
+		r.CloseCustomCmdMenu()
+		return m, nil
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		r.CustomCmdBackspace()
+		return m, nil
+	case tea.KeyCtrlC:
+		return m.exitRidealong()
+	case tea.KeyRunes:
+		r.CustomCmdAppend(string(msg.Runes))
+		return m, nil
+	case tea.KeySpace:
+		r.CustomCmdAppend(" ")
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+// executeRidealongCustomCmd runs an arbitrary command without advancing the ridealong step.
+func (m appModel) executeRidealongCustomCmd(text string) (appModel, tea.Cmd) {
+	r := m.ridealong
+	if r == nil {
+		return m, nil
+	}
+	r.CloseCustomCmdMenu()
+
+	m.ridealongDynapane.Deactivate()
+	m.input.SetValue("")
+	m.blinker.SetState(BlinkerInactive)
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+
+	echoLine := m.input.Prompt + text
+	echo := m.printlnLogged(echoLine)
+
+	mkDone := func(err error) tea.Msg {
+		return ridealongCustomCmdDoneMsg{
+			exitCode: extractExitCode(err),
+			line:     text,
+			cmdTime:  cmdTime,
+			deltaMs:  deltaMs,
+		}
+	}
+
+	if strings.HasPrefix(text, "agent ") {
+		prompt := strings.TrimPrefix(text, "agent ")
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.sessionDir)
+		if agentCmd == nil {
+			m.blinker.SetState(BlinkerRidealong)
+			return m, tea.Sequence(echo, tea.Println(errorStyle.Render(errOutput)),
+				m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
+		}
+		if m.visualLogPath != "" {
+			agentCmd = teeCommandAppend(agentCmd, m.visualLogPath)
+		}
+		return m, tea.Sequence(echo, deferRidealongExec(agentCmd, mkDone))
+	}
+
+	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath)
+	return m, tea.Sequence(echo, deferRidealongExec(runCmd, mkDone))
+}
+
 // handleWaypointMenuSelect handles Enter in the waypoint sub-menu.
 func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
 	r := m.ridealong
@@ -1524,20 +1633,31 @@ func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
 
 // exitRidealong exits ridealong mode and restores normal shell state
 func (m appModel) exitRidealong() (appModel, tea.Cmd) {
+	var finishedLogMsg tea.Cmd
 	if m.ridealong != nil && m.ridealong.debug && m.visualLogPath == m.ridealong.scrollbackLogPath && m.visualLogFile != nil {
+		finishedLogPath := m.visualLogPath
 		m.visualLogFile.Close()
 		m.visualLogFile = nil
 		m.visualLogPath = ""
+		finishedLogMsg = tea.Println(successStyle.Render("finished writing to: " + finishedLogPath))
+	}
+	if startPath := m.ridealong.RootStartPath(); startPath != "" && startPath != m.cwd {
+		if err := os.Chdir(startPath); err == nil {
+			m.oldCwd = m.cwd
+			m.cwd = startPath
+		}
 	}
 	m.ridealong.Deactivate()
 	m.ridealong = nil
 	m.ridealongDynapane.Deactivate()
 	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
 	m.input.Focus()
 	m.prevInputLen = 0
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("ridealong ended")),
+		finishedLogMsg,
 		m.blinker.ResetTick(),
 	)
 }
@@ -1562,6 +1682,9 @@ func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
 	}
 	m.input.SetValue(m.ridealong.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	if exitCode != 0 && m.ridealong.debug && m.ridealong.autoProposeFix {
+		return m.reviewLastRidealongStep()
+	}
 	return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 }
 
@@ -1590,7 +1713,8 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 		parent:        m.ridealong,
 		waypoints:     result.waypoints,
 		waypointOrder: result.waypointOrder,
-		autoplay:      m.ridealong.autoplay,
+		autoplay:       m.ridealong.autoplay,
+		autoProposeFix: m.ridealong.autoProposeFix,
 	}
 	if m.ridealong.debug {
 		child.EnableDebug(m.ridealong.scrollbackLogPath)
@@ -1620,7 +1744,7 @@ func (m appModel) reviewLastRidealongStep() (appModel, tea.Cmd) {
 		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
 	}
 	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
-	prompt := "Explain what happened in the last step of the ridealong with scrollback log " + m.ridealong.scrollbackLogPath
+	prompt := "Review the last step of the ridealong using scrollback log " + m.ridealong.scrollbackLogPath + ". Identify any issues and propose a specific fix plan for each issue found."
 	line := "agent -p " + shellQuote(prompt)
 	cachePath := filepath.Join(os.TempDir(), fmt.Sprintf("federation-command-ridealong-review-%s-%d.log", time.Now().Format("20060102-150405"), time.Now().UnixNano()))
 	agentCmd, errOutput := buildAgentPromptCmd(ModePrompt, prompt, m.currentAgent, m.currentModel, m.sessionDir)
@@ -1660,9 +1784,13 @@ func (m appModel) fixLastRidealongStep() (appModel, tea.Cmd) {
 }
 
 func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
+	return m.runRidealongModePrompt(ModeWrite, prompt)
+}
+
+func (m appModel) runRidealongModePrompt(mode, prompt string) (appModel, tea.Cmd) {
 	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
-	line := "agent -w " + shellQuote(prompt)
-	agentCmd, errOutput := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	line := "agent -" + mode + " " + shellQuote(prompt)
+	agentCmd, errOutput := buildAgentPromptCmd(mode, prompt, m.currentAgent, m.currentModel, m.sessionDir)
 	if agentCmd == nil {
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
@@ -1670,7 +1798,11 @@ func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
 	if sp := m.ridealong.RootStartPath(); sp != "" {
 		agentCmd.Dir = sp
 	}
-	return m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
+	runCmd := agentCmd
+	if m.visualLogPath != "" {
+		runCmd = teeCommandAppend(agentCmd, m.visualLogPath)
+	}
+	return m, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongFixDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
 	})
 }
@@ -2121,7 +2253,7 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 	actualCmd := cmdLine
 	if logPath != "" {
 		escapedPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
-		actualCmd = fmt.Sprintf("set -o pipefail; { %s; } 2>&1 | tee -a %s", cmdLine, escapedPath)
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escapedPath)
 	}
 
 	if os.Getenv(EnvIsClauditable) == "true" {
@@ -2283,6 +2415,21 @@ func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {
 		quotedArgs = append(quotedArgs, shellQuote(arg))
 	}
 	teeCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; %s 2>&1 | tee %s", strings.Join(quotedArgs, " "), shellQuote(outputPath)))
+	if cmd.Env != nil {
+		teeCmd.Env = cmd.Env
+	} else {
+		teeCmd.Env = os.Environ()
+	}
+	teeCmd.Dir = cmd.Dir
+	return teeCmd
+}
+
+func teeCommandAppend(cmd *exec.Cmd, outputPath string) *exec.Cmd {
+	var quotedArgs []string
+	for _, arg := range cmd.Args {
+		quotedArgs = append(quotedArgs, shellQuote(arg))
+	}
+	teeCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; %s 2>&1 | tee -a %s", strings.Join(quotedArgs, " "), shellQuote(outputPath)))
 	if cmd.Env != nil {
 		teeCmd.Env = cmd.Env
 	} else {
@@ -2583,7 +2730,11 @@ func processExportAssignment(assignment string) error {
 		return fmt.Errorf("'%s': not a valid identifier", name)
 	}
 
-	if strings.Contains(value, "$(") || strings.Contains(value, "`") {
+	needsBash := strings.Contains(value, "$(") || strings.Contains(value, "`")
+	if !needsBash && len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' && strings.Contains(value, "$") {
+		needsBash = true
+	}
+	if needsBash {
 		script := assignment + "\nprintf '%s' \"$" + name + "\""
 		out, err := exec.Command("bash", "-c", script).Output()
 		if err != nil {

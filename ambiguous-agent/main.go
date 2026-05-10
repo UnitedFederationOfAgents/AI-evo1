@@ -572,7 +572,7 @@ func invokeWithClauditable(config *AgentConfig, args []string, agent, model, ses
 	cmd.Stderr = os.Stderr
 
 	// Propagate working directory from parent process
-	// This is critical when invoked by heuristic-agent with a specific workdir
+	// This is critical when invoked by dungeon-keeper with a specific workdir
 	cwd, err := os.Getwd()
 	if err == nil {
 		cmd.Dir = cwd
@@ -611,7 +611,7 @@ func invokeAgent(agentCmd string, args []string) int {
 	cmd.Stderr = os.Stderr
 
 	// Propagate working directory from parent process
-	// This is critical when invoked by heuristic-agent with a specific workdir
+	// This is critical when invoked by dungeon-keeper with a specific workdir
 	cwd, cwdErr := os.Getwd()
 	if cwdErr == nil {
 		cmd.Dir = cwd

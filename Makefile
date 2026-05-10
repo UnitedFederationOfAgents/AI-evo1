@@ -1,7 +1,7 @@
 .PHONY: test test-all build-all clean-all deploy-dev-binaries
 
 # Sub-projects in this directory
-SUBPROJECTS = clauditable clod ambiguous-agent federation-command heuristic-agent
+SUBPROJECTS = clauditable clod ambiguous-agent federation-command dungeon-keeper
 
 DEV_BIN_DIR=/AI-evo1-dev/bin
 

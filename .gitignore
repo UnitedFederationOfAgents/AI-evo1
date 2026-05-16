@@ -33,3 +33,16 @@ go.work.sum
 
 ignored-scratch/
 ignored-scratch/**
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

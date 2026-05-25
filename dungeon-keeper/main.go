@@ -4,7 +4,7 @@
 // Usage:
 //
 //	dungeon-keeper watch [--agent-type <type>]
-//	dungeon-keeper slopspace create
+//	dungeon-keeper slopspace create [--sync-mode auto-sync]
 //	dungeon-keeper slopspace deploy <id> [--agent-type <type>]
 //	dungeon-keeper slopspace return <id>
 //	dungeon-keeper slopspace list
@@ -105,8 +105,11 @@ Watch command:
                     (default: agent-worker)
 
 Slopspace commands:
-  dungeon-keeper slopspace create
+  dungeon-keeper slopspace create [--sync-mode auto-sync]
     Creates a new slopspace (agent type specified at deploy time)
+    --sync-mode  Sync mode (default: auto-sync). In auto-sync mode:
+                 pre-deploy pulls all repo readspaces/writespaces from remote;
+                 post-return commits and pushes all writespace repo changes.
 
   dungeon-keeper slopspace deploy <id> [--agent-type <type>]
     Deploy a slopspace for a specific agent type (default: agent-worker)
@@ -221,12 +224,17 @@ func runSlopspace(cfg *types.Config, args []string) {
 	switch args[0] {
 	case "create":
 		// No agent-type needed at creation time
-		metadata, err := mgr.Create()
+		fs := flag.NewFlagSet("create", flag.ExitOnError)
+		syncMode := fs.String("sync-mode", "auto-sync", "Sync mode: auto-sync")
+		fs.Parse(args[1:])
+
+		metadata, err := mgr.Create(types.SyncMode(*syncMode))
 		if err != nil {
 			log.Fatalf("Failed to create slopspace: %v", err)
 		}
 		fmt.Printf("Created slopspace: %s\n", metadata.ID)
 		fmt.Printf("  Path: %s\n", metadata.RootPath)
+		fmt.Printf("  Sync mode: %s\n", metadata.SyncMode)
 		fmt.Println("  Agent type will be specified at deploy time")
 
 	case "deploy":
@@ -782,7 +790,7 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 	} else {
 		// Create and deploy a new slopspace
 		log.Printf("[%s] Creating new slopspace", w.workerID)
-		metadata, err = w.slopspaceMgr.Create()
+		metadata, err = w.slopspaceMgr.Create(types.SyncModeAutoSync)
 		if err != nil {
 			return fmt.Errorf("failed to create slopspace: %w", err)
 		}

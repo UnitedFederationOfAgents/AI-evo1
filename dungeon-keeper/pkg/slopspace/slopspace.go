@@ -17,15 +17,16 @@ import (
 
 // Directory names within a slopspace.
 const (
-	ReadSpacesDir       = "readspaces"
-	WriteSpacesDir      = "writespaces"
-	WriteSpacesSecure   = "writespaces-secure" // Secure storage for .git dirs (not copied to /agent)
-	MetadataFile        = "SLOPSPACE.json"
-	AgentRecordsDir     = "agent-records"
-	DTTImagesDir        = "dtt-images"
-	DTTCanvasDir        = "dtt-canvas"
-	ReposDir            = "repos"
-	FilesDir            = "files"
+	ReadSpacesDir     = "readspaces"
+	ReadSpacesSecure  = "readspaces-secure"  // Secure storage for readspace .git dirs (mirrors writespaces-secure)
+	WriteSpacesDir    = "writespaces"
+	WriteSpacesSecure = "writespaces-secure" // Secure storage for writespace .git dirs (not copied to /agent)
+	MetadataFile      = "SLOPSPACE.json"
+	AgentRecordsDir   = "agent-records"
+	DTTImagesDir      = "dtt-images"
+	DTTCanvasDir      = "dtt-canvas"
+	ReposDir          = "repos"
+	FilesDir          = "files"
 )
 
 // Manager handles slopspace lifecycle operations.
@@ -41,7 +42,8 @@ func NewManager(cfg *types.Config) *Manager {
 // Create creates a new slopspace.
 // Note: Slopspaces are NOT tied to an agent type at creation time.
 // The agent type is specified during Deploy().
-func (m *Manager) Create() (*types.SlopspaceMetadata, error) {
+// syncMode defaults to auto-sync when empty.
+func (m *Manager) Create(syncMode types.SyncMode) (*types.SlopspaceMetadata, error) {
 	id := uuid.New().String()
 	now := time.Now()
 
@@ -79,6 +81,7 @@ func (m *Manager) Create() (*types.SlopspaceMetadata, error) {
 			Deployed:  false,
 		},
 		Iteration: 0,
+		SyncMode:  syncMode,
 	}
 
 	// Write metadata file
@@ -132,6 +135,10 @@ func (m *Manager) Deploy(id string, agentType types.AgentType) error {
 
 	if metadata.Deployed {
 		return fmt.Errorf("slopspace %s is already deployed", id)
+	}
+
+	if err := m.syncPreDeploy(metadata.RootPath, metadata.SyncMode); err != nil {
+		return fmt.Errorf("pre-deploy sync: %w", err)
 	}
 
 	deployPath := m.config.DeployPathForAgentType(agentType)
@@ -232,6 +239,10 @@ func (m *Manager) Return(id string) error {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
 
+	if err := m.syncPostReturn(id, metadata.SyncMode, metadata.Iteration); err != nil {
+		return fmt.Errorf("post-return sync: %w", err)
+	}
+
 	return nil
 }
 
@@ -321,10 +332,19 @@ func (m *Manager) AddReadspaceRepo(id string, owner, repo string, ref string, so
 		}
 	}
 
-	// Delete the .git directory - readspaces don't need git history
+	// Move .git to readspaces-secure so sync can pull from remote before each deploy.
+	// This mirrors the writespaces-secure pattern; the agent never sees .git.
 	gitDir := filepath.Join(destPath, ".git")
-	if err := os.RemoveAll(gitDir); err != nil {
-		return fmt.Errorf("failed to remove .git directory: %w", err)
+	secureGitPath := filepath.Join(metadata.RootPath, ReadSpacesSecure, ReposDir, owner, repo)
+	if err := os.MkdirAll(filepath.Dir(secureGitPath), 0755); err != nil {
+		return fmt.Errorf("failed to create readspaces-secure parent dir: %w", err)
+	}
+	if err := os.Rename(gitDir, secureGitPath); err != nil {
+		// Cross-device fallback: copy then delete source
+		if err := copyDirContents(gitDir, secureGitPath); err != nil {
+			return fmt.Errorf("failed to move .git to readspaces-secure: %w", err)
+		}
+		os.RemoveAll(gitDir)
 	}
 
 	return nil
@@ -444,6 +464,14 @@ func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage 
 		return fmt.Errorf("failed to commit changes: %w", err)
 	}
 
+	// Pull --rebase to integrate any upstream changes cleanly before pushing.
+	// Skip if there is no upstream tracking ref (e.g. first push of a new branch).
+	if gitBranchHasUpstream(repoPath) {
+		if err := gitPullRebase(repoPath); err != nil {
+			return fmt.Errorf("failed to pull --rebase before push: %w", err)
+		}
+	}
+
 	// Push changes
 	if err := gitPush(repoPath); err != nil {
 		return fmt.Errorf("failed to push changes: %w", err)
@@ -492,6 +520,117 @@ func (m *Manager) WriteAllRepoChanges(id string, commitMessage string) error {
 	}
 
 	return lastErr
+}
+
+// isAutoSync returns true when the sync mode is auto-sync (or unset, which defaults to it).
+func isAutoSync(mode types.SyncMode) bool {
+	return mode == types.SyncModeAutoSync || mode == ""
+}
+
+// syncPreDeploy pulls fresh content into all readspace and writespace repos before deployment.
+func (m *Manager) syncPreDeploy(rootPath string, syncMode types.SyncMode) error {
+	if !isAutoSync(syncMode) {
+		return nil
+	}
+	if err := m.syncRepoDir(
+		filepath.Join(rootPath, ReadSpacesDir, ReposDir),
+		filepath.Join(rootPath, ReadSpacesSecure, ReposDir),
+	); err != nil {
+		return fmt.Errorf("readspace repo sync: %w", err)
+	}
+	if err := m.syncRepoDir(
+		filepath.Join(rootPath, WriteSpacesDir, ReposDir),
+		filepath.Join(rootPath, WriteSpacesSecure, ReposDir),
+	); err != nil {
+		return fmt.Errorf("writespace repo sync: %w", err)
+	}
+	return nil
+}
+
+// syncPostReturn commits and pushes all writespace repo changes after a slopspace returns.
+func (m *Manager) syncPostReturn(id string, syncMode types.SyncMode, iteration int) error {
+	if !isAutoSync(syncMode) {
+		return nil
+	}
+	msg := fmt.Sprintf("slopspace auto-sync: iteration %d", iteration)
+	return m.WriteAllRepoChanges(id, msg)
+}
+
+// syncRepoDir pulls all repos in reposPath using the .git dirs stored in secureGitsPath.
+// Repos without a corresponding secure .git are silently skipped.
+func (m *Manager) syncRepoDir(reposPath, secureGitsPath string) error {
+	if _, err := os.Stat(reposPath); os.IsNotExist(err) {
+		return nil
+	}
+	owners, err := os.ReadDir(reposPath)
+	if err != nil {
+		return err
+	}
+	for _, owner := range owners {
+		if !owner.IsDir() {
+			continue
+		}
+		repos, err := os.ReadDir(filepath.Join(reposPath, owner.Name()))
+		if err != nil {
+			continue
+		}
+		for _, repo := range repos {
+			if !repo.IsDir() {
+				continue
+			}
+			repoPath := filepath.Join(reposPath, owner.Name(), repo.Name())
+			secureGitPath := filepath.Join(secureGitsPath, owner.Name(), repo.Name())
+			if _, err := os.Stat(secureGitPath); os.IsNotExist(err) {
+				continue // No .git available; repo predates readspaces-secure
+			}
+			if err := pullWithSecureGit(repoPath, secureGitPath); err != nil {
+				return fmt.Errorf("%s/%s: %w", owner.Name(), repo.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+// pullWithSecureGit temporarily restores .git from secureGitPath, runs git pull --rebase,
+// then moves .git back to secure storage.
+func pullWithSecureGit(repoPath, secureGitPath string) error {
+	gitDir := filepath.Join(repoPath, ".git")
+
+	// Restore .git; fall back to copy+delete on cross-device rename
+	if err := os.Rename(secureGitPath, gitDir); err != nil {
+		if err := copyDirContents(secureGitPath, gitDir); err != nil {
+			return fmt.Errorf("restore .git: %w", err)
+		}
+		os.RemoveAll(secureGitPath)
+	}
+
+	defer func() {
+		if _, err := os.Stat(gitDir); err == nil {
+			os.Rename(gitDir, secureGitPath)
+		}
+	}()
+
+	if !gitBranchHasUpstream(repoPath) {
+		return nil // new branch with no remote tracking; nothing to pull
+	}
+	return gitPullRebase(repoPath)
+}
+
+// gitBranchHasUpstream reports whether the current branch in repoPath has an
+// upstream tracking ref configured.
+func gitBranchHasUpstream(repoPath string) bool {
+	cmd := newGitCommand(repoPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	return cmd.Run() == nil
+}
+
+// gitPullRebase runs git pull --rebase on a repository.
+func gitPullRebase(repoPath string) error {
+	cmd := newGitCommand(repoPath, "pull", "--rebase")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, string(output))
+	}
+	return nil
 }
 
 // gitCheckout checks out an existing ref in a repository.

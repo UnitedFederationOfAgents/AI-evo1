@@ -31,6 +31,14 @@ const (
 	WorkStatusFailed     WorkStatus = "failed"
 )
 
+// SyncMode controls when a slopspace synchronizes with remote repositories.
+// The empty value is treated as SyncModeAutoSync throughout.
+type SyncMode string
+
+const (
+	SyncModeAutoSync SyncMode = "auto-sync"
+)
+
 // WorkSignal is the initial header of a work signal file (WORKING-*.jsonl).
 // It defines the work location, agent configuration, and tracking metadata.
 type WorkSignal struct {
@@ -95,9 +103,10 @@ type WriteSpaces struct {
 // Note: DeployedAgentType is only populated when the slopspace is deployed.
 type SlopspaceMetadata struct {
 	Slopspace
-	WorkSignalPath    string    `json:"work_signal_path"`     // Associated work signal file
-	Iteration         int       `json:"iteration"`            // Number of deployment cycles
-	DeployedAgentType AgentType `json:"deployed_agent_type"`  // Agent type for current/last deployment
+	WorkSignalPath    string    `json:"work_signal_path"`    // Associated work signal file
+	Iteration         int       `json:"iteration"`           // Number of deployment cycles
+	DeployedAgentType AgentType `json:"deployed_agent_type"` // Agent type for current/last deployment
+	SyncMode          SyncMode  `json:"sync_mode,omitempty"` // Defaults to auto-sync when empty
 }
 
 // Config holds the runtime configuration for dungeon-keeper.

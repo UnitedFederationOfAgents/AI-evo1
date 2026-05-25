@@ -94,7 +94,10 @@ def main():
                     continue
                 try:
                     with open(entry) as f:
-                        completed = json.loads(f.readline())
+                        lines = f.readlines()
+                    if not lines:
+                        continue
+                    completed = json.loads(lines[0])
                     if completed.get("id") == signal_id:
                         status = completed.get("status")
                         print(f"[claudomation] Work signal {signal_id} completed with status: {status}")
@@ -102,7 +105,18 @@ def main():
                             print("[claudomation] Execution successful!")
                             sys.exit(0)
                         else:
-                            print(f"ERROR: Work failed with status: {status}", file=sys.stderr)
+                            failure_comment = ""
+                            for line in lines[1:]:
+                                try:
+                                    evt = json.loads(line)
+                                    if evt.get("comment"):
+                                        failure_comment = evt["comment"]
+                                except json.JSONDecodeError:
+                                    pass
+                            if failure_comment:
+                                print(f"ERROR: Work failed with status: {status}: {failure_comment}", file=sys.stderr)
+                            else:
+                                print(f"ERROR: Work failed with status: {status}", file=sys.stderr)
                             sys.exit(1)
                 except (json.JSONDecodeError, OSError):
                     continue

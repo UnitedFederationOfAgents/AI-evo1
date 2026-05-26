@@ -323,6 +323,10 @@ type appModel struct {
 	ridealong         *Ridealong
 	ridealongDynapane RidealongDynapane
 
+	// Condoc state
+	condoc         *CondocSession
+	condocDynapane CondocDynapane
+
 	// Visual log state (scrollback-log)
 	visualLogFile *os.File
 	visualLogPath string
@@ -534,6 +538,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle ridealong mode first
 		if m.ridealong != nil && m.ridealong.IsActive() {
 			return m.handleRidealongKey(msg)
+		}
+		// Handle condoc mode: only Ctrl+C is meaningful; flash everything else.
+		if m.condoc != nil && m.condoc.active {
+			if msg.Type == tea.KeyCtrlC {
+				return m.exitCondoc()
+			}
+			return m, m.blinker.StartFlash()
 		}
 
 		switch msg.Type {
@@ -791,6 +802,23 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongExecReadyMsg:
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
+
+	// ---- condoc messages ----
+	case condocTickMsg:
+		return m.handleCondocTick()
+
+	case condocGitDoneMsg:
+		return m.handleCondocGitDone(msg)
+
+	case condocAgentStepDoneMsg:
+		return m.handleCondocAgentDone(msg)
+
+	case condocExecReadyMsg:
+		return m, tea.ExecProcess(msg.runCmd, msg.callback)
+
+	case CondocDynapaneTickMsg:
+		cmd := m.condocDynapane.Tick()
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -815,10 +843,12 @@ func (m appModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	// Show ridealong dynapane if active, otherwise regular dynapane
+	// Show the highest-priority dynapane that is active.
 	var pane string
 	if m.ridealongDynapane.IsActive() {
 		pane = m.ridealongDynapane.View(m.windowWidth)
+	} else if m.condocDynapane.IsActive() {
+		pane = m.condocDynapane.View(m.windowWidth)
 	} else {
 		pane = m.dynapane.View(m.windowWidth)
 	}
@@ -1980,6 +2010,39 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	if line == "ridealong" {
 		m.logRecord(line, cmdTime, deltaMs, 1)
 		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
+	}
+
+	// condoc <filepath> ["<description>"]
+	if strings.HasPrefix(line, "condoc ") {
+		filePath, description := parseCondocCommand(line)
+		if filePath == "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("usage: condoc <filepath> [\"<description>\"]"))
+		}
+		if m.condoc != nil && m.condoc.active {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("condoc: already in condoc mode — ctrl+c to exit first"))
+		}
+		cs, err := NewCondocSession(filePath, description, m.cwd)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render(err.Error()))
+		}
+		m.condoc = cs
+		m.blinker.SetState(BlinkerCondoc)
+		m.input.Blur()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(
+			tea.Println(successStyle.Render("condoc: proposal written to "+filePath+" — add !HANDOFF! to accept")),
+			m.condocDynapane.Activate(cs),
+			m.blinker.ResetTick(),
+			condocTickCmd(),
+		)
+	}
+
+	if line == "condoc" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: condoc <filepath> [\"<description>\"]"))
 	}
 
 	// exit

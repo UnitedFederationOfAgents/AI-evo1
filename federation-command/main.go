@@ -539,12 +539,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ridealong != nil && m.ridealong.IsActive() {
 			return m.handleRidealongKey(msg)
 		}
-		// Handle condoc mode: only Ctrl+C is meaningful; flash everything else.
+		// Handle condoc mode: route through menu key handler.
 		if m.condoc != nil && m.condoc.active {
-			if msg.Type == tea.KeyCtrlC {
-				return m.exitCondoc()
-			}
-			return m, m.blinker.StartFlash()
+			return m.handleCondocKey(msg)
 		}
 
 		switch msg.Type {
@@ -809,6 +806,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case condocGitDoneMsg:
 		return m.handleCondocGitDone(msg)
+
+	case condocPullDoneMsg:
+		return m.handleCondocPullDone(msg)
 
 	case condocAgentStepDoneMsg:
 		return m.handleCondocAgentDone(msg)
@@ -1491,6 +1491,31 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	}
 
 	return false, m, nil
+}
+
+// handleCondocKey handles key presses while condoc mode is active.
+func (m appModel) handleCondocKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyUp:
+		m.condocDynapane.MenuUp()
+		return m, nil
+	case tea.KeyDown:
+		m.condocDynapane.MenuDown()
+		return m, nil
+	case tea.KeyEnter:
+		switch m.condocDynapane.MenuAction() {
+		case condocMenuExit:
+			return m.exitCondoc()
+		case condocMenuPlaceholder:
+			// Placeholder — intentionally does nothing.
+			return m, nil
+		}
+		return m, nil
+	case tea.KeyCtrlC:
+		return m.exitCondoc()
+	default:
+		return m, m.blinker.StartFlash()
+	}
 }
 
 // handleRidealongKey handles key presses in ridealong mode

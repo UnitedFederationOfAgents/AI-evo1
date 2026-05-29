@@ -71,8 +71,9 @@ type CondocSession struct {
 	stepNum      int         // current step number (1-based; 0 = not yet started)
 	stepFile     string      // absolute path to the active child step doc, "" if none
 
-	active    bool
-	statusMsg string // transient message shown in dynapane
+	active     bool
+	statusMsg  string    // transient message shown in dynapane
+	lastPullAt time.Time // last time a pull --rebase was attempted
 }
 
 // ===== MESSAGES =====
@@ -82,6 +83,9 @@ type condocTickMsg struct{}
 
 // condocGitDoneMsg is sent when an async git sequence completes.
 type condocGitDoneMsg struct{ errStr string }
+
+// condocPullDoneMsg is sent when an async pull --rebase completes.
+type condocPullDoneMsg struct{ errStr string }
 
 // condocAgentStepDoneMsg is sent when the agent finishes executing a step or revision.
 type condocAgentStepDoneMsg struct {
@@ -96,6 +100,7 @@ type condocExecReadyMsg struct {
 }
 
 const condocPollInterval = 1 * time.Second
+const condocPullInterval = 30 * time.Second
 
 func condocTickCmd() tea.Cmd {
 	return tea.Tick(condocPollInterval, func(time.Time) tea.Msg {
@@ -161,6 +166,19 @@ func runGitSequence(cmds [][]string, dir string) tea.Cmd {
 	}
 }
 
+// runGitPullRebase runs `git pull --rebase origin <branch>` quietly.
+func runGitPullRebase(dir, branch string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("git", "pull", "--rebase", "origin", branch)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return condocPullDoneMsg{errStr: fmt.Sprintf("pull --rebase: %v\n%s", err, string(out))}
+		}
+		return condocPullDoneMsg{}
+	}
+}
+
 // ===== PATH HELPERS =====
 
 func condocBaseName(filePath string) string {
@@ -195,7 +213,7 @@ func writeProposalFile(cs *CondocSession) error {
 	baseName := condocBaseName(cs.mainFilePath)
 	content := "# " + baseName + "\n\n" +
 		condocYAMLHeader(cs.startTime, cs.branch, cs.callerPath) + "\n\n" +
-		cs.description + "\n\n" +
+		cs.description + "\n\n\n" +
 		"## Human-Prompt\n\n" +
 		"This is the proposed document structure and condoc setup for our new condoc.\n\n" +
 		"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
@@ -227,7 +245,7 @@ func removeHumanPromptSection(content string) string {
 }
 
 func addHumanPrompt(content, text string) string {
-	return strings.TrimRight(content, "\n") + "\n\n## Human-Prompt\n\n" + text + "\n"
+	return strings.TrimRight(content, "\n") + "\n\n\n## Human-Prompt\n\n" + text + "\n"
 }
 
 var condocStepHeadingRe = regexp.MustCompile(`(?m)^### Step (\d+) - (.+)$`)
@@ -269,7 +287,7 @@ func templateStep(mainFilePath string, stepNum int, prevStepCompleted bool) erro
 	}
 	content := removeHumanPromptSection(string(b))
 	content = strings.TrimRight(content, "\n") +
-		fmt.Sprintf("\n\n### Step %d - <REPLACE-TITLE>\n\n```prompt\n<REPLACE-PROMPT>\n```\n\n", stepNum)
+		fmt.Sprintf("\n\n\n### Step %d - <REPLACE-TITLE>\n\n```prompt\n<REPLACE-PROMPT>\n```\n\n", stepNum)
 
 	var humanPrompt string
 	if !prevStepCompleted {
@@ -322,9 +340,9 @@ func addRevisionTemplate(stepFilePath string) error {
 	if err != nil {
 		return err
 	}
-	content := strings.TrimRight(string(b), "\n") + "\n\n" +
+	content := strings.TrimRight(string(b), "\n") + "\n\n\n" +
 		"## <REPLACE-Revision|Retry> A\n\n" +
-		"<REPLACE-PROMPT>\n\n" +
+		"<REPLACE-PROMPT>\n\n\n" +
 		"## Human-Prompt\n\n" +
 		"The AI has responded to the prompt in this step.\n\n" +
 		"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
@@ -343,9 +361,9 @@ func addNextRevisionTemplate(stepFilePath, lastLetter string) error {
 	}
 	nextLetter := string(rune(lastLetter[0] + 1))
 	content := removeHumanPromptSection(string(b))
-	content = strings.TrimRight(content, "\n") + "\n\n" +
+	content = strings.TrimRight(content, "\n") + "\n\n\n" +
 		"## <REPLACE-Revision|Retry> " + nextLetter + "\n\n" +
-		"<REPLACE-PROMPT>\n\n" +
+		"<REPLACE-PROMPT>\n\n\n" +
 		"## Human-Prompt\n\n" +
 		"The AI has responded to the revision in this step.\n\n" +
 		"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
@@ -364,7 +382,7 @@ func finalizeStepFile(stepFilePath string) error {
 	content := removeHumanPromptSection(string(b))
 	now := time.Now()
 	content = strings.TrimRight(content, "\n") +
-		fmt.Sprintf("\n\n## Step Completed\n\nThis step was completed at %d (%s).\n",
+		fmt.Sprintf("\n\n\n## Step Completed\n\nThis step was completed at %d (%s).\n",
 			now.Unix(), now.UTC().Format("Mon Jan 2 03:04:05 PM MST 2006"))
 	return os.WriteFile(stepFilePath, []byte(content), 0644)
 }
@@ -398,7 +416,7 @@ func finalizeMainFile(mainFilePath string) error {
 	content = strings.TrimRight(strings.Join(out, "\n"), " \t\n") + "\n"
 
 	now := time.Now()
-	content += fmt.Sprintf("\n## Condoc Completed\n\nThis condoc was completed at %d (%s).\n",
+	content += fmt.Sprintf("\n\n## Condoc Completed\n\nThis condoc was completed at %d (%s).\n",
 		now.Unix(), now.UTC().Format("Mon Jan 2 03:04:05 PM MST 2006"))
 	return os.WriteFile(mainFilePath, []byte(content), 0644)
 }
@@ -419,6 +437,21 @@ func pendingRevisionLetter(content string) string {
 	return ""
 }
 
+// revisionText extracts the human text under "## Revision X" in the step file content.
+func revisionText(content, letter string) string {
+	re := regexp.MustCompile(`(?m)^## Revision ` + regexp.QuoteMeta(letter) + `$`)
+	loc := re.FindStringIndex(content)
+	if loc == nil {
+		return ""
+	}
+	after := content[loc[1]:]
+	endRe := regexp.MustCompile(`(?m)^## `)
+	if endLoc := endRe.FindStringIndex(after); endLoc != nil {
+		after = after[:endLoc[0]]
+	}
+	return strings.TrimSpace(after)
+}
+
 // lastReplyLetter returns the letter of the most recent "## Reply X" section, or "".
 func lastReplyLetter(content string) string {
 	matches := condocReplyLetterRe.FindAllStringSubmatch(content, -1)
@@ -436,6 +469,7 @@ func buildCondocStepPrompt(stepFilePath string) string {
 			"Read the step file. Execute the task described in the '# Prompt' section. "+
 			"After completing all tasks, write a brief summary (2-3 sentences) of what you accomplished "+
 			"under a new '## Reply' section at the end of the step file. "+
+			"Use two blank lines before the '## Reply' heading. "+
 			"Only add the '## Reply' heading and your summary — do not add any other sections.",
 		stepFilePath)
 }
@@ -446,17 +480,47 @@ func buildCondocRevisionPrompt(stepFilePath, revLetter string) string {
 			"Read the step file. You previously completed a task (see '## Reply') and the human has "+
 			"requested Revision %s (see '## Revision %s'). "+
 			"Execute the revision as described. After completing it, write a brief summary "+
-			"under a new '## Reply %s' section at the end of the step file.",
-		stepFilePath, revLetter, revLetter, revLetter)
+			"under a new '## Reply %s' section at the end of the step file. "+
+			"Use two blank lines before the '## Reply %s' heading.",
+		stepFilePath, revLetter, revLetter, revLetter, revLetter)
 }
 
 // ===== DYNAPANE =====
 
 // CondocDynapane renders condoc status above the prompt.
+type condocMenuAction int
+
+const (
+	condocMenuExit        condocMenuAction = iota
+	condocMenuPlaceholder
+)
+
+const condocMenuItemCount = 2
+
 type CondocDynapane struct {
-	active  bool
-	session *CondocSession
-	tick    int
+	active    bool
+	session   *CondocSession
+	tick      int
+	menuIndex int
+}
+
+func (cd *CondocDynapane) MenuUp() {
+	if cd.menuIndex > 0 {
+		cd.menuIndex--
+	}
+}
+
+func (cd *CondocDynapane) MenuDown() {
+	if cd.menuIndex < condocMenuItemCount-1 {
+		cd.menuIndex++
+	}
+}
+
+func (cd *CondocDynapane) MenuAction() condocMenuAction {
+	if cd.menuIndex == 1 {
+		return condocMenuPlaceholder
+	}
+	return condocMenuExit
 }
 
 // CondocDynapaneTickMsg drives the animation in the dynapane.
@@ -518,6 +582,13 @@ var (
 	condocHintStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("243")).
 			Italic(true)
+
+	condocMenuSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("82")).
+				Bold(true)
+
+	condocMenuStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("243"))
 )
 
 // condocAnimColors cycles green→yellow for the animated indicator.
@@ -571,13 +642,20 @@ func (cd *CondocDynapane) View(windowWidth int) string {
 		stepLine = condocStatusStyle.Render("step: —")
 	}
 
-	hintLine := condocHintStyle.Render("ctrl+c to exit condoc mode")
-
+	menuLabels := []string{"exit", "placeholder"}
 	allLines := []string{titleRow, divider, phaseLine, watchLine, stepLine}
 	if cs.statusMsg != "" {
 		allLines = append(allLines, condocStatusStyle.Render(cs.statusMsg))
 	}
-	allLines = append(allLines, divider, hintLine)
+	allLines = append(allLines, divider)
+	for i, label := range menuLabels {
+		if cd.menuIndex == i {
+			allLines = append(allLines, condocMenuSelectedStyle.Render("◈ "+label))
+		} else {
+			allLines = append(allLines, condocMenuStyle.Render("  "+label))
+		}
+	}
+	allLines = append(allLines, condocHintStyle.Render("  ↑↓ navigate  enter to select"))
 
 	content := strings.Join(allLines, "\n")
 	pane := condocBorderStyle.Width(innerWidth).Render(content)
@@ -591,6 +669,9 @@ func (cd *CondocDynapane) View(windowWidth int) string {
 func NewCondocSession(filePath, description, cwd string) (*CondocSession, error) {
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(cwd, filePath)
+	}
+	if !strings.HasSuffix(filePath, ".md") {
+		return nil, fmt.Errorf("condoc: file path must have a .md extension")
 	}
 	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
 		return nil, fmt.Errorf("condoc: cannot create directory: %w", err)
@@ -634,6 +715,16 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 	if cs == nil || !cs.active {
 		return m, nil
 	}
+
+	// Attempt periodic pull --rebase while waiting (branch must already exist).
+	var pullCmd tea.Cmd
+	if cs.phase == condocPhaseAwaitingStep || cs.phase == condocPhaseAwaitingAction {
+		if time.Since(cs.lastPullAt) >= condocPullInterval {
+			cs.lastPullAt = time.Now()
+			pullCmd = runGitPullRebase(cs.repoRoot, cs.branch)
+		}
+	}
+
 	switch cs.phase {
 	case condocPhaseProposed:
 		if condocFileHasHandoff(cs.mainFilePath) {
@@ -656,7 +747,16 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 			}
 		}
 	}
-	return m, condocTickCmd()
+	return m, tea.Batch(condocTickCmd(), pullCmd)
+}
+
+// handleCondocPullDone processes the result of a background pull --rebase.
+func (m appModel) handleCondocPullDone(msg condocPullDoneMsg) (appModel, tea.Cmd) {
+	if msg.errStr != "" && m.condoc != nil {
+		m.condoc.statusMsg = "pull: " + msg.errStr
+		return m, m.condocDynapane.Activate(m.condoc)
+	}
+	return m, nil
 }
 
 // condocAcceptProposal handles !HANDOFF! on the proposal: creates the git branch,
@@ -675,6 +775,7 @@ func (m appModel) condocAcceptProposal() (appModel, tea.Cmd) {
 		{"checkout", "-b", cs.branch},
 		{"add", "."},
 		{"commit", "-m", "condoc: accept proposal, template step 1"},
+		{"push", "--set-upstream", "origin", cs.branch},
 	}
 	return m, tea.Batch(
 		m.condocDynapane.Activate(cs),
@@ -767,6 +868,7 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 
 	return m, tea.Sequence(
 		tea.Println(sessionStyle.Render("condoc: running agent for "+filepath.Base(stepPath)+"…")),
+		tea.Println(condocHintStyle.Render("prompt: "+step.prompt)),
 		deferCondocExec(agentCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
@@ -815,6 +917,7 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 	gitCmds := [][]string{
 		{"add", "."},
 		{"commit", "-m", fmt.Sprintf("condoc: step %d agent output", cs.stepNum)},
+		{"push", "origin", cs.branch},
 	}
 	return m, tea.Batch(
 		statusPrint,
@@ -837,6 +940,8 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 		return m, condocTickCmd()
 	}
 
+	revText := revisionText(string(b), revLetter)
+
 	cs.phase = condocPhaseRunningAgent
 	cs.statusMsg = "running agent for revision " + revLetter + "…"
 
@@ -852,6 +957,7 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 
 	return m, tea.Sequence(
 		tea.Println(sessionStyle.Render("condoc: running agent for revision "+revLetter+"…")),
+		tea.Println(condocHintStyle.Render("revision: "+revText)),
 		deferCondocExec(agentCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
@@ -878,6 +984,7 @@ func (m appModel) condocCompleteStep() (appModel, tea.Cmd) {
 	gitCmds := [][]string{
 		{"add", "."},
 		{"commit", "-m", fmt.Sprintf("condoc: step %d completed, template step %d", nextStep-1, nextStep)},
+		{"push", "origin", cs.branch},
 	}
 	// After commit, condocPhaseCommitting handler will set phase → condocPhaseAwaitingStep.
 	return m, tea.Batch(
@@ -899,6 +1006,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 	gitCmds := [][]string{
 		{"add", "."},
 		{"commit", "-m", "condoc: completed"},
+		{"push", "origin", cs.branch},
 	}
 	m.condocDynapane.Deactivate()
 	m.condoc = nil

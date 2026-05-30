@@ -71,9 +71,12 @@ type CondocSession struct {
 	stepNum      int         // current step number (1-based; 0 = not yet started)
 	stepFile     string      // absolute path to the active child step doc, "" if none
 
-	active     bool
-	statusMsg  string    // transient message shown in dynapane
-	lastPullAt time.Time // last time a pull --rebase was attempted
+	active          bool
+	verbose         bool      // verbose Human-Prompt text if true; brief if false
+	statusMsg       string    // transient message shown in dynapane
+	lastPullAt      time.Time // last time a pull --rebase was attempted
+	replyTmpPath    string    // temp file capturing agent terminal output for the current run
+	pendingRevLetter string   // "" for initial step reply, "A"/"B"/... for revision reply
 }
 
 // ===== MESSAGES =====
@@ -110,6 +113,47 @@ func condocTickCmd() tea.Cmd {
 
 func deferCondocExec(cmd *exec.Cmd, cb func(error) tea.Msg) tea.Cmd {
 	return func() tea.Msg { return condocExecReadyMsg{runCmd: cmd, callback: cb} }
+}
+
+// ===== HELPERS =====
+
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b[^[]`)
+
+// stripANSI removes ANSI escape sequences and collapses CR-overwritten lines.
+func stripANSI(s string) string {
+	s = ansiEscRe.ReplaceAllString(s, "")
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		parts := strings.Split(line, "\r")
+		lines[i] = parts[len(parts)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ordinal(n int) string {
+	switch n {
+	case 1:
+		return "first"
+	case 2:
+		return "second"
+	case 3:
+		return "third"
+	case 4:
+		return "fourth"
+	case 5:
+		return "fifth"
+	case 6:
+		return "sixth"
+	case 7:
+		return "seventh"
+	case 8:
+		return "eighth"
+	case 9:
+		return "ninth"
+	case 10:
+		return "tenth"
+	}
+	return fmt.Sprintf("step %d", n)
 }
 
 // ===== FILE HELPERS =====
@@ -211,13 +255,19 @@ func condocYAMLHeader(startTime int64, branch, callerPath string) string {
 // writeProposalFile creates the initial condoc file (snp0 format).
 func writeProposalFile(cs *CondocSession) error {
 	baseName := condocBaseName(cs.mainFilePath)
+	var humanPrompt string
+	if cs.verbose {
+		humanPrompt = "This is the proposed document structure and condoc setup for our new condoc.\n\n" +
+			"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
+			"To accept this condoc proposal add the '!HANDOFF!' directive to the end of the file followed by only whitespace, and the handler will template the first step."
+	} else {
+		humanPrompt = "To accept this condoc proposal add the '!HANDOFF!'."
+	}
 	content := "# " + baseName + "\n\n" +
 		condocYAMLHeader(cs.startTime, cs.branch, cs.callerPath) + "\n\n" +
 		cs.description + "\n\n\n" +
 		"## Human-Prompt\n\n" +
-		"This is the proposed document structure and condoc setup for our new condoc.\n\n" +
-		"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
-		"To accept this condoc proposal add the '!HANDOFF!' directive to the end of the file followed by only whitespace, and the handler will template the first step.\n"
+		humanPrompt + "\n"
 	return os.WriteFile(cs.mainFilePath, []byte(content), 0644)
 }
 
@@ -280,7 +330,7 @@ func parseLastStep(content string) (parsedCondocStep, bool) {
 }
 
 // templateStep adds a step template to the main file and the appropriate Human-Prompt.
-func templateStep(mainFilePath string, stepNum int, prevStepCompleted bool) error {
+func templateStep(mainFilePath string, stepNum int, prevStepCompleted, verbose bool) error {
 	b, err := os.ReadFile(mainFilePath)
 	if err != nil {
 		return err
@@ -291,86 +341,164 @@ func templateStep(mainFilePath string, stepNum int, prevStepCompleted bool) erro
 
 	var humanPrompt string
 	if !prevStepCompleted {
-		humanPrompt = fmt.Sprintf(
-			"The proposed document has been accepted and we have templated step %d.\n\n"+
-				"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
-				"Please replace the title and the prompt with the desired input for our AI.\n\n"+
-				"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace,\n"+
-				"and the handler will instruct the AI to execute step %d.", stepNum, stepNum)
+		if verbose {
+			humanPrompt = fmt.Sprintf(
+				"The proposed document has been accepted and we have templated step %d.\n\n"+
+					"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
+					"Please replace the title and the prompt with the desired input for our AI.\n\n"+
+					"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace,\n"+
+					"and the handler will instruct the AI to execute step %d.", stepNum, stepNum)
+		} else {
+			humanPrompt = fmt.Sprintf(
+				"Once you have added the Title and Prompt add the '!HANDOFF!' directive to execute the %s step.",
+				ordinal(stepNum))
+		}
 	} else {
-		humanPrompt = fmt.Sprintf(
-			"Step %d has been completed and we have templated step %d.\n\n"+
-				"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
-				"Please replace the title and the prompt with the desired input for our AI.\n\n"+
-				"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace,\n"+
-				"and the handler will instruct the AI to execute step %d.\n\n"+
-				"Alternatively, add the '!COMPLETED!' directive to consider this condoc a success and conclude it.",
-			stepNum-1, stepNum, stepNum)
+		if verbose {
+			humanPrompt = fmt.Sprintf(
+				"Step %d has been completed and we have templated step %d.\n\n"+
+					"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
+					"Please replace the title and the prompt with the desired input for our AI.\n\n"+
+					"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace,\n"+
+					"and the handler will instruct the AI to execute step %d.\n\n"+
+					"Alternatively, add the '!COMPLETED!' directive to consider this condoc a success and conclude it.",
+				stepNum-1, stepNum, stepNum)
+		} else {
+			humanPrompt = fmt.Sprintf(
+				"Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the %s step,"+
+					" or submit the '!COMPLETED!' directive to complete this condoc.",
+				ordinal(stepNum))
+		}
 	}
 	content = addHumanPrompt(content, humanPrompt)
 	return os.WriteFile(mainFilePath, []byte(content), 0644)
 }
 
-// writeStepFile creates the initial step child doc with just the prompt.
-func writeStepFile(stepFilePath, prompt string) error {
+// writeStepFile creates the initial step child doc with a backlink to the main file and the prompt.
+func writeStepFile(stepFilePath, mainFilePath, prompt string) error {
 	if err := os.MkdirAll(filepath.Dir(stepFilePath), 0755); err != nil {
 		return err
 	}
-	content := "# Prompt\n\n" + prompt + "\n"
+	baseName := condocBaseName(mainFilePath)
+	mainFileName := filepath.Base(mainFilePath)
+	backLink := fmt.Sprintf("[%s](../%s)", baseName, mainFileName)
+	content := "# Prompt\n\n" + backLink + "\n\n" + prompt + "\n"
 	return os.WriteFile(stepFilePath, []byte(content), 0644)
 }
 
+// insertStepLink inserts a markdown link to the step file right after the filled-in step heading.
+func insertStepLink(content, mainFilePath string, stepNum int) string {
+	implsDir := filepath.Base(condocImplsDirPath(mainFilePath))
+	linkTarget := fmt.Sprintf("%s/Step%dPrompt.md", implsDir, stepNum)
+	linkText := fmt.Sprintf("[Step %d Prompt](%s)", stepNum, linkTarget)
+	if strings.Contains(content, linkText) {
+		return content
+	}
+	headingRe := regexp.MustCompile(fmt.Sprintf(`(?m)^### Step %d - .+$`, stepNum))
+	return headingRe.ReplaceAllStringFunc(content, func(match string) string {
+		if strings.Contains(match, "<REPLACE-TITLE>") {
+			return match
+		}
+		return match + "\n\n" + linkText
+	})
+}
+
 // updateMainAfterStepStart updates the main file to redirect focus to the step file (snp4).
-func updateMainAfterStepStart(mainFilePath string) error {
+// It inserts a link to the step file and updates the Human-Prompt section.
+func updateMainAfterStepStart(mainFilePath string, stepNum int, verbose bool) error {
 	b, err := os.ReadFile(mainFilePath)
 	if err != nil {
 		return err
 	}
 	content := removeHumanPromptSection(string(b))
-	humanPrompt := "The flow of the condoc is now within the current step.\n\n" +
-		"Please respond to the Human-Prompt in the step file and add the '!HANDOFF!' directive there,\n" +
-		"or the '!COMPLETED!' directive when the step is complete."
+	content = insertStepLink(content, mainFilePath, stepNum)
+	ord := ordinal(stepNum)
+	var humanPrompt string
+	if verbose {
+		humanPrompt = fmt.Sprintf(
+			"The flow of the condoc is now within the %s step.\n\n"+
+				"Please respond to the Human-Prompt in the %s step and add the '!HANDOFF!' directive there,\n"+
+				"or the '!COMPLETED!' directive when the step is complete.",
+			ord, ord)
+	} else {
+		humanPrompt = fmt.Sprintf("The flow of the condoc is now within the %s step.", ord)
+	}
 	content = addHumanPrompt(content, humanPrompt)
 	return os.WriteFile(mainFilePath, []byte(content), 0644)
 }
 
 // addRevisionTemplate appends the REPLACE-Revision template + Human-Prompt to the step file.
-func addRevisionTemplate(stepFilePath string) error {
+func addRevisionTemplate(stepFilePath string, verbose bool) error {
 	b, err := os.ReadFile(stepFilePath)
 	if err != nil {
 		return err
+	}
+	var humanPrompt string
+	if verbose {
+		humanPrompt = "The AI has responded to the prompt in this step.\n\n" +
+			"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
+			"To REVISE the work, replace '<REPLACE-Revision|Retry>' with 'Revision' and '<REPLACE-PROMPT>'\n" +
+			"with your revision request, then add the '!HANDOFF!' directive.\n\n" +
+			"Alternatively, add the '!COMPLETED!' directive to consider this step a success and conclude it."
+	} else {
+		humanPrompt = "When you are done add the '!HANDOFF!' or '!COMPLETED!' directive."
 	}
 	content := strings.TrimRight(string(b), "\n") + "\n\n\n" +
 		"## <REPLACE-Revision|Retry> A\n\n" +
 		"<REPLACE-PROMPT>\n\n\n" +
 		"## Human-Prompt\n\n" +
-		"The AI has responded to the prompt in this step.\n\n" +
-		"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
-		"To REVISE the work, replace '<REPLACE-Revision|Retry>' with 'Revision' and '<REPLACE-PROMPT>'\n" +
-		"with your revision request, then add the '!HANDOFF!' directive.\n\n" +
-		"Alternatively, add the '!COMPLETED!' directive to consider this step a success and conclude it.\n"
+		humanPrompt + "\n"
 	return os.WriteFile(stepFilePath, []byte(content), 0644)
 }
 
 // addNextRevisionTemplate appends a next-letter revision template to the step file
 // after a completed revision cycle.
-func addNextRevisionTemplate(stepFilePath, lastLetter string) error {
+func addNextRevisionTemplate(stepFilePath, lastLetter string, verbose bool) error {
 	b, err := os.ReadFile(stepFilePath)
 	if err != nil {
 		return err
 	}
 	nextLetter := string(rune(lastLetter[0] + 1))
+	var humanPrompt string
+	if verbose {
+		humanPrompt = "The AI has responded to the revision in this step.\n\n" +
+			"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
+			"To REVISE further, replace '<REPLACE-Revision|Retry>' with 'Revision' and '<REPLACE-PROMPT>'\n" +
+			"with your revision request, then add the '!HANDOFF!' directive.\n\n" +
+			"Alternatively, add the '!COMPLETED!' directive to consider this step a success and conclude it."
+	} else {
+		humanPrompt = "When you are done add the '!HANDOFF!' or '!COMPLETED!' directive."
+	}
 	content := removeHumanPromptSection(string(b))
 	content = strings.TrimRight(content, "\n") + "\n\n\n" +
 		"## <REPLACE-Revision|Retry> " + nextLetter + "\n\n" +
 		"<REPLACE-PROMPT>\n\n\n" +
 		"## Human-Prompt\n\n" +
-		"The AI has responded to the revision in this step.\n\n" +
-		"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
-		"To REVISE further, replace '<REPLACE-Revision|Retry>' with 'Revision' and '<REPLACE-PROMPT>'\n" +
-		"with your revision request, then add the '!HANDOFF!' directive.\n\n" +
-		"Alternatively, add the '!COMPLETED!' directive to consider this step a success and conclude it.\n"
+		humanPrompt + "\n"
 	return os.WriteFile(stepFilePath, []byte(content), 0644)
+}
+
+// removeUnfilledRevisionTemplates strips any ## <REPLACE-Revision|Retry> X blocks
+// whose body is still the unfilled <REPLACE-PROMPT> placeholder.
+func removeUnfilledRevisionTemplates(content string) string {
+	lines := strings.Split(content, "\n")
+	var out []string
+	skip := false
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "## <REPLACE-Revision|Retry>") {
+			skip = true
+			continue
+		}
+		if skip {
+			if t == "" || t == "<REPLACE-PROMPT>" {
+				continue
+			}
+			skip = false
+		}
+		out = append(out, line)
+	}
+	return strings.TrimRight(strings.Join(out, "\n"), " \t\n") + "\n"
 }
 
 // finalizeStepFile replaces the Human-Prompt section with a completion timestamp.
@@ -380,6 +508,7 @@ func finalizeStepFile(stepFilePath string) error {
 		return err
 	}
 	content := removeHumanPromptSection(string(b))
+	content = removeUnfilledRevisionTemplates(content)
 	now := time.Now()
 	content = strings.TrimRight(content, "\n") +
 		fmt.Sprintf("\n\n\n## Step Completed\n\nThis step was completed at %d (%s).\n",
@@ -419,6 +548,27 @@ func finalizeMainFile(mainFilePath string) error {
 	content += fmt.Sprintf("\n\n## Condoc Completed\n\nThis condoc was completed at %d (%s).\n",
 		now.Unix(), now.UTC().Format("Mon Jan 2 03:04:05 PM MST 2006"))
 	return os.WriteFile(mainFilePath, []byte(content), 0644)
+}
+
+// appendReplyToStepFile writes the captured agent reply under "## Reply" (or "## Reply X")
+// at the end of the step file. Called by the handler — agents must never write to step files.
+func appendReplyToStepFile(stepFilePath, letter, replyText string) error {
+	b, err := os.ReadFile(stepFilePath)
+	if err != nil {
+		return err
+	}
+	heading := "## Reply"
+	if letter != "" {
+		heading = "## Reply " + letter
+	}
+	// Strip any Human-Prompt section (and HANDOFF directive) before appending — for revision
+	// runs the file still has ## Human-Prompt + !HANDOFF! at EOF when this is called, so
+	// without stripping, addNextRevisionTemplate's removeHumanPromptSection call would
+	// delete the reply we just wrote.
+	cleaned := removeHumanPromptSection(string(b))
+	content := strings.TrimRight(cleaned, "\n") +
+		"\n\n\n" + heading + "\n\n" + replyText + "\n"
+	return os.WriteFile(stepFilePath, []byte(content), 0644)
 }
 
 // ===== REVISION DETECTION =====
@@ -467,10 +617,10 @@ func buildCondocStepPrompt(stepFilePath string) string {
 	return fmt.Sprintf(
 		"You are executing a condoc step. The step file is at '%s'. "+
 			"Read the step file. Execute the task described in the '# Prompt' section. "+
-			"After completing all tasks, write a brief summary (2-3 sentences) of what you accomplished "+
-			"under a new '## Reply' section at the end of the step file. "+
-			"Use two blank lines before the '## Reply' heading. "+
-			"Only add the '## Reply' heading and your summary — do not add any other sections.",
+			"IMPORTANT: Do NOT write to or modify the step file or any other condoc files — "+
+			"the condoc handler will automatically capture your terminal response as the reply. "+
+			"When you have finished, provide a brief summary (2-3 sentences) of what you accomplished "+
+			"as your terminal response.",
 		stepFilePath)
 }
 
@@ -479,10 +629,12 @@ func buildCondocRevisionPrompt(stepFilePath, revLetter string) string {
 		"You are executing a condoc step revision. The step file is at '%s'. "+
 			"Read the step file. You previously completed a task (see '## Reply') and the human has "+
 			"requested Revision %s (see '## Revision %s'). "+
-			"Execute the revision as described. After completing it, write a brief summary "+
-			"under a new '## Reply %s' section at the end of the step file. "+
-			"Use two blank lines before the '## Reply %s' heading.",
-		stepFilePath, revLetter, revLetter, revLetter, revLetter)
+			"Execute the revision as described. "+
+			"IMPORTANT: Do NOT write to or modify the step file or any other condoc files — "+
+			"the condoc handler will automatically capture your terminal response as the reply. "+
+			"When you have finished, provide a brief summary (2-3 sentences) of what you changed "+
+			"as your terminal response.",
+		stepFilePath, revLetter, revLetter)
 }
 
 // ===== DYNAPANE =====
@@ -666,7 +818,7 @@ func (cd *CondocDynapane) View(windowWidth int) string {
 
 // NewCondocSession initialises a new condoc session, writes the proposal file,
 // and returns the session ready for the handler to start watching.
-func NewCondocSession(filePath, description, cwd string) (*CondocSession, error) {
+func NewCondocSession(filePath, description string, verbose bool, cwd string) (*CondocSession, error) {
 	if !filepath.IsAbs(filePath) {
 		filePath = filepath.Join(cwd, filePath)
 	}
@@ -699,6 +851,7 @@ func NewCondocSession(filePath, description, cwd string) (*CondocSession, error)
 		callerPath:   callerPath,
 		phase:        condocPhaseProposed,
 		active:       true,
+		verbose:      verbose,
 	}
 	if err := writeProposalFile(cs); err != nil {
 		return nil, fmt.Errorf("condoc: cannot write proposal file: %w", err)
@@ -767,7 +920,7 @@ func (m appModel) condocAcceptProposal() (appModel, tea.Cmd) {
 	cs.statusMsg = "creating branch and templating step 1…"
 
 	// Pre-emptively update the file (step 1 template will be written after branch creation)
-	if err := templateStep(cs.mainFilePath, 1, false); err != nil {
+	if err := templateStep(cs.mainFilePath, 1, false, cs.verbose); err != nil {
 		return m.condocError("templateStep: " + err.Error())
 	}
 
@@ -844,15 +997,16 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 	}
 
 	stepPath := condocStepFilePath(cs.mainFilePath, step.num)
-	if err := writeStepFile(stepPath, step.prompt); err != nil {
+	if err := writeStepFile(stepPath, cs.mainFilePath, step.prompt); err != nil {
 		return m.condocError("write step file: " + err.Error())
 	}
-	if err := updateMainAfterStepStart(cs.mainFilePath); err != nil {
+	if err := updateMainAfterStepStart(cs.mainFilePath, step.num, cs.verbose); err != nil {
 		return m.condocError("update main file: " + err.Error())
 	}
 
 	cs.stepNum = step.num
 	cs.stepFile = stepPath
+	cs.pendingRevLetter = ""
 	cs.phase = condocPhaseRunningAgent
 	cs.statusMsg = "running agent for step " + strconv.Itoa(step.num) + "…"
 
@@ -862,6 +1016,11 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 		return m.condocError("build agent cmd: " + errMsg)
 	}
 	agentCmd.Dir = cs.repoRoot
+	agentCmd.Env = append(agentCmd.Env, "AA_QUIET=true")
+
+	replyTmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("condoc-reply-%d.txt", time.Now().UnixNano()))
+	cs.replyTmpPath = replyTmpPath
+	runCmd := teeCommand(agentCmd, replyTmpPath)
 
 	m.condocDynapane.Deactivate()
 	m.blinker.SetState(BlinkerInactive)
@@ -869,7 +1028,7 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 	return m, tea.Sequence(
 		tea.Println(sessionStyle.Render("condoc: running agent for "+filepath.Base(stepPath)+"…")),
 		tea.Println(condocHintStyle.Render("prompt: "+step.prompt)),
-		deferCondocExec(agentCmd, func(err error) tea.Msg {
+		deferCondocExec(runCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
 	)
@@ -893,17 +1052,30 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 		statusPrint = tea.Println(successStyle.Render("condoc: agent completed"))
 	}
 
-	// Read step file to determine what template to add next.
-	b, _ := os.ReadFile(cs.stepFile)
-	stepContent := string(b)
+	// Read and strip the captured terminal reply from the temp file, then write it to
+	// the step file. The handler owns all condoc file writes — agents must not touch them.
+	replyText := "(no reply captured)"
+	if cs.replyTmpPath != "" {
+		if raw, err := os.ReadFile(cs.replyTmpPath); err == nil {
+			cleaned := strings.TrimSpace(stripANSI(string(raw)))
+			if cleaned != "" {
+				replyText = cleaned
+			}
+		}
+		_ = os.Remove(cs.replyTmpPath)
+		cs.replyTmpPath = ""
+	}
+
+	revLetter := cs.pendingRevLetter
+	if err := appendReplyToStepFile(cs.stepFile, revLetter, replyText); err != nil {
+		return m.condocError("append reply to step file: " + err.Error())
+	}
 
 	var templateErr error
-	if letter := lastReplyLetter(stepContent); letter != "" {
-		// Agent completed a lettered reply (e.g. ## Reply A) — offer next revision letter.
-		templateErr = addNextRevisionTemplate(cs.stepFile, letter)
+	if revLetter != "" {
+		templateErr = addNextRevisionTemplate(cs.stepFile, revLetter, cs.verbose)
 	} else {
-		// Agent completed the initial step (## Reply, no letter) — offer first revision.
-		templateErr = addRevisionTemplate(cs.stepFile)
+		templateErr = addRevisionTemplate(cs.stepFile, cs.verbose)
 	}
 	if templateErr != nil {
 		return m.condocError("add revision template: " + templateErr.Error())
@@ -942,6 +1114,7 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 
 	revText := revisionText(string(b), revLetter)
 
+	cs.pendingRevLetter = revLetter
 	cs.phase = condocPhaseRunningAgent
 	cs.statusMsg = "running agent for revision " + revLetter + "…"
 
@@ -951,6 +1124,11 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 		return m.condocError("build agent cmd: " + errMsg)
 	}
 	agentCmd.Dir = cs.repoRoot
+	agentCmd.Env = append(agentCmd.Env, "AA_QUIET=true")
+
+	replyTmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("condoc-reply-%d.txt", time.Now().UnixNano()))
+	cs.replyTmpPath = replyTmpPath
+	runCmd := teeCommand(agentCmd, replyTmpPath)
 
 	m.condocDynapane.Deactivate()
 	m.blinker.SetState(BlinkerInactive)
@@ -958,7 +1136,7 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 	return m, tea.Sequence(
 		tea.Println(sessionStyle.Render("condoc: running agent for revision "+revLetter+"…")),
 		tea.Println(condocHintStyle.Render("revision: "+revText)),
-		deferCondocExec(agentCmd, func(err error) tea.Msg {
+		deferCondocExec(runCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
 	)
@@ -971,7 +1149,7 @@ func (m appModel) condocCompleteStep() (appModel, tea.Cmd) {
 		return m.condocError("finalize step file: " + err.Error())
 	}
 	nextStep := cs.stepNum + 1
-	if err := templateStep(cs.mainFilePath, nextStep, true); err != nil {
+	if err := templateStep(cs.mainFilePath, nextStep, true, cs.verbose); err != nil {
 		return m.condocError("template next step: " + err.Error())
 	}
 
@@ -1052,19 +1230,30 @@ func (m appModel) condocError(msg string) (appModel, tea.Cmd) {
 	)
 }
 
-// parseCondocCommand parses `condoc <filepath> ["<description>"]`.
-func parseCondocCommand(line string) (filePath, description string) {
+// parseCondocCommand parses `condoc [-v|--verbose] <filepath> ["<description>"]`.
+func parseCondocCommand(line string) (filePath, description string, verbose bool) {
 	rest := strings.TrimSpace(strings.TrimPrefix(line, "condoc"))
 	if rest == "" {
-		return "", ""
+		return "", "", false
 	}
 	args := parseArgs(rest)
 	if len(args) == 0 {
-		return "", ""
+		return "", "", false
 	}
-	filePath = args[0]
-	if len(args) > 1 {
-		description = strings.Join(args[1:], " ")
+	var remaining []string
+	for _, arg := range args {
+		if arg == "-v" || arg == "--verbose" {
+			verbose = true
+		} else {
+			remaining = append(remaining, arg)
+		}
 	}
-	return filePath, description
+	if len(remaining) == 0 {
+		return "", "", verbose
+	}
+	filePath = remaining[0]
+	if len(remaining) > 1 {
+		description = strings.Join(remaining[1:], " ")
+	}
+	return filePath, description, verbose
 }

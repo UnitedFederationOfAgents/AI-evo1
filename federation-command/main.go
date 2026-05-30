@@ -2037,18 +2037,18 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
 	}
 
-	// condoc <filepath> ["<description>"]
+	// condoc [-v|--verbose] <filepath> ["<description>"]
 	if strings.HasPrefix(line, "condoc ") {
-		filePath, description := parseCondocCommand(line)
+		filePath, description, verbose := parseCondocCommand(line)
 		if filePath == "" {
 			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("usage: condoc <filepath> [\"<description>\"]"))
+			return m, tea.Println(errorStyle.Render("usage: condoc [-v|--verbose] <filepath> [\"<description>\"]"))
 		}
 		if m.condoc != nil && m.condoc.active {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("condoc: already in condoc mode — ctrl+c to exit first"))
 		}
-		cs, err := NewCondocSession(filePath, description, m.cwd)
+		cs, err := NewCondocSession(filePath, description, verbose, m.cwd)
 		if err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render(err.Error()))
@@ -2067,7 +2067,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "condoc" {
 		m.logRecord(line, cmdTime, deltaMs, 1)
-		return m, tea.Println(errorStyle.Render("usage: condoc <filepath> [\"<description>\"]"))
+		return m, tea.Println(errorStyle.Render("usage: condoc [-v|--verbose] <filepath> [\"<description>\"]"))
 	}
 
 	// exit

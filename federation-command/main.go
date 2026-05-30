@@ -813,6 +813,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case condocAgentStepDoneMsg:
 		return m.handleCondocAgentDone(msg)
 
+	case condocRetryReadyMsg:
+		return m.handleCondocRetryReady(msg)
+
 	case condocExecReadyMsg:
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
 

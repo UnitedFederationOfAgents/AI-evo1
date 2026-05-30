@@ -25,13 +25,14 @@ import (
 type condocPhase int
 
 const (
-	condocPhaseProposed     condocPhase = iota // proposal file written; watching main for !HANDOFF!
-	condocPhaseBranching                       // git branch creation in progress
-	condocPhaseAwaitingStep                    // step templated; waiting for human fill + !HANDOFF!
-	condocPhaseRunningAgent                    // agent executing step or revision
-	condocPhaseCommitting                      // post-agent git commit in progress
-	condocPhaseAwaitingAction                  // step done; watching step file for revision/!COMPLETED!
-	condocPhaseDone                            // condoc completed; handler will exit
+	condocPhaseProposed      condocPhase = iota // proposal file written; watching main for !HANDOFF!
+	condocPhaseBranching                        // git branch creation in progress
+	condocPhaseAwaitingStep                     // step templated; waiting for human fill + !HANDOFF!
+	condocPhaseStepStarting                     // step file committed; about to launch agent
+	condocPhaseRunningAgent                     // agent executing step or revision
+	condocPhaseCommitting                       // post-agent git commit in progress
+	condocPhaseAwaitingAction                   // step done; watching step file for revision/!COMPLETED!
+	condocPhaseDone                             // condoc completed; handler will exit
 )
 
 func (p condocPhase) label() string {
@@ -42,6 +43,8 @@ func (p condocPhase) label() string {
 		return "creating branch…"
 	case condocPhaseAwaitingStep:
 		return "awaiting step"
+	case condocPhaseStepStarting:
+		return "starting step…"
 	case condocPhaseRunningAgent:
 		return "agent running"
 	case condocPhaseCommitting:
@@ -71,12 +74,13 @@ type CondocSession struct {
 	stepNum      int         // current step number (1-based; 0 = not yet started)
 	stepFile     string      // absolute path to the active child step doc, "" if none
 
-	active          bool
-	verbose         bool      // verbose Human-Prompt text if true; brief if false
-	statusMsg       string    // transient message shown in dynapane
-	lastPullAt      time.Time // last time a pull --rebase was attempted
-	replyTmpPath    string    // temp file capturing agent terminal output for the current run
-	pendingRevLetter string   // "" for initial step reply, "A"/"B"/... for revision reply
+	active           bool
+	verbose          bool      // verbose Human-Prompt text if true; brief if false
+	statusMsg        string    // transient message shown in dynapane
+	lastPullAt       time.Time // last time a pull --rebase was attempted
+	replyTmpPath     string    // temp file capturing agent terminal output for the current run
+	pendingRevLetter string    // "" for initial step reply, "A"/"B"/... for revision/retry reply
+	takeCounter      int       // number of retries executed so far (increments on each Retry)
 }
 
 // ===== MESSAGES =====
@@ -94,6 +98,13 @@ type condocPullDoneMsg struct{ errStr string }
 type condocAgentStepDoneMsg struct {
 	exitCode int
 	execErr  error
+}
+
+// condocRetryReadyMsg is sent when the retry git operations complete and the agent is ready to start.
+type condocRetryReadyMsg struct {
+	runCmd       *exec.Cmd
+	replyTmpPath string
+	errStr       string
 }
 
 // condocExecReadyMsg defers a tea.ExecProcess by one render cycle.
@@ -435,11 +446,15 @@ func addRevisionTemplate(stepFilePath string, verbose bool) error {
 	}
 	var humanPrompt string
 	if verbose {
-		humanPrompt = "The AI has responded to the prompt in this step.\n\n" +
+		humanPrompt = "The AI has responded to the first prompt in this step.\n\n" +
 			"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
-			"To REVISE the work, replace '<REPLACE-Revision|Retry>' with 'Revision' and '<REPLACE-PROMPT>'\n" +
-			"with your revision request, then add the '!HANDOFF!' directive.\n\n" +
-			"Alternatively, add the '!COMPLETED!' directive to consider this step a success and conclude it."
+			"To REVISE the work here replace the '<REPLACE-Revision|Retry>' with 'Revision', to incorporate the AI's current work and add to it.\n\n" +
+			"To RETRY from a previous point replace the '<REPLACE-Revision|Retry>' with 'Retry'. By default this retries from the\n" +
+			"previous increment. To retry from further back add '(from start)' or '(from X)' where X is a revision letter,\n" +
+			"for example '## Retry A (from start)'.\n\n" +
+			"Replace the '<REPLACE-PROMPT>' with the new prompt you wish the agent to follow.\n\n" +
+			"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace.\n\n" +
+			"Alternatively, add the '!COMPLETED!' directive to the end of the file to consider this step a success and conclude it."
 	} else {
 		humanPrompt = "When you are done add the '!HANDOFF!' or '!COMPLETED!' directive."
 	}
@@ -461,11 +476,15 @@ func addNextRevisionTemplate(stepFilePath, lastLetter string, verbose bool) erro
 	nextLetter := string(rune(lastLetter[0] + 1))
 	var humanPrompt string
 	if verbose {
-		humanPrompt = "The AI has responded to the revision in this step.\n\n" +
+		humanPrompt = "The AI has responded to the next increment in this step.\n\n" +
 			"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
-			"To REVISE further, replace '<REPLACE-Revision|Retry>' with 'Revision' and '<REPLACE-PROMPT>'\n" +
-			"with your revision request, then add the '!HANDOFF!' directive.\n\n" +
-			"Alternatively, add the '!COMPLETED!' directive to consider this step a success and conclude it."
+			"To REVISE further, replace '<REPLACE-Revision|Retry>' with 'Revision' to incorporate the AI's current work and add to it.\n\n" +
+			"To RETRY from a previous point replace the '<REPLACE-Revision|Retry>' with 'Retry'. By default this retries from the\n" +
+			"previous increment. To retry from further back add '(from start)' or '(from X)' where X is a revision letter,\n" +
+			"for example '## Retry C (from A)'.\n\n" +
+			"Replace the '<REPLACE-PROMPT>' with the new prompt you wish the agent to follow.\n\n" +
+			"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace.\n\n" +
+			"Alternatively, add the '!COMPLETED!' directive to the end of the file to consider this step a success and conclude it."
 	} else {
 		humanPrompt = "When you are done add the '!HANDOFF!' or '!COMPLETED!' directive."
 	}
@@ -551,8 +570,10 @@ func finalizeMainFile(mainFilePath string) error {
 }
 
 // appendReplyToStepFile writes the captured agent reply under "## Reply" (or "## Reply X")
-// at the end of the step file. Called by the handler — agents must never write to step files.
-func appendReplyToStepFile(stepFilePath, letter, replyText string) error {
+// at the end of the step file. commitPreamble is a markdown link to the HEAD commit inserted
+// immediately before the heading (pass "" to omit). Called by the handler — agents must never
+// write to step files.
+func appendReplyToStepFile(stepFilePath, letter, replyText, commitPreamble string) error {
 	b, err := os.ReadFile(stepFilePath)
 	if err != nil {
 		return err
@@ -566,8 +587,12 @@ func appendReplyToStepFile(stepFilePath, letter, replyText string) error {
 	// without stripping, addNextRevisionTemplate's removeHumanPromptSection call would
 	// delete the reply we just wrote.
 	cleaned := removeHumanPromptSection(string(b))
+	prefix := ""
+	if commitPreamble != "" {
+		prefix = commitPreamble + "\n\n"
+	}
 	content := strings.TrimRight(cleaned, "\n") +
-		"\n\n\n" + heading + "\n\n" + replyText + "\n"
+		"\n\n\n" + prefix + heading + "\n\n" + replyText + "\n"
 	return os.WriteFile(stepFilePath, []byte(content), 0644)
 }
 
@@ -575,6 +600,8 @@ func appendReplyToStepFile(stepFilePath, letter, replyText string) error {
 
 var condocRevisionHeadingRe = regexp.MustCompile(`(?m)^## Revision ([A-Z])$`)
 var condocReplyLetterRe = regexp.MustCompile(`(?m)^## Reply ([A-Z])$`)
+var condocInitialReplyRe = regexp.MustCompile(`(?m)^## Reply$`)
+var condocRetryHeadingRe = regexp.MustCompile(`(?m)^## Retry ([A-Z])(?:\s+\(from\s+(start|[A-Z])\))?$`)
 
 // pendingRevisionLetter returns the letter of a Revision heading that has no
 // corresponding Reply heading, or "" if all revisions have replies.
@@ -611,6 +638,117 @@ func lastReplyLetter(content string) string {
 	return matches[len(matches)-1][1]
 }
 
+// pendingRetryLetterAndFrom returns the letter and (from X) reference of a Retry heading that has
+// no corresponding Reply heading, or ("", "") if no pending retry exists.
+func pendingRetryLetterAndFrom(content string) (letter, fromRef string) {
+	retries := condocRetryHeadingRe.FindAllStringSubmatch(content, -1)
+	if len(retries) == 0 {
+		return "", ""
+	}
+	last := retries[len(retries)-1]
+	retryLetter := last[1]
+	if len(last) > 2 {
+		fromRef = last[2]
+	}
+	// Check if there is already a Reply with this letter (retry already processed).
+	for _, m := range condocReplyLetterRe.FindAllStringSubmatch(content, -1) {
+		if m[1] == retryLetter {
+			return "", ""
+		}
+	}
+	return retryLetter, fromRef
+}
+
+// retryText extracts the human guidance text under a "## Retry X" heading.
+func retryText(content, letter string) string {
+	re := regexp.MustCompile(`(?m)^## Retry ` + regexp.QuoteMeta(letter) + `(?:\s+\([^)]+\))?$`)
+	loc := re.FindStringIndex(content)
+	if loc == nil {
+		return ""
+	}
+	after := content[loc[1]:]
+	endRe := regexp.MustCompile(`(?m)^## `)
+	if endLoc := endRe.FindStringIndex(after); endLoc != nil {
+		after = after[:endLoc[0]]
+	}
+	return strings.TrimSpace(after)
+}
+
+// retryFromStepsBack computes how many commits to revert for a retry.
+// fromRef is "start", a letter "A"-"Z", or "" (default = 1 step back).
+func retryFromStepsBack(content, fromRef string) int {
+	if fromRef == "" {
+		return 1
+	}
+	if fromRef == "start" {
+		total := 0
+		if condocInitialReplyRe.MatchString(content) {
+			total++
+		}
+		total += len(condocReplyLetterRe.FindAllStringSubmatch(content, -1))
+		return total
+	}
+	// fromRef is a letter: count Reply sections with a later letter (those come after fromRef).
+	stepsBack := 0
+	for _, m := range condocReplyLetterRe.FindAllStringSubmatch(content, -1) {
+		if m[1] > fromRef {
+			stepsBack++
+		}
+	}
+	return stepsBack
+}
+
+// condocBranchIdentifier extracts the identifier segment from a condoc branch name.
+// e.g. "condoc/Simple-1779734463/main" → "Simple-1779734463"
+func condocBranchIdentifier(branch string) string {
+	parts := strings.Split(branch, "/")
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return branch
+}
+
+// condocGitHubCommitURL attempts to build a GitHub commit URL from the repo remote and a full hash.
+// Returns "" if the remote is not a GitHub URL or cannot be determined.
+func condocGitHubCommitURL(repoRoot, fullHash string) string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	remote := strings.TrimSpace(string(out))
+	remote = strings.TrimSuffix(remote, ".git")
+	if strings.HasPrefix(remote, "git@github.com:") {
+		remote = "https://github.com/" + strings.TrimPrefix(remote, "git@github.com:")
+	}
+	if strings.Contains(remote, "github.com") {
+		return remote + "/commit/" + fullHash
+	}
+	return ""
+}
+
+// condocCommitPreamble returns a markdown link to the current HEAD commit for insertion before
+// a ## Reply heading. Returns "" if the commit hash cannot be determined.
+func condocCommitPreamble(repoRoot string) string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	fullHash := strings.TrimSpace(string(out))
+	if len(fullHash) < 7 {
+		return ""
+	}
+	shortHash := fullHash[:7]
+	url := condocGitHubCommitURL(repoRoot, fullHash)
+	if url != "" {
+		return fmt.Sprintf("[`%s`](%s)", shortHash, url)
+	}
+	return fmt.Sprintf("`%s`", shortHash)
+}
+
 // ===== AGENT PROMPT BUILDERS =====
 
 func buildCondocStepPrompt(stepFilePath string) string {
@@ -635,6 +773,111 @@ func buildCondocRevisionPrompt(stepFilePath, revLetter string) string {
 			"When you have finished, provide a brief summary (2-3 sentences) of what you changed "+
 			"as your terminal response.",
 		stepFilePath, revLetter, revLetter)
+}
+
+func buildCondocRetryPrompt(stepFilePath, retryLetter, retryGuidance string) string {
+	base := fmt.Sprintf(
+		"You are executing a condoc step retry. The step file is at '%s'. "+
+			"Read the step file — it contains the full history of previous attempts on this step. "+
+			"The project files have been reset to their state before those attempts, "+
+			"so you are starting fresh. Execute the task described in the '# Prompt' section.",
+		stepFilePath)
+	if retryGuidance != "" {
+		base += fmt.Sprintf(
+			" The human has provided this additional guidance for Retry %s: %q.",
+			retryLetter, retryGuidance)
+	}
+	return base + " " +
+		"IMPORTANT: Do NOT write to or modify the step file or any other condoc files — " +
+		"the condoc handler will automatically capture your terminal response as the reply. " +
+		"When you have finished, provide a brief summary (2-3 sentences) of what you accomplished " +
+		"as your terminal response."
+}
+
+// runCondocRetryGitSequence pushes the current branch state to a take branch, resets HEAD
+// stepsBack commits, restores the step file with its full pre-reset history, writes the diff
+// file, commits both, then pushes. On success it returns a condocRetryReadyMsg carrying the
+// pre-built agent command.
+//
+// Restoring the step file after the reset is the key invariant of a retry: project files go
+// back to the earlier state, but the step document keeps the full visible history of every
+// previous attempt (including the Retry heading the human just wrote).
+func runCondocRetryGitSequence(repoRoot, mainBranch, takeBranch, diffFilePath, stepFilePath string, stepsBack, takeN int, runCmd *exec.Cmd, replyTmpPath, retryLetter string) tea.Cmd {
+	return func() tea.Msg {
+		// 1. Capture the diff of the commits we are about to abandon.
+		logCmd := exec.Command("git", "log", "-p", fmt.Sprintf("-n%d", stepsBack))
+		logCmd.Dir = repoRoot
+		diffOut, err := logCmd.Output()
+		if err != nil {
+			return condocRetryReadyMsg{errStr: "git log: " + err.Error()}
+		}
+
+		// 2. Save the step file content before the reset so we can restore it.
+		// Strip the Human-Prompt section; the retry agent does not need it.
+		stepRaw, err := os.ReadFile(stepFilePath)
+		if err != nil {
+			return condocRetryReadyMsg{errStr: "read step file: " + err.Error()}
+		}
+		stepContent := removeHumanPromptSection(string(stepRaw))
+
+		// 3. Push current HEAD to the take branch.
+		pushTakeCmd := exec.Command("git", "push", "origin",
+			fmt.Sprintf("HEAD:refs/heads/%s", takeBranch))
+		pushTakeCmd.Dir = repoRoot
+		if out, err := pushTakeCmd.CombinedOutput(); err != nil {
+			return condocRetryReadyMsg{errStr: fmt.Sprintf("push take branch: %v\n%s", err, string(out))}
+		}
+
+		// 4. Reset main branch HEAD back stepsBack commits.
+		resetCmd := exec.Command("git", "reset", "--hard", fmt.Sprintf("HEAD~%d", stepsBack))
+		resetCmd.Dir = repoRoot
+		if out, err := resetCmd.CombinedOutput(); err != nil {
+			return condocRetryReadyMsg{errStr: fmt.Sprintf("git reset: %v\n%s", err, string(out))}
+		}
+
+		// 5. Restore the step file with its full pre-reset history. The reset reverted
+		// the working tree, so without this the agent would see an older file that is
+		// missing all previous attempts and the Retry heading.
+		if err := os.MkdirAll(filepath.Dir(stepFilePath), 0755); err != nil {
+			return condocRetryReadyMsg{errStr: "create step dir: " + err.Error()}
+		}
+		if err := os.WriteFile(stepFilePath, []byte(stepContent), 0644); err != nil {
+			return condocRetryReadyMsg{errStr: "restore step file: " + err.Error()}
+		}
+
+		// 6. Write the diff file alongside the step file. MkdirAll is a safety net
+		// in case the directory was somehow not part of the reset target commit.
+		if err := os.MkdirAll(filepath.Dir(diffFilePath), 0755); err != nil {
+			return condocRetryReadyMsg{errStr: "create diff dir: " + err.Error()}
+		}
+		if err := os.WriteFile(diffFilePath, diffOut, 0644); err != nil {
+			return condocRetryReadyMsg{errStr: "write diff file: " + err.Error()}
+		}
+
+		// 7. Commit the diff file and restored step file so both survive on the reset branch.
+		addCmd := exec.Command("git", "add", diffFilePath, stepFilePath)
+		addCmd.Dir = repoRoot
+		if out, err := addCmd.CombinedOutput(); err != nil {
+			return condocRetryReadyMsg{errStr: fmt.Sprintf("git add: %v\n%s", err, string(out))}
+		}
+		commitMsg := fmt.Sprintf("condoc: retry %s, take%d snapshot saved", retryLetter, takeN)
+		commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+		commitCmd.Dir = repoRoot
+		if out, err := commitCmd.CombinedOutput(); err != nil {
+			return condocRetryReadyMsg{errStr: fmt.Sprintf("git commit: %v\n%s", err, string(out))}
+		}
+
+		// 8. Force-push the reset + snapshot commit to origin. History was rewritten by the
+		// reset so a regular push would be rejected; the take branch already preserves
+		// the old state.
+		pushMainCmd := exec.Command("git", "push", "--force", "origin", mainBranch)
+		pushMainCmd.Dir = repoRoot
+		if out, err := pushMainCmd.CombinedOutput(); err != nil {
+			return condocRetryReadyMsg{errStr: fmt.Sprintf("push main branch: %v\n%s", err, string(out))}
+		}
+
+		return condocRetryReadyMsg{runCmd: runCmd, replyTmpPath: replyTmpPath}
+	}
 }
 
 // ===== DYNAPANE =====
@@ -896,6 +1139,13 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 				return m.condocCompleteStep()
 			}
 			if condocFileHasHandoff(cs.stepFile) {
+				b, err := os.ReadFile(cs.stepFile)
+				if err != nil {
+					return m.condocError("read step file: " + err.Error())
+				}
+				if letter, _ := pendingRetryLetterAndFrom(string(b)); letter != "" {
+					return m.condocRunRetry()
+				}
 				return m.condocRunRevision()
 			}
 		}
@@ -966,6 +1216,10 @@ func (m appModel) handleCondocGitDone(msg condocGitDoneMsg) (appModel, tea.Cmd) 
 			condocTickCmd(),
 		)
 
+	case condocPhaseStepStarting:
+		// Step file committed — now launch the agent.
+		return m.condocStartStepAgent()
+
 	case condocPhaseCommitting:
 		// Commit done — advance to whichever phase was requested.
 		target := cs.commitTarget
@@ -985,6 +1239,8 @@ func (m appModel) handleCondocGitDone(msg condocGitDoneMsg) (appModel, tea.Cmd) 
 }
 
 // condocStartStep handles !HANDOFF! on the main file when a step is ready to run.
+// It creates the step file, updates the main file, then commits before starting the agent.
+// Committing first ensures a clean git state that retry can reset to.
 func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 	cs := m.condoc
 	b, err := os.ReadFile(cs.mainFilePath)
@@ -1007,10 +1263,28 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 	cs.stepNum = step.num
 	cs.stepFile = stepPath
 	cs.pendingRevLetter = ""
-	cs.phase = condocPhaseRunningAgent
-	cs.statusMsg = "running agent for step " + strconv.Itoa(step.num) + "…"
+	cs.phase = condocPhaseStepStarting
+	cs.statusMsg = "committing step " + strconv.Itoa(step.num) + " start…"
 
-	prompt := buildCondocStepPrompt(stepPath)
+	gitCmds := [][]string{
+		{"add", "."},
+		{"commit", "-m", fmt.Sprintf("condoc: step %d started", step.num)},
+		{"push", "origin", cs.branch},
+	}
+	return m, tea.Batch(
+		tea.Println(sessionStyle.Render("condoc: step "+strconv.Itoa(step.num)+" started, committing…")),
+		m.condocDynapane.Activate(cs),
+		runGitSequence(gitCmds, cs.repoRoot),
+	)
+}
+
+// condocStartStepAgent launches the agent after the step-started commit completes.
+func (m appModel) condocStartStepAgent() (appModel, tea.Cmd) {
+	cs := m.condoc
+	cs.phase = condocPhaseRunningAgent
+	cs.statusMsg = "running agent for step " + strconv.Itoa(cs.stepNum) + "…"
+
+	prompt := buildCondocStepPrompt(cs.stepFile)
 	agentCmd, errMsg := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
 	if agentCmd == nil {
 		return m.condocError("build agent cmd: " + errMsg)
@@ -1026,8 +1300,7 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 	m.blinker.SetState(BlinkerInactive)
 
 	return m, tea.Sequence(
-		tea.Println(sessionStyle.Render("condoc: running agent for "+filepath.Base(stepPath)+"…")),
-		tea.Println(condocHintStyle.Render("prompt: "+step.prompt)),
+		tea.Println(sessionStyle.Render("condoc: running agent for "+filepath.Base(cs.stepFile)+"…")),
 		deferCondocExec(runCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
@@ -1067,7 +1340,8 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 	}
 
 	revLetter := cs.pendingRevLetter
-	if err := appendReplyToStepFile(cs.stepFile, revLetter, replyText); err != nil {
+	commitPreamble := condocCommitPreamble(cs.repoRoot)
+	if err := appendReplyToStepFile(cs.stepFile, revLetter, replyText, commitPreamble); err != nil {
 		return m.condocError("append reply to step file: " + err.Error())
 	}
 
@@ -1137,6 +1411,81 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 		tea.Println(sessionStyle.Render("condoc: running agent for revision "+revLetter+"…")),
 		tea.Println(condocHintStyle.Render("revision: "+revText)),
 		deferCondocExec(runCmd, func(err error) tea.Msg {
+			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
+		}),
+	)
+}
+
+// condocRunRetry handles !HANDOFF! on the step file when a Retry is requested.
+func (m appModel) condocRunRetry() (appModel, tea.Cmd) {
+	cs := m.condoc
+	b, err := os.ReadFile(cs.stepFile)
+	if err != nil {
+		return m.condocError("read step file: " + err.Error())
+	}
+	content := string(b)
+
+	retryLetter, fromRef := pendingRetryLetterAndFrom(content)
+	if retryLetter == "" {
+		return m, condocTickCmd()
+	}
+
+	retryGuidance := retryText(content, retryLetter)
+	stepsBack := retryFromStepsBack(content, fromRef)
+	if stepsBack == 0 {
+		return m.condocError("retry: computed 0 steps back — nothing to revert")
+	}
+
+	cs.takeCounter++
+	takeN := cs.takeCounter
+	identifier := condocBranchIdentifier(cs.branch)
+	takeBranch := fmt.Sprintf("condoc/%s/take%d", identifier, takeN)
+	diffFileName := fmt.Sprintf("take%d%sdiff.txt", takeN, identifier)
+	diffFilePath := filepath.Join(filepath.Dir(cs.stepFile), diffFileName)
+
+	cs.pendingRevLetter = retryLetter
+	cs.phase = condocPhaseRunningAgent
+	cs.statusMsg = fmt.Sprintf("retry %s: saving take%d…", retryLetter, takeN)
+
+	agentPrompt := buildCondocRetryPrompt(cs.stepFile, retryLetter, retryGuidance)
+	agentCmd, errMsg := buildAgentPromptCmd(ModeWrite, agentPrompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		return m.condocError("build agent cmd: " + errMsg)
+	}
+	agentCmd.Dir = cs.repoRoot
+	agentCmd.Env = append(agentCmd.Env, "AA_QUIET=true")
+
+	replyTmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("condoc-reply-%d.txt", time.Now().UnixNano()))
+	cs.replyTmpPath = replyTmpPath
+	runCmd := teeCommand(agentCmd, replyTmpPath)
+
+	fromDisplay := fromRef
+	if fromDisplay == "" {
+		fromDisplay = "previous"
+	}
+
+	m.condocDynapane.Deactivate()
+	m.blinker.SetState(BlinkerInactive)
+
+	return m, tea.Sequence(
+		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: retry %s (from %s) — saving take%d…", retryLetter, fromDisplay, takeN))),
+		runCondocRetryGitSequence(cs.repoRoot, cs.branch, takeBranch, diffFilePath, cs.stepFile, stepsBack, takeN, runCmd, replyTmpPath, retryLetter),
+	)
+}
+
+// handleCondocRetryReady processes the result of the retry git sequence and starts the agent.
+func (m appModel) handleCondocRetryReady(msg condocRetryReadyMsg) (appModel, tea.Cmd) {
+	if msg.errStr != "" {
+		return m.condocError("retry: " + msg.errStr)
+	}
+	cs := m.condoc
+	if cs == nil {
+		return m, nil
+	}
+	cs.replyTmpPath = msg.replyTmpPath
+	return m, tea.Sequence(
+		tea.Println(sessionStyle.Render("condoc: take saved, running agent for retry…")),
+		deferCondocExec(msg.runCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
 	)

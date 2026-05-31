@@ -170,6 +170,12 @@ function parseStepSections(content: string): StepSection[] {
   return sections
 }
 
+function sectionsToIterations(sections: StepSection[]): Iteration[] {
+  return sections
+    .filter((s) => s.kind !== 'prompt')
+    .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
+}
+
 // ---- Sidebar ----
 
 interface SidebarProps {
@@ -254,8 +260,12 @@ function Sidebar({
   }
 
   if (navLevel === 'step' && activeState) {
-    const iterations: Iteration[] =
-      selectedStepNum === activeState.info.stepNum ? (activeState.iterations ?? []) : []
+    const iterations: Iteration[] = (() => {
+      if (selectedStepNum === null) return []
+      if (selectedStepNum === activeState.info.stepNum) return activeState.iterations ?? []
+      const content = activeState.completedStepContents?.[selectedStepNum]
+      return content ? sectionsToIterations(parseStepSections(content)) : []
+    })()
 
     return (
       <div className="sidebar">
@@ -597,20 +607,34 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction }: StepDetail
   }, [selectedIterId])
 
   if (!isActiveStep) {
-    // Completed step: just show title and prompt from main file
+    // Completed step: render all iterations read-only (with nav/scroll support)
+    const completedContent = state.completedStepContents?.[stepNum]
+    const completedSections = completedContent ? parseStepSections(completedContent) : []
     return (
       <div className="detail-view">
         <div className="detail-header">
           <h2>Step {stepNum}</h2>
           {stepSummary && <span className="detail-step-title">{stepSummary.title}</span>}
+          <PhaseBadge phase="completed" />
         </div>
         <div className="detail-body">
-          {stepSummary?.prompt && (
-            <div className="detail-section">
-              <div className="detail-section-label">Prompt</div>
-              <div className="detail-text">{stepSummary.prompt}</div>
-            </div>
-          )}
+          {completedSections.length > 0
+            ? completedSections.map((sec) => (
+                <div
+                  key={sec.id}
+                  className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
+                  ref={(el) => { sectionRefs.current[sec.id] = el }}
+                >
+                  <div className="iter-section-label">{sec.label}</div>
+                  <div className="iter-section-content">{sec.content}</div>
+                </div>
+              ))
+            : stepSummary?.prompt && (
+                <div className="detail-section">
+                  <div className="detail-section-label">Prompt</div>
+                  <div className="detail-text">{stepSummary.prompt}</div>
+                </div>
+              )}
           <div className="action-panel">
             <div className="action-status" style={{ color: '#4ec94e' }}>✓ Step completed.</div>
           </div>

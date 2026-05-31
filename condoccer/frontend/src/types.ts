@@ -44,6 +44,7 @@ export interface CondocState {
   description: string
   steps: StepSummary[]
   iterations: Iteration[]
+  completedStepContents?: Record<number, string>
 }
 
 export type ServerMsg =

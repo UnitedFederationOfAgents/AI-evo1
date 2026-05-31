@@ -45,15 +45,16 @@ type CondocInfo struct {
 
 // CondocState is the full detail for the selected condoc.
 type CondocState struct {
-	Info        CondocInfo    `json:"info"`
-	MainContent string        `json:"mainContent"`
-	StepContent string        `json:"stepContent,omitempty"`
-	NextLetter  string        `json:"nextLetter"`
-	FromOptions []string      `json:"fromOptions"`
-	Meta        CondocMeta    `json:"meta"`
-	Description string        `json:"description"`
-	Steps       []StepSummary `json:"steps"`
-	Iterations  []Iteration   `json:"iterations"`
+	Info                  CondocInfo        `json:"info"`
+	MainContent           string            `json:"mainContent"`
+	StepContent           string            `json:"stepContent,omitempty"`
+	NextLetter            string            `json:"nextLetter"`
+	FromOptions           []string          `json:"fromOptions"`
+	Meta                  CondocMeta        `json:"meta"`
+	Description           string            `json:"description"`
+	Steps                 []StepSummary     `json:"steps"`
+	Iterations            []Iteration       `json:"iterations"`
+	CompletedStepContents map[int]string    `json:"completedStepContents,omitempty"`
 }
 
 // wsMsg is the wire format for WebSocket messages.
@@ -336,16 +337,31 @@ func getCondocState(root, absPath string) (CondocState, error) {
 	letter := nextRevLetter(stepStr)
 	opts := fromOptions(letter)
 
+	// Load past step files so the UI can show iterations for completed steps.
+	// When info.Phase == PhaseCompleted, info.StepNum is 0 so all steps are included.
+	completedStepContents := make(map[int]string)
+	maxStep := parseMaxStepNum(mainStr)
+	for n := 1; n <= maxStep; n++ {
+		if n == info.StepNum {
+			continue // current active step is already in StepContent
+		}
+		sfPath := stepFilePath(absPath, n)
+		if b, readErr := os.ReadFile(sfPath); readErr == nil {
+			completedStepContents[n] = string(b)
+		}
+	}
+
 	return CondocState{
-		Info:        info,
-		MainContent: mainStr,
-		StepContent: stepStr,
-		NextLetter:  letter,
-		FromOptions: opts,
-		Meta:        parseCondocMeta(mainStr),
-		Description: parseDescription(mainStr),
-		Steps:       parseSteps(mainStr),
-		Iterations:  parseIterations(stepStr),
+		Info:                  info,
+		MainContent:           mainStr,
+		StepContent:           stepStr,
+		NextLetter:            letter,
+		FromOptions:           opts,
+		Meta:                  parseCondocMeta(mainStr),
+		Description:           parseDescription(mainStr),
+		Steps:                 parseSteps(mainStr),
+		Iterations:            parseIterations(stepStr),
+		CompletedStepContents: completedStepContents,
 	}, nil
 }
 

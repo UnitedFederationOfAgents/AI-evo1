@@ -81,6 +81,7 @@ type CondocSession struct {
 	replyTmpPath     string    // temp file capturing agent terminal output for the current run
 	pendingRevLetter string    // "" for initial step reply, "A"/"B"/... for revision/retry reply
 	takeCounter      int       // number of retries executed so far (increments on each Retry)
+	stepStartHash    string    // git commit hash of "step N started" commit; anchor for retry-from-start resets
 }
 
 // ===== MESSAGES =====
@@ -795,17 +796,26 @@ func buildCondocRetryPrompt(stepFilePath, retryLetter, retryGuidance string) str
 }
 
 // runCondocRetryGitSequence pushes the current branch state to a take branch, resets HEAD
-// stepsBack commits, restores the step file with its full pre-reset history, writes the diff
-// file, commits both, then pushes. On success it returns a condocRetryReadyMsg carrying the
-// pre-built agent command.
+// back to resetHash (for retry-from-start) or stepsBack commits (for other retries), restores
+// the step file with its full pre-reset history, writes the diff file, commits both, then
+// pushes. On success it returns a condocRetryReadyMsg carrying the pre-built agent command.
+//
+// resetHash should be the "step N started" commit hash when fromRef=="start"; passing a hash
+// avoids the stepsBack overcounting that occurs after a prior retry-from-start has already
+// accumulated reply sections in the step file without a matching git commit for each.
 //
 // Restoring the step file after the reset is the key invariant of a retry: project files go
 // back to the earlier state, but the step document keeps the full visible history of every
 // previous attempt (including the Retry heading the human just wrote).
-func runCondocRetryGitSequence(repoRoot, mainBranch, takeBranch, diffFilePath, stepFilePath string, stepsBack, takeN int, runCmd *exec.Cmd, replyTmpPath, retryLetter string) tea.Cmd {
+func runCondocRetryGitSequence(repoRoot, mainBranch, takeBranch, diffFilePath, stepFilePath string, stepsBack, takeN int, runCmd *exec.Cmd, replyTmpPath, retryLetter, resetHash string) tea.Cmd {
 	return func() tea.Msg {
 		// 1. Capture the diff of the commits we are about to abandon.
-		logCmd := exec.Command("git", "log", "-p", fmt.Sprintf("-n%d", stepsBack))
+		var logCmd *exec.Cmd
+		if resetHash != "" {
+			logCmd = exec.Command("git", "log", "-p", resetHash+"..HEAD")
+		} else {
+			logCmd = exec.Command("git", "log", "-p", fmt.Sprintf("-n%d", stepsBack))
+		}
 		logCmd.Dir = repoRoot
 		diffOut, err := logCmd.Output()
 		if err != nil {
@@ -828,8 +838,16 @@ func runCondocRetryGitSequence(repoRoot, mainBranch, takeBranch, diffFilePath, s
 			return condocRetryReadyMsg{errStr: fmt.Sprintf("push take branch: %v\n%s", err, string(out))}
 		}
 
-		// 4. Reset main branch HEAD back stepsBack commits.
-		resetCmd := exec.Command("git", "reset", "--hard", fmt.Sprintf("HEAD~%d", stepsBack))
+		// 4. Reset main branch HEAD to the target. For retry-from-start, resetHash is the exact
+		// "step N started" commit, which is correct regardless of how many prior retries have
+		// accumulated reply sections in the step file. For other retries, fall back to HEAD~stepsBack.
+		var resetTarget string
+		if resetHash != "" {
+			resetTarget = resetHash
+		} else {
+			resetTarget = fmt.Sprintf("HEAD~%d", stepsBack)
+		}
+		resetCmd := exec.Command("git", "reset", "--hard", resetTarget)
 		resetCmd.Dir = repoRoot
 		if out, err := resetCmd.CombinedOutput(); err != nil {
 			return condocRetryReadyMsg{errStr: fmt.Sprintf("git reset: %v\n%s", err, string(out))}
@@ -1217,7 +1235,13 @@ func (m appModel) handleCondocGitDone(msg condocGitDoneMsg) (appModel, tea.Cmd) 
 		)
 
 	case condocPhaseStepStarting:
-		// Step file committed — now launch the agent.
+		// Step file committed — capture hash so retry-from-start can reset to this exact commit
+		// regardless of how many retries accumulate reply sections in the step file later.
+		revCmd := exec.Command("git", "rev-parse", "HEAD")
+		revCmd.Dir = cs.repoRoot
+		if hashOut, err := revCmd.Output(); err == nil {
+			cs.stepStartHash = strings.TrimSpace(string(hashOut))
+		}
 		return m.condocStartStepAgent()
 
 	case condocPhaseCommitting:
@@ -1436,6 +1460,15 @@ func (m appModel) condocRunRetry() (appModel, tea.Cmd) {
 		return m.condocError("retry: computed 0 steps back — nothing to revert")
 	}
 
+	// For retry-from-start, use the stored step-start commit hash as the reset target.
+	// stepsBack can overcount after a prior retry-from-start has already reset history:
+	// the step file preserves all reply sections across retries, but the git history
+	// only has commits since the last reset.
+	var resetHash string
+	if fromRef == "start" {
+		resetHash = cs.stepStartHash
+	}
+
 	cs.takeCounter++
 	takeN := cs.takeCounter
 	identifier := condocBranchIdentifier(cs.branch)
@@ -1469,7 +1502,7 @@ func (m appModel) condocRunRetry() (appModel, tea.Cmd) {
 
 	return m, tea.Sequence(
 		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: retry %s (from %s) — saving take%d…", retryLetter, fromDisplay, takeN))),
-		runCondocRetryGitSequence(cs.repoRoot, cs.branch, takeBranch, diffFilePath, cs.stepFile, stepsBack, takeN, runCmd, replyTmpPath, retryLetter),
+		runCondocRetryGitSequence(cs.repoRoot, cs.branch, takeBranch, diffFilePath, cs.stepFile, stepsBack, takeN, runCmd, replyTmpPath, retryLetter, resetHash),
 	)
 }
 

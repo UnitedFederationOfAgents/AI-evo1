@@ -45,11 +45,15 @@ type CondocInfo struct {
 
 // CondocState is the full detail for the selected condoc.
 type CondocState struct {
-	Info        CondocInfo `json:"info"`
-	MainContent string     `json:"mainContent"`
-	StepContent string     `json:"stepContent,omitempty"`
-	NextLetter  string     `json:"nextLetter"`
-	FromOptions []string   `json:"fromOptions"`
+	Info        CondocInfo    `json:"info"`
+	MainContent string        `json:"mainContent"`
+	StepContent string        `json:"stepContent,omitempty"`
+	NextLetter  string        `json:"nextLetter"`
+	FromOptions []string      `json:"fromOptions"`
+	Meta        CondocMeta    `json:"meta"`
+	Description string        `json:"description"`
+	Steps       []StepSummary `json:"steps"`
+	Iterations  []Iteration   `json:"iterations"`
 }
 
 // wsMsg is the wire format for WebSocket messages.
@@ -67,13 +71,46 @@ type ActionRequest struct {
 	From    string `json:"from,omitempty"`
 }
 
+// CondocMeta holds the parsed condoc-yaml fields.
+type CondocMeta struct {
+	StartTime     int64  `json:"startTime,omitempty"`
+	ControlScheme string `json:"controlScheme,omitempty"`
+	Branch        string `json:"branch,omitempty"`
+	CallerPath    string `json:"callerPath,omitempty"`
+}
+
+// StepSummary is a parsed step entry from the condoc main file.
+type StepSummary struct {
+	Num        int    `json:"num"`
+	Title      string `json:"title"`
+	Prompt     string `json:"prompt"`
+	HasReplace bool   `json:"hasReplace,omitempty"`
+}
+
+// Iteration is a parsed section header from the condoc step file.
+type Iteration struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Type  string `json:"type"` // "reply", "revision", "retry"
+	From  string `json:"from,omitempty"`
+}
+
 var (
-	condocYamlRe  = regexp.MustCompile(`condoc-yaml`)
-	completedRe   = regexp.MustCompile(`(?m)^## Condoc Completed\s*$`)
-	humanPromptRe = regexp.MustCompile(`(?m)^## Human-Prompt\s*$`)
-	replaceTitleRe = regexp.MustCompile(`(?m)^### Step \d+ - <REPLACE-TITLE>`)
-	stepNumRe     = regexp.MustCompile(`(?m)^### Step (\d+)`)
-	replyLetterRe = regexp.MustCompile(`(?m)^## Reply ([A-Z])\s*$`)
+	condocYamlRe     = regexp.MustCompile(`condoc-yaml`)
+	completedRe      = regexp.MustCompile(`(?m)^## Condoc Completed\s*$`)
+	humanPromptRe    = regexp.MustCompile(`(?m)^## Human-Prompt\s*$`)
+	replaceTitleRe   = regexp.MustCompile(`(?m)^### Step \d+ - <REPLACE-TITLE>`)
+	stepNumRe        = regexp.MustCompile(`(?m)^### Step (\d+)`)
+	replyLetterRe    = regexp.MustCompile(`(?m)^## Reply ([A-Z])\s*$`)
+	condocYamlBlockRe    = regexp.MustCompile("(?s)```condoc-yaml\n(.*?)```")
+	htmlCommentRe        = regexp.MustCompile(`(?s)<!--.*?-->`)
+	stepHeadingRe        = regexp.MustCompile(`(?m)^### Step (\d+) - (.+)$`)
+	promptBlockRe        = regexp.MustCompile("(?s)```prompt\n(.*?)```")
+	anyH23Re             = regexp.MustCompile(`(?m)^#{2,}`)
+	anyH2Re              = regexp.MustCompile(`(?m)^## `)
+	iterHeadingRe        = regexp.MustCompile(`(?m)^## (Reply|Revision|Retry)(?: ([A-Z]))?(?: \(from (\w+)\))?`)
+	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
+	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 )
 
 // implDir returns the step-implementation directory adjacent to a condoc main file.
@@ -144,6 +181,9 @@ func detectPhase(root, absPath string) (CondocInfo, error) {
 	}
 
 	if humanPromptRe.Match(sfContent) {
+		if handoffDirectiveRe.Match(sfContent) || completedDirectiveRe.Match(sfContent) {
+			return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel}, nil
+		}
 		return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel}, nil
 	}
 	return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel}, nil
@@ -168,6 +208,115 @@ func fromOptions(nextLetter string) []string {
 	return opts
 }
 
+// parseCondocMeta extracts structured fields from the condoc-yaml block.
+func parseCondocMeta(content string) CondocMeta {
+	m := condocYamlBlockRe.FindStringSubmatch(content)
+	if m == nil {
+		return CondocMeta{}
+	}
+	var meta CondocMeta
+	for _, line := range strings.Split(m[1], "\n") {
+		kv := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key, val := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+		switch key {
+		case "startTime":
+			fmt.Sscanf(val, "%d", &meta.StartTime)
+		case "controlScheme":
+			meta.ControlScheme = val
+		case "branch":
+			meta.Branch = val
+		case "callerPath":
+			meta.CallerPath = val
+		}
+	}
+	return meta
+}
+
+// parseDescription extracts the prose description from the condoc main file.
+func parseDescription(content string) string {
+	text := htmlCommentRe.ReplaceAllString(content, "")
+	// Remove the h1 title line.
+	if loc := regexp.MustCompile(`(?m)^#\s+.+\n?`).FindStringIndex(text); loc != nil {
+		text = text[loc[1]:]
+	}
+	// Keep only text before the first h2/h3 heading.
+	if loc := anyH23Re.FindStringIndex(text); loc != nil {
+		text = text[:loc[0]]
+	}
+	return strings.TrimSpace(text)
+}
+
+// parseSteps extracts the list of step summaries from the condoc main file.
+func parseSteps(content string) []StepSummary {
+	allIdx := stepHeadingRe.FindAllStringSubmatchIndex(content, -1)
+	var steps []StepSummary
+	for i, idx := range allIdx {
+		numStr := content[idx[2]:idx[3]]
+		title := strings.TrimSpace(content[idx[4]:idx[5]])
+
+		sectionStart := idx[1]
+		sectionEnd := len(content)
+		if i+1 < len(allIdx) {
+			sectionEnd = allIdx[i+1][0]
+		}
+		if loc := anyH2Re.FindStringIndex(content[sectionStart:sectionEnd]); loc != nil {
+			sectionEnd = sectionStart + loc[0]
+		}
+		section := content[sectionStart:sectionEnd]
+
+		prompt := ""
+		if pm := promptBlockRe.FindStringSubmatch(section); pm != nil {
+			prompt = strings.TrimSpace(pm[1])
+		}
+
+		hasReplace := strings.Contains(title, "<REPLACE") || strings.Contains(prompt, "<REPLACE")
+
+		var num int
+		fmt.Sscanf(numStr, "%d", &num)
+		steps = append(steps, StepSummary{Num: num, Title: title, Prompt: prompt, HasReplace: hasReplace})
+	}
+	return steps
+}
+
+// parseIterations extracts the ordered list of reply/revision/retry sections from a step file.
+func parseIterations(stepContent string) []Iteration {
+	allIdx := iterHeadingRe.FindAllStringSubmatchIndex(stepContent, -1)
+	var iters []Iteration
+	for _, idx := range allIdx {
+		kind := stepContent[idx[2]:idx[3]]
+		letter := ""
+		if idx[4] >= 0 {
+			letter = stepContent[idx[4]:idx[5]]
+		}
+		from := ""
+		if idx[6] >= 0 {
+			from = stepContent[idx[6]:idx[7]]
+		}
+		var iter Iteration
+		switch kind {
+		case "Reply":
+			if letter == "" {
+				iter = Iteration{ID: "reply-initial", Label: "Reply", Type: "reply"}
+			} else {
+				iter = Iteration{ID: "reply-" + letter, Label: "Reply " + letter, Type: "reply"}
+			}
+		case "Revision":
+			iter = Iteration{ID: "revision-" + letter, Label: "Revision " + letter, Type: "revision"}
+		case "Retry":
+			label := "Retry " + letter
+			if from != "" {
+				label += " (from " + from + ")"
+			}
+			iter = Iteration{ID: "retry-" + letter, Label: label, Type: "retry", From: from}
+		}
+		iters = append(iters, iter)
+	}
+	return iters
+}
+
 // getCondocState returns full detail for a condoc at absPath.
 func getCondocState(root, absPath string) (CondocState, error) {
 	info, err := detectPhase(root, absPath)
@@ -182,15 +331,21 @@ func getCondocState(root, absPath string) (CondocState, error) {
 		stepContent, _ = os.ReadFile(filepath.Join(root, info.StepFile))
 	}
 
-	letter := nextRevLetter(string(stepContent))
+	mainStr := string(mainContent)
+	stepStr := string(stepContent)
+	letter := nextRevLetter(stepStr)
 	opts := fromOptions(letter)
 
 	return CondocState{
 		Info:        info,
-		MainContent: string(mainContent),
-		StepContent: string(stepContent),
+		MainContent: mainStr,
+		StepContent: stepStr,
 		NextLetter:  letter,
 		FromOptions: opts,
+		Meta:        parseCondocMeta(mainStr),
+		Description: parseDescription(mainStr),
+		Steps:       parseSteps(mainStr),
+		Iterations:  parseIterations(stepStr),
 	}, nil
 }
 
@@ -430,8 +585,8 @@ func (s *Server) performAction(action ActionRequest) error {
 			return fmt.Errorf("no active step file")
 		}
 		sfPath := filepath.Join(s.root, info.StepFile)
-		text := fmt.Sprintf("\n## Revision %s\n\n%s\n\n!HANDOFF!\n", action.Letter, action.Content)
-		return appendToFile(sfPath, text)
+		header := fmt.Sprintf("## Revision %s", action.Letter)
+		return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
 
 	case "retry":
 		if info.StepFile == "" {
@@ -442,8 +597,7 @@ func (s *Server) performAction(action ActionRequest) error {
 		if action.From != "" {
 			header = fmt.Sprintf("## Retry %s (from %s)", action.Letter, action.From)
 		}
-		text := fmt.Sprintf("\n%s\n\n%s\n\n!HANDOFF!\n", header, action.Content)
-		return appendToFile(sfPath, text)
+		return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
 
 	default:
 		return fmt.Errorf("unknown action: %s", action.Action)
@@ -458,6 +612,22 @@ func appendToFile(path, content string) error {
 	defer f.Close()
 	_, err = f.WriteString(content)
 	return err
+}
+
+// replaceIterationPlaceholder replaces the "## <REPLACE-Revision|Retry> X\n\n<REPLACE-PROMPT>"
+// block in-place with the real header+content, then appends !HANDOFF! at the end.
+func replaceIterationPlaceholder(sfPath, letter, header, content string) error {
+	data, err := os.ReadFile(sfPath)
+	if err != nil {
+		return err
+	}
+	placeholder := fmt.Sprintf("## <REPLACE-Revision|Retry> %s\n\n<REPLACE-PROMPT>", letter)
+	replacement := fmt.Sprintf("%s\n\n%s", header, content)
+	newContent := strings.Replace(string(data), placeholder, replacement, 1)
+	if err := os.WriteFile(sfPath, []byte(newContent), 0644); err != nil {
+		return err
+	}
+	return appendToFile(sfPath, "\n!HANDOFF!\n")
 }
 
 // watchLoop polls condoc files every second and pushes updates to subscribed clients.

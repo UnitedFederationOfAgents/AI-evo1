@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocState, Phase, ServerMsg } from './types'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, Phase, StepSummary } from './types'
 
 // ---- WebSocket hook ----
 
@@ -57,13 +57,15 @@ function useCondocWS() {
 
       ws.onmessage = (ev) => {
         try {
-          const msg = JSON.parse(ev.data) as ServerMsg
+          const msg = JSON.parse(ev.data) as { type: string; payload: unknown }
           if (msg.type === 'list') {
-            setCondocs(msg.payload.condocs ?? [])
+            const p = msg.payload as { condocs: CondocInfo[] }
+            setCondocs(p.condocs ?? [])
           } else if (msg.type === 'condoc') {
-            setActiveState(msg.payload)
+            setActiveState(msg.payload as CondocState)
           } else if (msg.type === 'error') {
-            setError(msg.payload.message)
+            const p = msg.payload as { message: string }
+            setError(p.message)
           }
         } catch {
           // ignore malformed messages
@@ -77,6 +79,10 @@ function useCondocWS() {
 
   return { connected, condocs, activeState, error, subscribe, sendAction, setError }
 }
+
+// ---- Navigation ----
+
+type NavLevel = 'condoc-list' | 'condoc' | 'step'
 
 // ---- Phase helpers ----
 
@@ -92,47 +98,366 @@ function PhaseBadge({ phase }: { phase: Phase }) {
   return <span className={`badge badge-${phase}`}>{PHASE_LABELS[phase]}</span>
 }
 
+// ---- Step section parser ----
+
+interface StepSection {
+  id: string
+  label: string
+  kind: 'prompt' | 'reply' | 'revision' | 'retry'
+  content: string
+}
+
+const COMMIT_LINK_RE = /^\[`[a-f0-9]+`\]\([^)]+\)\s*$/gm
+const PARENT_LINK_RE = /^\[.*?\]\(.*?\)\s*$/gm
+const REPLACE_LINE_RE = /^(?:## )?<REPLACE[^>]*>[^\n]*\n?/gm
+const DIRECTIVE_RE = /^!(?:HANDOFF|COMPLETED)!\s*$/gm
+
+function parseStepSections(content: string): StepSection[] {
+  const sections: StepSection[] = []
+
+  const firstH2 = /^## /m.exec(content)
+  const preContent = firstH2 ? content.slice(0, firstH2.index) : content
+
+  const promptText = preContent
+    .replace(/^#\s+.+\n?/m, '')
+    .replace(PARENT_LINK_RE, '')
+    .replace(COMMIT_LINK_RE, '')
+    .trim()
+
+  if (promptText) {
+    sections.push({ id: 'prompt', label: 'Prompt', kind: 'prompt', content: promptText })
+  }
+
+  const headings: Array<{ index: number; kind: string; letter: string; from: string; fullMatch: string }> = []
+  const re = /^## (Reply|Revision|Retry|Human-Prompt)(?: ([A-Z]))?(?: \(from (\w+)\))?/gm
+  re.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(content)) !== null) {
+    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', fullMatch: m[0] })
+  }
+
+  for (let i = 0; i < headings.length; i++) {
+    const h = headings[i]
+    if (h.kind === 'Human-Prompt') continue
+
+    const contentStart = h.index + h.fullMatch.length
+    const contentEnd = i + 1 < headings.length ? headings[i + 1].index : content.length
+    const cleaned = content
+      .slice(contentStart, contentEnd)
+      .replace(COMMIT_LINK_RE, '')
+      .replace(REPLACE_LINE_RE, '')
+      .replace(DIRECTIVE_RE, '')
+      .trim()
+
+    let id: string, label: string, kind: StepSection['kind']
+    if (h.kind === 'Reply') {
+      id = h.letter ? `reply-${h.letter}` : 'reply-initial'
+      label = h.letter ? `Reply ${h.letter}` : 'Reply'
+      kind = 'reply'
+    } else if (h.kind === 'Revision') {
+      id = `revision-${h.letter}`
+      label = `Revision ${h.letter}`
+      kind = 'revision'
+    } else {
+      id = `retry-${h.letter}`
+      label = h.from ? `Retry ${h.letter} (from ${h.from})` : `Retry ${h.letter}`
+      kind = 'retry'
+    }
+
+    sections.push({ id, label, kind, content: cleaned })
+  }
+
+  return sections
+}
+
 // ---- Sidebar ----
 
 interface SidebarProps {
+  navLevel: NavLevel
   condocs: CondocInfo[]
-  selected: string | null
-  onSelect: (path: string) => void
+  activeState: CondocState | null
+  selectedCondocPath: string | null
+  selectedStepNum: number | null
+  selectedIterId: string | null
+  onSelectCondoc: (path: string) => void
+  onSelectStep: (num: number) => void
+  onSelectIter: (id: string) => void
+  onNavUp: () => void
 }
 
-function Sidebar({ condocs, selected, onSelect }: SidebarProps) {
-  return (
-    <div className="sidebar">
-      <div className="sidebar-header">
-        <h1>Condoccer</h1>
+function Sidebar({
+  navLevel,
+  condocs,
+  activeState,
+  selectedCondocPath,
+  selectedStepNum,
+  selectedIterId,
+  onSelectCondoc,
+  onSelectStep,
+  onSelectIter,
+  onNavUp,
+}: SidebarProps) {
+  if (navLevel === 'condoc-list') {
+    return (
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <h1>Condoccer</h1>
+        </div>
+        <div className="nav-list">
+          {condocs.length === 0 && (
+            <div className="nav-empty">No condocs found in this repository.</div>
+          )}
+          {condocs.map((c) => (
+            <div
+              key={c.path}
+              className={`nav-item${selectedCondocPath === c.path ? ' selected' : ''}`}
+              onClick={() => onSelectCondoc(c.path)}
+            >
+              <span className="nav-item-name">{c.name}</span>
+              <div className="nav-item-meta">
+                <PhaseBadge phase={c.phase} />
+                {c.stepNum > 0 && <span className="step-label">step {c.stepNum}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
-      <div className="condoc-list">
-        {condocs.length === 0 && (
-          <div style={{ padding: '16px', color: '#555', fontSize: 12 }}>
-            No condocs found in this repository.
+    )
+  }
+
+  if (navLevel === 'condoc' && activeState) {
+    return (
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <button className="nav-up-btn" onClick={onNavUp}>↑ condocs</button>
+          <div className="sidebar-title">{activeState.info.name}</div>
+        </div>
+        <div className="nav-list">
+          {(activeState.steps ?? []).length === 0 && (
+            <div className="nav-empty">No steps yet.</div>
+          )}
+          {(activeState.steps ?? []).map((s) => (
+            <div
+              key={s.num}
+              className={`nav-item${selectedStepNum === s.num ? ' selected' : ''}`}
+              onClick={() => onSelectStep(s.num)}
+            >
+              <span className="nav-item-name">Step {s.num}</span>
+              <div className="nav-item-meta">
+                <span className="nav-item-subtitle">{s.hasReplace ? '(needs input)' : s.title}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (navLevel === 'step' && activeState) {
+    const iterations: Iteration[] =
+      selectedStepNum === activeState.info.stepNum ? (activeState.iterations ?? []) : []
+
+    return (
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <button className="nav-up-btn" onClick={onNavUp}>↑ {activeState.info.name}</button>
+          <div className="sidebar-title">Step {selectedStepNum}</div>
+        </div>
+        <div className="nav-list">
+          {iterations.length === 0 && (
+            <div className="nav-empty">No iterations yet.</div>
+          )}
+          {iterations.map((iter) => (
+            <div
+              key={iter.id}
+              className={`nav-item${selectedIterId === iter.id ? ' selected' : ''}`}
+              onClick={() => onSelectIter(iter.id)}
+            >
+              <span className={`nav-iter-dot iter-${iter.type}`} />
+              <span className="nav-item-name">{iter.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  return <div className="sidebar"><div className="sidebar-header"><h1>Condoccer</h1></div></div>
+}
+
+// ---- Meta fields ----
+
+function MetaField({ label, value }: { label: string; value: string | number | undefined }) {
+  if (!value) return null
+  return (
+    <div className="meta-field">
+      <span className="meta-label">{label}</span>
+      <span className="meta-value">{value}</span>
+    </div>
+  )
+}
+
+function CondocMetaSection({ meta }: { meta: CondocMeta }) {
+  if (!meta.branch && !meta.controlScheme && !meta.callerPath && !meta.startTime) return null
+  return (
+    <div className="meta-section">
+      <MetaField label="Branch" value={meta.branch} />
+      <MetaField label="Control Scheme" value={meta.controlScheme} />
+      <MetaField label="Caller Path" value={meta.callerPath} />
+      {meta.startTime != null && meta.startTime > 0 && (
+        <MetaField label="Start Time" value={new Date(meta.startTime * 1000).toLocaleString()} />
+      )}
+    </div>
+  )
+}
+
+// ---- Step card (inside condoc view) ----
+
+interface StepCardProps {
+  step: StepSummary
+  onStartStep: (title: string, prompt: string) => void
+  onCompleted: () => void
+  isActive: boolean
+}
+
+function StepCard({ step, onStartStep, onCompleted, isActive }: StepCardProps) {
+  const [title, setTitle] = useState('')
+  const [prompt, setPrompt] = useState('')
+
+  if (step.hasReplace) {
+    return (
+      <div className="step-card step-card-active">
+        <div className="step-card-header">Step {step.num}</div>
+        <div className="step-form">
+          <label className="step-form-label">Title</label>
+          <input
+            className="step-form-input"
+            type="text"
+            placeholder="Step title…"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+          <label className="step-form-label">Prompt</label>
+          <textarea
+            className="step-form-textarea"
+            placeholder="Describe what the AI should do…"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={4}
+          />
+          <div className="action-row" style={{ marginTop: 8 }}>
+            <button
+              className="btn-primary"
+              onClick={() => onStartStep(title.trim(), prompt.trim())}
+              disabled={!title.trim() || !prompt.trim()}
+            >
+              Start Step →
+            </button>
+            <button className="btn-secondary" onClick={onCompleted}>
+              Complete Condoc ✓
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className={`step-card${isActive ? ' step-card-active' : ''}`}>
+      <div className="step-card-header">
+        Step {step.num} — <span className="step-card-title">{step.title}</span>
+      </div>
+      {step.prompt && <div className="step-card-prompt">{step.prompt}</div>}
+    </div>
+  )
+}
+
+// ---- Condoc detail view ----
+
+interface CondocDetailViewProps {
+  state: CondocState
+  onAction: (action: ActionRequest) => void
+}
+
+function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
+  const { info, meta, description, steps } = state
+
+  const handleStartStep = (title: string, prompt: string) => {
+    const newContent = state.mainContent
+      .replace('<REPLACE-TITLE>', title)
+      .replace('<REPLACE-PROMPT>', prompt)
+    onAction({ action: 'start_step', path: info.path, content: newContent })
+  }
+
+  return (
+    <div className="detail-view">
+      <div className="detail-header">
+        <h2>{info.name}</h2>
+        <PhaseBadge phase={info.phase} />
+      </div>
+
+      <div className="detail-body">
+        <CondocMetaSection meta={meta} />
+
+        {description && (
+          <div className="detail-section">
+            <div className="detail-section-label">Description</div>
+            <div className="detail-text">{description}</div>
           </div>
         )}
-        {condocs.map((c) => (
-          <div
-            key={c.path}
-            className={`condoc-item${selected === c.path ? ' selected' : ''}`}
-            onClick={() => onSelect(c.path)}
-          >
-            <div className="condoc-item-name">{c.name}</div>
-            <div className="condoc-item-meta">
-              <PhaseBadge phase={c.phase} />
-              {c.stepNum > 0 && <span className="step-label">step {c.stepNum}</span>}
+
+        {info.phase === 'proposed' && (
+          <div className="action-panel">
+            <div className="action-row">
+              <button
+                className="btn-primary"
+                onClick={() => onAction({ action: 'handoff', path: info.path })}
+              >
+                Accept Proposal →
+              </button>
             </div>
           </div>
-        ))}
+        )}
+
+        {steps && steps.length > 0 && (
+          <div className="detail-section">
+            <div className="detail-section-label">Steps</div>
+            <div className="step-list">
+              {steps.map((s) => (
+                <StepCard
+                  key={s.num}
+                  step={s}
+                  isActive={s.num === info.stepNum}
+                  onStartStep={handleStartStep}
+                  onCompleted={() => onAction({ action: 'completed', path: info.path })}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {info.phase === 'agent_running' && (
+          <div className="action-panel">
+            <div className="action-status">
+              <span className="spinner" />
+              Agent is working on step {info.stepNum}…
+            </div>
+          </div>
+        )}
+
+        {info.phase === 'completed' && (
+          <div className="action-panel">
+            <div className="action-status">
+              <span style={{ color: '#4ec94e' }}>✓</span> Condoc completed.
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-// ---- Action panel ----
-// Receives the condoc state and a callback that supplies the current edited main
-// file content (used only for the start_step action).
+// ---- Action panel (for step view) ----
 
 type ActionMode = null | 'revision' | 'retry'
 
@@ -147,90 +472,25 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
   const [promptText, setPromptText] = useState('')
   const [fromSel, setFromSel] = useState('start')
 
-  // Reset form state when condoc path changes.
   useEffect(() => {
     setMode(null)
     setPromptText('')
     setFromSel('start')
-  }, [info.path])
-
-  const submitRevision = () => {
-    if (!promptText.trim()) return
-    onAction({ action: 'revision', path: info.path, letter: nextLetter, content: promptText.trim() })
-    setMode(null)
-    setPromptText('')
-  }
-
-  const submitRetry = () => {
-    if (!promptText.trim()) return
-    onAction({ action: 'retry', path: info.path, letter: nextLetter, from: fromSel, content: promptText.trim() })
-    setMode(null)
-    setPromptText('')
-  }
-
-  if (info.phase === 'completed') {
-    return (
-      <div className="action-panel">
-        <div className="action-status">
-          <span style={{ color: '#4ec94e' }}>✓</span> Condoc completed.
-        </div>
-      </div>
-    )
-  }
+  }, [info.path, info.stepNum])
 
   if (info.phase === 'agent_running') {
     return (
       <div className="action-panel">
         <div className="action-status">
           <span className="spinner" />
-          Agent is working on step {info.stepNum}…
+          Agent is working…
         </div>
       </div>
     )
   }
 
-  if (info.phase === 'proposed') {
-    return (
-      <div className="action-panel">
-        <div className="action-row">
-          <button
-            className="btn-primary"
-            onClick={() => onAction({ action: 'handoff', path: info.path })}
-          >
-            Accept Proposal →
-          </button>
-        </div>
-      </div>
-    )
-  }
+  if (info.phase !== 'awaiting_action') return null
 
-  if (info.phase === 'awaiting_step') {
-    return (
-      <div className="action-panel">
-        <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>
-          Click <strong style={{ color: '#ccc' }}>Edit</strong> in the header to fill in the step
-          template, then click <strong style={{ color: '#ccc' }}>Start Step</strong>.
-        </div>
-        <div className="action-row">
-          {/* start_step content is injected by CondocView.handleAction */}
-          <button
-            className="btn-primary"
-            onClick={() => onAction({ action: 'start_step', path: info.path })}
-          >
-            Start Step →
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => onAction({ action: 'completed', path: info.path })}
-          >
-            Complete Condoc ✓
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  // awaiting_action
   return (
     <div className="action-panel">
       {mode === null && (
@@ -262,14 +522,17 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
           <div className="action-row">
             <button
               className="btn-warning"
-              onClick={submitRevision}
+              onClick={() => {
+                if (!promptText.trim()) return
+                onAction({ action: 'revision', path: info.path, letter: nextLetter, content: promptText.trim() })
+                setMode(null)
+                setPromptText('')
+              }}
               disabled={!promptText.trim()}
             >
               Submit Revision →
             </button>
-            <button className="btn-secondary" onClick={() => setMode(null)}>
-              Cancel
-            </button>
+            <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
           </div>
         </div>
       )}
@@ -281,14 +544,12 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
             <span className="action-form-label">From:</span>
             <select value={fromSel} onChange={(e) => setFromSel(e.target.value)}>
               {fromOptions.map((opt) => (
-                <option key={opt} value={opt}>
-                  {opt}
-                </option>
+                <option key={opt} value={opt}>{opt}</option>
               ))}
             </select>
           </div>
           <textarea
-            placeholder="Describe what you want the agent to try differently…"
+            placeholder="Describe what to try differently…"
             value={promptText}
             onChange={(e) => setPromptText(e.target.value)}
             rows={4}
@@ -296,14 +557,17 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
           <div className="action-row">
             <button
               className="btn-secondary"
-              onClick={submitRetry}
+              onClick={() => {
+                if (!promptText.trim()) return
+                onAction({ action: 'retry', path: info.path, letter: nextLetter, from: fromSel, content: promptText.trim() })
+                setMode(null)
+                setPromptText('')
+              }}
               disabled={!promptText.trim()}
             >
               Submit Retry →
             </button>
-            <button className="btn-secondary" onClick={() => setMode(null)}>
-              Cancel
-            </button>
+            <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
           </div>
         </div>
       )}
@@ -311,79 +575,72 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
   )
 }
 
-// ---- Condoc view ----
+// ---- Step detail view ----
 
-interface CondocViewProps {
+interface StepDetailViewProps {
   state: CondocState
+  stepNum: number
+  selectedIterId: string | null
   onAction: (action: ActionRequest) => void
 }
 
-function CondocView({ state, onAction }: CondocViewProps) {
-  const { info, mainContent, stepContent } = state
-  const [editing, setEditing] = useState(false)
-  const [editText, setEditText] = useState(mainContent)
+function StepDetailView({ state, stepNum, selectedIterId, onAction }: StepDetailViewProps) {
+  const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const stepSummary = (state.steps ?? []).find((s) => s.num === stepNum)
+  const isActiveStep = stepNum === state.info.stepNum
 
-  // Reset edit state when condoc or content changes.
+  // Scroll to selected iteration
   useEffect(() => {
-    setEditing(false)
-    setEditText(mainContent)
-  }, [info.path, mainContent])
-
-  // Intercept start_step to inject the current edit buffer as content.
-  const handleAction = (action: ActionRequest) => {
-    if (action.action === 'start_step') {
-      onAction({ ...action, content: editText })
-      setEditing(false)
-    } else {
-      onAction(action)
+    if (selectedIterId && sectionRefs.current[selectedIterId]) {
+      sectionRefs.current[selectedIterId]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
+  }, [selectedIterId])
+
+  if (!isActiveStep) {
+    // Completed step: just show title and prompt from main file
+    return (
+      <div className="detail-view">
+        <div className="detail-header">
+          <h2>Step {stepNum}</h2>
+          {stepSummary && <span className="detail-step-title">{stepSummary.title}</span>}
+        </div>
+        <div className="detail-body">
+          {stepSummary?.prompt && (
+            <div className="detail-section">
+              <div className="detail-section-label">Prompt</div>
+              <div className="detail-text">{stepSummary.prompt}</div>
+            </div>
+          )}
+          <div className="action-panel">
+            <div className="action-status" style={{ color: '#4ec94e' }}>✓ Step completed.</div>
+          </div>
+        </div>
+      </div>
+    )
   }
 
+  const sections = parseStepSections(state.stepContent ?? '')
+
   return (
-    <div className="condoc-view">
-      <div className="condoc-header">
-        <h2>{info.name}</h2>
-        <PhaseBadge phase={info.phase} />
-        {info.stepNum > 0 && (
-          <span className="step-label" style={{ color: '#777' }}>
-            step {info.stepNum}
-          </span>
-        )}
-        {info.phase === 'awaiting_step' && (
-          <button
-            className="btn-secondary"
-            style={{ marginLeft: 'auto', fontSize: 11 }}
-            onClick={() => setEditing((e) => !e)}
+    <div className="detail-view">
+      <div className="detail-header">
+        <h2>Step {stepNum}</h2>
+        {stepSummary && <span className="detail-step-title">{stepSummary.title}</span>}
+        <PhaseBadge phase={state.info.phase} />
+      </div>
+      <div className="detail-body">
+        {sections.map((sec) => (
+          <div
+            key={sec.id}
+            className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
+            ref={(el) => { sectionRefs.current[sec.id] = el }}
           >
-            {editing ? 'View' : 'Edit'}
-          </button>
-        )}
-      </div>
-
-      <div className="condoc-panels">
-        <div className="file-panel">
-          <div className="file-panel-header">Main File</div>
-          {editing ? (
-            <textarea
-              className="file-edit-area"
-              value={editText}
-              onChange={(e) => setEditText(e.target.value)}
-              spellCheck={false}
-            />
-          ) : (
-            <pre className="file-content">{mainContent}</pre>
-          )}
-        </div>
-
-        {stepContent && (
-          <div className="file-panel">
-            <div className="file-panel-header">Step {info.stepNum} File</div>
-            <pre className="file-content">{stepContent}</pre>
+            <div className="iter-section-label">{sec.label}</div>
+            <div className="iter-section-content">{sec.content}</div>
           </div>
-        )}
+        ))}
       </div>
-
-      <ActionPanel state={state} onAction={handleAction} />
+      <ActionPanel state={state} onAction={onAction} />
     </div>
   )
 }
@@ -391,19 +648,70 @@ function CondocView({ state, onAction }: CondocViewProps) {
 // ---- Root app ----
 
 export default function App() {
-  const { connected, condocs, activeState, error, subscribe, sendAction, setError } =
-    useCondocWS()
-  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const { connected, condocs, activeState, error, subscribe, sendAction, setError } = useCondocWS()
 
-  const handleSelect = (path: string) => {
-    setSelectedPath(path)
+  const [navLevel, setNavLevel] = useState<NavLevel>('condoc-list')
+  const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(null)
+  const [selectedStepNum, setSelectedStepNum] = useState<number | null>(null)
+  const [selectedIterId, setSelectedIterId] = useState<string | null>(null)
+
+  const handleSelectCondoc = (path: string) => {
+    setSelectedCondocPath(path)
+    setSelectedStepNum(null)
+    setSelectedIterId(null)
+    setNavLevel('condoc')
     subscribe(path)
     setError(null)
   }
 
+  const handleSelectStep = (num: number) => {
+    setSelectedStepNum(num)
+    setSelectedIterId(null)
+    setNavLevel('step')
+  }
+
+  const handleSelectIter = (id: string) => {
+    setSelectedIterId(id)
+  }
+
+  const handleNavUp = () => {
+    if (navLevel === 'step') {
+      setNavLevel('condoc')
+      setSelectedStepNum(null)
+      setSelectedIterId(null)
+    } else if (navLevel === 'condoc') {
+      setNavLevel('condoc-list')
+      setSelectedCondocPath(null)
+      setSelectedIterId(null)
+    }
+  }
+
+  const handleAction = (action: ActionRequest) => {
+    setError(null)
+    sendAction(action)
+    if (action.action === 'start_step' && activeState !== null) {
+      handleSelectStep(activeState.info.stepNum)
+    } else if (action.action === 'completed' && navLevel === 'step') {
+      setNavLevel('condoc')
+      setSelectedStepNum(null)
+      setSelectedIterId(null)
+    }
+  }
+
   return (
     <div className="app">
-      <Sidebar condocs={condocs} selected={selectedPath} onSelect={handleSelect} />
+      <Sidebar
+        navLevel={navLevel}
+        condocs={condocs}
+        activeState={activeState}
+        selectedCondocPath={selectedCondocPath}
+        selectedStepNum={selectedStepNum}
+        selectedIterId={selectedIterId}
+        onSelectCondoc={handleSelectCondoc}
+        onSelectStep={handleSelectStep}
+        onSelectIter={handleSelectIter}
+        onNavUp={handleNavUp}
+      />
 
       <div className="main-content">
         {error && (
@@ -419,7 +727,7 @@ export default function App() {
           </div>
         )}
 
-        {!selectedPath || !activeState ? (
+        {navLevel === 'condoc-list' && (
           <div className="empty-state">
             <div>
               <span className={`conn-dot ${connected ? 'connected' : 'disconnected'}`} />
@@ -430,13 +738,18 @@ export default function App() {
                 : 'Connecting…'}
             </div>
           </div>
-        ) : (
-          <CondocView
+        )}
+
+        {navLevel === 'condoc' && activeState && (
+          <CondocDetailView state={activeState} onAction={handleAction} />
+        )}
+
+        {navLevel === 'step' && activeState && selectedStepNum !== null && (
+          <StepDetailView
             state={activeState}
-            onAction={(action) => {
-              setError(null)
-              sendAction(action)
-            }}
+            stepNum={selectedStepNum}
+            selectedIterId={selectedIterId}
+            onAction={handleAction}
           />
         )}
       </div>

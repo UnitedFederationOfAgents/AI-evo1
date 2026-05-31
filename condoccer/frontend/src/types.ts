@@ -13,12 +13,37 @@ export interface CondocInfo {
   stepFile?: string
 }
 
+export interface CondocMeta {
+  startTime?: number
+  controlScheme?: string
+  branch?: string
+  callerPath?: string
+}
+
+export interface StepSummary {
+  num: number
+  title: string
+  prompt: string
+  hasReplace?: boolean
+}
+
+export interface Iteration {
+  id: string
+  label: string
+  type: 'reply' | 'revision' | 'retry'
+  from?: string
+}
+
 export interface CondocState {
   info: CondocInfo
   mainContent: string
   stepContent?: string
   nextLetter: string
   fromOptions: string[]
+  meta: CondocMeta
+  description: string
+  steps: StepSummary[]
+  iterations: Iteration[]
 }
 
 export type ServerMsg =

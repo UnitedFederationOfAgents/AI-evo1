@@ -50,7 +50,7 @@ const (
 	EnvAgentName        = "AGENT_NAME"
 	EnvAgentModel       = "AGENT_MODEL"
 	EnvAgentSession     = "AGENT_SESSION"
-	EnvIsClauditable    = "IS_CLAUDITABLE" // Used to prevent double-wrapping
+	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 )
 
 // Available agents (must match ambiguous-agent configurations)
@@ -2347,7 +2347,7 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escapedPath)
 	}
 
-	if os.Getenv(EnvIsClauditable) == "true" {
+	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmd := exec.Command("bash", "-c", actualCmd)
 		cmd.Env = os.Environ()
 		return cmd
@@ -2366,7 +2366,6 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
 	)
 	cmd.Env = env
 	return cmd
@@ -2422,7 +2421,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvIsClauditable) == "true" {
+	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
 		cmd.Env = os.Environ()
 		return cmd, ""
@@ -2442,7 +2441,6 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2467,7 +2465,7 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvIsClauditable) == "true" {
+	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
 		cmd.Env = os.Environ()
 		return cmd, ""
@@ -2487,7 +2485,6 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2533,7 +2530,7 @@ func teeCommandAppend(cmd *exec.Cmd, outputPath string) *exec.Cmd {
 // buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
 func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, string) {
-	if os.Getenv(EnvIsClauditable) == "true" {
+	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		ambiguousAgentPath, err := findBinary("ambiguous-agent")
 		if err != nil {
 			return nil, renderModelsFallback(agent, currentModel)
@@ -2561,7 +2558,6 @@ func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, stri
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
 	)
 	cmd.Env = env
 	return cmd, ""

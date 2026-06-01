@@ -68,7 +68,7 @@ The following environment variables are recognized:
 | `AGENT_NAME` | Default agent to use | `claude` |
 | `AGENT_MODEL` | Default model override | (none) |
 | `AGENT_SESSION` | Session identifier | Auto-generated |
-| `IS_CLAUDITABLE` | Double-wrap prevention flag | (set by clauditable) |
+| `CLAUDITABLE_ALREADY_ACTIVE` | Double-wrap prevention flag | (set by clauditable) |
 
 ## Dependencies
 

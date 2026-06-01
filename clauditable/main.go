@@ -68,7 +68,7 @@ const (
 	EnvUFAMetadata             = "UFA_METADATA"
 	EnvUFAVerbosityManagement  = "UFA_VERBOSITY_MANAGEMENT"
 	EnvUFAVerbosityAfterLine   = "UFA_VERBOSITY_AFTER_LINE"
-	EnvIsClauditable           = "IS_CLAUDITABLE" // Used to prevent double-wrapping
+	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 
@@ -81,18 +81,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Check for double-wrapping: if IS_CLAUDITABLE is already set, pass through
-	// without recording to prevent duplicate logging
-	if os.Getenv(EnvIsClauditable) == "true" {
-		// Already in clauditable context, pass through directly
+	// If a parent clauditable already set the guard, pass through without recording.
+	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmdName := os.Args[1]
 		cmdArgs := os.Args[2:]
 		verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
 		os.Exit(runPassthrough(cmdName, cmdArgs, verbosity))
 	}
 
-	// Set IS_CLAUDITABLE for child processes to detect
-	os.Setenv(EnvIsClauditable, "true")
+	// Mark the environment so nested clauditable invocations pass through.
+	os.Setenv(EnvClauditableAlreadyActive, "true")
 
 	// Extract command and args
 	cmdName := os.Args[1]

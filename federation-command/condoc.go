@@ -172,6 +172,108 @@ func ordinal(n int) string {
 
 var condocHandoffRe = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 var condocCompletedRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
+var condocYAMLHeaderRe = regexp.MustCompile("(?s)<!--\\s*```condoc-yaml\\n(.*?)```\\s*-->")
+var condocCompletedMarkerRe = regexp.MustCompile(`(?m)^## Condoc Completed$`)
+
+// parseCondocYAML extracts startTime, branch, and callerPath from a condoc-yaml block.
+// Returns ok=false if the block is absent or branch cannot be parsed.
+func parseCondocYAML(content string) (startTime int64, branch, callerPath string, ok bool) {
+	m := condocYAMLHeaderRe.FindStringSubmatch(content)
+	if m == nil {
+		return 0, "", "", false
+	}
+	for _, line := range strings.Split(m[1], "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "startTime:"):
+			val, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "startTime:")), 10, 64)
+			if err == nil {
+				startTime = val
+			}
+		case strings.HasPrefix(line, "branch:"):
+			branch = strings.TrimSpace(strings.TrimPrefix(line, "branch:"))
+		case strings.HasPrefix(line, "callerPath:"):
+			callerPath = strings.TrimSpace(strings.TrimPrefix(line, "callerPath:"))
+		}
+	}
+	return startTime, branch, callerPath, branch != ""
+}
+
+// loadCondocSession reconstructs a CondocSession from an existing condoc file.
+// Returns an error if the file is not a valid condoc or is already completed.
+func loadCondocSession(filePath string, verbose bool, cwd string) (*CondocSession, error) {
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(cwd, filePath)
+	}
+	b, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("condoc: cannot read file: %w", err)
+	}
+	content := string(b)
+
+	startTime, branch, callerPath, ok := parseCondocYAML(content)
+	if !ok {
+		return nil, fmt.Errorf("condoc: file exists but is not a condoc (no condoc-yaml header): %s", filePath)
+	}
+	if condocCompletedMarkerRe.MatchString(content) {
+		return nil, fmt.Errorf("condoc: already completed: %s", filePath)
+	}
+
+	repoRoot, err := condocFindGitRoot(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("condoc: %w", err)
+	}
+
+	cs := &CondocSession{
+		mainFilePath: filePath,
+		startTime:    startTime,
+		branch:       branch,
+		repoRoot:     repoRoot,
+		callerPath:   callerPath,
+		active:       true,
+		verbose:      verbose,
+	}
+
+	stepMatches := condocStepHeadingRe.FindAllStringSubmatch(content, -1)
+	if len(stepMatches) == 0 {
+		// No step headings — still in the proposal phase.
+		cs.phase = condocPhaseProposed
+		return cs, nil
+	}
+
+	lastMatch := stepMatches[len(stepMatches)-1]
+	lastStepNum, _ := strconv.Atoi(lastMatch[1])
+
+	if strings.Contains(lastMatch[2], "<REPLACE-TITLE>") {
+		// Template present but not yet filled in.
+		cs.phase = condocPhaseAwaitingStep
+		cs.stepNum = lastStepNum
+		return cs, nil
+	}
+
+	// Step heading is filled — the step file must exist to resume.
+	stepPath := condocStepFilePath(filePath, lastStepNum)
+	if _, err := os.Stat(stepPath); err != nil {
+		return nil, fmt.Errorf("condoc: step %d was started but its file is missing — condoc is in an inconsistent state: %s", lastStepNum, stepPath)
+	}
+
+	cs.phase = condocPhaseAwaitingAction
+	cs.stepNum = lastStepNum
+	cs.stepFile = stepPath
+
+	// Try to recover the step-start commit hash so retry-from-start works correctly.
+	hashCmd := exec.Command("git", "log", "--format=%H",
+		"--grep=condoc: step "+strconv.Itoa(lastStepNum)+" started")
+	hashCmd.Dir = repoRoot
+	if hashOut, err := hashCmd.Output(); err == nil {
+		lines := strings.Split(strings.TrimSpace(string(hashOut)), "\n")
+		if len(lines) > 0 && lines[0] != "" {
+			cs.stepStartHash = lines[0]
+		}
+	}
+
+	return cs, nil
+}
 
 func condocFileHasHandoff(path string) bool {
 	b, err := os.ReadFile(path)
@@ -1090,7 +1192,7 @@ func NewCondocSession(filePath, description string, verbose bool, cwd string) (*
 		return nil, fmt.Errorf("condoc: cannot create directory: %w", err)
 	}
 	if _, err := os.Stat(filePath); err == nil {
-		return nil, fmt.Errorf("condoc: file already exists: %s", filePath)
+		return loadCondocSession(filePath, verbose, cwd)
 	}
 
 	repoRoot, err := condocFindGitRoot(filePath)

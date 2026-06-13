@@ -82,7 +82,7 @@ function useCondocWS() {
 
 // ---- Navigation ----
 
-type NavLevel = 'condoc-list' | 'condoc' | 'step'
+type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep'
 
 // ---- Phase helpers ----
 
@@ -103,14 +103,15 @@ function PhaseBadge({ phase }: { phase: Phase }) {
 interface StepSection {
   id: string
   label: string
-  kind: 'prompt' | 'reply' | 'revision' | 'retry'
+  kind: 'prompt' | 'reply' | 'revision' | 'retry' | 'substep'
   content: string
+  substepLetter?: string
 }
 
 const COMMIT_LINK_RE = /^\[`[a-f0-9]+`\]\([^)]+\)\s*$/gm
 const PARENT_LINK_RE = /^\[.*?\]\(.*?\)\s*$/gm
 const REPLACE_LINE_RE = /^(?:## )?<REPLACE[^>]*>[^\n]*\n?/gm
-const DIRECTIVE_RE = /^!(?:HANDOFF|COMPLETED)!\s*$/gm
+const DIRECTIVE_RE = /^!(?:HANDOFF|COMPLETED|REVERT[^!]*)!\s*$/gm
 
 function parseStepSections(content: string): StepSection[] {
   const sections: StepSection[] = []
@@ -128,13 +129,29 @@ function parseStepSections(content: string): StepSection[] {
     sections.push({ id: 'prompt', label: 'Prompt', kind: 'prompt', content: promptText })
   }
 
-  const headings: Array<{ index: number; kind: string; letter: string; from: string; fullMatch: string }> = []
-  const re = /^## (Reply|Revision|Retry|Human-Prompt)(?: ([A-Z]))?(?: \(from (\w+)\))?/gm
-  re.lastIndex = 0
-  let m: RegExpExecArray | null
-  while ((m = re.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', fullMatch: m[0] })
+  // Collect all H2 headings with position info.
+  interface Heading {
+    index: number
+    kind: string
+    letter: string
+    from: string
+    substepTitle: string
+    fullMatch: string
   }
+  const headings: Heading[] = []
+  const reMain = /^## (Reply|Revision|Retry|Human-Prompt)(?: ([A-Z]))?(?: \(from (\w+)\))?/gm
+  const reSubstep = /^## Substep ([A-Z]) - (.+)/gm
+  reMain.lastIndex = 0
+  reSubstep.lastIndex = 0
+
+  let m: RegExpExecArray | null
+  while ((m = reMain.exec(content)) !== null) {
+    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', substepTitle: '', fullMatch: m[0] })
+  }
+  while ((m = reSubstep.exec(content)) !== null) {
+    headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), fullMatch: m[0] })
+  }
+  headings.sort((a, b) => a.index - b.index)
 
   for (let i = 0; i < headings.length; i++) {
     const h = headings[i]
@@ -150,6 +167,8 @@ function parseStepSections(content: string): StepSection[] {
       .trim()
 
     let id: string, label: string, kind: StepSection['kind']
+    let substepLetter: string | undefined
+
     if (h.kind === 'Reply') {
       id = h.letter ? `reply-${h.letter}` : 'reply-initial'
       label = h.letter ? `Reply ${h.letter}` : 'Reply'
@@ -158,13 +177,19 @@ function parseStepSections(content: string): StepSection[] {
       id = `revision-${h.letter}`
       label = `Revision ${h.letter}`
       kind = 'revision'
-    } else {
+    } else if (h.kind === 'Retry') {
       id = `retry-${h.letter}`
       label = h.from ? `Retry ${h.letter} (from ${h.from})` : `Retry ${h.letter}`
       kind = 'retry'
+    } else {
+      // Substep
+      id = `substep-${h.letter}`
+      label = `Substep ${h.letter} — ${h.substepTitle}`
+      kind = 'substep'
+      substepLetter = h.letter
     }
 
-    sections.push({ id, label, kind, content: cleaned })
+    sections.push({ id, label, kind, content: cleaned, substepLetter })
   }
 
   return sections
@@ -185,9 +210,12 @@ interface SidebarProps {
   selectedCondocPath: string | null
   selectedStepNum: number | null
   selectedIterId: string | null
+  selectedSubstepIterId: string | null
   onSelectCondoc: (path: string) => void
   onSelectStep: (num: number) => void
   onSelectIter: (id: string) => void
+  onEnterSubstep: (substepLetter: string) => void
+  onSelectSubstepIter: (id: string) => void
   onNavUp: () => void
 }
 
@@ -198,9 +226,12 @@ function Sidebar({
   selectedCondocPath,
   selectedStepNum,
   selectedIterId,
+  selectedSubstepIterId,
   onSelectCondoc,
   onSelectStep,
   onSelectIter,
+  onEnterSubstep,
+  onSelectSubstepIter,
   onNavUp,
 }: SidebarProps) {
   if (navLevel === 'condoc-list') {
@@ -280,8 +311,46 @@ function Sidebar({
           {iterations.map((iter) => (
             <div
               key={iter.id}
-              className={`nav-item${selectedIterId === iter.id ? ' selected' : ''}`}
+              className={`nav-item nav-item-iter${selectedIterId === iter.id ? ' selected' : ''}`}
               onClick={() => onSelectIter(iter.id)}
+            >
+              <span className={`nav-iter-dot iter-${iter.type}`} />
+              <span className="nav-item-name">{iter.label}</span>
+              {iter.type === 'substep' && (
+                <button
+                  className="nav-enter-btn"
+                  title="Enter substep"
+                  onClick={(e) => { e.stopPropagation(); onEnterSubstep(iter.id.replace('substep-', '')) }}
+                >
+                  →
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (navLevel === 'substep' && activeState) {
+    const substepIterations: Iteration[] = activeState.substepIterations ?? []
+    const substepLetter = activeState.info.substepLetter ?? ''
+
+    return (
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <button className="nav-up-btn" onClick={onNavUp}>↑ Step {selectedStepNum}</button>
+          <div className="sidebar-title">Substep {substepLetter}</div>
+        </div>
+        <div className="nav-list">
+          {substepIterations.length === 0 && (
+            <div className="nav-empty">No iterations yet.</div>
+          )}
+          {substepIterations.map((iter) => (
+            <div
+              key={iter.id}
+              className={`nav-item nav-item-iter${selectedSubstepIterId === iter.id ? ' selected' : ''}`}
+              onClick={() => onSelectSubstepIter(iter.id)}
             >
               <span className={`nav-iter-dot iter-${iter.type}`} />
               <span className="nav-item-name">{iter.label}</span>
@@ -325,14 +394,30 @@ function CondocMetaSection({ meta }: { meta: CondocMeta }) {
 
 interface StepCardProps {
   step: StepSummary
+  completedContent?: string
   onStartStep: (title: string, prompt: string) => void
   onCompleted: () => void
+  onRevert: (stepNum: number, iterLetter?: string) => void
   isActive: boolean
+  isCompleted: boolean
 }
 
-function StepCard({ step, onStartStep, onCompleted, isActive }: StepCardProps) {
+function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, isActive, isCompleted }: StepCardProps) {
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
+  const [revertOpen, setRevertOpen] = useState(false)
+  const [revertIter, setRevertIter] = useState('')
+
+  const revertIterOptions: string[] = []
+  if (completedContent) {
+    const sections = parseStepSections(completedContent)
+    for (const sec of sections) {
+      if (sec.kind === 'revision' || sec.kind === 'retry') {
+        const letter = sec.id.split('-').pop() ?? ''
+        if (letter) revertIterOptions.push(letter)
+      }
+    }
+  }
 
   if (step.hasReplace) {
     return (
@@ -374,10 +459,50 @@ function StepCard({ step, onStartStep, onCompleted, isActive }: StepCardProps) {
 
   return (
     <div className={`step-card${isActive ? ' step-card-active' : ''}`}>
-      <div className="step-card-header">
-        Step {step.num} — <span className="step-card-title">{step.title}</span>
+      <div className="step-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Step {step.num} — <span className="step-card-title">{step.title}</span></span>
+        {isCompleted && !revertOpen && (
+          <button
+            className="btn-danger-sm"
+            title={`Revert to step ${step.num}`}
+            onClick={() => { setRevertOpen(true); setRevertIter('') }}
+          >
+            ↩ Revert
+          </button>
+        )}
       </div>
-      {step.prompt && <div className="step-card-prompt">{step.prompt}</div>}
+      {step.prompt && !revertOpen && <div className="step-card-prompt">{step.prompt}</div>}
+      {isCompleted && revertOpen && (
+        <div className="action-form" style={{ marginTop: 8 }}>
+          <div className="action-form-title">Revert to Step {step.num}</div>
+          <div className="action-form-row">
+            <span className="action-form-label">Before iteration:</span>
+            <select value={revertIter} onChange={(e) => setRevertIter(e.target.value)}>
+              <option value="">— start (remove all iterations)</option>
+              {revertIterOptions.map((l) => (
+                <option key={l} value={l}>{l}</option>
+              ))}
+            </select>
+          </div>
+          <div className="action-status" style={{ fontSize: 12, color: '#aaa' }}>
+            {revertIter
+              ? `Keeps content up to just before iteration ${revertIter}. Previous work saved in a diff file.`
+              : `Reverts git to the start of step ${step.num}. Previous work saved in a diff file.`}
+          </div>
+          <div className="action-row">
+            <button
+              className="btn-danger"
+              onClick={() => {
+                onRevert(step.num, revertIter || undefined)
+                setRevertOpen(false)
+              }}
+            >
+              Confirm Revert ↩
+            </button>
+            <button className="btn-secondary" onClick={() => setRevertOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -437,9 +562,12 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
                 <StepCard
                   key={s.num}
                   step={s}
+                  completedContent={s.num < info.stepNum ? state.completedStepContents?.[s.num] : undefined}
                   isActive={s.num === info.stepNum}
+                  isCompleted={s.num < info.stepNum}
                   onStartStep={handleStartStep}
                   onCompleted={() => onAction({ action: 'completed', path: info.path })}
+                  onRevert={(stepNum, iterLetter) => onAction({ action: 'revert', path: info.path, revertStep: stepNum, revertIter: iterLetter })}
                 />
               ))}
             </div>
@@ -467,26 +595,31 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
   )
 }
 
-// ---- Action panel (for step view) ----
+// ---- Action panel (for step or substep view) ----
 
-type ActionMode = null | 'revision' | 'retry'
+type ActionMode = null | 'revision' | 'retry' | 'revert' | 'substep'
 
 interface ActionPanelProps {
   state: CondocState
   onAction: (action: ActionRequest) => void
+  isSubstep?: boolean
 }
 
-function ActionPanel({ state, onAction }: ActionPanelProps) {
+function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const { info, nextLetter, fromOptions } = state
   const [mode, setMode] = useState<ActionMode>(null)
   const [promptText, setPromptText] = useState('')
   const [fromSel, setFromSel] = useState('start')
+  const [revertIter, setRevertIter] = useState('')
+  const [substepTitle, setSubstepTitle] = useState('')
 
   useEffect(() => {
     setMode(null)
     setPromptText('')
     setFromSel('start')
-  }, [info.path, info.stepNum])
+    setRevertIter('')
+    setSubstepTitle('')
+  }, [info.path, info.stepNum, info.substepLetter])
 
   if (info.phase === 'agent_running') {
     return (
@@ -501,6 +634,34 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
 
   if (info.phase !== 'awaiting_action') return null
 
+  // Build revert iteration options: letters that exist (Reply A → A is a valid revert point).
+  const revertIterOptions: string[] = []
+  const iterSource = isSubstep ? (state.substepIterations ?? []) : (state.iterations ?? [])
+  for (const iter of iterSource) {
+    if (iter.type === 'revision' || iter.type === 'retry' || iter.type === 'substep') {
+      const letter = iter.id.split('-').pop() ?? ''
+      if (letter) revertIterOptions.push(letter)
+    }
+  }
+
+  const buildRevertAction = (): ActionRequest => {
+    if (isSubstep && info.substepLetter) {
+      return {
+        action: 'revert',
+        path: info.path,
+        revertStep: info.stepNum,
+        revertIter: info.substepLetter,
+        revertSubIter: revertIter || undefined,
+      }
+    }
+    return {
+      action: 'revert',
+      path: info.path,
+      revertStep: info.stepNum,
+      revertIter: revertIter || undefined,
+    }
+  }
+
   return (
     <div className="action-panel">
       {mode === null && (
@@ -509,13 +670,21 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
             className="btn-success"
             onClick={() => onAction({ action: 'completed', path: info.path })}
           >
-            Complete Step ✓
+            Complete {isSubstep ? 'Substep' : 'Step'} ✓
           </button>
           <button className="btn-warning" onClick={() => setMode('revision')}>
             Revise {nextLetter}…
           </button>
           <button className="btn-secondary" onClick={() => setMode('retry')}>
             Retry {nextLetter}…
+          </button>
+          {!isSubstep && (
+            <button className="btn-primary" onClick={() => setMode('substep')}>
+              Substep {nextLetter}…
+            </button>
+          )}
+          <button className="btn-danger" onClick={() => setMode('revert')}>
+            Revert↩
           </button>
         </div>
       )}
@@ -581,6 +750,138 @@ function ActionPanel({ state, onAction }: ActionPanelProps) {
           </div>
         </div>
       )}
+
+      {mode === 'substep' && (
+        <div className="action-form">
+          <div className="action-form-title">Substep {nextLetter}</div>
+          <input
+            className="step-form-input"
+            type="text"
+            placeholder="Substep title…"
+            value={substepTitle}
+            onChange={(e) => setSubstepTitle(e.target.value)}
+          />
+          <textarea
+            placeholder="Describe what the substep should accomplish…"
+            value={promptText}
+            onChange={(e) => setPromptText(e.target.value)}
+            rows={4}
+          />
+          <div className="action-row">
+            <button
+              className="btn-primary"
+              onClick={() => {
+                if (!substepTitle.trim() || !promptText.trim()) return
+                onAction({ action: 'substep', path: info.path, letter: nextLetter, substepTitle: substepTitle.trim(), content: promptText.trim() })
+                setMode(null)
+                setPromptText('')
+                setSubstepTitle('')
+              }}
+              disabled={!substepTitle.trim() || !promptText.trim()}
+            >
+              Create Substep →
+            </button>
+            <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {mode === 'revert' && (
+        <div className="action-form">
+          <div className="action-form-title">
+            Revert {isSubstep ? `Substep ${info.substepLetter}` : `Step ${info.stepNum}`}
+          </div>
+          {revertIterOptions.length > 0 ? (
+            <div className="action-form-row">
+              <span className="action-form-label">Before iteration:</span>
+              <select value={revertIter} onChange={(e) => setRevertIter(e.target.value)}>
+                {!isSubstep
+                  ? <option value="">— start (remove all iterations)</option>
+                  : <option value="" disabled>— choose iteration —</option>
+                }
+                {revertIterOptions.map((l) => (
+                  <option key={l} value={l}>{l}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            !isSubstep && (
+              <div className="action-status" style={{ fontSize: 12, color: '#aaa' }}>
+                No iterations yet — will revert to step start.
+              </div>
+            )
+          )}
+          {isSubstep && revertIterOptions.length === 0 && (
+            <div className="action-status" style={{ fontSize: 12, color: '#666' }}>
+              No iterations to revert to within this substep.
+            </div>
+          )}
+          <div className="action-status" style={{ fontSize: 12, color: '#aaa', margin: '4px 0' }}>
+            {revertIter
+              ? `Keeps content up to just before iteration ${revertIter}. Previous work saved in a diff file.`
+              : isSubstep
+                ? 'Select an iteration above to revert to.'
+                : 'Reverts git to the start of this step. Previous work saved in a diff file.'}
+          </div>
+          <div className="action-row">
+            <button
+              className="btn-danger"
+              disabled={isSubstep && !revertIter}
+              onClick={() => {
+                onAction(buildRevertAction())
+                setMode(null)
+              }}
+            >
+              Confirm Revert ↩
+            </button>
+            <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- Substep detail view ----
+
+interface SubstepDetailViewProps {
+  state: CondocState
+  selectedSubstepIterId: string | null
+  onAction: (action: ActionRequest) => void
+}
+
+function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDetailViewProps) {
+  const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const substepLetter = state.info.substepLetter ?? ''
+  const content = state.substepContent ?? ''
+
+  useEffect(() => {
+    if (selectedSubstepIterId && sectionRefs.current[selectedSubstepIterId]) {
+      sectionRefs.current[selectedSubstepIterId]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [selectedSubstepIterId])
+
+  const sections = parseStepSections(content)
+
+  return (
+    <div className="detail-view">
+      <div className="detail-header">
+        <h2>Substep {substepLetter}</h2>
+        <PhaseBadge phase={state.info.phase} />
+      </div>
+      <div className="detail-body">
+        {sections.map((sec) => (
+          <div
+            key={sec.id}
+            className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+            ref={(el) => { sectionRefs.current[sec.id] = el }}
+          >
+            <div className="iter-section-label">{sec.label}</div>
+            <div className="iter-section-content">{sec.content}</div>
+          </div>
+        ))}
+      </div>
+      <ActionPanel state={state} onAction={onAction} isSubstep />
     </div>
   )
 }
@@ -592,9 +893,10 @@ interface StepDetailViewProps {
   stepNum: number
   selectedIterId: string | null
   onAction: (action: ActionRequest) => void
+  onEnterSubstep: (substepLetter: string) => void
 }
 
-function StepDetailView({ state, stepNum, selectedIterId, onAction }: StepDetailViewProps) {
+function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubstep }: StepDetailViewProps) {
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
   const stepSummary = (state.steps ?? []).find((s) => s.num === stepNum)
   const isActiveStep = stepNum === state.info.stepNum
@@ -626,7 +928,20 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction }: StepDetail
                   ref={(el) => { sectionRefs.current[sec.id] = el }}
                 >
                   <div className="iter-section-label">{sec.label}</div>
-                  <div className="iter-section-content">{sec.content}</div>
+                  {sec.kind === 'substep' ? (
+                    <div className="iter-section-content">
+                      <span style={{ color: '#aaa', fontSize: 12 }}>{sec.content}</span>
+                      <button
+                        className="btn-secondary"
+                        style={{ marginLeft: 8, fontSize: 11, padding: '2px 8px' }}
+                        onClick={() => sec.substepLetter && onEnterSubstep(sec.substepLetter)}
+                      >
+                        View substep →
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="iter-section-content">{sec.content}</div>
+                  )}
                 </div>
               ))
             : stepSummary?.prompt && (
@@ -658,8 +973,20 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction }: StepDetail
             key={sec.id}
             className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
             ref={(el) => { sectionRefs.current[sec.id] = el }}
+            onDoubleClick={() => sec.kind === 'substep' && sec.substepLetter && onEnterSubstep(sec.substepLetter)}
           >
-            <div className="iter-section-label">{sec.label}</div>
+            <div className="iter-section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>{sec.label}</span>
+              {sec.kind === 'substep' && sec.substepLetter && (
+                <button
+                  className="btn-secondary"
+                  style={{ fontSize: 11, padding: '2px 8px' }}
+                  onClick={() => onEnterSubstep(sec.substepLetter!)}
+                >
+                  Enter →
+                </button>
+              )}
+            </div>
             <div className="iter-section-content">{sec.content}</div>
           </div>
         ))}
@@ -678,11 +1005,13 @@ export default function App() {
   const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(null)
   const [selectedStepNum, setSelectedStepNum] = useState<number | null>(null)
   const [selectedIterId, setSelectedIterId] = useState<string | null>(null)
+  const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(null)
 
   const handleSelectCondoc = (path: string) => {
     setSelectedCondocPath(path)
     setSelectedStepNum(null)
     setSelectedIterId(null)
+    setSelectedSubstepIterId(null)
     setNavLevel('condoc')
     subscribe(path)
     setError(null)
@@ -691,6 +1020,7 @@ export default function App() {
   const handleSelectStep = (num: number) => {
     setSelectedStepNum(num)
     setSelectedIterId(null)
+    setSelectedSubstepIterId(null)
     setNavLevel('step')
   }
 
@@ -698,15 +1028,29 @@ export default function App() {
     setSelectedIterId(id)
   }
 
+  const handleEnterSubstep = (_substepLetter: string) => {
+    setSelectedSubstepIterId(null)
+    setNavLevel('substep')
+  }
+
+  const handleSelectSubstepIter = (id: string) => {
+    setSelectedSubstepIterId(id)
+  }
+
   const handleNavUp = () => {
-    if (navLevel === 'step') {
+    if (navLevel === 'substep') {
+      setNavLevel('step')
+      setSelectedSubstepIterId(null)
+    } else if (navLevel === 'step') {
       setNavLevel('condoc')
       setSelectedStepNum(null)
       setSelectedIterId(null)
+      setSelectedSubstepIterId(null)
     } else if (navLevel === 'condoc') {
       setNavLevel('condoc-list')
       setSelectedCondocPath(null)
       setSelectedIterId(null)
+      setSelectedSubstepIterId(null)
     }
   }
 
@@ -715,10 +1059,26 @@ export default function App() {
     sendAction(action)
     if (action.action === 'start_step' && activeState !== null) {
       handleSelectStep(activeState.info.stepNum)
-    } else if (action.action === 'completed' && navLevel === 'step') {
-      setNavLevel('condoc')
-      setSelectedStepNum(null)
-      setSelectedIterId(null)
+    } else if (action.action === 'completed') {
+      if (navLevel === 'substep') {
+        // After completing a substep, go back to the step view.
+        setNavLevel('step')
+        setSelectedSubstepIterId(null)
+      } else if (navLevel === 'step') {
+        setNavLevel('condoc')
+        setSelectedStepNum(null)
+        setSelectedIterId(null)
+      }
+    } else if (action.action === 'revert') {
+      // After reverting, go up a level — the federation-command will reset state.
+      if (navLevel === 'substep') {
+        setNavLevel('step')
+        setSelectedSubstepIterId(null)
+      } else if (navLevel === 'step') {
+        setNavLevel('condoc')
+        setSelectedStepNum(null)
+        setSelectedIterId(null)
+      }
     }
   }
 
@@ -731,9 +1091,12 @@ export default function App() {
         selectedCondocPath={selectedCondocPath}
         selectedStepNum={selectedStepNum}
         selectedIterId={selectedIterId}
+        selectedSubstepIterId={selectedSubstepIterId}
         onSelectCondoc={handleSelectCondoc}
         onSelectStep={handleSelectStep}
         onSelectIter={handleSelectIter}
+        onEnterSubstep={handleEnterSubstep}
+        onSelectSubstepIter={handleSelectSubstepIter}
         onNavUp={handleNavUp}
       />
 
@@ -773,6 +1136,15 @@ export default function App() {
             state={activeState}
             stepNum={selectedStepNum}
             selectedIterId={selectedIterId}
+            onAction={handleAction}
+            onEnterSubstep={handleEnterSubstep}
+          />
+        )}
+
+        {navLevel === 'substep' && activeState && (
+          <SubstepDetailView
+            state={activeState}
+            selectedSubstepIterId={selectedSubstepIterId}
             onAction={handleAction}
           />
         )}

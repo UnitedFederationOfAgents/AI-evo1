@@ -11,6 +11,8 @@ export interface CondocInfo {
   phase: Phase
   stepNum: number
   stepFile?: string
+  substepFile?: string
+  substepLetter?: string
 }
 
 export interface CondocMeta {
@@ -30,7 +32,7 @@ export interface StepSummary {
 export interface Iteration {
   id: string
   label: string
-  type: 'reply' | 'revision' | 'retry'
+  type: 'reply' | 'revision' | 'retry' | 'substep'
   from?: string
 }
 
@@ -38,6 +40,8 @@ export interface CondocState {
   info: CondocInfo
   mainContent: string
   stepContent?: string
+  substepContent?: string
+  substepIterations?: Iteration[]
   nextLetter: string
   fromOptions: string[]
   meta: CondocMeta
@@ -53,9 +57,13 @@ export type ServerMsg =
   | { type: 'error'; payload: { message: string } }
 
 export interface ActionRequest {
-  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'start_step'
+  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert'
   path: string
   content?: string
   letter?: string
   from?: string
+  substepTitle?: string
+  revertStep?: number
+  revertIter?: string
+  revertSubIter?: string
 }

@@ -92,6 +92,12 @@ body {
   gap: 2px;
 }
 
+.nav-item-iter {
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+
 .nav-item:hover { background: #2a2d2e; }
 
 .nav-item.selected {
@@ -128,9 +134,24 @@ body {
   flex-shrink: 0;
 }
 
+.nav-enter-btn {
+  background: none;
+  border: none;
+  color: #555;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 1px 4px;
+  margin-left: auto;
+  border-radius: 3px;
+  font-family: inherit;
+  flex-shrink: 0;
+}
+.nav-enter-btn:hover { color: #9d55cc; background: #2a2a2e; }
+
 .iter-reply   { background: #4da6ff; }
 .iter-revision { background: #d9a800; }
 .iter-retry   { background: #e07020; }
+.iter-substep { background: #9d55cc; }
 
 /* ---- Badges ---- */
 
@@ -384,6 +405,7 @@ body {
 .iter-section-reply   .iter-section-label { color: #4da6ff; }
 .iter-section-revision .iter-section-label { color: #d9a800; }
 .iter-section-retry   .iter-section-label { color: #e07020; }
+.iter-section-substep .iter-section-label { color: #9d55cc; }
 
 .iter-section-content {
   font-size: 12px;
@@ -460,6 +482,18 @@ button:disabled {
 
 .btn-warning   { background: #7a5c00; color: white; }
 .btn-warning:hover:not(:disabled)   { background: #956e00; }
+
+.btn-danger    { background: #6e1e1e; color: white; }
+.btn-danger:hover:not(:disabled)    { background: #882525; }
+
+.btn-danger-sm {
+  background: none;
+  border: 1px solid #6e1e1e;
+  color: #c05050;
+  font-size: 10px;
+  padding: 2px 7px;
+}
+.btn-danger-sm:hover:not(:disabled) { background: #3a1010; }
 
 /* ---- Action form (revision / retry) ---- */
 

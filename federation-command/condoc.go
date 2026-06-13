@@ -82,6 +82,10 @@ type CondocSession struct {
 	pendingRevLetter string    // "" for initial step reply, "A"/"B"/... for revision/retry reply
 	takeCounter      int       // number of retries executed so far (increments on each Retry)
 	stepStartHash    string    // git commit hash of "step N started" commit; anchor for retry-from-start resets
+
+	substepFile      string    // absolute path to active substep doc, "" if none
+	substepLetter    string    // letter of the active substep ("A", "B", …)
+	substepStartHash string    // git commit hash of substep-N-started commit; anchor for substep retry-from-start
 }
 
 // ===== MESSAGES =====
@@ -555,6 +559,7 @@ func addRevisionTemplate(stepFilePath string, verbose bool) error {
 			"To RETRY from a previous point replace the '<REPLACE-Revision|Retry>' with 'Retry'. By default this retries from the\n" +
 			"previous increment. To retry from further back add '(from start)' or '(from X)' where X is a revision letter,\n" +
 			"for example '## Retry A (from start)'.\n\n" +
+			"To add a SUBSTEP replace '<REPLACE-Revision|Retry>' with 'Substep A - Your Title' and add a ```prompt block beneath it.\n\n" +
 			"Replace the '<REPLACE-PROMPT>' with the new prompt you wish the agent to follow.\n\n" +
 			"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace.\n\n" +
 			"Alternatively, add the '!COMPLETED!' directive to the end of the file to consider this step a success and conclude it."
@@ -585,6 +590,7 @@ func addNextRevisionTemplate(stepFilePath, lastLetter string, verbose bool) erro
 			"To RETRY from a previous point replace the '<REPLACE-Revision|Retry>' with 'Retry'. By default this retries from the\n" +
 			"previous increment. To retry from further back add '(from start)' or '(from X)' where X is a revision letter,\n" +
 			"for example '## Retry C (from A)'.\n\n" +
+			"To add a SUBSTEP replace '<REPLACE-Revision|Retry>' with 'Substep X - Your Title' (using the next letter) and add a ```prompt block.\n\n" +
 			"Replace the '<REPLACE-PROMPT>' with the new prompt you wish the agent to follow.\n\n" +
 			"When you are done add the '!HANDOFF!' directive to the end of the file followed by only whitespace.\n\n" +
 			"Alternatively, add the '!COMPLETED!' directive to the end of the file to consider this step a success and conclude it."
@@ -613,7 +619,7 @@ func removeUnfilledRevisionTemplates(content string) string {
 			continue
 		}
 		if skip {
-			if t == "" || t == "<REPLACE-PROMPT>" {
+			if t == "" || t == "<REPLACE-PROMPT>" || t == "```prompt" || t == "```" {
 				continue
 			}
 			skip = false
@@ -705,6 +711,9 @@ var condocRevisionHeadingRe = regexp.MustCompile(`(?m)^## Revision ([A-Z])$`)
 var condocReplyLetterRe = regexp.MustCompile(`(?m)^## Reply ([A-Z])$`)
 var condocInitialReplyRe = regexp.MustCompile(`(?m)^## Reply$`)
 var condocRetryHeadingRe = regexp.MustCompile(`(?m)^## Retry ([A-Z])(?:\s+\(from\s+(start|[A-Z])\))?$`)
+var condocSubstepHeadingRe = regexp.MustCompile(`(?m)^## Substep ([A-Z]) - (.+)$`)
+var condocSubstepCompletedRe = regexp.MustCompile(`(?m)^## Substep Completed$`)
+var condocRevertRe = regexp.MustCompile(`(?m)^!REVERT-(\d+)(?:-([A-Z])(?:-([A-Z]))?)?!\s*$`)
 
 // pendingRevisionLetter returns the letter of a Revision heading that has no
 // corresponding Reply heading, or "" if all revisions have replies.
@@ -801,6 +810,190 @@ func retryFromStepsBack(content, fromRef string) int {
 	return stepsBack
 }
 
+// ===== SUBSTEP HELPERS =====
+
+func condocSubstepFilePath(mainFilePath string, stepNum int, substepLetter string) string {
+	return filepath.Join(condocImplsDirPath(mainFilePath),
+		fmt.Sprintf("Step%dSubstep%sPrompt.md", stepNum, substepLetter))
+}
+
+// pendingSubstepLetterAndTitle returns the letter and title of the first unstarted substep
+// found in the step file content (one whose substep file does not yet exist).
+func pendingSubstepLetterAndTitle(content, mainFilePath string, stepNum int) (letter, title string) {
+	for _, m := range condocSubstepHeadingRe.FindAllStringSubmatch(content, -1) {
+		l, t := m[1], strings.TrimSpace(m[2])
+		if strings.Contains(t, "<REPLACE") {
+			continue
+		}
+		substepPath := condocSubstepFilePath(mainFilePath, stepNum, l)
+		if _, err := os.Stat(substepPath); os.IsNotExist(err) {
+			// Verify a prompt block follows this heading (before the next ## heading).
+			headingRe := regexp.MustCompile(`(?m)^## Substep ` + regexp.QuoteMeta(l) + ` - .+$`)
+			loc := headingRe.FindStringIndex(content)
+			if loc == nil {
+				continue
+			}
+			after := content[loc[1]:]
+			nextH2 := regexp.MustCompile(`(?m)^## `).FindStringIndex(after)
+			section := after
+			if nextH2 != nil {
+				section = after[:nextH2[0]]
+			}
+			if condocPromptBlockRe.MatchString(section) {
+				return l, t
+			}
+		}
+	}
+	return "", ""
+}
+
+// extractSubstepPrompt extracts the text inside the ```prompt block of a substep heading section.
+func extractSubstepPrompt(content, substepLetter string) string {
+	headingRe := regexp.MustCompile(`(?m)^## Substep ` + regexp.QuoteMeta(substepLetter) + ` - .+$`)
+	loc := headingRe.FindStringIndex(content)
+	if loc == nil {
+		return ""
+	}
+	after := content[loc[1]:]
+	nextH2 := regexp.MustCompile(`(?m)^## `).FindStringIndex(after)
+	section := after
+	if nextH2 != nil {
+		section = after[:nextH2[0]]
+	}
+	pm := condocPromptBlockRe.FindStringSubmatch(section)
+	if pm == nil {
+		return ""
+	}
+	return strings.TrimSpace(pm[1])
+}
+
+// writeSubstepFile creates the initial substep child doc with a backlink to the parent step file.
+func writeSubstepFile(substepFilePath, stepFilePath, prompt string) error {
+	if err := os.MkdirAll(filepath.Dir(substepFilePath), 0755); err != nil {
+		return err
+	}
+	stepBaseName := condocBaseName(stepFilePath)
+	stepFileName := filepath.Base(stepFilePath)
+	backLink := fmt.Sprintf("[%s](%s)", stepBaseName, stepFileName)
+	content := "# Prompt\n\n" + backLink + "\n\n" + prompt + "\n"
+	return os.WriteFile(substepFilePath, []byte(content), 0644)
+}
+
+// replaceSubstepPromptWithLink replaces the ```prompt block under a substep heading with a
+// markdown link to the substep file, and removes the Human-Prompt section.
+func replaceSubstepPromptWithLink(content, mainFilePath string, stepNum int, substepLetter string) string {
+	substepFileName := filepath.Base(condocSubstepFilePath(mainFilePath, stepNum, substepLetter))
+	linkText := fmt.Sprintf("[Step %d Substep %s](%s)", stepNum, substepLetter, substepFileName)
+	if strings.Contains(content, linkText) {
+		return content
+	}
+	headingRe := regexp.MustCompile(`(?m)^## Substep ` + regexp.QuoteMeta(substepLetter) + ` - .+$`)
+	loc := headingRe.FindStringIndex(content)
+	if loc == nil {
+		return content
+	}
+	headingEnd := loc[1]
+	afterHeading := content[headingEnd:]
+	nextH2 := regexp.MustCompile(`(?m)^## `).FindStringIndex(afterHeading)
+	sectionEnd := len(content)
+	sectionText := afterHeading
+	if nextH2 != nil {
+		sectionText = afterHeading[:nextH2[0]]
+		sectionEnd = headingEnd + nextH2[0]
+	}
+	newSection := condocPromptBlockRe.ReplaceAllString(sectionText, "")
+	newSection = strings.TrimRight(newSection, "\n") + "\n\n" + linkText + "\n\n"
+	return content[:headingEnd] + newSection + content[sectionEnd:]
+}
+
+// markSubstepInStepFile replaces the substep prompt block with a link and updates Human-Prompt.
+func markSubstepInStepFile(stepFilePath, mainFilePath string, stepNum int, substepLetter string) error {
+	b, err := os.ReadFile(stepFilePath)
+	if err != nil {
+		return err
+	}
+	content := replaceSubstepPromptWithLink(string(b), mainFilePath, stepNum, substepLetter)
+	content = removeHumanPromptSection(content)
+	substepFileName := filepath.Base(condocSubstepFilePath(mainFilePath, stepNum, substepLetter))
+	humanPrompt := fmt.Sprintf("Substep %s is now active. Interact with the substep file (%s).",
+		substepLetter, substepFileName)
+	content = addHumanPrompt(content, humanPrompt)
+	return os.WriteFile(stepFilePath, []byte(content), 0644)
+}
+
+// finalizeSubstepFile marks the substep as completed (mirrors finalizeStepFile).
+func finalizeSubstepFile(substepFilePath string) error {
+	b, err := os.ReadFile(substepFilePath)
+	if err != nil {
+		return err
+	}
+	content := removeHumanPromptSection(string(b))
+	content = removeUnfilledRevisionTemplates(content)
+	now := time.Now()
+	content = strings.TrimRight(content, "\n") +
+		fmt.Sprintf("\n\n\n## Substep Completed\n\nThis substep was completed at %d (%s).\n",
+			now.Unix(), now.UTC().Format("Mon Jan 2 03:04:05 PM MST 2006"))
+	return os.WriteFile(substepFilePath, []byte(content), 0644)
+}
+
+// addSubstepRevisionTemplate appends a revision template to the substep file; the Human-Prompt
+// mentions that !COMPLETED! returns to the parent step.
+func addSubstepRevisionTemplate(substepFilePath string, verbose bool) error {
+	b, err := os.ReadFile(substepFilePath)
+	if err != nil {
+		return err
+	}
+	var humanPrompt string
+	if verbose {
+		humanPrompt = "The AI has responded to the substep prompt.\n\n" +
+			"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n" +
+			"To REVISE replace '<REPLACE-Revision|Retry>' with 'Revision' to add to the AI's work.\n\n" +
+			"To RETRY replace '<REPLACE-Revision|Retry>' with 'Retry' to restart.\n\n" +
+			"When done add the '!HANDOFF!' directive.\n\n" +
+			"Alternatively, add the '!COMPLETED!' directive to complete this substep and return to the parent step."
+	} else {
+		humanPrompt = "When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step."
+	}
+	content := strings.TrimRight(string(b), "\n") + "\n\n\n" +
+		"## <REPLACE-Revision|Retry> A\n\n" +
+		"<REPLACE-PROMPT>\n\n\n" +
+		"## Human-Prompt\n\n" +
+		humanPrompt + "\n"
+	return os.WriteFile(substepFilePath, []byte(content), 0644)
+}
+
+// updateStepFileAfterSubstepComplete restores the revision template and Human-Prompt in the step
+// file after a substep completes, using the next available revision letter.
+func updateStepFileAfterSubstepComplete(stepFilePath string, verbose bool) error {
+	b, err := os.ReadFile(stepFilePath)
+	if err != nil {
+		return err
+	}
+	content := removeHumanPromptSection(string(b))
+	letter := lastReplyLetter(content)
+	var nextLetter string
+	if letter == "" {
+		nextLetter = "A"
+	} else {
+		nextLetter = string(rune(letter[0] + 1))
+	}
+	var humanPrompt string
+	if verbose {
+		humanPrompt = "The substep has been completed.\n\n" +
+			"You may now Revise, Retry, add another Substep, or Complete this step.\n\n" +
+			"Replace '<REPLACE-Revision|Retry>' with 'Revision', 'Retry', or 'Substep X - Title'.\n\n" +
+			"Add the '!HANDOFF!' directive when ready, or '!COMPLETED!' to complete this step."
+	} else {
+		humanPrompt = "Add the '!HANDOFF!' or '!COMPLETED!' directive."
+	}
+	content = strings.TrimRight(content, "\n") + "\n\n\n" +
+		"## <REPLACE-Revision|Retry> " + nextLetter + "\n\n" +
+		"<REPLACE-PROMPT>\n\n\n" +
+		"## Human-Prompt\n\n" +
+		humanPrompt + "\n"
+	return os.WriteFile(stepFilePath, []byte(content), 0644)
+}
+
 // condocBranchIdentifier extracts the identifier segment from a condoc branch name.
 // e.g. "condoc/Simple-1779734463/main" → "Simple-1779734463"
 func condocBranchIdentifier(branch string) string {
@@ -892,6 +1085,51 @@ func buildCondocRetryPrompt(stepFilePath, retryLetter, retryGuidance string) str
 	}
 	return base + " " +
 		"IMPORTANT: Do NOT write to or modify the step file or any other condoc files — " +
+		"the condoc handler will automatically capture your terminal response as the reply. " +
+		"When you have finished, provide a brief summary (2-3 sentences) of what you accomplished " +
+		"as your terminal response."
+}
+
+func buildCondocSubstepPrompt(stepFilePath, substepFilePath string) string {
+	return fmt.Sprintf(
+		"You are executing a condoc substep. The parent step file is at '%s'. "+
+			"The substep file is at '%s'. "+
+			"Read the substep file. Execute the task described in the '# Prompt' section. "+
+			"You may also read the parent step file for additional context. "+
+			"IMPORTANT: Do NOT write to or modify the step file, substep file, or any other condoc files — "+
+			"the condoc handler will automatically capture your terminal response as the reply. "+
+			"When you have finished, provide a brief summary (2-3 sentences) of what you accomplished "+
+			"as your terminal response.",
+		stepFilePath, substepFilePath)
+}
+
+func buildCondocSubstepRevisionPrompt(substepFilePath, revLetter string) string {
+	return fmt.Sprintf(
+		"You are executing a condoc substep revision. The substep file is at '%s'. "+
+			"Read the substep file. You previously completed the substep task (see '## Reply') and the human has "+
+			"requested Revision %s (see '## Revision %s'). "+
+			"Execute the revision as described. "+
+			"IMPORTANT: Do NOT write to or modify the substep file or any other condoc files — "+
+			"the condoc handler will automatically capture your terminal response as the reply. "+
+			"When you have finished, provide a brief summary (2-3 sentences) of what you changed "+
+			"as your terminal response.",
+		substepFilePath, revLetter, revLetter)
+}
+
+func buildCondocSubstepRetryPrompt(substepFilePath, retryLetter, retryGuidance string) string {
+	base := fmt.Sprintf(
+		"You are executing a condoc substep retry. The substep file is at '%s'. "+
+			"Read the substep file — it contains the full history of previous attempts on this substep. "+
+			"The project files have been reset to their state before those attempts, "+
+			"so you are starting fresh. Execute the task described in the '# Prompt' section.",
+		substepFilePath)
+	if retryGuidance != "" {
+		base += fmt.Sprintf(
+			" The human has provided this additional guidance for Retry %s: %q.",
+			retryLetter, retryGuidance)
+	}
+	return base + " " +
+		"IMPORTANT: Do NOT write to or modify the substep file or any other condoc files — " +
 		"the condoc handler will automatically capture your terminal response as the reply. " +
 		"When you have finished, provide a brief summary (2-3 sentences) of what you accomplished " +
 		"as your terminal response."
@@ -1144,7 +1382,9 @@ func (cd *CondocDynapane) View(windowWidth int) string {
 	phaseLine := condocPhaseStyle.Render("phase: " + cs.phase.label())
 
 	var watchLine string
-	if cs.stepFile != "" && cs.phase == condocPhaseAwaitingAction {
+	if cs.substepFile != "" && cs.phase == condocPhaseAwaitingAction {
+		watchLine = condocStatusStyle.Render("watching: " + filepath.Base(cs.substepFile))
+	} else if cs.stepFile != "" && cs.phase == condocPhaseAwaitingAction {
 		watchLine = condocStatusStyle.Render("watching: " + filepath.Base(cs.stepFile))
 	} else {
 		watchLine = condocStatusStyle.Render("watching: " + filepath.Base(cs.mainFilePath))
@@ -1254,7 +1494,33 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 			return m.condocStartStep()
 		}
 	case condocPhaseAwaitingAction:
-		if cs.stepFile != "" {
+		if cs.substepFile != "" {
+			// Watching substep file.
+			if b, err := os.ReadFile(cs.substepFile); err == nil {
+				if m2 := condocRevertRe.FindStringSubmatch(string(b)); m2 != nil {
+					return m.condocRevert(cs.substepFile, m2)
+				}
+			}
+			if condocFileHasCompleted(cs.substepFile) {
+				return m.condocCompleteSubstep()
+			}
+			if condocFileHasHandoff(cs.substepFile) {
+				b, err := os.ReadFile(cs.substepFile)
+				if err != nil {
+					return m.condocError("read substep file: " + err.Error())
+				}
+				if letter, _ := pendingRetryLetterAndFrom(string(b)); letter != "" {
+					return m.condocRunRetry()
+				}
+				return m.condocRunRevision()
+			}
+		} else if cs.stepFile != "" {
+			// Watching step file.
+			if b, err := os.ReadFile(cs.stepFile); err == nil {
+				if m2 := condocRevertRe.FindStringSubmatch(string(b)); m2 != nil {
+					return m.condocRevert(cs.stepFile, m2)
+				}
+			}
 			if condocFileHasCompleted(cs.stepFile) {
 				return m.condocCompleteStep()
 			}
@@ -1263,10 +1529,23 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 				if err != nil {
 					return m.condocError("read step file: " + err.Error())
 				}
-				if letter, _ := pendingRetryLetterAndFrom(string(b)); letter != "" {
+				content := string(b)
+				if letter, _ := pendingRetryLetterAndFrom(content); letter != "" {
 					return m.condocRunRetry()
 				}
+				if substepLetter, substepTitle := pendingSubstepLetterAndTitle(content, cs.mainFilePath, cs.stepNum); substepLetter != "" {
+					return m.condocStartSubstep(substepLetter, substepTitle)
+				}
 				return m.condocRunRevision()
+			}
+		}
+	}
+	// Also check for revert on main/step files in proposal/awaiting-step phases.
+	switch cs.phase {
+	case condocPhaseProposed, condocPhaseAwaitingStep:
+		if b, err := os.ReadFile(cs.mainFilePath); err == nil {
+			if m2 := condocRevertRe.FindStringSubmatch(string(b)); m2 != nil {
+				return m.condocRevert(cs.mainFilePath, m2)
 			}
 		}
 	}
@@ -1337,12 +1616,19 @@ func (m appModel) handleCondocGitDone(msg condocGitDoneMsg) (appModel, tea.Cmd) 
 		)
 
 	case condocPhaseStepStarting:
-		// Step file committed — capture hash so retry-from-start can reset to this exact commit
-		// regardless of how many retries accumulate reply sections in the step file later.
+		// Committed — capture hash for retry-from-start, then launch the appropriate agent.
 		revCmd := exec.Command("git", "rev-parse", "HEAD")
 		revCmd.Dir = cs.repoRoot
 		if hashOut, err := revCmd.Output(); err == nil {
-			cs.stepStartHash = strings.TrimSpace(string(hashOut))
+			hash := strings.TrimSpace(string(hashOut))
+			if cs.substepFile != "" {
+				cs.substepStartHash = hash
+			} else {
+				cs.stepStartHash = hash
+			}
+		}
+		if cs.substepFile != "" {
+			return m.condocStartSubstepAgent()
 		}
 		return m.condocStartStepAgent()
 
@@ -1467,15 +1753,29 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 
 	revLetter := cs.pendingRevLetter
 	commitPreamble := condocCommitPreamble(cs.repoRoot)
-	if err := appendReplyToStepFile(cs.stepFile, revLetter, replyText, commitPreamble); err != nil {
-		return m.condocError("append reply to step file: " + err.Error())
+
+	// Write to substep file if a substep is active; otherwise write to the step file.
+	activeFile := cs.stepFile
+	if cs.substepFile != "" {
+		activeFile = cs.substepFile
+	}
+	if err := appendReplyToStepFile(activeFile, revLetter, replyText, commitPreamble); err != nil {
+		return m.condocError("append reply to file: " + err.Error())
 	}
 
 	var templateErr error
-	if revLetter != "" {
-		templateErr = addNextRevisionTemplate(cs.stepFile, revLetter, cs.verbose)
+	if cs.substepFile != "" {
+		if revLetter != "" {
+			templateErr = addNextRevisionTemplate(cs.substepFile, revLetter, cs.verbose)
+		} else {
+			templateErr = addSubstepRevisionTemplate(cs.substepFile, cs.verbose)
+		}
 	} else {
-		templateErr = addRevisionTemplate(cs.stepFile, cs.verbose)
+		if revLetter != "" {
+			templateErr = addNextRevisionTemplate(cs.stepFile, revLetter, cs.verbose)
+		} else {
+			templateErr = addRevisionTemplate(cs.stepFile, cs.verbose)
+		}
 	}
 	if templateErr != nil {
 		return m.condocError("add revision template: " + templateErr.Error())
@@ -1483,12 +1783,16 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 
 	cs.phase = condocPhaseCommitting
 	cs.commitTarget = condocPhaseAwaitingAction
-	cs.statusMsg = "committing step output…"
+	cs.statusMsg = "committing agent output…"
 	m.blinker.SetState(BlinkerCondoc)
 
+	commitMsg := fmt.Sprintf("condoc: step %d agent output", cs.stepNum)
+	if cs.substepFile != "" {
+		commitMsg = fmt.Sprintf("condoc: step %d substep %s agent output", cs.stepNum, cs.substepLetter)
+	}
 	gitCmds := [][]string{
 		{"add", "."},
-		{"commit", "-m", fmt.Sprintf("condoc: step %d agent output", cs.stepNum)},
+		{"commit", "-m", commitMsg},
 		{"push", "origin", cs.branch},
 	}
 	return m, tea.Batch(
@@ -1499,16 +1803,19 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 	)
 }
 
-// condocRunRevision handles !HANDOFF! on the step file (revision requested).
+// condocRunRevision handles !HANDOFF! on the active file (step or substep) for a revision.
 func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 	cs := m.condoc
-	b, err := os.ReadFile(cs.stepFile)
+	activeFile := cs.stepFile
+	if cs.substepFile != "" {
+		activeFile = cs.substepFile
+	}
+	b, err := os.ReadFile(activeFile)
 	if err != nil {
-		return m.condocError("read step file: " + err.Error())
+		return m.condocError("read active file: " + err.Error())
 	}
 	revLetter := pendingRevisionLetter(string(b))
 	if revLetter == "" {
-		// No pending revision — shouldn't happen, but treat as no-op.
 		return m, condocTickCmd()
 	}
 
@@ -1518,7 +1825,12 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 	cs.phase = condocPhaseRunningAgent
 	cs.statusMsg = "running agent for revision " + revLetter + "…"
 
-	prompt := buildCondocRevisionPrompt(cs.stepFile, revLetter)
+	var prompt string
+	if cs.substepFile != "" {
+		prompt = buildCondocSubstepRevisionPrompt(cs.substepFile, revLetter)
+	} else {
+		prompt = buildCondocRevisionPrompt(cs.stepFile, revLetter)
+	}
 	agentCmd, errMsg := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
 	if agentCmd == nil {
 		return m.condocError("build agent cmd: " + errMsg)
@@ -1542,12 +1854,16 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 	)
 }
 
-// condocRunRetry handles !HANDOFF! on the step file when a Retry is requested.
+// condocRunRetry handles !HANDOFF! on the active file (step or substep) when a Retry is requested.
 func (m appModel) condocRunRetry() (appModel, tea.Cmd) {
 	cs := m.condoc
-	b, err := os.ReadFile(cs.stepFile)
+	activeFile := cs.stepFile
+	if cs.substepFile != "" {
+		activeFile = cs.substepFile
+	}
+	b, err := os.ReadFile(activeFile)
 	if err != nil {
-		return m.condocError("read step file: " + err.Error())
+		return m.condocError("read active file: " + err.Error())
 	}
 	content := string(b)
 
@@ -1562,27 +1878,38 @@ func (m appModel) condocRunRetry() (appModel, tea.Cmd) {
 		return m.condocError("retry: computed 0 steps back — nothing to revert")
 	}
 
-	// For retry-from-start, use the stored step-start commit hash as the reset target.
-	// stepsBack can overcount after a prior retry-from-start has already reset history:
-	// the step file preserves all reply sections across retries, but the git history
-	// only has commits since the last reset.
 	var resetHash string
 	if fromRef == "start" {
-		resetHash = cs.stepStartHash
+		if cs.substepFile != "" {
+			resetHash = cs.substepStartHash
+		} else {
+			resetHash = cs.stepStartHash
+		}
 	}
 
 	cs.takeCounter++
 	takeN := cs.takeCounter
 	identifier := condocBranchIdentifier(cs.branch)
 	takeBranch := fmt.Sprintf("condoc/%s/take%d", identifier, takeN)
-	diffFileName := fmt.Sprintf("take%d%sdiff.txt", takeN, identifier)
-	diffFilePath := filepath.Join(filepath.Dir(cs.stepFile), diffFileName)
+
+	var diffFileName string
+	if cs.substepFile != "" {
+		diffFileName = fmt.Sprintf("take%d%sstep%dsubstep%sdiff.txt", takeN, identifier, cs.stepNum, cs.substepLetter)
+	} else {
+		diffFileName = fmt.Sprintf("take%d%sdiff.txt", takeN, identifier)
+	}
+	diffFilePath := filepath.Join(filepath.Dir(activeFile), diffFileName)
 
 	cs.pendingRevLetter = retryLetter
 	cs.phase = condocPhaseRunningAgent
 	cs.statusMsg = fmt.Sprintf("retry %s: saving take%d…", retryLetter, takeN)
 
-	agentPrompt := buildCondocRetryPrompt(cs.stepFile, retryLetter, retryGuidance)
+	var agentPrompt string
+	if cs.substepFile != "" {
+		agentPrompt = buildCondocSubstepRetryPrompt(cs.substepFile, retryLetter, retryGuidance)
+	} else {
+		agentPrompt = buildCondocRetryPrompt(cs.stepFile, retryLetter, retryGuidance)
+	}
 	agentCmd, errMsg := buildAgentPromptCmd(ModeWrite, agentPrompt, m.currentAgent, m.currentModel, m.sessionDir)
 	if agentCmd == nil {
 		return m.condocError("build agent cmd: " + errMsg)
@@ -1604,7 +1931,7 @@ func (m appModel) condocRunRetry() (appModel, tea.Cmd) {
 
 	return m, tea.Sequence(
 		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: retry %s (from %s) — saving take%d…", retryLetter, fromDisplay, takeN))),
-		runCondocRetryGitSequence(cs.repoRoot, cs.branch, takeBranch, diffFilePath, cs.stepFile, stepsBack, takeN, runCmd, replyTmpPath, retryLetter, resetHash),
+		runCondocRetryGitSequence(cs.repoRoot, cs.branch, takeBranch, diffFilePath, activeFile, stepsBack, takeN, runCmd, replyTmpPath, retryLetter, resetHash),
 	)
 }
 
@@ -1623,6 +1950,421 @@ func (m appModel) handleCondocRetryReady(msg condocRetryReadyMsg) (appModel, tea
 		deferCondocExec(msg.runCmd, func(err error) tea.Msg {
 			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
 		}),
+	)
+}
+
+// condocStartSubstep handles detection of an unstarted substep heading in the step file.
+func (m appModel) condocStartSubstep(letter, title string) (appModel, tea.Cmd) {
+	cs := m.condoc
+	b, err := os.ReadFile(cs.stepFile)
+	if err != nil {
+		return m.condocError("read step file: " + err.Error())
+	}
+	prompt := extractSubstepPrompt(string(b), letter)
+	if prompt == "" {
+		return m.condocError(fmt.Sprintf("substep %s: could not extract prompt block", letter))
+	}
+
+	substepPath := condocSubstepFilePath(cs.mainFilePath, cs.stepNum, letter)
+	if err := writeSubstepFile(substepPath, cs.stepFile, prompt); err != nil {
+		return m.condocError("write substep file: " + err.Error())
+	}
+	if err := markSubstepInStepFile(cs.stepFile, cs.mainFilePath, cs.stepNum, letter); err != nil {
+		return m.condocError("mark substep in step file: " + err.Error())
+	}
+
+	cs.substepFile = substepPath
+	cs.substepLetter = letter
+	cs.pendingRevLetter = ""
+	cs.phase = condocPhaseStepStarting
+	cs.statusMsg = fmt.Sprintf("starting substep %s…", letter)
+
+	gitCmds := [][]string{
+		{"add", "."},
+		{"commit", "-m", fmt.Sprintf("condoc: step %d substep %s started", cs.stepNum, letter)},
+		{"push", "origin", cs.branch},
+	}
+	return m, tea.Batch(
+		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: substep %s started, committing…", letter))),
+		m.condocDynapane.Activate(cs),
+		runGitSequence(gitCmds, cs.repoRoot),
+	)
+}
+
+// condocStartSubstepAgent launches the agent for a substep after the substep-started commit.
+func (m appModel) condocStartSubstepAgent() (appModel, tea.Cmd) {
+	cs := m.condoc
+	cs.phase = condocPhaseRunningAgent
+	cs.statusMsg = fmt.Sprintf("running agent for substep %s…", cs.substepLetter)
+
+	prompt := buildCondocSubstepPrompt(cs.stepFile, cs.substepFile)
+	agentCmd, errMsg := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		return m.condocError("build agent cmd: " + errMsg)
+	}
+	agentCmd.Dir = cs.repoRoot
+	agentCmd.Env = append(agentCmd.Env, "AA_QUIET=true")
+
+	replyTmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("condoc-reply-%d.txt", time.Now().UnixNano()))
+	cs.replyTmpPath = replyTmpPath
+	runCmd := teeCommand(agentCmd, replyTmpPath)
+
+	m.condocDynapane.Deactivate()
+	m.blinker.SetState(BlinkerInactive)
+
+	return m, tea.Sequence(
+		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: running agent for substep %s…", cs.substepLetter))),
+		deferCondocExec(runCmd, func(err error) tea.Msg {
+			return condocAgentStepDoneMsg{exitCode: extractExitCode(err), execErr: err}
+		}),
+	)
+}
+
+// condocCompleteSubstep handles !COMPLETED! on the substep file.
+func (m appModel) condocCompleteSubstep() (appModel, tea.Cmd) {
+	cs := m.condoc
+	if err := finalizeSubstepFile(cs.substepFile); err != nil {
+		return m.condocError("finalize substep file: " + err.Error())
+	}
+	if err := updateStepFileAfterSubstepComplete(cs.stepFile, cs.verbose); err != nil {
+		return m.condocError("update step file after substep: " + err.Error())
+	}
+
+	substepLetter := cs.substepLetter
+	cs.substepFile = ""
+	cs.substepLetter = ""
+	cs.substepStartHash = ""
+	cs.pendingRevLetter = ""
+
+	cs.phase = condocPhaseCommitting
+	cs.commitTarget = condocPhaseAwaitingAction
+	cs.statusMsg = fmt.Sprintf("substep %s completed, returning to step…", substepLetter)
+
+	gitCmds := [][]string{
+		{"add", "."},
+		{"commit", "-m", fmt.Sprintf("condoc: step %d substep %s completed", cs.stepNum, substepLetter)},
+		{"push", "origin", cs.branch},
+	}
+	return m, tea.Batch(
+		tea.Println(successStyle.Render(fmt.Sprintf("condoc: substep %s completed", substepLetter))),
+		m.condocDynapane.Activate(cs),
+		runGitSequence(gitCmds, cs.repoRoot),
+	)
+}
+
+// trimContentBeforeIteration removes everything in content from the first occurrence
+// of "## (Revision|Retry) letter" onwards, preserving earlier sections.
+// Substep headings are intentionally excluded — they are not cut points for step-level reverts.
+// If the heading is not found the content is returned unchanged.
+func trimContentBeforeIteration(content, letter string) string {
+	re := regexp.MustCompile(`(?m)^## (Revision|Retry) ` + regexp.QuoteMeta(letter))
+	if loc := re.FindStringIndex(content); loc != nil {
+		return strings.TrimRight(content[:loc[0]], "\n") + "\n"
+	}
+	return content
+}
+
+// condocRevert handles a !REVERT-N[-X[-Y]]! directive found in the given file.
+// match is the result of condocRevertRe.FindStringSubmatch.
+//
+// Three forms:
+//   !REVERT-N!      → reset git to "step N started"; strip all iterations from step file.
+//   !REVERT-N-X!    → reset git to "step N started"; keep step file content up to before
+//                     iteration X (first Revision/Retry/Substep heading with letter X).
+//   !REVERT-N-X-Y!  → reset git to "step N substep X started"; keep substep file content
+//                     up to before iteration Y; step file restored by git reset.
+func (m appModel) condocRevert(sourceFile string, match []string) (appModel, tea.Cmd) {
+	cs := m.condoc
+	stepNumStr := match[1]
+	iterLetter := ""
+	substepIterLetter := ""
+	if len(match) > 2 {
+		iterLetter = match[2]
+	}
+	if len(match) > 3 {
+		substepIterLetter = match[3]
+	}
+	stepNum, err := strconv.Atoi(stepNumStr)
+	if err != nil {
+		return m.condocError("revert: invalid step number: " + stepNumStr)
+	}
+
+	// Determine git target hash and substep file path.
+	var targetHash string
+	var substepFilePath string
+
+	if substepIterLetter != "" {
+		// iterLetter is the substep letter; substepIterLetter is the iteration within that substep.
+		grepPattern := fmt.Sprintf("condoc: step %d substep %s started", stepNum, iterLetter)
+		logCmd := exec.Command("git", "log", "--format=%H", "--grep="+grepPattern)
+		logCmd.Dir = cs.repoRoot
+		hashOut, err := logCmd.Output()
+		if err != nil || strings.TrimSpace(string(hashOut)) == "" {
+			return m.condocError(fmt.Sprintf("revert: could not find 'step %d substep %s started' commit", stepNum, iterLetter))
+		}
+		targetHash = strings.Split(strings.TrimSpace(string(hashOut)), "\n")[0]
+		substepFilePath = condocSubstepFilePath(cs.mainFilePath, stepNum, iterLetter)
+	} else {
+		grepPattern := fmt.Sprintf("condoc: step %d started", stepNum)
+		logCmd := exec.Command("git", "log", "--format=%H", "--grep="+grepPattern)
+		logCmd.Dir = cs.repoRoot
+		hashOut, err := logCmd.Output()
+		if err != nil || strings.TrimSpace(string(hashOut)) == "" {
+			return m.condocError(fmt.Sprintf("revert: could not find 'step %d started' commit", stepNum))
+		}
+		targetHash = strings.Split(strings.TrimSpace(string(hashOut)), "\n")[0]
+	}
+
+	cs.takeCounter++
+	takeN := cs.takeCounter
+	identifier := condocBranchIdentifier(cs.branch)
+	takeBranch := fmt.Sprintf("condoc/%s/take%d", identifier, takeN)
+
+	var diffFileSuffix string
+	switch {
+	case substepIterLetter != "":
+		diffFileSuffix = fmt.Sprintf("take%d%sstep%dsubstep%srevert%sdiff.txt", takeN, identifier, stepNum, iterLetter, substepIterLetter)
+	case iterLetter != "":
+		diffFileSuffix = fmt.Sprintf("take%d%sstep%drevert%sdiff.txt", takeN, identifier, stepNum, iterLetter)
+	default:
+		diffFileSuffix = fmt.Sprintf("take%d%sstep%drevertdiff.txt", takeN, identifier, stepNum)
+	}
+	diffFilePath := filepath.Join(condocImplsDirPath(cs.mainFilePath), diffFileSuffix)
+
+	targetStepFile := condocStepFilePath(cs.mainFilePath, stepNum)
+
+	// Clear substep state; handleCondocRevertDone will restore it if reverting into a substep.
+	cs.substepFile = ""
+	cs.substepLetter = ""
+	cs.substepStartHash = ""
+	cs.pendingRevLetter = ""
+	cs.stepNum = stepNum
+	cs.stepFile = targetStepFile
+	cs.phase = condocPhaseRunningAgent // placeholder while git ops run
+
+	var statusLabel string
+	switch {
+	case substepIterLetter != "":
+		statusLabel = fmt.Sprintf("reverting to step %d substep %s iteration %s…", stepNum, iterLetter, substepIterLetter)
+	case iterLetter != "":
+		statusLabel = fmt.Sprintf("reverting to step %d before iteration %s…", stepNum, iterLetter)
+	default:
+		statusLabel = fmt.Sprintf("reverting to step %d…", stepNum)
+	}
+	cs.statusMsg = statusLabel
+
+	m.condocDynapane.Deactivate()
+	m.blinker.SetState(BlinkerInactive)
+
+	return m, tea.Sequence(
+		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: %s — saving take%d…", statusLabel, takeN))),
+		runCondocRevertGitSequence(cs.repoRoot, cs.branch, takeBranch, diffFilePath, targetStepFile, substepFilePath, targetHash, takeN, stepNum, iterLetter, substepIterLetter, cs.verbose),
+	)
+}
+
+// revertGitDoneMsg is sent when the async revert git sequence completes.
+type revertGitDoneMsg struct {
+	stepNum         int
+	stepFile        string
+	errStr          string
+	substepFile     string // non-empty when reverting into a substep (!REVERT-N-X-Y!)
+	substepLetter   string // substep letter for the restored substep
+	substepStartHash string // targetHash used for substep revert; needed for future substep retry-from-start
+}
+
+// runCondocRevertGitSequence performs the git operations for a revert: saves diff, pushes take
+// branch, resets to targetHash, restores step/substep file content, commits, force-pushes.
+//
+//   iterLetter=""       → strip all iterations from step file (revert to step start)
+//   iterLetter="X"      → keep step file content before iteration X heading
+//   substepIterLetter   → iterLetter is the substep letter; reset to substep-start commit;
+//                         keep substep file content before iteration substepIterLetter heading
+func runCondocRevertGitSequence(repoRoot, mainBranch, takeBranch, diffFilePath, stepFilePath, substepFilePath string, targetHash string, takeN, stepNum int, iterLetter, substepIterLetter string, verbose bool) tea.Cmd {
+	return func() tea.Msg {
+		// 1. Capture diff of commits being abandoned.
+		logCmd := exec.Command("git", "log", "-p", targetHash+"..HEAD")
+		logCmd.Dir = repoRoot
+		diffOut, err := logCmd.Output()
+		if err != nil {
+			return revertGitDoneMsg{errStr: "git log: " + err.Error()}
+		}
+
+		// 1b. If reverting within a substep, save the substep file content before the reset.
+		var substepContentSaved string
+		if substepIterLetter != "" && substepFilePath != "" {
+			if raw, readErr := os.ReadFile(substepFilePath); readErr == nil {
+				substepContentSaved = removeHumanPromptSection(string(raw))
+			}
+		}
+
+		// 1c. If reverting to a step iteration, save the step file content before the reset.
+		// (The reset will restore the file to its "step N started" state, erasing all iterations.)
+		var stepContentSaved string
+		if iterLetter != "" && substepIterLetter == "" && stepFilePath != "" {
+			if raw, readErr := os.ReadFile(stepFilePath); readErr == nil {
+				stepContentSaved = removeHumanPromptSection(string(raw))
+			}
+		}
+
+		// 2. Push current state to take branch.
+		pushTakeCmd := exec.Command("git", "push", "origin",
+			fmt.Sprintf("HEAD:refs/heads/%s", takeBranch))
+		pushTakeCmd.Dir = repoRoot
+		if out, err := pushTakeCmd.CombinedOutput(); err != nil {
+			return revertGitDoneMsg{errStr: fmt.Sprintf("push take branch: %v\n%s", err, string(out))}
+		}
+
+		// 3. Reset to target commit.
+		resetCmd := exec.Command("git", "reset", "--hard", targetHash)
+		resetCmd.Dir = repoRoot
+		if out, err := resetCmd.CombinedOutput(); err != nil {
+			return revertGitDoneMsg{errStr: fmt.Sprintf("git reset: %v\n%s", err, string(out))}
+		}
+
+		// 4. Update file(s) with trimmed content + Human-Prompt.
+		switch {
+		case substepIterLetter != "":
+			// Revert within a substep: restore substep file trimmed to before iteration Y.
+			// The step file is automatically at its substep-started state after the git reset.
+			if substepContentSaved != "" {
+				trimmed := trimContentBeforeIteration(substepContentSaved, substepIterLetter)
+				var hp string
+				if verbose {
+					hp = fmt.Sprintf(
+						"The substep has been reverted to before iteration %s.\n\n"+
+							"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
+							"Add the '!HANDOFF!' directive to re-run the agent for this substep.",
+						substepIterLetter)
+				} else {
+					hp = fmt.Sprintf("Reverted substep %s to before iteration %s. Add '!HANDOFF!' to re-run.", iterLetter, substepIterLetter)
+				}
+				_ = os.WriteFile(substepFilePath, []byte(addHumanPrompt(trimmed, hp)), 0644)
+			}
+
+		case iterLetter != "":
+			// Revert to before iteration X in the step file.
+			// Use the pre-reset snapshot; reading from disk here would return the post-reset (bare) state.
+			if stepContentSaved != "" {
+				stepContent := trimContentBeforeIteration(stepContentSaved, iterLetter)
+				var hp string
+				if verbose {
+					hp = fmt.Sprintf(
+						"The step has been reverted to before iteration %s.\n\n"+
+							"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
+							"Add the '!HANDOFF!' directive to re-run the agent.",
+						iterLetter)
+				} else {
+					hp = fmt.Sprintf("Reverted step %d to before iteration %s. Add '!HANDOFF!' to re-run.", stepNum, iterLetter)
+				}
+				_ = os.WriteFile(stepFilePath, []byte(addHumanPrompt(stepContent, hp)), 0644)
+			}
+
+		default:
+			// Revert to step start: strip all iterations from the step file.
+			if _, statErr := os.Stat(stepFilePath); statErr == nil {
+				stepRaw, readErr := os.ReadFile(stepFilePath)
+				if readErr == nil {
+					stepContent := removeHumanPromptSection(string(stepRaw))
+					firstReply := regexp.MustCompile(`(?m)^## (Reply|Revision|Retry)`).FindStringIndex(stepContent)
+					if firstReply != nil {
+						stepContent = strings.TrimRight(stepContent[:firstReply[0]], "\n") + "\n"
+					}
+					var hp string
+					if verbose {
+						hp = fmt.Sprintf(
+							"The condoc has been reverted to step %d.\n\n"+
+								"Note that everything after the 'Human-Prompt' header will be removed for our next interaction.\n\n"+
+								"Add the '!HANDOFF!' directive to re-run the agent for this step.",
+							stepNum)
+					} else {
+						hp = fmt.Sprintf("Reverted to step %d. Add '!HANDOFF!' to re-run the agent.", stepNum)
+					}
+					_ = os.WriteFile(stepFilePath, []byte(addHumanPrompt(stepContent, hp)), 0644)
+				}
+			}
+		}
+
+		// 5. Write diff file.
+		if err := os.MkdirAll(filepath.Dir(diffFilePath), 0755); err != nil {
+			return revertGitDoneMsg{errStr: "create diff dir: " + err.Error()}
+		}
+		if err := os.WriteFile(diffFilePath, diffOut, 0644); err != nil {
+			return revertGitDoneMsg{errStr: "write diff file: " + err.Error()}
+		}
+
+		// 6. Commit diff file and updated file(s).
+		addCmd := exec.Command("git", "add", ".")
+		addCmd.Dir = repoRoot
+		if out, err := addCmd.CombinedOutput(); err != nil {
+			return revertGitDoneMsg{errStr: fmt.Sprintf("git add: %v\n%s", err, string(out))}
+		}
+		var commitMsg string
+		switch {
+		case substepIterLetter != "":
+			commitMsg = fmt.Sprintf("condoc: revert step %d substep %s to before %s, take%d snapshot saved", stepNum, iterLetter, substepIterLetter, takeN)
+		case iterLetter != "":
+			commitMsg = fmt.Sprintf("condoc: revert step %d to before %s, take%d snapshot saved", stepNum, iterLetter, takeN)
+		default:
+			commitMsg = fmt.Sprintf("condoc: revert to step %d, take%d snapshot saved", stepNum, takeN)
+		}
+		commitCmd := exec.Command("git", "commit", "-m", commitMsg)
+		commitCmd.Dir = repoRoot
+		if out, err := commitCmd.CombinedOutput(); err != nil {
+			return revertGitDoneMsg{errStr: fmt.Sprintf("git commit: %v\n%s", err, string(out))}
+		}
+
+		// 7. Force-push.
+		pushMainCmd := exec.Command("git", "push", "--force", "origin", mainBranch)
+		pushMainCmd.Dir = repoRoot
+		if out, err := pushMainCmd.CombinedOutput(); err != nil {
+			return revertGitDoneMsg{errStr: fmt.Sprintf("push main branch: %v\n%s", err, string(out))}
+		}
+
+		// substepLetter and substepStartHash are only meaningful for case 3.
+		retSubstepLetter := ""
+		retSubstepStartHash := ""
+		if substepFilePath != "" {
+			retSubstepLetter = iterLetter
+			retSubstepStartHash = targetHash
+		}
+		return revertGitDoneMsg{
+			stepNum:          stepNum,
+			stepFile:         stepFilePath,
+			substepFile:      substepFilePath,
+			substepLetter:    retSubstepLetter,
+			substepStartHash: retSubstepStartHash,
+		}
+	}
+}
+
+// handleCondocRevertDone processes the result of a revert git sequence.
+func (m appModel) handleCondocRevertDone(msg revertGitDoneMsg) (appModel, tea.Cmd) {
+	cs := m.condoc
+	if cs == nil {
+		return m, nil
+	}
+	if msg.errStr != "" {
+		return m.condocError("revert: " + msg.errStr)
+	}
+	cs.stepNum = msg.stepNum
+	cs.stepFile = msg.stepFile
+	cs.substepFile = msg.substepFile
+	cs.substepLetter = msg.substepLetter
+	cs.substepStartHash = msg.substepStartHash
+	cs.phase = condocPhaseAwaitingAction
+	var statusMsg string
+	if msg.substepFile != "" {
+		statusMsg = fmt.Sprintf("reverted substep %s in step %d", msg.substepLetter, msg.stepNum)
+	} else {
+		statusMsg = fmt.Sprintf("reverted to step %d", msg.stepNum)
+	}
+	cs.statusMsg = statusMsg
+	m.blinker.SetState(BlinkerCondoc)
+	return m, tea.Batch(
+		tea.Println(successStyle.Render("condoc: "+statusMsg)),
+		m.condocDynapane.Activate(cs),
+		m.blinker.ResetTick(),
+		condocTickCmd(),
 	)
 }
 

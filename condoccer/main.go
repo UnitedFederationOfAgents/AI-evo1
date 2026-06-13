@@ -36,11 +36,13 @@ const (
 
 // CondocInfo is the lightweight summary sent in the list view.
 type CondocInfo struct {
-	Path     string `json:"path"`
-	Name     string `json:"name"`
-	Phase    Phase  `json:"phase"`
-	StepNum  int    `json:"stepNum"`
-	StepFile string `json:"stepFile,omitempty"`
+	Path          string `json:"path"`
+	Name          string `json:"name"`
+	Phase         Phase  `json:"phase"`
+	StepNum       int    `json:"stepNum"`
+	StepFile      string `json:"stepFile,omitempty"`
+	SubstepFile   string `json:"substepFile,omitempty"`
+	SubstepLetter string `json:"substepLetter,omitempty"`
 }
 
 // CondocState is the full detail for the selected condoc.
@@ -48,6 +50,8 @@ type CondocState struct {
 	Info                  CondocInfo        `json:"info"`
 	MainContent           string            `json:"mainContent"`
 	StepContent           string            `json:"stepContent,omitempty"`
+	SubstepContent        string            `json:"substepContent,omitempty"`
+	SubstepIterations     []Iteration       `json:"substepIterations,omitempty"`
 	NextLetter            string            `json:"nextLetter"`
 	FromOptions           []string          `json:"fromOptions"`
 	Meta                  CondocMeta        `json:"meta"`
@@ -65,11 +69,15 @@ type wsMsg struct {
 
 // ActionRequest is sent by the client when the user clicks an action button.
 type ActionRequest struct {
-	Action  string `json:"action"`  // handoff, completed, revision, retry, start_step
-	Path    string `json:"path"`    // condoc path (relative to repo root)
-	Content string `json:"content,omitempty"`
-	Letter  string `json:"letter,omitempty"`
-	From    string `json:"from,omitempty"`
+	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert
+	Path          string `json:"path"`          // condoc path (relative to repo root)
+	Content       string `json:"content,omitempty"`
+	Letter        string `json:"letter,omitempty"`
+	From          string `json:"from,omitempty"`
+	SubstepTitle  string `json:"substepTitle,omitempty"`  // for substep action
+	RevertStep    int    `json:"revertStep,omitempty"`    // for revert action
+	RevertIter    string `json:"revertIter,omitempty"`    // for revert action (optional iteration letter)
+	RevertSubIter string `json:"revertSubIter,omitempty"` // for revert action (optional substep iter letter)
 }
 
 // CondocMeta holds the parsed condoc-yaml fields.
@@ -88,21 +96,21 @@ type StepSummary struct {
 	HasReplace bool   `json:"hasReplace,omitempty"`
 }
 
-// Iteration is a parsed section header from the condoc step file.
+// Iteration is a parsed section header from a condoc step or substep file.
 type Iteration struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	Type  string `json:"type"` // "reply", "revision", "retry"
+	Type  string `json:"type"` // "reply", "revision", "retry", "substep"
 	From  string `json:"from,omitempty"`
 }
 
 var (
-	condocYamlRe     = regexp.MustCompile(`condoc-yaml`)
-	completedRe      = regexp.MustCompile(`(?m)^## Condoc Completed\s*$`)
-	humanPromptRe    = regexp.MustCompile(`(?m)^## Human-Prompt\s*$`)
-	replaceTitleRe   = regexp.MustCompile(`(?m)^### Step \d+ - <REPLACE-TITLE>`)
-	stepNumRe        = regexp.MustCompile(`(?m)^### Step (\d+)`)
-	replyLetterRe    = regexp.MustCompile(`(?m)^## Reply ([A-Z])\s*$`)
+	condocYamlRe         = regexp.MustCompile(`condoc-yaml`)
+	completedRe          = regexp.MustCompile(`(?m)^## Condoc Completed\s*$`)
+	humanPromptRe        = regexp.MustCompile(`(?m)^## Human-Prompt\s*$`)
+	replaceTitleRe       = regexp.MustCompile(`(?m)^### Step \d+ - <REPLACE-TITLE>`)
+	stepNumRe            = regexp.MustCompile(`(?m)^### Step (\d+)`)
+	replyLetterRe        = regexp.MustCompile(`(?m)^## Reply ([A-Z])\s*$`)
 	condocYamlBlockRe    = regexp.MustCompile("(?s)```condoc-yaml\n(.*?)```")
 	htmlCommentRe        = regexp.MustCompile(`(?s)<!--.*?-->`)
 	stepHeadingRe        = regexp.MustCompile(`(?m)^### Step (\d+) - (.+)$`)
@@ -110,6 +118,9 @@ var (
 	anyH23Re             = regexp.MustCompile(`(?m)^#{2,}`)
 	anyH2Re              = regexp.MustCompile(`(?m)^## `)
 	iterHeadingRe        = regexp.MustCompile(`(?m)^## (Reply|Revision|Retry)(?: ([A-Z]))?(?: \(from (\w+)\))?`)
+	substepHeadingRe     = regexp.MustCompile(`(?m)^## Substep ([A-Z]) - (.+)$`)
+	substepCompletedRe   = regexp.MustCompile(`(?m)^## Substep Completed\s*$`)
+	substepActiveRe      = regexp.MustCompile(`Substep ([A-Z]) is now active\. Interact with the substep file \(([^)]+)\)`)
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 )
@@ -182,6 +193,31 @@ func detectPhase(root, absPath string) (CondocInfo, error) {
 	}
 
 	if humanPromptRe.Match(sfContent) {
+		// Check if a substep is currently active.
+		if m := substepActiveRe.FindSubmatch(sfContent); m != nil {
+			substepLetter := string(m[1])
+			substepFileName := string(m[2])
+			substepPath := filepath.Join(filepath.Dir(sf), substepFileName)
+			substepRel, _ := filepath.Rel(root, substepPath)
+
+			substepContent, substepErr := os.ReadFile(substepPath)
+			if substepErr != nil {
+				// Substep file missing — agent probably hasn't created it yet.
+				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel, SubstepFile: substepRel, SubstepLetter: substepLetter}, nil
+			}
+			if substepCompletedRe.Match(substepContent) {
+				// Substep completed but step not yet resumed — treat as awaiting action on step.
+				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel}, nil
+			}
+			if handoffDirectiveRe.Match(substepContent) || completedDirectiveRe.Match(substepContent) {
+				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel, SubstepFile: substepRel, SubstepLetter: substepLetter}, nil
+			}
+			if humanPromptRe.Match(substepContent) {
+				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel, SubstepFile: substepRel, SubstepLetter: substepLetter}, nil
+			}
+			return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel, SubstepFile: substepRel, SubstepLetter: substepLetter}, nil
+		}
+
 		if handoffDirectiveRe.Match(sfContent) || completedDirectiveRe.Match(sfContent) {
 			return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel}, nil
 		}
@@ -282,11 +318,17 @@ func parseSteps(content string) []StepSummary {
 	return steps
 }
 
-// parseIterations extracts the ordered list of reply/revision/retry sections from a step file.
+// parseIterations extracts the ordered list of reply/revision/retry/substep sections from a step file.
+// Results are ordered by their position in the file so substeps appear in context with other iterations.
 func parseIterations(stepContent string) []Iteration {
-	allIdx := iterHeadingRe.FindAllStringSubmatchIndex(stepContent, -1)
-	var iters []Iteration
-	for _, idx := range allIdx {
+	type candidate struct {
+		pos  int
+		iter Iteration
+	}
+	var candidates []candidate
+
+	// Parse Reply/Revision/Retry headings.
+	for _, idx := range iterHeadingRe.FindAllStringSubmatchIndex(stepContent, -1) {
 		kind := stepContent[idx[2]:idx[3]]
 		letter := ""
 		if idx[4] >= 0 {
@@ -313,7 +355,28 @@ func parseIterations(stepContent string) []Iteration {
 			}
 			iter = Iteration{ID: "retry-" + letter, Label: label, Type: "retry", From: from}
 		}
-		iters = append(iters, iter)
+		candidates = append(candidates, candidate{pos: idx[0], iter: iter})
+	}
+
+	// Parse Substep headings and interleave them by position.
+	for _, idx := range substepHeadingRe.FindAllStringSubmatchIndex(stepContent, -1) {
+		letter := stepContent[idx[2]:idx[3]]
+		title := strings.TrimSpace(stepContent[idx[4]:idx[5]])
+		candidates = append(candidates, candidate{
+			pos: idx[0],
+			iter: Iteration{
+				ID:    "substep-" + letter,
+				Label: "Substep " + letter + " — " + title,
+				Type:  "substep",
+			},
+		})
+	}
+
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].pos < candidates[j].pos })
+
+	iters := make([]Iteration, len(candidates))
+	for i, c := range candidates {
+		iters[i] = c.iter
 	}
 	return iters
 }
@@ -332,13 +395,24 @@ func getCondocState(root, absPath string) (CondocState, error) {
 		stepContent, _ = os.ReadFile(filepath.Join(root, info.StepFile))
 	}
 
+	var substepContent []byte
+	if info.SubstepFile != "" {
+		substepContent, _ = os.ReadFile(filepath.Join(root, info.SubstepFile))
+	}
+
 	mainStr := string(mainContent)
 	stepStr := string(stepContent)
-	letter := nextRevLetter(stepStr)
+	substepStr := string(substepContent)
+
+	// nextLetter and fromOptions reflect the active file (substep if present, else step).
+	activeForLetter := stepStr
+	if substepStr != "" {
+		activeForLetter = substepStr
+	}
+	letter := nextRevLetter(activeForLetter)
 	opts := fromOptions(letter)
 
 	// Load past step files so the UI can show iterations for completed steps.
-	// When info.Phase == PhaseCompleted, info.StepNum is 0 so all steps are included.
 	completedStepContents := make(map[int]string)
 	maxStep := parseMaxStepNum(mainStr)
 	for n := 1; n <= maxStep; n++ {
@@ -355,6 +429,8 @@ func getCondocState(root, absPath string) (CondocState, error) {
 		Info:                  info,
 		MainContent:           mainStr,
 		StepContent:           stepStr,
+		SubstepContent:        substepStr,
+		SubstepIterations:     parseIterations(substepStr),
 		NextLetter:            letter,
 		FromOptions:           opts,
 		Meta:                  parseCondocMeta(mainStr),
@@ -576,18 +652,22 @@ func (s *Server) performAction(action ActionRequest) error {
 		return err
 	}
 
-	// targetFile is where we write directives; defaults to main condoc file.
-	targetFile := absPath
-	if info.StepFile != "" && (info.Phase == PhaseAwaitingAction) {
-		targetFile = filepath.Join(s.root, info.StepFile)
+	// activeFile is the file that receives directives (substep if active, else step or main).
+	activeFile := absPath
+	if info.Phase == PhaseAwaitingAction {
+		if info.SubstepFile != "" {
+			activeFile = filepath.Join(s.root, info.SubstepFile)
+		} else if info.StepFile != "" {
+			activeFile = filepath.Join(s.root, info.StepFile)
+		}
 	}
 
 	switch action.Action {
 	case "handoff":
-		return appendToFile(targetFile, "\n!HANDOFF!\n")
+		return appendToFile(activeFile, "\n!HANDOFF!\n")
 
 	case "completed":
-		return appendToFile(targetFile, "\n!COMPLETED!\n")
+		return appendToFile(activeFile, "\n!COMPLETED!\n")
 
 	case "start_step":
 		// Write edited main file content (with filled template), then trigger HANDOFF.
@@ -597,16 +677,29 @@ func (s *Server) performAction(action ActionRequest) error {
 		return appendToFile(absPath, "\n!HANDOFF!\n")
 
 	case "revision":
+		if info.SubstepFile != "" {
+			sfPath := filepath.Join(s.root, info.SubstepFile)
+			header := fmt.Sprintf("## Revision %s", action.Letter)
+			return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
+		}
 		if info.StepFile == "" {
-			return fmt.Errorf("no active step file")
+			return fmt.Errorf("no active step or substep file")
 		}
 		sfPath := filepath.Join(s.root, info.StepFile)
 		header := fmt.Sprintf("## Revision %s", action.Letter)
 		return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
 
 	case "retry":
+		if info.SubstepFile != "" {
+			sfPath := filepath.Join(s.root, info.SubstepFile)
+			header := fmt.Sprintf("## Retry %s", action.Letter)
+			if action.From != "" {
+				header = fmt.Sprintf("## Retry %s (from %s)", action.Letter, action.From)
+			}
+			return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
+		}
 		if info.StepFile == "" {
-			return fmt.Errorf("no active step file")
+			return fmt.Errorf("no active step or substep file")
 		}
 		sfPath := filepath.Join(s.root, info.StepFile)
 		header := fmt.Sprintf("## Retry %s", action.Letter)
@@ -614,6 +707,29 @@ func (s *Server) performAction(action ActionRequest) error {
 			header = fmt.Sprintf("## Retry %s (from %s)", action.Letter, action.From)
 		}
 		return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
+
+	case "substep":
+		if info.StepFile == "" {
+			return fmt.Errorf("no active step file")
+		}
+		sfPath := filepath.Join(s.root, info.StepFile)
+		header := fmt.Sprintf("## Substep %s - %s", action.Letter, action.SubstepTitle)
+		promptBlock := fmt.Sprintf("```prompt\n%s\n```", action.Content)
+		return replaceIterationPlaceholder(sfPath, action.Letter, header, promptBlock)
+
+	case "revert":
+		// Build the revert directive and append it to the active file.
+		var directive string
+		switch {
+		case action.RevertSubIter != "":
+			directive = fmt.Sprintf("!REVERT-%d-%s-%s!", action.RevertStep, action.RevertIter, action.RevertSubIter)
+		case action.RevertIter != "":
+			directive = fmt.Sprintf("!REVERT-%d-%s!", action.RevertStep, action.RevertIter)
+		default:
+			directive = fmt.Sprintf("!REVERT-%d!", action.RevertStep)
+		}
+		// Write revert directive to the active condoc file so the handler sees it.
+		return appendToFile(activeFile, "\n"+directive+"\n")
 
 	default:
 		return fmt.Errorf("unknown action: %s", action.Action)
@@ -678,9 +794,11 @@ func (s *Server) watchLoop() {
 				continue
 			}
 
-			// Fingerprint the relevant file (step file if active, else main file).
+			// Fingerprint the most-active file: substep if present, else step, else main.
 			watchFile := absPath
-			if info.StepFile != "" {
+			if info.SubstepFile != "" {
+				watchFile = filepath.Join(s.root, info.SubstepFile)
+			} else if info.StepFile != "" {
 				watchFile = filepath.Join(s.root, info.StepFile)
 			}
 

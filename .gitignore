@@ -33,3 +33,4 @@ go.work.sum
 
 ignored-scratch/
 ignored-scratch/**
+!ignored-scratch/.gitkeep

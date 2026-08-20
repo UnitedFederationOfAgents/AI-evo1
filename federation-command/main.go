@@ -2350,12 +2350,6 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escapedPath)
 	}
 
-	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
-		cmd := exec.Command("bash", "-c", actualCmd)
-		cmd.Env = os.Environ()
-		return cmd
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command("bash", "-c", actualCmd)
@@ -2364,7 +2358,7 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 	}
 
 	cmd := exec.Command(clauditablePath, "bash", "-c", actualCmd)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
@@ -2424,12 +2418,6 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
-		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
@@ -2439,7 +2427,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 
 	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
@@ -2468,12 +2456,6 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
-		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
@@ -2483,7 +2465,7 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 
 	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
@@ -2533,16 +2515,6 @@ func teeCommandAppend(cmd *exec.Cmd, outputPath string) *exec.Cmd {
 // buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
 func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, string) {
-	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
-		ambiguousAgentPath, err := findBinary("ambiguous-agent")
-		if err != nil {
-			return nil, renderModelsFallback(agent, currentModel)
-		}
-		cmd := exec.Command(ambiguousAgentPath, "--list-models", "-a", agent)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	ambiguousAgentPath, err := findBinary("ambiguous-agent")
 	if err != nil {
 		return nil, renderModelsFallback(agent, currentModel)
@@ -2556,7 +2528,7 @@ func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, stri
 	}
 
 	cmd := exec.Command(clauditablePath, ambiguousAgentPath, "--list-models", "-a", agent)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
@@ -2928,6 +2900,24 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 // (unlimited) so View() can perform explicit wrapping via wrapAtWidth.
 func setPromptWidth(input *textinput.Model, prompt string, windowWidth int) {
 	input.Prompt = prompt
+}
+
+// environWithoutClauditableGuard returns the current environment with
+// CLAUDITABLE_ALREADY_ACTIVE stripped. federation-command's own process may
+// have inherited that flag from whatever launched it (e.g. an outer
+// clauditable wrap), but that says nothing about whether the individual
+// command we're about to dispatch has been recorded. Without stripping it,
+// a freshly-spawned clauditable child would see the inherited flag and
+// silently skip recording for every command, for the life of the shell.
+func environWithoutClauditableGuard() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, EnvClauditableAlreadyActive+"=") {
+			filtered = append(filtered, kv)
+		}
+	}
+	return filtered
 }
 
 // findBinary finds a binary by checking PATH first, then the directory of the running executable

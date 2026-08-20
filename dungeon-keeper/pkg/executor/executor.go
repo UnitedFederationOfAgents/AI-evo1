@@ -40,7 +40,7 @@ func NewExecutor(cfg *types.Config) (*Executor, error) {
 // findClauditable searches for the clauditable binary.
 func findClauditable() (string, error) {
 	// Check if we're already in a clauditable context
-	if os.Getenv("IS_CLAUDITABLE") == "true" {
+	if os.Getenv("CLAUDITABLE_ALREADY_ACTIVE") == "true" {
 		// We're nested - return empty to signal no wrapping needed
 		return "", nil
 	}
@@ -268,9 +268,9 @@ func CheckDependencies() error {
 	// Check clauditable
 	clauditablePath, err := findClauditable()
 	if err != nil {
-		fmt.Println("clauditable not found (will run without wrapping if IS_CLAUDITABLE is set)")
+		fmt.Println("clauditable not found (will run without wrapping if CLAUDITABLE_ALREADY_ACTIVE is set)")
 	} else if clauditablePath == "" {
-		fmt.Println("Running in clauditable context (IS_CLAUDITABLE=true)")
+		fmt.Println("Running in clauditable context (CLAUDITABLE_ALREADY_ACTIVE=true)")
 	} else {
 		fmt.Printf("Found clauditable at: %s\n", clauditablePath)
 	}

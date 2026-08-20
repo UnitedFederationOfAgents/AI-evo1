@@ -50,7 +50,7 @@ const (
 	EnvAgentName        = "AGENT_NAME"
 	EnvAgentModel       = "AGENT_MODEL"
 	EnvAgentSession     = "AGENT_SESSION"
-	EnvIsClauditable    = "IS_CLAUDITABLE" // Used to prevent double-wrapping
+	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 )
 
 // Available agents (must match ambiguous-agent configurations)
@@ -323,6 +323,10 @@ type appModel struct {
 	ridealong         *Ridealong
 	ridealongDynapane RidealongDynapane
 
+	// Condoc state
+	condoc         *CondocSession
+	condocDynapane CondocDynapane
+
 	// Visual log state (scrollback-log)
 	visualLogFile *os.File
 	visualLogPath string
@@ -534,6 +538,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle ridealong mode first
 		if m.ridealong != nil && m.ridealong.IsActive() {
 			return m.handleRidealongKey(msg)
+		}
+		// Handle condoc mode: route through menu key handler.
+		if m.condoc != nil && m.condoc.active {
+			return m.handleCondocKey(msg)
 		}
 
 		switch msg.Type {
@@ -791,6 +799,32 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongExecReadyMsg:
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
+
+	// ---- condoc messages ----
+	case condocTickMsg:
+		return m.handleCondocTick()
+
+	case condocGitDoneMsg:
+		return m.handleCondocGitDone(msg)
+
+	case condocPullDoneMsg:
+		return m.handleCondocPullDone(msg)
+
+	case condocAgentStepDoneMsg:
+		return m.handleCondocAgentDone(msg)
+
+	case condocRetryReadyMsg:
+		return m.handleCondocRetryReady(msg)
+
+	case revertGitDoneMsg:
+		return m.handleCondocRevertDone(msg)
+
+	case condocExecReadyMsg:
+		return m, tea.ExecProcess(msg.runCmd, msg.callback)
+
+	case CondocDynapaneTickMsg:
+		cmd := m.condocDynapane.Tick()
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -815,10 +849,12 @@ func (m appModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	// Show ridealong dynapane if active, otherwise regular dynapane
+	// Show the highest-priority dynapane that is active.
 	var pane string
 	if m.ridealongDynapane.IsActive() {
 		pane = m.ridealongDynapane.View(m.windowWidth)
+	} else if m.condocDynapane.IsActive() {
+		pane = m.condocDynapane.View(m.windowWidth)
 	} else {
 		pane = m.dynapane.View(m.windowWidth)
 	}
@@ -1463,6 +1499,31 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	return false, m, nil
 }
 
+// handleCondocKey handles key presses while condoc mode is active.
+func (m appModel) handleCondocKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyUp:
+		m.condocDynapane.MenuUp()
+		return m, nil
+	case tea.KeyDown:
+		m.condocDynapane.MenuDown()
+		return m, nil
+	case tea.KeyEnter:
+		switch m.condocDynapane.MenuAction() {
+		case condocMenuExit:
+			return m.exitCondoc()
+		case condocMenuPlaceholder:
+			// Placeholder — intentionally does nothing.
+			return m, nil
+		}
+		return m, nil
+	case tea.KeyCtrlC:
+		return m.exitCondoc()
+	default:
+		return m, m.blinker.StartFlash()
+	}
+}
+
 // handleRidealongKey handles key presses in ridealong mode
 func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	if m.ridealong.customCmdMenuActive {
@@ -1982,6 +2043,39 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(errorStyle.Render("usage: ridealong [--debug] [--waypoint NAME] <file.md>"))
 	}
 
+	// condoc [-v|--verbose] <filepath> ["<description>"]
+	if strings.HasPrefix(line, "condoc ") {
+		filePath, description, verbose := parseCondocCommand(line)
+		if filePath == "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("usage: condoc [-v|--verbose] <filepath> [\"<description>\"]"))
+		}
+		if m.condoc != nil && m.condoc.active {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("condoc: already in condoc mode — ctrl+c to exit first"))
+		}
+		cs, err := NewCondocSession(filePath, description, verbose, m.cwd)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render(err.Error()))
+		}
+		m.condoc = cs
+		m.blinker.SetState(BlinkerCondoc)
+		m.input.Blur()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(
+			tea.Println(successStyle.Render("condoc: proposal written to "+filePath+" — add !HANDOFF! to accept")),
+			m.condocDynapane.Activate(cs),
+			m.blinker.ResetTick(),
+			condocTickCmd(),
+		)
+	}
+
+	if line == "condoc" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("usage: condoc [-v|--verbose] <filepath> [\"<description>\"]"))
+	}
+
 	// exit
 	if line == "exit" {
 		m.quitting = true
@@ -2256,12 +2350,6 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escapedPath)
 	}
 
-	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command("bash", "-c", actualCmd)
-		cmd.Env = os.Environ()
-		return cmd
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command("bash", "-c", actualCmd)
@@ -2270,12 +2358,11 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 	}
 
 	cmd := exec.Command(clauditablePath, "bash", "-c", actualCmd)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
 	)
 	cmd.Env = env
 	return cmd
@@ -2331,12 +2418,6 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
@@ -2346,12 +2427,11 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 
 	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2376,12 +2456,6 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
@@ -2391,12 +2465,11 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 
 	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2442,16 +2515,6 @@ func teeCommandAppend(cmd *exec.Cmd, outputPath string) *exec.Cmd {
 // buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
 func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, string) {
-	if os.Getenv(EnvIsClauditable) == "true" {
-		ambiguousAgentPath, err := findBinary("ambiguous-agent")
-		if err != nil {
-			return nil, renderModelsFallback(agent, currentModel)
-		}
-		cmd := exec.Command(ambiguousAgentPath, "--list-models", "-a", agent)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	ambiguousAgentPath, err := findBinary("ambiguous-agent")
 	if err != nil {
 		return nil, renderModelsFallback(agent, currentModel)
@@ -2465,12 +2528,11 @@ func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, stri
 	}
 
 	cmd := exec.Command(clauditablePath, ambiguousAgentPath, "--list-models", "-a", agent)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
 	)
 	cmd.Env = env
 	return cmd, ""
@@ -2838,6 +2900,24 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 // (unlimited) so View() can perform explicit wrapping via wrapAtWidth.
 func setPromptWidth(input *textinput.Model, prompt string, windowWidth int) {
 	input.Prompt = prompt
+}
+
+// environWithoutClauditableGuard returns the current environment with
+// CLAUDITABLE_ALREADY_ACTIVE stripped. federation-command's own process may
+// have inherited that flag from whatever launched it (e.g. an outer
+// clauditable wrap), but that says nothing about whether the individual
+// command we're about to dispatch has been recorded. Without stripping it,
+// a freshly-spawned clauditable child would see the inherited flag and
+// silently skip recording for every command, for the life of the shell.
+func environWithoutClauditableGuard() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, EnvClauditableAlreadyActive+"=") {
+			filtered = append(filtered, kv)
+		}
+	}
+	return filtered
 }
 
 // findBinary finds a binary by checking PATH first, then the directory of the running executable

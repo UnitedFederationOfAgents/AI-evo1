@@ -15,6 +15,7 @@ const (
 	BlinkerInactive                      // Blank, not blinking (user has typed)
 	BlinkerSelect                        // Blinking with solid grey circle (blinker select mode)
 	BlinkerRidealong                     // Blinking red/blue for ridealong mode (always on)
+	BlinkerCondoc                        // Blinking green/yellow for condoc mode (always on)
 )
 
 // Standard cursor blink interval (typical terminal cursor blink rate)
@@ -91,6 +92,13 @@ var (
 
 	blinkerBlueStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("39"))
+
+	// Condoc mode styles - alternates green/yellow
+	blinkerGreenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("34"))
+
+	blinkerYellowStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
@@ -106,8 +114,8 @@ func (b *Blinker) Tick() tea.Cmd {
 	if b.state == BlinkerInactive {
 		return nil
 	}
-	if b.state == BlinkerRidealong {
-		// In ridealong mode, toggle between red and blue (always visible)
+	if b.state == BlinkerRidealong || b.state == BlinkerCondoc {
+		// In ridealong/condoc mode, toggle colour each tick (always visible)
 		b.ridealongBlue = !b.ridealongBlue
 		b.visible = true
 	} else {
@@ -204,9 +212,21 @@ func (b *Blinker) View() string {
 		} else {
 			content = blinkerRedStyle.Render(SolidBlock)
 		}
+	case BlinkerCondoc:
+		// Always visible in condoc mode, alternates green/yellow
+		if b.ridealongBlue {
+			content = blinkerGreenStyle.Render(SolidBlock)
+		} else {
+			content = blinkerYellowStyle.Render(SolidBlock)
+		}
 	}
 
 	return openBracket + content + closeBracket
+}
+
+// IsCondocMode returns true if the blinker is in condoc mode
+func (b *Blinker) IsCondocMode() bool {
+	return b.state == BlinkerCondoc
 }
 
 // ShouldBlink returns true if the blinker should be ticking

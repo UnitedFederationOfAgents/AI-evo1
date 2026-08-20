@@ -24,7 +24,7 @@ export AGENT_SESSION=tour-session
 ```
 
 ```ridealong
-unset IS_CLAUDITABLE
+unset CLAUDITABLE_ALREADY_ACTIVE
 ```
 
 ## Basic Usage
@@ -32,7 +32,7 @@ unset IS_CLAUDITABLE
 Wrap any command for recording:
 
 ```ridealong
-AGENT_RECORDS_PATH=/tmp/clauditable-tour AGENT_SESSION=tour-session env -u IS_CLAUDITABLE ./clauditable echo "Hello, recorded world"
+AGENT_RECORDS_PATH=/tmp/clauditable-tour AGENT_SESSION=tour-session env -u CLAUDITABLE_ALREADY_ACTIVE ./clauditable echo "Hello, recorded world"
 ```
 
 ## Record Structure
@@ -71,7 +71,7 @@ Example session.jsonl entry:
 
 ## Double-Wrap Prevention
 
-clauditable sets `IS_CLAUDITABLE=true` in the environment. If this is already set, it passes through without recording to prevent duplicate entries.
+clauditable sets `CLAUDITABLE_ALREADY_ACTIVE=true` in the environment. If this is already set, it passes through without recording to prevent duplicate entries.
 
 ## Testing
 

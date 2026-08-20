@@ -416,6 +416,8 @@ Examples:
 		fmt.Fprintf(os.Stderr, "Warning: failed to create session directory: %v\n", err)
 	}
 
+	quiet := os.Getenv("AA_QUIET") == "true"
+
 	// Handle record provision - copy session files to temp dir for agent context
 	var recordsTempDir string
 	if len(provideRecordsList) > 0 {
@@ -429,38 +431,44 @@ Examples:
 		defer func() {
 			if recordsTempDir != "" {
 				os.RemoveAll(recordsTempDir)
-				fmt.Println(sessionStyle.Render(fmt.Sprintf("cleaned up records temp dir: %s", recordsTempDir)))
+				if !quiet {
+					fmt.Println(sessionStyle.Render(fmt.Sprintf("cleaned up records temp dir: %s", recordsTempDir)))
+				}
 			}
 		}()
 		// Add temp dir to additional dirs for the agent
 		additionalDirs = append(additionalDirs, recordsTempDir)
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("● providing records from: %s", recordsTempDir)))
+		if !quiet {
+			fmt.Println(sessionStyle.Render(fmt.Sprintf("● providing records from: %s", recordsTempDir)))
+		}
 	}
 
-	// Print invocation info with visual flare
-	agentStyled := getAgentStyle(agent)
-	modeStyled := modeStyles[mode].Render(modeDescription(mode))
+	if !quiet {
+		// Print invocation info with visual flare
+		agentStyled := getAgentStyle(agent)
+		modeStyled := modeStyles[mode].Render(modeDescription(mode))
 
-	if model != "" {
-		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-			sessionStyle.Render("invoking "),
-			agentStyled.Render(agent),
-			sessionStyle.Render(" ("),
-			agentStyled.Render(model),
-			sessionStyle.Render(") in "),
-			modeStyled,
-			sessionStyle.Render(" mode..."),
-		))
-	} else {
-		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-			sessionStyle.Render("invoking "),
-			agentStyled.Render(agent),
-			sessionStyle.Render(" in "),
-			modeStyled,
-			sessionStyle.Render(" mode..."),
-		))
+		if model != "" {
+			fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
+				sessionStyle.Render("invoking "),
+				agentStyled.Render(agent),
+				sessionStyle.Render(" ("),
+				agentStyled.Render(model),
+				sessionStyle.Render(") in "),
+				modeStyled,
+				sessionStyle.Render(" mode..."),
+			))
+		} else {
+			fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
+				sessionStyle.Render("invoking "),
+				agentStyled.Render(agent),
+				sessionStyle.Render(" in "),
+				modeStyled,
+				sessionStyle.Render(" mode..."),
+			))
+		}
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
 	}
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
 
 	// Build the agent command
 	args := buildAgentArgs(config, mode, model, prompt, sessionDir, additionalDirs)
@@ -469,10 +477,12 @@ Examples:
 	exitCode := invokeWithClauditable(config, args, agent, model, sessionDir)
 
 	// Print completion status
-	if exitCode == 0 {
-		fmt.Println(successStyle.Render("agent completed successfully"))
-	} else {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited with code %d", exitCode)))
+	if !quiet {
+		if exitCode == 0 {
+			fmt.Println(successStyle.Render("agent completed successfully"))
+		} else {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited with code %d", exitCode)))
+		}
 	}
 
 	os.Exit(exitCode)

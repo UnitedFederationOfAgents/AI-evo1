@@ -116,13 +116,13 @@ var (
 	blinkerYellowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("220"))
 
-	// Connected/connecting style - blue, used for both connecting (fast) and connected remote-control (slow)
+	// Connected/connecting style - dark blue (connecting fast blink, local-control slow blink)
 	blinkerConnectedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("33"))
 
-	// Local control style - orange, FC has local control while still connected
-	blinkerLocalControlStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("208"))
+	// Remote-control style - light blue, alternates with blinkerConnectedStyle for remote-control indication
+	blinkerConnectedLightStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("81"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
@@ -138,8 +138,9 @@ func (b *Blinker) Tick() tea.Cmd {
 	if b.state == BlinkerInactive {
 		return nil
 	}
-	if b.state == BlinkerRidealong || b.state == BlinkerCondoc {
-		// In ridealong/condoc mode, toggle colour each tick (always visible)
+	if b.state == BlinkerRidealong || b.state == BlinkerCondoc || b.state == BlinkerConnected {
+		// Toggle colour each tick (always visible): ridealong/condoc alternate their colours;
+		// BlinkerConnected alternates dark-blue/light-blue for remote-control indication.
 		b.ridealongBlue = !b.ridealongBlue
 		b.visible = true
 	} else {
@@ -277,15 +278,23 @@ func (b *Blinker) View() string {
 		} else {
 			content = blinkerYellowStyle.Render(SolidBlock)
 		}
-	case BlinkerConnecting, BlinkerConnected:
+	case BlinkerConnecting:
 		if b.visible {
 			content = blinkerConnectedStyle.Render(SolidBlock)
 		} else {
 			content = " "
 		}
+	case BlinkerConnected:
+		// Remote control: always visible, alternates dark-blue / light-blue.
+		if b.ridealongBlue {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = blinkerConnectedLightStyle.Render(SolidBlock)
+		}
 	case BlinkerLocalControl:
+		// Local control: slow on/off blue blink (user's blinking cursor already signals local mode).
 		if b.visible {
-			content = blinkerLocalControlStyle.Render(SolidBlock)
+			content = blinkerConnectedStyle.Render(SolidBlock)
 		} else {
 			content = " "
 		}

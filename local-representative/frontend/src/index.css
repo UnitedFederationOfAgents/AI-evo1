@@ -126,7 +126,6 @@ body {
 /* ---- FC control panel ---- */
 
 .fc-status {
-  margin-top: 24px;
   font-size: 13px;
 }
 
@@ -135,34 +134,51 @@ body {
   font-style: italic;
 }
 
-.fc-mode-badge {
-  display: inline-block;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 3px 8px;
-  border-radius: 3px;
-  margin-bottom: 16px;
+/* Unified panel: output log on top, optional input below */
+
+.fc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.fc-mode-remote {
-  background: #1a3a5c;
+/* Output log — always visible when connected */
+
+.fc-output {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.fc-log-empty {
+  color: #555;
+  font-style: italic;
+}
+
+.fc-log-line {
+  padding: 2px 0;
+  color: #d4d4d4;
+}
+
+.fc-log-prompt {
   color: #5bb8ff;
-  border: 1px solid #2e5c8a;
+  margin-right: 6px;
+  user-select: none;
 }
 
-.fc-mode-local {
-  background: #3a2800;
-  color: #d48f00;
-  border: 1px solid #6b4d00;
+.fc-log-state {
+  padding: 5px 0;
+  color: #555;
+  font-style: italic;
+  font-size: 11px;
+  text-align: center;
 }
 
-/* Remote control: command input */
-
-.fc-remote-control {
-  margin-top: 24px;
-}
+/* Remote control: command input — shown only in remote-control mode */
 
 .fc-command-area {
   display: flex;
@@ -206,35 +222,3 @@ body {
 }
 
 .fc-cmd-send:hover { background: #2e5c8a; }
-
-/* Local control: command log */
-
-.fc-local-control {
-  margin-top: 24px;
-}
-
-.fc-log {
-  background: #141414;
-  border: 1px solid #3c3c3c;
-  border-radius: 4px;
-  padding: 12px;
-  max-height: 300px;
-  overflow-y: auto;
-  font-size: 13px;
-}
-
-.fc-log-empty {
-  color: #555;
-  font-style: italic;
-}
-
-.fc-log-line {
-  padding: 2px 0;
-  color: #d4d4d4;
-}
-
-.fc-log-prompt {
-  color: #d48f00;
-  margin-right: 6px;
-  user-select: none;
-}

@@ -788,6 +788,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.blinker.IsConnected() {
 			return m, listenCmd
 		}
+		// Echo the command to LR's output pane so the remote operator sees it.
+		if m.reprClient != nil {
+			m.reprClient.SendLog(msg.cmd)
+		}
 		// Execute the command directly (bypass handleEnter's key-rejection checks).
 		echoLine := m.input.Prompt + msg.cmd
 		echo := m.printlnLogged(echoLine)

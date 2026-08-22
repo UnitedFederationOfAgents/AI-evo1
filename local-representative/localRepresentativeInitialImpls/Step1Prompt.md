@@ -134,7 +134,30 @@ Here's a summary of what was implemented for Revision D:
 **LR frontend** — `federation-command` tab now shows a mode badge ("remote control" / "local control") and adapts its panel: remote control shows a command entry field that executes on FC; local control shows a scrolling log of commands executed by FC.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
+
+This is a good start, but there are a few things to adjust coming out of this:
+- The cursor should always blink blue for LR connection, not orange. The user can tell they are in local control because their cursor is blinking. To distinguish things even more let's have the remote control mode blink between the current blue and a miuch lighter blue (instead of on-off)
+- We should always be able to see what the OUTPUT is for FC when we are connected. This is true regardless of local and remote control (and the stream should be uninterrupted when state changes). This is in a distinct output window (not the same widget as the input)
+- There should also be continuity in the input sequence, with notifications of change in state inline with the commands.
+
+
+[`102d6ec`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/102d6ec7eb9a8f1b37889dfb4157c49b8545fb90)
+
+## Reply E
+
+Everything looks correct. The implementation is complete. Here's a summary of what changed across Revision E:
+
+**`federation-command/blinker.go`:** Removed the orange `blinkerLocalControlStyle`; added `blinkerConnectedLightStyle` (ANSI color 81, light blue). `BlinkerConnected` (remote control) now alternates dark-blue/light-blue on every tick (always visible, like ridealong mode) instead of on/off. `BlinkerLocalControl` now renders a slow on/off blue blink using the same dark-blue style — both connected states are consistently blue.
+
+**`federation-command/main.go`:** Added `m.reprClient.SendLog(msg.cmd)` in the `reprRemoteCmdMsg` handler so commands sent from LR to FC are echoed back as log entries, making the output pane in LR continuous regardless of which side is sending commands.
+
+**`local-representative/frontend/src/App.tsx`:** Replaced the mode-switching panel (local-control shows log, remote-control shows input, state changes clear log) with a unified `fc-panel`: the scrolling output log is always shown when connected, and the command input appears below it only in remote-control mode. State changes push inline `{kind: 'state'}` entries into the log via `fcStateRef` comparison, so the log accumulates a continuous, uninterrupted history with contextual notifications (`-- remote control --`, `-- local control --`, `-- disconnected --`).
+
+**`local-representative/frontend/src/index.css`:** Removed `.fc-local-control`, `.fc-remote-control`, and mode-badge classes; added `.fc-panel`, `.fc-output`, and `.fc-log-state` (centered italic dimmed text for state notifications). The `$` prompt in the log now uses blue (`#5bb8ff`) consistently.
+
+
+## <REPLACE-Revision|Retry> F
 
 <REPLACE-PROMPT>
 

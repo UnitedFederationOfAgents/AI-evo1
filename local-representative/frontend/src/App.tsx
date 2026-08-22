@@ -4,13 +4,19 @@ import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg } from './types'
 const TABS = ['federation-command', 'condoccer', 'worker'] as const
 type Tab = typeof TABS[number]
 
+interface LogEntry {
+  kind: 'cmd' | 'state'
+  text: string
+}
+
 function useStatusWS() {
   const [connected, setConnected] = useState(false)
   const [services, setServices] = useState<ServiceStatus[]>([])
   const [fcState, setFcState] = useState<string>('')
-  const [fcLog, setFcLog] = useState<string[]>([])
+  const [fcLog, setFcLog] = useState<LogEntry[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcStateRef = useRef<string>('')
 
   const sendCommand = useCallback((cmd: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -43,14 +49,25 @@ function useStatusWS() {
             break
           case 'fc-state': {
             const raw = (msg.payload as FCStateMsg).state
-            // "disconnected" from the server normalises to "" (unknown/not connected)
-            const st = raw === 'disconnected' ? '' : raw
-            setFcState(st)
-            if (st !== 'local-control') setFcLog([])
+            const newSt = raw === 'disconnected' ? '' : raw
+            const prevSt = fcStateRef.current
+            fcStateRef.current = newSt
+            setFcState(newSt)
+            if (prevSt !== newSt) {
+              const label =
+                newSt === '' ? '-- disconnected --'
+                : newSt === 'remote-control' ? '-- remote control --'
+                : newSt === 'local-control' ? '-- local control --'
+                : `-- ${newSt} --`
+              setFcLog(prev => [...prev, { kind: 'state', text: label }])
+            }
             break
           }
           case 'fc-log':
-            setFcLog(prev => [...prev.slice(-199), (msg.payload as FCLogMsg).line])
+            setFcLog(prev => [
+              ...prev.slice(-199),
+              { kind: 'cmd', text: (msg.payload as FCLogMsg).line },
+            ])
             break
         }
       } catch {
@@ -76,7 +93,7 @@ function FCCommandPanel({
   sendCommand,
 }: {
   fcState: string
-  fcLog: string[]
+  fcLog: LogEntry[]
   sendCommand: (cmd: string) => void
 }) {
   const [input, setInput] = useState('')
@@ -97,44 +114,38 @@ function FCCommandPanel({
     return <div className="fc-status fc-status-disconnected">not connected</div>
   }
 
-  if (fcState === 'local-control') {
-    return (
-      <div className="fc-local-control">
-        <div className="fc-mode-badge fc-mode-local">local control</div>
-        <div className="fc-log">
-          {fcLog.length === 0
-            ? <span className="fc-log-empty">waiting for commands…</span>
-            : fcLog.map((line, i) => (
-                <div key={i} className="fc-log-line">
-                  <span className="fc-log-prompt">$</span> {line}
-                </div>
-              ))
-          }
-          <div ref={logEndRef} />
-        </div>
-      </div>
-    )
-  }
-
-  // remote-control
   return (
-    <div className="fc-remote-control">
-      <div className="fc-mode-badge fc-mode-remote">remote control</div>
-      <div className="fc-command-area">
-        <span className="fc-cmd-prompt">$</span>
-        <input
-          className="fc-cmd-input"
-          type="text"
-          value={input}
-          placeholder="enter command to run on federation-command…"
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === 'Enter') submit()
-          }}
-          autoFocus
-        />
-        <button className="fc-cmd-send" onClick={submit}>run</button>
+    <div className="fc-panel">
+      <div className="fc-output">
+        {fcLog.length === 0
+          ? <span className="fc-log-empty">waiting for activity…</span>
+          : fcLog.map((entry, i) =>
+              entry.kind === 'state'
+                ? <div key={i} className="fc-log-state">{entry.text}</div>
+                : <div key={i} className="fc-log-line">
+                    <span className="fc-log-prompt">$</span> {entry.text}
+                  </div>
+            )
+        }
+        <div ref={logEndRef} />
       </div>
+      {fcState === 'remote-control' && (
+        <div className="fc-command-area">
+          <span className="fc-cmd-prompt">$</span>
+          <input
+            className="fc-cmd-input"
+            type="text"
+            value={input}
+            placeholder="enter command to run on federation-command…"
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') submit()
+            }}
+            autoFocus
+          />
+          <button className="fc-cmd-send" onClick={submit}>run</button>
+        </div>
+      )}
     </div>
   )
 }

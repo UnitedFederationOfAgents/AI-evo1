@@ -334,7 +334,9 @@ type appModel struct {
 	visualLogPath string
 
 	// Representable connection to local-representative
-	reprClient *representable.Client
+	reprClient   *representable.Client
+	remoteCmdCh  chan string    // receives commands sent from LR to execute in FC
+	listenerStop chan struct{}  // closed to cancel the active listenForRemoteCmdCmd goroutine
 
 	quitting    bool
 	windowWidth int
@@ -408,6 +410,9 @@ type reprConnectedMsg struct {
 // reprConnectFailedMsg is sent when the connection attempt times out or errors.
 type reprConnectFailedMsg struct{}
 
+// reprRemoteCmdMsg is sent when LR delivers a command for FC to execute.
+type reprRemoteCmdMsg struct{ cmd string }
+
 // attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
 func attemptConnectCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -417,6 +422,30 @@ func attemptConnectCmd() tea.Cmd {
 		}
 		return reprConnectedMsg{client: client}
 	}
+}
+
+// listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
+func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case cmd := <-ch:
+			return reprRemoteCmdMsg{cmd: cmd}
+		case <-stop:
+			return nil
+		}
+	}
+}
+
+// disconnectRepr closes the representable client and resets the listener stop channel
+// so any in-flight listenForRemoteCmdCmd goroutine exits.
+func (m *appModel) disconnectRepr() {
+	if m.reprClient != nil {
+		m.reprClient.Close()
+		m.reprClient = nil
+	}
+	// Cancel the running listener goroutine by closing the old stop channel.
+	close(m.listenerStop)
+	m.listenerStop = make(chan struct{})
 }
 
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
@@ -445,6 +474,8 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		logFile:      logFile,
 		encoder:      encoder,
 		blinker:      NewBlinker(),
+		remoteCmdCh:  make(chan string, 8),
+		listenerStop: make(chan struct{}),
 	}
 
 	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
@@ -584,12 +615,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				return m, m.blinker.ResetTick()
 			}
-			// Exit blinker select/connecting/connected mode if active
-			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
-				if m.reprClient != nil {
-					m.reprClient.Close()
-					m.reprClient = nil
-				}
+			// Exit blinker select/connecting/connected/local-control mode if active
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+				m.disconnectRepr()
 				m.blinker.SetState(BlinkerIdle)
 				m.input.Focus()
 				return m, m.blinker.ResetTick()
@@ -633,9 +661,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleBackspace()
 
 		default:
-			// Handle other keys in blinker select mode
-			if m.blinker.IsSelectMode() {
-				// Flash the blinker to alert user they're in select mode
+			// Reject keys (with a flash) in select/connecting/remote-control states.
+			// Local-control falls through so the user can type normally.
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
 				cmd := m.blinker.StartFlash()
 				return m, cmd
 			}
@@ -655,8 +683,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
-		// Reset blinker to idle state after command completes
-		m.blinker.SetState(BlinkerIdle)
+		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
 		m.prevInputLen = 0
 		return m, m.blinker.ResetTick()
 
@@ -681,8 +711,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
-		// Reset blinker to idle state after agent completes
-		m.blinker.SetState(BlinkerIdle)
+		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
 		m.prevInputLen = 0
 		return m, tea.Batch(tea.Println(postOutput), m.blinker.ResetTick())
 
@@ -727,8 +759,18 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reprClient.Close()
 		}
 		m.reprClient = msg.client
+		// Wire up remote command delivery via the channel.
+		ch := m.remoteCmdCh
+		m.reprClient.SetCommandHandler(func(cmd string) {
+			select {
+			case ch <- cmd:
+			default: // drop if full
+			}
+		})
+		// Announce initial control mode so LR shows the entry field immediately.
+		m.reprClient.SendState("remote-control")
 		m.blinker.SetState(BlinkerConnected)
-		return m, m.blinker.ResetTick()
+		return m, tea.Batch(m.blinker.ResetTick(), listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop))
 
 	case reprConnectFailedMsg:
 		if m.blinker.IsConnecting() {
@@ -736,6 +778,21 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.blinker.ResetTick()
 		}
 		return m, nil
+
+	case reprRemoteCmdMsg:
+		if msg.cmd == "" {
+			return m, nil
+		}
+		// Restart listener regardless of whether we execute the command.
+		listenCmd := listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop)
+		if !m.blinker.IsConnected() {
+			return m, listenCmd
+		}
+		// Execute the command directly (bypass handleEnter's key-rejection checks).
+		echoLine := m.input.Prompt + msg.cmd
+		echo := m.printlnLogged(echoLine)
+		newM, execCmd := m.executeCommand(msg.cmd)
+		return newM, tea.Batch(tea.Sequence(echo, execCmd), listenCmd)
 
 	case DynapaneTickMsg:
 		cmd := m.dynapane.Tick()
@@ -882,10 +939,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 
-	// Track input changes to manage blinker state
+	// Track input changes to manage blinker state.
+	// Don't deactivate the indicator while in remote/local-control mode so the
+	// orange/blue dot remains visible to the user even when they are typing.
 	currentLen := len(m.input.Value())
 	if currentLen != m.prevInputLen {
-		if currentLen > 0 && m.ridealong == nil {
+		if currentLen > 0 && m.ridealong == nil && !m.blinker.IsRemoteControlActive() {
 			// User has typed something - deactivate blinker
 			if m.blinker.State() != BlinkerInactive {
 				m.blinker.SetState(BlinkerInactive)
@@ -976,8 +1035,8 @@ func wrapAtWidth(s string, width int) string {
 }
 
 func (m appModel) handleEnter() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash and do nothing
-	if m.blinker.IsSelectMode() {
+	// Reject Enter in select/connecting/remote-control states.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		cmd := m.blinker.StartFlash()
 		return m, cmd
 	}
@@ -1068,6 +1127,11 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 		return m, echo
 	}
 
+	// In local-control mode, stream the command to LR for display.
+	if m.blinker.IsLocalControl() && m.reprClient != nil {
+		m.reprClient.SendLog(line)
+	}
+
 	newM, execCmd := m.executeCommand(line)
 	return newM, tea.Sequence(echo, execCmd)
 }
@@ -1080,10 +1144,12 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
-	// Up in blinker select mode initiates connection to local-representative.
-	if m.blinker.IsSelectMode() {
-		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd())
+	// Up while connected/connecting deselects and disconnects from LR.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+		m.disconnectRepr()
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+		return m, m.blinker.ResetTick()
 	}
 
 	if len(m.history) == 0 || m.inMultiLine {
@@ -1106,10 +1172,12 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 }
 
 func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash
-	if m.blinker.IsSelectMode() {
-		cmd := m.blinker.StartFlash()
-		return m, cmd
+	// Down while connected/connecting deselects and disconnects from LR.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+		m.disconnectRepr()
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+		return m, m.blinker.ResetTick()
 	}
 
 	if m.inMultiLine {
@@ -1208,10 +1276,10 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 	if cursorPos == 0 && inputVal == "" {
 		switch m.blinker.State() {
 		case BlinkerIdle:
-			// Enter blinker select mode — tick chain is already running, no new one needed
-			m.blinker.SetState(BlinkerSelect)
+			// Start connecting to LR immediately; visually enters connecting state.
+			connectCmd := m.blinker.StartConnecting()
 			m.input.Blur()
-			return m, nil
+			return m, tea.Batch(connectCmd, attemptConnectCmd())
 		case BlinkerInactive:
 			// Resume idle blinking from stopped state
 			m.blinker.SetState(BlinkerIdle)
@@ -1220,6 +1288,14 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 			// Already in select mode, flash to indicate we can't go further left
 			cmd := m.blinker.StartFlash()
 			return m, cmd
+		case BlinkerLocalControl:
+			// Return to remote control — LR entry field re-appears.
+			if m.reprClient != nil {
+				m.reprClient.SendState("remote-control")
+			}
+			m.blinker.SetState(BlinkerConnected)
+			m.input.Blur()
+			return m, m.blinker.ResetTick()
 		}
 	}
 
@@ -1242,12 +1318,22 @@ func (m appModel) handleRight() (appModel, tea.Cmd) {
 		return m, cmd
 	}
 
-	// If in blinker select mode, exit to idle mode and restore cursor
-	// Tick chain is still running (select→idle, same gen) so no new tick needed.
-	if m.blinker.IsSelectMode() {
+	// Right while in select/connecting mode: cancel and return to idle.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() {
+		m.disconnectRepr()
 		m.blinker.SetState(BlinkerIdle)
 		m.input.Focus()
-		return m, textinput.Blink
+		return m, m.blinker.ResetTick()
+	}
+
+	// Right while in remote control (connected): switch to local control.
+	if m.blinker.IsConnected() {
+		if m.reprClient != nil {
+			m.reprClient.SendState("local-control")
+		}
+		m.blinker.SetState(BlinkerLocalControl)
+		m.input.Focus()
+		return m, tea.Batch(textinput.Blink, m.blinker.ResetTick())
 	}
 
 	inputVal := m.input.Value()

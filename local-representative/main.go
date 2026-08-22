@@ -29,6 +29,16 @@ type StatusMsg struct {
 	Services []ServiceStatus `json:"services"`
 }
 
+// FCStateMsg is the payload of "fc-state" WebSocket messages.
+type FCStateMsg struct {
+	State string `json:"state"` // "remote-control", "local-control", or "" (disconnected)
+}
+
+// FCLogMsg is the payload of "fc-log" WebSocket messages.
+type FCLogMsg struct {
+	Line string `json:"line"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -47,6 +57,9 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
+
+	fcMu    sync.RWMutex
+	fcState string // "remote-control", "local-control", or "" (disconnected)
 }
 
 func newServer() *Server {
@@ -100,6 +113,19 @@ func (s *Server) currentStatus() StatusMsg {
 	}
 }
 
+func (s *Server) getFCState() string {
+	s.fcMu.RLock()
+	defer s.fcMu.RUnlock()
+	return s.fcState
+}
+
+func (s *Server) setFCState(state string) {
+	s.fcMu.Lock()
+	s.fcState = state
+	s.fcMu.Unlock()
+	s.broadcast("fc-state", FCStateMsg{State: state})
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -117,8 +143,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.clients[c] = true
 	s.mu.Unlock()
 
-	// Send initial status.
-	go s.sendToClient(c, "status", s.currentStatus())
+	// Send initial status and FC state.
+	go func() {
+		s.sendToClient(c, "status", s.currentStatus())
+		s.sendToClient(c, "fc-state", FCStateMsg{State: s.getFCState()})
+	}()
 
 	// Write pump.
 	go func() {
@@ -138,7 +167,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Read pump (blocks until client disconnects).
+	// Read pump: handle commands from browser clients.
 	defer func() {
 		close(c.done)
 		s.mu.Lock()
@@ -147,8 +176,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
 			return
+		}
+		var m wsMsg
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.Type == "command" && s.reprServer != nil {
+			var payload struct {
+				Cmd string `json:"cmd"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
+				s.reprServer.SendCommand("federation-command", payload.Cmd)
+			}
 		}
 	}
 }
@@ -213,6 +255,19 @@ func main() {
 		log.Fatal("representable server:", err)
 	}
 	s.reprServer = reprSrv
+
+	// Track FC control mode changes and forward log entries to browser clients.
+	reprSrv.SetStateChangeHandler(func(name, state string) {
+		if name == "federation-command" {
+			s.setFCState(state)
+		}
+	})
+	reprSrv.SetLogHandler(func(name, line string) {
+		if name == "federation-command" {
+			s.broadcast("fc-log", FCLogMsg{Line: line})
+		}
+	})
+
 	log.Printf("representable server listening on tcp://localhost:%s", *reprPort)
 
 	go s.broadcastLoop()

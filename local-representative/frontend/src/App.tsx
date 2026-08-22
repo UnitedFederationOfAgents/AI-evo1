@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'worker'] as const
 type Tab = typeof TABS[number]
@@ -7,8 +7,19 @@ type Tab = typeof TABS[number]
 function useStatusWS() {
   const [connected, setConnected] = useState(false)
   const [services, setServices] = useState<ServiceStatus[]>([])
+  const [fcState, setFcState] = useState<string>('')
+  const [fcLog, setFcLog] = useState<string[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const sendCommand = useCallback((cmd: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'command',
+        payload: { cmd },
+      }))
+    }
+  }, [])
 
   const connect = useCallback(() => {
     const ws = new WebSocket(`ws://${window.location.host}/ws`)
@@ -26,8 +37,21 @@ function useStatusWS() {
     ws.onmessage = (ev: MessageEvent) => {
       try {
         const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown }
-        if (msg.type === 'status') {
-          setServices((msg.payload as StatusMsg).services)
+        switch (msg.type) {
+          case 'status':
+            setServices((msg.payload as StatusMsg).services)
+            break
+          case 'fc-state': {
+            const raw = (msg.payload as FCStateMsg).state
+            // "disconnected" from the server normalises to "" (unknown/not connected)
+            const st = raw === 'disconnected' ? '' : raw
+            setFcState(st)
+            if (st !== 'local-control') setFcLog([])
+            break
+          }
+          case 'fc-log':
+            setFcLog(prev => [...prev.slice(-199), (msg.payload as FCLogMsg).line])
+            break
         }
       } catch {
         // ignore malformed messages
@@ -43,12 +67,81 @@ function useStatusWS() {
     }
   }, [connect])
 
-  return { connected, services }
+  return { connected, services, fcState, fcLog, sendCommand }
+}
+
+function FCCommandPanel({
+  fcState,
+  fcLog,
+  sendCommand,
+}: {
+  fcState: string
+  fcLog: string[]
+  sendCommand: (cmd: string) => void
+}) {
+  const [input, setInput] = useState('')
+  const logEndRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [fcLog])
+
+  const submit = () => {
+    const cmd = input.trim()
+    if (!cmd) return
+    sendCommand(cmd)
+    setInput('')
+  }
+
+  if (fcState === '') {
+    return <div className="fc-status fc-status-disconnected">not connected</div>
+  }
+
+  if (fcState === 'local-control') {
+    return (
+      <div className="fc-local-control">
+        <div className="fc-mode-badge fc-mode-local">local control</div>
+        <div className="fc-log">
+          {fcLog.length === 0
+            ? <span className="fc-log-empty">waiting for commands…</span>
+            : fcLog.map((line, i) => (
+                <div key={i} className="fc-log-line">
+                  <span className="fc-log-prompt">$</span> {line}
+                </div>
+              ))
+          }
+          <div ref={logEndRef} />
+        </div>
+      </div>
+    )
+  }
+
+  // remote-control
+  return (
+    <div className="fc-remote-control">
+      <div className="fc-mode-badge fc-mode-remote">remote control</div>
+      <div className="fc-command-area">
+        <span className="fc-cmd-prompt">$</span>
+        <input
+          className="fc-cmd-input"
+          type="text"
+          value={input}
+          placeholder="enter command to run on federation-command…"
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') submit()
+          }}
+          autoFocus
+        />
+        <button className="fc-cmd-send" onClick={submit}>run</button>
+      </div>
+    </div>
+  )
 }
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('federation-command')
-  const { connected, services } = useStatusWS()
+  const { connected, services, fcState, fcLog, sendCommand } = useStatusWS()
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -81,6 +174,13 @@ export default function App() {
             <span className="health-dot" />
             <span className="health-label">{getStatus(activeTab)}</span>
           </div>
+          {activeTab === 'federation-command' && (
+            <FCCommandPanel
+              fcState={fcState}
+              fcLog={fcLog}
+              sendCommand={sendCommand}
+            />
+          )}
         </div>
       </div>
     </div>

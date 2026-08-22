@@ -102,7 +102,39 @@ Revision B is now complete. Here's what was implemented across three files:
 **`local-representative/main.go`** — Imported `representable`, added `reprServer *representable.Server` to the `Server` struct, converted `currentStatus()` to a method that checks live heartbeat health for `federation-command` (unhealthy until FC connects), and starts the TCP listener on `:8082` (configurable via `-repr-port`). Condoccer and worker remain hardcoded healthy for now.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
+
+This is a good start - the user is able to form the connection.
+
+Now we need to clean up this implementation a little bit, then make it do something useful.
+
+To clean it up we will make the interaction clearer - once the dot has been selected we will make it so that the users commands will be rejected (with a fast-blink indication) if they are anything other than right, up or down. Up or down will make it so that the disconnected state is selected again.
+
+When the user selects the right arrow they get back to "local control" mode (this will read out on the LR UI due to a state message exchange).
+
+When the user is in "local control" mode we will see all of the input and output in LR but we will not have any input capability.
+
+When the user's cursor is still in "remote control" there will be an entry field available in LR. This will allow the LR user to input commands - when they submit them they will appear on the FC terminal and will be executed exactly as if they had been input locally.
+
+
+[`1c7ec56`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1c7ec5652fb03057ed168b35ad5ed5381b0f21a8)
+
+## Reply D
+
+Here's a summary of what was implemented for Revision D:
+
+**`representable/representable.go`** — Protocol extended to bidirectional: FC→LR messages now carry `type` ("heartbeat", "state", "log"), and a new `ServerMsg` type carries "command" from LR→FC. New `Client.SendState()`, `Client.SendLog()`, `Client.SetCommandHandler()` methods added with a read loop; new `Server.SendCommand()`, `Server.GetState()`, `Server.SetStateChangeHandler()`, `Server.SetLogHandler()` methods added.
+
+**`federation-command/blinker.go`** — Added `BlinkerLocalControl` state (slow orange blink; FC connected but has local control), `IsLocalControl()`, and `IsRemoteControlActive()` helpers.
+
+**`federation-command/main.go`** — Left arrow now auto-connects to LR immediately (skips the old BlinkerSelect interim step). Up or Down in any connected state (connecting/connected/local-control) disconnects and returns to idle. Right in remote control sends "local-control" to LR and switches to BlinkerLocalControl; left in local-control reverses that. Other keys in connecting/connected/remote-control modes are rejected with a flash. Remote commands from LR arrive via a channel listener and execute via `executeCommand()` directly. Commands typed in local-control mode are sent to LR as log entries. Blinker state is preserved across command execution while connected.
+
+**`local-representative/main.go`** — Tracks FC control mode, broadcasts `fc-state` changes to browser clients, forwards browser "command" WS messages to FC via `SendCommand`, and broadcasts `fc-log` entries.
+
+**LR frontend** — `federation-command` tab now shows a mode badge ("remote control" / "local control") and adapts its panel: remote control shows a command entry field that executes on FC; local control shows a scrolling log of commands executed by FC.
+
+
+## <REPLACE-Revision|Retry> E
 
 <REPLACE-PROMPT>
 

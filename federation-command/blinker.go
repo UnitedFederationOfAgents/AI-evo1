@@ -17,7 +17,8 @@ const (
 	BlinkerRidealong                      // Blinking red/blue for ridealong mode (always on)
 	BlinkerCondoc                         // Blinking green/yellow for condoc mode (always on)
 	BlinkerConnecting                     // Fast blue blink while connecting to local-representative
-	BlinkerConnected                      // Slow blue blink when connected to local-representative
+	BlinkerConnected                      // Slow blue blink when connected to local-representative (remote control)
+	BlinkerLocalControl                   // Slow orange blink when connected but FC has local control
 )
 
 // Standard cursor blink interval (typical terminal cursor blink rate)
@@ -115,9 +116,13 @@ var (
 	blinkerYellowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("220"))
 
-	// Connected/connecting style - blue, used for both connecting (fast) and connected (slow)
+	// Connected/connecting style - blue, used for both connecting (fast) and connected remote-control (slow)
 	blinkerConnectedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("33"))
+
+	// Local control style - orange, FC has local control while still connected
+	blinkerLocalControlStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("208"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
@@ -219,9 +224,14 @@ func (b *Blinker) IsConnecting() bool {
 	return b.state == BlinkerConnecting
 }
 
-// IsConnected returns true when FC has an active connection to LR.
+// IsConnected returns true when FC has an active connection to LR in remote control mode.
 func (b *Blinker) IsConnected() bool {
 	return b.state == BlinkerConnected
+}
+
+// IsLocalControl returns true when FC is connected to LR but has local control.
+func (b *Blinker) IsLocalControl() bool {
+	return b.state == BlinkerLocalControl
 }
 
 // View renders the blinker slot
@@ -273,6 +283,12 @@ func (b *Blinker) View() string {
 		} else {
 			content = " "
 		}
+	case BlinkerLocalControl:
+		if b.visible {
+			content = blinkerLocalControlStyle.Render(SolidBlock)
+		} else {
+			content = " "
+		}
 	}
 
 	return openBracket + content + closeBracket
@@ -281,6 +297,11 @@ func (b *Blinker) View() string {
 // IsCondocMode returns true if the blinker is in condoc mode
 func (b *Blinker) IsCondocMode() bool {
 	return b.state == BlinkerCondoc
+}
+
+// IsRemoteControlActive returns true when FC is connected to LR (remote or local control).
+func (b *Blinker) IsRemoteControlActive() bool {
+	return b.state == BlinkerConnected || b.state == BlinkerLocalControl
 }
 
 // ShouldBlink returns true if the blinker should be ticking

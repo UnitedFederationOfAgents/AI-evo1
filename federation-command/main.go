@@ -25,6 +25,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
+	"representable"
 )
 
 // Version information
@@ -34,6 +35,7 @@ const Version = "0.1.0"
 const (
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 	DefaultAgent       = "claude"
+	DefaultLRAddr      = "localhost:8082" // local-representative representable TCP address
 )
 
 // Mode constants for agent permission levels
@@ -331,6 +333,9 @@ type appModel struct {
 	visualLogFile *os.File
 	visualLogPath string
 
+	// Representable connection to local-representative
+	reprClient *representable.Client
+
 	quitting    bool
 	windowWidth int
 }
@@ -392,6 +397,25 @@ type ridealongCustomCmdDoneMsg struct {
 func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd {
 	return func() tea.Msg {
 		return ridealongExecReadyMsg{runCmd: runCmd, callback: callback}
+	}
+}
+
+// reprConnectedMsg is sent when a TCP connection to local-representative succeeds.
+type reprConnectedMsg struct {
+	client *representable.Client
+}
+
+// reprConnectFailedMsg is sent when the connection attempt times out or errors.
+type reprConnectFailedMsg struct{}
+
+// attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
+func attemptConnectCmd() tea.Cmd {
+	return func() tea.Msg {
+		client, err := representable.Connect(DefaultLRAddr, "federation-command", 3*time.Second)
+		if err != nil {
+			return reprConnectFailedMsg{}
+		}
+		return reprConnectedMsg{client: client}
 	}
 }
 
@@ -560,11 +584,15 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				return m, m.blinker.ResetTick()
 			}
-			// Exit blinker select mode if active
-			if m.blinker.IsSelectMode() {
+			// Exit blinker select/connecting/connected mode if active
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
+				if m.reprClient != nil {
+					m.reprClient.Close()
+					m.reprClient = nil
+				}
 				m.blinker.SetState(BlinkerIdle)
 				m.input.Focus()
-				return m, nil // tick chain is already running (select→idle, same gen)
+				return m, m.blinker.ResetTick()
 			}
 			if m.input.Value() == "" {
 				m.quitting = true
@@ -684,6 +712,30 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BlinkerFlashMsg:
 		cmd := m.blinker.Flash()
 		return m, cmd
+
+	case BlinkerConnectingTickMsg:
+		cmd := m.blinker.ConnectingTick()
+		return m, cmd
+
+	case reprConnectedMsg:
+		if !m.blinker.IsConnecting() {
+			// Arrived after cancellation; discard and close.
+			msg.client.Close()
+			return m, nil
+		}
+		if m.reprClient != nil {
+			m.reprClient.Close()
+		}
+		m.reprClient = msg.client
+		m.blinker.SetState(BlinkerConnected)
+		return m, m.blinker.ResetTick()
+
+	case reprConnectFailedMsg:
+		if m.blinker.IsConnecting() {
+			m.blinker.SetState(BlinkerIdle)
+			return m, m.blinker.ResetTick()
+		}
+		return m, nil
 
 	case DynapaneTickMsg:
 		cmd := m.dynapane.Tick()
@@ -1028,10 +1080,10 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash
+	// Up in blinker select mode initiates connection to local-representative.
 	if m.blinker.IsSelectMode() {
-		cmd := m.blinker.StartFlash()
-		return m, cmd
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd())
 	}
 
 	if len(m.history) == 0 || m.inMultiLine {

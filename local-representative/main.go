@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"representable"
 )
 
 //go:embed frontend/dist
@@ -42,9 +43,10 @@ type wsClient struct {
 
 // Server manages WebSocket clients and broadcasts status updates.
 type Server struct {
-	upgrader websocket.Upgrader
-	mu       sync.RWMutex
-	clients  map[*wsClient]bool
+	upgrader   websocket.Upgrader
+	mu         sync.RWMutex
+	clients    map[*wsClient]bool
+	reprServer *representable.Server
 }
 
 func newServer() *Server {
@@ -83,11 +85,15 @@ func (s *Server) broadcast(typ string, payload interface{}) {
 	}
 }
 
-// currentStatus returns the current service statuses (all healthy for now).
-func currentStatus() StatusMsg {
+// currentStatus returns service statuses; federation-command reflects live heartbeat health.
+func (s *Server) currentStatus() StatusMsg {
+	fcStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("federation-command") {
+		fcStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
-			{Name: "federation-command", Status: "healthy"},
+			{Name: "federation-command", Status: fcStatus},
 			{Name: "condoccer", Status: "healthy"},
 			{Name: "worker", Status: "healthy"},
 		},
@@ -112,7 +118,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	// Send initial status.
-	go s.sendToClient(c, "status", currentStatus())
+	go s.sendToClient(c, "status", s.currentStatus())
 
 	// Write pump.
 	go func() {
@@ -152,7 +158,7 @@ func (s *Server) broadcastLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		s.broadcast("status", currentStatus())
+		s.broadcast("status", s.currentStatus())
 	}
 }
 
@@ -196,10 +202,19 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 
 func main() {
 	port := flag.String("port", "8081", "HTTP port to listen on")
+	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
 	flag.Parse()
 
 	s := newServer()
+
+	reprSrv, err := representable.NewServer(":" + *reprPort)
+	if err != nil {
+		log.Fatal("representable server:", err)
+	}
+	s.reprServer = reprSrv
+	log.Printf("representable server listening on tcp://localhost:%s", *reprPort)
+
 	go s.broadcastLoop()
 
 	addr := ":" + *port

@@ -713,6 +713,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 		var postOutput string
 		if msg.execErr != nil {
 			if _, ok := msg.execErr.(*exec.ExitError); ok {
@@ -2438,6 +2442,9 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		if agentCmd == nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errOutput)
+		}
+		if m.reprOutPath != "" {
+			agentCmd = teeCommandAppend(agentCmd, m.reprOutPath)
 		}
 		return m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
 			return agentDoneMsg{

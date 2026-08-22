@@ -186,7 +186,23 @@ Everything looks correct. Here's a summary of what changed in this revision:
 - `federation-command/main.go`: When LR is connected, regular shell commands are tee'd to a temp file; after each command completes (`cmdDoneMsg`), new lines are read from that file and forwarded to LR via `SendOutput()`.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
+
+The output is captured perfectly on local-representative from bash commands like 'echo hi', but the output is not captured from embedded commands like 'agent -p "You up?"'.
+
+Let's fix that one last item to finish this first pass.
+
+
+[`22db865`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/22db865fcbce5b2e55f53bb1fd5af256886b4ce4)
+
+## Reply G
+
+Both changes look correct. The fix is complete.
+
+**Revision G summary:** The root cause was that `agent` commands bypassed the output capture pipeline entirely. Two changes were made to `federation-command/main.go`: (1) at the `agent <args>` dispatch site, the built `agentCmd` is now wrapped with the existing `teeCommandAppend` helper when `m.reprOutPath` is set, so agent output gets tee'd to the same capture file as regular commands; (2) in the `agentDoneMsg` handler, a call to `sendNewOutputToRepr()` was added (mirroring the identical block already in `cmdDoneMsg`) to flush whatever was written to that file and forward it to local-representative via `SendOutput`.
+
+
+## <REPLACE-Revision|Retry> H
 
 <REPLACE-PROMPT>
 

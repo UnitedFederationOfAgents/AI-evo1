@@ -5,7 +5,7 @@ const TABS = ['federation-command', 'condoccer', 'worker'] as const
 type Tab = typeof TABS[number]
 
 interface LogEntry {
-  kind: 'cmd' | 'state'
+  kind: 'cmd' | 'output' | 'state'
   text: string
 }
 
@@ -63,12 +63,17 @@ function useStatusWS() {
             }
             break
           }
-          case 'fc-log':
+          case 'fc-log': {
+            const logPayload = msg.payload as FCLogMsg
             setFcLog(prev => [
               ...prev.slice(-199),
-              { kind: 'cmd', text: (msg.payload as FCLogMsg).line },
+              {
+                kind: logPayload.kind === 'output' ? 'output' : 'cmd',
+                text: logPayload.line,
+              },
             ])
             break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -122,6 +127,8 @@ function FCCommandPanel({
           : fcLog.map((entry, i) =>
               entry.kind === 'state'
                 ? <div key={i} className="fc-log-state">{entry.text}</div>
+                : entry.kind === 'output'
+                ? <div key={i} className="fc-log-output">{entry.text}</div>
                 : <div key={i} className="fc-log-line">
                     <span className="fc-log-prompt">$</span> {entry.text}
                   </div>

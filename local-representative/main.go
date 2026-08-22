@@ -37,6 +37,7 @@ type FCStateMsg struct {
 // FCLogMsg is the payload of "fc-log" WebSocket messages.
 type FCLogMsg struct {
 	Line string `json:"line"`
+	Kind string `json:"kind,omitempty"` // "cmd" or "output"
 }
 
 // wsMsg is the wire format for all WebSocket messages.
@@ -262,9 +263,9 @@ func main() {
 			s.setFCState(state)
 		}
 	})
-	reprSrv.SetLogHandler(func(name, line string) {
+	reprSrv.SetLogHandler(func(name, line, kind string) {
 		if name == "federation-command" {
-			s.broadcast("fc-log", FCLogMsg{Line: line})
+			s.broadcast("fc-log", FCLogMsg{Line: line, Kind: kind})
 		}
 	})
 

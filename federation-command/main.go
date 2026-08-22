@@ -334,9 +334,11 @@ type appModel struct {
 	visualLogPath string
 
 	// Representable connection to local-representative
-	reprClient   *representable.Client
-	remoteCmdCh  chan string    // receives commands sent from LR to execute in FC
-	listenerStop chan struct{}  // closed to cancel the active listenForRemoteCmdCmd goroutine
+	reprClient    *representable.Client
+	remoteCmdCh   chan string   // receives commands sent from LR to execute in FC
+	listenerStop  chan struct{} // closed to cancel the active listenForRemoteCmdCmd goroutine
+	reprOutPath   string       // temp file path for tee'd output when LR is connected
+	reprOutOffset int64        // bytes already forwarded from reprOutPath
 
 	quitting    bool
 	windowWidth int
@@ -446,6 +448,12 @@ func (m *appModel) disconnectRepr() {
 	// Cancel the running listener goroutine by closing the old stop channel.
 	close(m.listenerStop)
 	m.listenerStop = make(chan struct{})
+	// Clean up output capture temp file.
+	if m.reprOutPath != "" {
+		os.Remove(m.reprOutPath)
+		m.reprOutPath = ""
+		m.reprOutOffset = 0
+	}
 }
 
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
@@ -683,6 +691,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
 		if !m.blinker.IsRemoteControlActive() {
 			m.blinker.SetState(BlinkerIdle)
@@ -767,6 +779,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default: // drop if full
 			}
 		})
+		// Create temp file for output capture.
+		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
+			tf.Close()
+			m.reprOutPath = tf.Name()
+			m.reprOutOffset = 0
+		}
 		// Announce initial control mode so LR shows the entry field immediately.
 		m.reprClient.SendState("remote-control")
 		m.blinker.SetState(BlinkerConnected)
@@ -774,7 +792,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case reprConnectFailedMsg:
 		if m.blinker.IsConnecting() {
-			m.blinker.SetState(BlinkerIdle)
+			// Failed to connect — return to select mode so user can try again.
+			m.blinker.SetState(BlinkerSelect)
 			return m, m.blinker.ResetTick()
 		}
 		return m, nil
@@ -1148,11 +1167,15 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
-	// Up while connected/connecting deselects and disconnects from LR.
-	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+	if m.blinker.IsSelectMode() {
+		// Up in select mode: initiate LR connection attempt.
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd())
+	}
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+		// Cancel/disconnect — return to select mode (not back to terminal).
 		m.disconnectRepr()
-		m.blinker.SetState(BlinkerIdle)
-		m.input.Focus()
+		m.blinker.SetState(BlinkerSelect)
 		return m, m.blinker.ResetTick()
 	}
 
@@ -1176,11 +1199,15 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 }
 
 func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
-	// Down while connected/connecting deselects and disconnects from LR.
-	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+	if m.blinker.IsSelectMode() {
+		// Down in select mode: initiate LR connection attempt.
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd())
+	}
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+		// Cancel/disconnect — return to select mode (not back to terminal).
 		m.disconnectRepr()
-		m.blinker.SetState(BlinkerIdle)
-		m.input.Focus()
+		m.blinker.SetState(BlinkerSelect)
 		return m, m.blinker.ResetTick()
 	}
 
@@ -1280,10 +1307,10 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 	if cursorPos == 0 && inputVal == "" {
 		switch m.blinker.State() {
 		case BlinkerIdle:
-			// Start connecting to LR immediately; visually enters connecting state.
-			connectCmd := m.blinker.StartConnecting()
+			// Left selects the blinker (solid grey dot); up or down then initiates connection.
+			m.blinker.SetState(BlinkerSelect)
 			m.input.Blur()
-			return m, tea.Batch(connectCmd, attemptConnectCmd())
+			return m, m.blinker.ResetTick()
 		case BlinkerInactive:
 			// Resume idle blinking from stopped state
 			m.blinker.SetState(BlinkerIdle)
@@ -1813,7 +1840,7 @@ func (m appModel) executeRidealongCustomCmd(text string) (appModel, tea.Cmd) {
 		return m, tea.Sequence(echo, deferRidealongExec(agentCmd, mkDone))
 	}
 
-	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath, "")
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, mkDone))
 }
 
@@ -2045,7 +2072,7 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	}
 
 	// Regular command — run via subprocess
-	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath, "")
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -2471,7 +2498,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	}
 
 	// Regular command - wrap with clauditable
-	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return cmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -2483,13 +2510,21 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 }
 
 // buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
-// If logPath is non-empty, command output is tee'd to that file (non-interactive commands only).
+// logPath and reprOutPath are optional tee targets (non-interactive commands only).
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
+func buildRunCmd(cmdLine, sessionDir, logPath, reprOutPath string) *exec.Cmd {
 	actualCmd := cmdLine
-	if logPath != "" {
-		escapedPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
-		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escapedPath)
+	escape := func(p string) string {
+		return "'" + strings.ReplaceAll(p, "'", "'\\''") + "'"
+	}
+	switch {
+	case logPath != "" && reprOutPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s | tee -a %s",
+			cmdLine, escape(logPath), escape(reprOutPath))
+	case logPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escape(logPath))
+	case reprOutPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escape(reprOutPath))
 	}
 
 	clauditablePath, err := findBinary("clauditable")
@@ -2508,6 +2543,34 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 	)
 	cmd.Env = env
 	return cmd
+}
+
+// sendNewOutputToRepr reads lines appended to path since offset and sends each via client.SendOutput.
+// Returns the new file offset after reading.
+func sendNewOutputToRepr(path string, offset int64, client *representable.Client) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return offset
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() <= offset {
+		return offset
+	}
+	if _, err := f.Seek(offset, 0); err != nil {
+		return offset
+	}
+	buf := make([]byte, fi.Size()-offset)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return offset
+	}
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		if line != "" {
+			client.SendOutput(line)
+		}
+	}
+	return offset + int64(n)
 }
 
 // buildAgentCmd builds an exec.Cmd for agent invocation, parsing mode flags and -provide-records.

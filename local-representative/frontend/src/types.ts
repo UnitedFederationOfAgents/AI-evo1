@@ -13,4 +13,5 @@ export interface FCStateMsg {
 
 export interface FCLogMsg {
   line: string
+  kind?: string // "cmd" or "output"
 }

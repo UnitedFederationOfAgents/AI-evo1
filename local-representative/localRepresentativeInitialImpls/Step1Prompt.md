@@ -157,7 +157,36 @@ Everything looks correct. The implementation is complete. Here's a summary of wh
 **`local-representative/frontend/src/index.css`:** Removed `.fc-local-control`, `.fc-remote-control`, and mode-badge classes; added `.fc-panel`, `.fc-output`, and `.fc-log-state` (centered italic dimmed text for state notifications). The `$` prompt in the log now uses blue (`#5bb8ff`) consistently.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
+
+The input timeline where we can now see state changes has improved.
+
+We need to fix the selector logic now - we are supposed to need to press left then up or down to connect, not just left. And when we press up or down to cancel the connection we should stay on a highlighted blinking grey curson, we shouldn't warp back to the terminal.
+
+We also still need the OUTPUT DIALOG in the UI, where we see everything that comes out of the CLI output.
+
+Let's fix these items now.
+
+
+[`9acb233`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9acb2339a4d127227feb694f1ae33859d76a16e2)
+
+## Reply F
+
+Everything looks correct. Here's a summary of what changed in this revision:
+
+**Selector logic fix (federation-command/main.go):**
+- `handleLeft()`: `BlinkerIdle` now enters `BlinkerSelect` (solid blinking grey dot) instead of immediately connecting. Up or down from select mode now triggers the connection attempt.
+- `handleHistoryUp()` / `handleHistoryDown()`: When in `BlinkerSelect`, pressing up/down starts connecting to LR. When in `BlinkerConnecting`, `BlinkerConnected`, or `BlinkerLocalControl`, up/down now returns to `BlinkerSelect` (staying on the highlighted grey cursor) instead of warping back to terminal idle.
+- `reprConnectFailedMsg` handler: connection failure now returns to `BlinkerSelect` so the user can retry without pressing left again.
+
+**Output dialog (across 6 files):**
+- `representable/representable.go`: Added `Kind` field to `Msg`, `SendOutput()` method on `Client`, and updated `SetLogHandler` signature to pass `kind` along to the callback.
+- `local-representative/main.go`: `FCLogMsg` now carries a `Kind` field; `SetLogHandler` forwards it to the browser.
+- `local-representative/frontend/src/types.ts` / `App.tsx` / `index.css`: Frontend now distinguishes `'output'` log entries (indented, dimmer color, `pre-wrap`) from `'cmd'` entries (with `$` prompt).
+- `federation-command/main.go`: When LR is connected, regular shell commands are tee'd to a temp file; after each command completes (`cmdDoneMsg`), new lines are read from that file and forwarded to LR via `SendOutput()`.
+
+
+## <REPLACE-Revision|Retry> G
 
 <REPLACE-PROMPT>
 

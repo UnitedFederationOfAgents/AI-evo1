@@ -178,6 +178,13 @@ body {
   text-align: center;
 }
 
+.fc-log-output {
+  padding: 1px 0 1px 14px;
+  color: #888;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* Remote control: command input — shown only in remote-control mode */
 
 .fc-command-area {

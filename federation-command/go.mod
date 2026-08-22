@@ -2,6 +2,10 @@ module federation-command
 
 go 1.21
 
+require representable v0.0.0
+
+replace representable => ../representable
+
 require (
 	github.com/charmbracelet/bubbles v0.20.0
 	github.com/charmbracelet/bubbletea v1.3.4

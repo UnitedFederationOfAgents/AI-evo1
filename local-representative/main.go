@@ -195,7 +195,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 }
 
 func main() {
-	port := flag.String("port", "8080", "HTTP port to listen on")
+	port := flag.String("port", "8081", "HTTP port to listen on")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
 	flag.Parse()
 

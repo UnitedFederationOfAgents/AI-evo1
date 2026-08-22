@@ -22,7 +22,7 @@ run: build
 dev:
 	go run . -dev
 
-# Run the Vite dev server (proxies /ws to the Go server on :8080).
+# Run the Vite dev server (proxies /ws to the Go server on :8081).
 dev-frontend:
 	cd frontend && npm run dev
 

@@ -22,7 +22,19 @@ The implementation is complete. All files have been created and verified. Here's
 The `local-representative` skeleton was created at `/workspaces/research/AI-evo1/local-representative/` mirroring the condoccer's architecture — a Go backend with an embedded React/TypeScript/Vite frontend. The Go server handles WebSocket connections and broadcasts service status updates for `federation-command`, `condoccer`, and `worker` (all hardcoded as "healthy"). The React frontend renders a top tab bar with the three service tabs, each displaying a green "healthy" indicator, styled with condoccer's dark VS Code-like theme. The root Makefile was updated to include `local-representative` in `SUBPROJECTS`, and the sub-project Makefile exposes the same `build`, `run`, `dev`, `dev-frontend`, `clean`, `test`, and `deploy-dev-binary` targets as the other sub-applications.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
+
+Let's quick adjust local-representative's default port - condoccer uses 8080, we need something different.
+
+
+[`e2a5556`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e2a555664b2717d0fa4075c0988e90669eea01e3)
+
+## Reply A
+
+Changed local-representative's default port from `8080` to `8081` in three places: the Go flag default in `main.go`, the Vite proxy target in `frontend/vite.config.ts`, and the comment in the `Makefile`. Condoccer remains on 8080 and local-representative will now bind to 8081 by default.
+
+
+## <REPLACE-Revision|Retry> B
 
 <REPLACE-PROMPT>
 

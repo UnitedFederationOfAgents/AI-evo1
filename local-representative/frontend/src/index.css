@@ -1,0 +1,124 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ---- Tab bar ---- */
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  height: 40px;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.app-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.tabs {
+  display: flex;
+  flex: 1;
+  height: 100%;
+}
+
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 0 16px;
+  height: 100%;
+  cursor: pointer;
+  transition: color 0.1s;
+  white-space: nowrap;
+}
+
+.tab:hover { color: #ccc; }
+
+.tab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+}
+
+.conn-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.conn-dot-ok  { background: #4ec94e; }
+.conn-dot-err { background: #cc4444; }
+
+/* ---- Main pane ---- */
+
+.main-pane {
+  flex: 1;
+  overflow: auto;
+  padding: 40px;
+}
+
+.service-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.service-name {
+  font-size: 22px;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+.health-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.health-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.health-healthy .health-dot  { background: #4ec94e; }
+.health-healthy .health-label { color: #4ec94e; }
+
+.health-unhealthy .health-dot  { background: #cc4444; }
+.health-unhealthy .health-label { color: #cc4444; }

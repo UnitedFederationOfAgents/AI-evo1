@@ -415,6 +415,75 @@ type reprConnectFailedMsg struct{}
 // reprRemoteCmdMsg is sent when LR delivers a command for FC to execute.
 type reprRemoteCmdMsg struct{ cmd string }
 
+// ridealongStatePayload is sent over the representable data channel to broadcast ridealong state.
+type ridealongStatePayload struct {
+	Active       bool     `json:"active"`
+	Title        string   `json:"title,omitempty"`
+	CurrentIndex int      `json:"current_index,omitempty"`
+	TotalSteps   int      `json:"total_steps,omitempty"`
+	CurrentCmd   string   `json:"current_cmd,omitempty"`
+	PrevCmd      string   `json:"prev_cmd,omitempty"`
+	PrevExitCode int      `json:"prev_exit_code,omitempty"`
+	NextCmd      string   `json:"next_cmd,omitempty"`
+	Autoplay     bool     `json:"autoplay,omitempty"`
+	Countdown    string   `json:"countdown,omitempty"`
+	Waypoints    []string `json:"waypoints,omitempty"`
+}
+
+// condocStatePayload is sent over the representable data channel to broadcast condoc state.
+type condocStatePayload struct {
+	Active    bool   `json:"active"`
+	Name      string `json:"name,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	StepNum   int    `json:"step_num,omitempty"`
+	StatusMsg string `json:"status_msg,omitempty"`
+}
+
+// sendRidealongState pushes the current ridealong state to local-representative.
+func (m appModel) sendRidealongState() {
+	if m.reprClient == nil {
+		return
+	}
+	if m.ridealong == nil || !m.ridealong.IsActive() {
+		m.reprClient.SendData("ridealong-state", ridealongStatePayload{Active: false})
+		return
+	}
+	r := m.ridealong
+	prevCmd, prevExitCode := r.PreviousCommand()
+	m.reprClient.SendData("ridealong-state", ridealongStatePayload{
+		Active:       true,
+		Title:        r.DisplayTitle(),
+		CurrentIndex: r.currentIndex,
+		TotalSteps:   len(r.steps),
+		CurrentCmd:   r.CurrentCommand(),
+		PrevCmd:      prevCmd,
+		PrevExitCode: prevExitCode,
+		NextCmd:      r.NextCommand(),
+		Autoplay:     r.autoplay,
+		Countdown:    r.CountdownDisplay(),
+		Waypoints:    r.waypointOrder,
+	})
+}
+
+// sendCondocState pushes the current condoc state to local-representative.
+func (m appModel) sendCondocState() {
+	if m.reprClient == nil {
+		return
+	}
+	if m.condoc == nil || !m.condoc.active {
+		m.reprClient.SendData("condoc-state", condocStatePayload{Active: false})
+		return
+	}
+	cs := m.condoc
+	m.reprClient.SendData("condoc-state", condocStatePayload{
+		Active:    true,
+		Name:      cs.description,
+		Phase:     cs.phase.label(),
+		StepNum:   cs.stepNum,
+		StatusMsg: cs.statusMsg,
+	})
+}
+
 // attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
 func attemptConnectCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -811,6 +880,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.blinker.IsConnected() {
 			return m, listenCmd
 		}
+		// Intercept ridealong control commands before executing as shell commands.
+		if strings.HasPrefix(msg.cmd, "__ridealong:") {
+			newM, ridCmd := m.handleRidealongRemoteCmd(strings.TrimPrefix(msg.cmd, "__ridealong:"))
+			return newM, tea.Batch(ridCmd, listenCmd)
+		}
 		// Echo the command to LR's output pane so the remote operator sees it.
 		if m.reprClient != nil {
 			m.reprClient.SendLog(msg.cmd)
@@ -938,19 +1012,29 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ---- condoc messages ----
 	case condocTickMsg:
-		return m.handleCondocTick()
+		newM, cmd := m.handleCondocTick()
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocGitDoneMsg:
-		return m.handleCondocGitDone(msg)
+		newM, cmd := m.handleCondocGitDone(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocPullDoneMsg:
-		return m.handleCondocPullDone(msg)
+		newM, cmd := m.handleCondocPullDone(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocAgentStepDoneMsg:
-		return m.handleCondocAgentDone(msg)
+		newM, cmd := m.handleCondocAgentDone(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocRetryReadyMsg:
-		return m.handleCondocRetryReady(msg)
+		newM, cmd := m.handleCondocRetryReady(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case revertGitDoneMsg:
 		return m.handleCondocRevertDone(msg)
@@ -1770,6 +1854,45 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	}
 }
 
+// handleRidealongRemoteCmd dispatches a ridealong control action received from local-representative.
+// The action is the string after "__ridealong:" in the command.
+func (m appModel) handleRidealongRemoteCmd(action string) (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.IsActive() {
+		return m, nil
+	}
+	switch {
+	case action == "execute":
+		return m.executeRidealongCommand()
+	case action == "exit":
+		return m.exitRidealong()
+	case action == "autoplay":
+		if m.ridealong.autoplay {
+			m.ridealong.AutoplayDeactivate()
+		} else {
+			m.ridealong.EnableAutoplay()
+		}
+		m.sendRidealongState()
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	case strings.HasPrefix(action, "waypoint:"):
+		name := strings.TrimPrefix(action, "waypoint:")
+		if m.ridealong.JumpToWaypoint(name) {
+			if m.ridealong.IsDiveStep() {
+				return m.enterDiveStep()
+			}
+			m.input.SetValue(m.ridealong.CurrentCommand())
+			m.blinker.SetState(BlinkerRidealong)
+		}
+		m.sendRidealongState()
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	case strings.HasPrefix(action, "custom:"):
+		text := strings.TrimSpace(strings.TrimPrefix(action, "custom:"))
+		if text != "" {
+			return m.executeRidealongCustomCmd(text)
+		}
+	}
+	return m, nil
+}
+
 // handleCustomCmdKey handles key presses while the custom command sub-menu is open.
 func (m appModel) handleCustomCmdKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	r := m.ridealong
@@ -1862,6 +1985,7 @@ func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
 	}
 	m.input.SetValue(r.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
 }
 
@@ -1883,6 +2007,7 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	}
 	m.ridealong.Deactivate()
 	m.ridealong = nil
+	m.sendRidealongState()
 	m.ridealongDynapane.Deactivate()
 	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
@@ -1919,6 +2044,7 @@ func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
 	if exitCode != 0 && m.ridealong.debug && m.ridealong.autoProposeFix {
 		return m.reviewLastRidealongStep()
 	}
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 }
 
@@ -2207,6 +2333,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		m.input.SetValue(ridealong.CurrentCommand())
 		m.input.Blur() // Disable normal input in ridealong mode
 		m.logRecord(line, cmdTime, deltaMs, 0)
+		m.sendRidealongState()
 		cmd := tea.Batch(debugMsg, m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
 		return m, cmd
 	}
@@ -2236,6 +2363,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		m.blinker.SetState(BlinkerCondoc)
 		m.input.Blur()
 		m.logRecord(line, cmdTime, deltaMs, 0)
+		m.sendCondocState()
 		return m, tea.Batch(
 			tea.Println(successStyle.Render("condoc: proposal written to "+filePath+" — add !HANDOFF! to accept")),
 			m.condocDynapane.Activate(cs),

@@ -15,3 +15,25 @@ export interface FCLogMsg {
   line: string
   kind?: string // "cmd" or "output"
 }
+
+export interface RidealongStateMsg {
+  active: boolean
+  title?: string
+  current_index?: number
+  total_steps?: number
+  current_cmd?: string
+  prev_cmd?: string
+  prev_exit_code?: number
+  next_cmd?: string
+  autoplay?: boolean
+  countdown?: string
+  waypoints?: string[]
+}
+
+export interface CondocStateMsg {
+  active: boolean
+  name?: string
+  phase?: string
+  step_num?: number
+  status_msg?: string
+}

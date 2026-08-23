@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'worker'] as const
 type Tab = typeof TABS[number]
@@ -14,6 +14,8 @@ function useStatusWS() {
   const [services, setServices] = useState<ServiceStatus[]>([])
   const [fcState, setFcState] = useState<string>('')
   const [fcLog, setFcLog] = useState<LogEntry[]>([])
+  const [ridealongState, setRidealongState] = useState<RidealongStateMsg | null>(null)
+  const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -23,6 +25,15 @@ function useStatusWS() {
       wsRef.current.send(JSON.stringify({
         type: 'command',
         payload: { cmd },
+      }))
+    }
+  }, [])
+
+  const sendRidealongCommand = useCallback((action: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'ridealong-command',
+        payload: { action },
       }))
     }
   }, [])
@@ -74,6 +85,16 @@ function useStatusWS() {
             ])
             break
           }
+          case 'ridealong-state': {
+            const payload = msg.payload as RidealongStateMsg
+            setRidealongState(payload.active ? payload : null)
+            break
+          }
+          case 'condoc-state': {
+            const payload = msg.payload as CondocStateMsg
+            setCondocState(payload.active ? payload : null)
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -89,7 +110,7 @@ function useStatusWS() {
     }
   }, [connect])
 
-  return { connected, services, fcState, fcLog, sendCommand }
+  return { connected, services, fcState, fcLog, ridealongState, condocState, sendCommand, sendRidealongCommand }
 }
 
 function FCCommandPanel({
@@ -157,9 +178,168 @@ function FCCommandPanel({
   )
 }
 
+function RidealongPanel({
+  state,
+  fcState,
+  sendRidealongCommand,
+}: {
+  state: RidealongStateMsg
+  fcState: string
+  sendRidealongCommand: (action: string) => void
+}) {
+  const [customCmd, setCustomCmd] = useState('')
+  const canControl = fcState === 'remote-control'
+
+  const totalSteps = state.total_steps ?? 0
+  const currentIndex = state.current_index ?? 0
+  const stepLabel = totalSteps > 0 ? `${currentIndex + 1} / ${totalSteps}` : ''
+
+  const submitCustom = () => {
+    const text = customCmd.trim()
+    if (!text) return
+    sendRidealongCommand(`custom:${text}`)
+    setCustomCmd('')
+  }
+
+  return (
+    <div className="ra-panel">
+      <div className="ra-header">
+        <span className="ra-icon">🚔</span>
+        <span className="ra-title">ridealong</span>
+        <span className="ra-file">{state.title}</span>
+        {stepLabel && <span className="ra-progress">{stepLabel}</span>}
+      </div>
+
+      <div className="ra-steps">
+        {state.prev_cmd ? (
+          <div className="ra-step ra-step-prev">
+            <span className="ra-step-marker ra-step-marker-prev">▸</span>
+            <span className="ra-step-text">{state.prev_cmd}</span>
+            {(state.prev_exit_code ?? 0) !== 0 && (
+              <span className="ra-exit-code">[{state.prev_exit_code}]</span>
+            )}
+          </div>
+        ) : (
+          <div className="ra-step ra-step-prev">
+            <span className="ra-step-text ra-step-empty">(no previous step)</span>
+          </div>
+        )}
+        <div className="ra-step ra-step-current">
+          <span className="ra-step-marker ra-step-marker-current">✦</span>
+          <span className="ra-step-text">{state.current_cmd}</span>
+          {state.autoplay && state.countdown && (
+            <span className="ra-countdown">{state.countdown}</span>
+          )}
+        </div>
+        <div className="ra-step ra-step-next">
+          <span className="ra-step-marker ra-step-marker-next">▸</span>
+          <span className="ra-step-text">{state.next_cmd === '<end>' ? '<end>' : state.next_cmd}</span>
+        </div>
+      </div>
+
+      {canControl && (
+        <div className="ra-controls">
+          <div className="ra-actions">
+            <button
+              className="ra-btn ra-btn-primary"
+              onClick={() => sendRidealongCommand('execute')}
+              title="Execute current step"
+            >
+              execute
+            </button>
+            <button
+              className={`ra-btn ${state.autoplay ? 'ra-btn-active' : ''}`}
+              onClick={() => sendRidealongCommand('autoplay')}
+              title="Toggle autoplay"
+            >
+              {state.autoplay ? 'stop autoplay' : 'autoplay'}
+            </button>
+            <button
+              className="ra-btn ra-btn-danger"
+              onClick={() => sendRidealongCommand('exit')}
+              title="Exit ridealong"
+            >
+              exit
+            </button>
+          </div>
+
+          {state.waypoints && state.waypoints.length > 0 && (
+            <div className="ra-waypoints">
+              <span className="ra-waypoints-label">waypoints:</span>
+              {state.waypoints.map(wp => (
+                <button
+                  key={wp}
+                  className="ra-btn ra-btn-waypoint"
+                  onClick={() => sendRidealongCommand(`waypoint:${wp}`)}
+                >
+                  {wp}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="ra-custom">
+            <span className="ra-cmd-prompt">$</span>
+            <input
+              className="ra-cmd-input"
+              type="text"
+              value={customCmd}
+              placeholder="insert custom command…"
+              onChange={e => setCustomCmd(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') submitCustom() }}
+            />
+            <button className="ra-btn" onClick={submitCustom}>run</button>
+          </div>
+        </div>
+      )}
+
+      {!canControl && (
+        <div className="ra-observe-hint">observing — switch to remote control to drive</div>
+      )}
+    </div>
+  )
+}
+
+function CondocPanel({
+  state,
+  fcState,
+}: {
+  state: CondocStateMsg
+  fcState: string
+}) {
+  const canControl = fcState === 'remote-control'
+  const stepLabel = state.step_num ? `step ${state.step_num}` : ''
+
+  return (
+    <div className="condoc-panel">
+      <div className="condoc-header">
+        <span className="condoc-icon">📄</span>
+        <span className="condoc-title">condoc</span>
+        {state.name && <span className="condoc-name">{state.name}</span>}
+      </div>
+      <div className="condoc-status">
+        <div className="condoc-phase">
+          {stepLabel && <span className="condoc-step">{stepLabel}</span>}
+          <span className="condoc-phase-label">{state.phase}</span>
+        </div>
+        {state.status_msg && (
+          <div className="condoc-msg">{state.status_msg}</div>
+        )}
+      </div>
+      {!canControl && (
+        <div className="ra-observe-hint">observing — switch to remote control to drive</div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('federation-command')
-  const { connected, services, fcState, fcLog, sendCommand } = useStatusWS()
+  const {
+    connected, services, fcState, fcLog,
+    ridealongState, condocState,
+    sendCommand, sendRidealongCommand,
+  } = useStatusWS()
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -193,11 +373,26 @@ export default function App() {
             <span className="health-label">{getStatus(activeTab)}</span>
           </div>
           {activeTab === 'federation-command' && (
-            <FCCommandPanel
-              fcState={fcState}
-              fcLog={fcLog}
-              sendCommand={sendCommand}
-            />
+            <>
+              {ridealongState && (
+                <RidealongPanel
+                  state={ridealongState}
+                  fcState={fcState}
+                  sendRidealongCommand={sendRidealongCommand}
+                />
+              )}
+              {condocState && !ridealongState && (
+                <CondocPanel
+                  state={condocState}
+                  fcState={fcState}
+                />
+              )}
+              <FCCommandPanel
+                fcState={fcState}
+                fcLog={fcLog}
+                sendCommand={sendCommand}
+              />
+            </>
           )}
         </div>
       </div>

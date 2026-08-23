@@ -40,6 +40,30 @@ type FCLogMsg struct {
 	Kind string `json:"kind,omitempty"` // "cmd" or "output"
 }
 
+// RidealongStateMsg is the payload of "ridealong-state" WebSocket messages.
+type RidealongStateMsg struct {
+	Active       bool     `json:"active"`
+	Title        string   `json:"title,omitempty"`
+	CurrentIndex int      `json:"current_index,omitempty"`
+	TotalSteps   int      `json:"total_steps,omitempty"`
+	CurrentCmd   string   `json:"current_cmd,omitempty"`
+	PrevCmd      string   `json:"prev_cmd,omitempty"`
+	PrevExitCode int      `json:"prev_exit_code,omitempty"`
+	NextCmd      string   `json:"next_cmd,omitempty"`
+	Autoplay     bool     `json:"autoplay,omitempty"`
+	Countdown    string   `json:"countdown,omitempty"`
+	Waypoints    []string `json:"waypoints,omitempty"`
+}
+
+// CondocStateMsg is the payload of "condoc-state" WebSocket messages.
+type CondocStateMsg struct {
+	Active    bool   `json:"active"`
+	Name      string `json:"name,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	StepNum   int    `json:"step_num,omitempty"`
+	StatusMsg string `json:"status_msg,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -61,6 +85,12 @@ type Server struct {
 
 	fcMu    sync.RWMutex
 	fcState string // "remote-control", "local-control", or "" (disconnected)
+
+	ridealongMu    sync.RWMutex
+	ridealongState *RidealongStateMsg
+
+	condocMu    sync.RWMutex
+	condocState *CondocStateMsg
 }
 
 func newServer() *Server {
@@ -127,6 +157,24 @@ func (s *Server) setFCState(state string) {
 	s.broadcast("fc-state", FCStateMsg{State: state})
 }
 
+func (s *Server) getRidealongState() RidealongStateMsg {
+	s.ridealongMu.RLock()
+	defer s.ridealongMu.RUnlock()
+	if s.ridealongState == nil {
+		return RidealongStateMsg{Active: false}
+	}
+	return *s.ridealongState
+}
+
+func (s *Server) getCondocState() CondocStateMsg {
+	s.condocMu.RLock()
+	defer s.condocMu.RUnlock()
+	if s.condocState == nil {
+		return CondocStateMsg{Active: false}
+	}
+	return *s.condocState
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -148,6 +196,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		s.sendToClient(c, "status", s.currentStatus())
 		s.sendToClient(c, "fc-state", FCStateMsg{State: s.getFCState()})
+		s.sendToClient(c, "ridealong-state", s.getRidealongState())
+		s.sendToClient(c, "condoc-state", s.getCondocState())
 	}()
 
 	// Write pump.
@@ -185,12 +235,22 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		if m.Type == "command" && s.reprServer != nil {
-			var payload struct {
-				Cmd string `json:"cmd"`
-			}
-			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
-				s.reprServer.SendCommand("federation-command", payload.Cmd)
+		if s.reprServer != nil {
+			switch m.Type {
+			case "command":
+				var payload struct {
+					Cmd string `json:"cmd"`
+				}
+				if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
+					s.reprServer.SendCommand("federation-command", payload.Cmd)
+				}
+			case "ridealong-command":
+				var payload struct {
+					Action string `json:"action"`
+				}
+				if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Action != "" {
+					s.reprServer.SendCommand("federation-command", "__ridealong:"+payload.Action)
+				}
 			}
 		}
 	}
@@ -261,11 +321,44 @@ func main() {
 	reprSrv.SetStateChangeHandler(func(name, state string) {
 		if name == "federation-command" {
 			s.setFCState(state)
+			if state == "disconnected" {
+				s.ridealongMu.Lock()
+				s.ridealongState = nil
+				s.ridealongMu.Unlock()
+				s.broadcast("ridealong-state", RidealongStateMsg{Active: false})
+				s.condocMu.Lock()
+				s.condocState = nil
+				s.condocMu.Unlock()
+				s.broadcast("condoc-state", CondocStateMsg{Active: false})
+			}
 		}
 	})
 	reprSrv.SetLogHandler(func(name, line, kind string) {
 		if name == "federation-command" {
 			s.broadcast("fc-log", FCLogMsg{Line: line, Kind: kind})
+		}
+	})
+	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if name != "federation-command" {
+			return
+		}
+		switch dataType {
+		case "ridealong-state":
+			var payload RidealongStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.ridealongMu.Lock()
+				s.ridealongState = &payload
+				s.ridealongMu.Unlock()
+				s.broadcast("ridealong-state", payload)
+			}
+		case "condoc-state":
+			var payload CondocStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.condocMu.Lock()
+				s.condocState = &payload
+				s.condocMu.Unlock()
+				s.broadcast("condoc-state", payload)
+			}
 		}
 	})
 

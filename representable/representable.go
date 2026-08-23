@@ -22,11 +22,13 @@ const (
 
 // Msg is sent from client to server on the TCP connection.
 type Msg struct {
-	Type  string `json:"type"`            // "heartbeat", "state", "log"
-	From  string `json:"from,omitempty"`  // client name
-	State string `json:"state,omitempty"` // for type="state": "remote-control" or "local-control"
-	Line  string `json:"line,omitempty"`  // for type="log": command text or output line
-	Kind  string `json:"kind,omitempty"`  // for type="log": "cmd" (command echo) or "output" (stdout/stderr)
+	Type     string          `json:"type"`               // "heartbeat", "state", "log", "data"
+	From     string          `json:"from,omitempty"`     // client name
+	State    string          `json:"state,omitempty"`    // for type="state": "remote-control" or "local-control"
+	Line     string          `json:"line,omitempty"`     // for type="log": command text or output line
+	Kind     string          `json:"kind,omitempty"`     // for type="log": "cmd" (command echo) or "output" (stdout/stderr)
+	DataType string          `json:"data_type,omitempty"` // for type="data": subtype identifier
+	Data     json.RawMessage `json:"data,omitempty"`      // for type="data": arbitrary JSON payload
 }
 
 // ServerMsg is sent from server to client on the TCP connection.
@@ -90,6 +92,15 @@ func (c *Client) SendLog(line string) {
 // SendOutput sends a line of command stdout/stderr output to the server for display.
 func (c *Client) SendOutput(line string) {
 	c.send(Msg{Type: "log", From: c.name, Line: line, Kind: "output"})
+}
+
+// SendData sends a typed JSON payload to the server.
+func (c *Client) SendData(dataType string, payload interface{}) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	c.send(Msg{Type: "data", From: c.name, DataType: dataType, Data: json.RawMessage(b)})
 }
 
 func (c *Client) send(m Msg) {
@@ -195,8 +206,9 @@ type Server struct {
 	ln      net.Listener
 	mu      sync.RWMutex
 	states  map[string]*connState
-	onState func(name, state string)       // called on state change or disconnect
-	onLog   func(name, line, kind string) // called when client sends a log entry
+	onState func(name, state string)                          // called on state change or disconnect
+	onLog   func(name, line, kind string)                     // called when client sends a log entry
+	onData  func(name, dataType string, data json.RawMessage) // called when client sends a data message
 }
 
 // NewServer starts a TCP listener on addr and begins accepting connections.
@@ -226,6 +238,13 @@ func (s *Server) SetStateChangeHandler(fn func(name, state string)) {
 func (s *Server) SetLogHandler(fn func(name, line, kind string)) {
 	s.mu.Lock()
 	s.onLog = fn
+	s.mu.Unlock()
+}
+
+// SetDataHandler registers fn to be called when a client sends a typed data message.
+func (s *Server) SetDataHandler(fn func(name, dataType string, data json.RawMessage)) {
+	s.mu.Lock()
+	s.onData = fn
 	s.mu.Unlock()
 }
 
@@ -316,6 +335,13 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.mu.RUnlock()
 			if fn != nil {
 				fn(clientName, m.Line, m.Kind)
+			}
+		case "data":
+			s.mu.RLock()
+			fn := s.onData
+			s.mu.RUnlock()
+			if fn != nil {
+				fn(clientName, m.DataType, m.Data)
 			}
 		}
 	}

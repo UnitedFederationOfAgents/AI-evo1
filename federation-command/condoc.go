@@ -2559,6 +2559,7 @@ func (m appModel) exitCondoc() (appModel, tea.Cmd) {
 		m.condoc.active = false
 	}
 	m.condoc = nil
+	m.sendCondocState()
 	m.condocDynapane.Deactivate()
 	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")

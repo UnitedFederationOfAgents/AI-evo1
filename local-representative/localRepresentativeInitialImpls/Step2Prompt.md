@@ -176,7 +176,27 @@ All three changes are in place and look correct.
 3. **Example ridealong agent call:** Changed `agent -p "..."` to `clod -p "..."` on the relevant ridealong step in `federation-command/docs/example-ridealong.md`.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
+
+When we finish a ridealong we have initiated from local-control we correctly enter a standard cli entry local-control state functionally, but the blinking cursor shows grey when we expect blue. When we press left to enter state transition mode we also see that we do not re-enter remote control. When we change state to 'connected' again we see the connection is interrupted and re-initiated. Let's fix this.
+
+We have also changed the 'agent' command in our example ridealong directly to 'clod' -- we want to use an argument in the agent command to select that agent instead. Let's correct that too.
+
+
+[`c65cd1f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c65cd1f63d3e96988d91b3afe13de1022de76281)
+
+## Reply D
+
+All changes look correct. The `textinput` package is already imported (used in `Init()` and `handleRight()`), so no import changes are needed.
+
+Here's a summary of what was changed:
+
+**Bug 1 (grey cursor / left-key state issue):** In `exitRidealong()`, the `BlinkerLocalControl` case now calls `m.reprClient.SendState("local-control")` (if connected) before restoring the blinker — mirroring the behavior of the normal right-arrow local-control entry path. Additionally, `textinput.Blink` was added to the returned batch so the text cursor is properly re-animated on exit, matching the same pattern used when entering local-control normally and at FC startup.
+
+**Bug 2 (agent command for ridealong):** `buildAgentCmd` now recognises a `-a AGENT` flag that overrides the current session agent for that invocation. The `example-ridealong.md` step was updated from the bare `clod -p "..."` invocation to `agent -a clod -p "..."`, keeping it within the FC `agent` command paradigm while still targeting the clod agent explicitly.
+
+
+## <REPLACE-Revision|Retry> E
 
 <REPLACE-PROMPT>
 

@@ -2033,6 +2033,9 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 		m.blinker.SetState(BlinkerConnected)
 		m.input.Blur()
 	case BlinkerLocalControl:
+		if m.reprClient != nil {
+			m.reprClient.SendState("local-control")
+		}
 		m.blinker.SetState(BlinkerLocalControl)
 		m.input.Focus()
 	default:
@@ -2043,6 +2046,7 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("ridealong ended")),
 		finishedLogMsg,
+		textinput.Blink,
 		m.blinker.ResetTick(),
 	)
 }
@@ -2742,6 +2746,7 @@ func sendNewOutputToRepr(path string, offset int64, client *representable.Client
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
 func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	mode := ModeRead
+	selectedAgent := agent
 	args := parseArgs(input)
 	var promptParts []string
 	var provideRecordsSessions []string
@@ -2756,6 +2761,11 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 			mode = ModeWrite
 		case "-x":
 			mode = ModeExecute
+		case "-a":
+			if i+1 < len(args) {
+				i++
+				selectedAgent = args[i]
+			}
 		case "-provide-records":
 			if i+1 < len(args) {
 				i++
@@ -2778,7 +2788,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 
 	var agentArgs []string
 	agentArgs = append(agentArgs, "-"+mode)
-	agentArgs = append(agentArgs, "-a", agent)
+	agentArgs = append(agentArgs, "-a", selectedAgent)
 	if model != "" {
 		agentArgs = append(agentArgs, "-m", model)
 	}
@@ -2800,7 +2810,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT="+agent,
+		"UFA_AGENT="+selectedAgent,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)

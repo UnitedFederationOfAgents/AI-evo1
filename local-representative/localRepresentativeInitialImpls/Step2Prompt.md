@@ -125,7 +125,30 @@ Everything looks good. The implementation is complete. Here's a summary of what 
 **Example files** (`federation-command/docs/example-ridealong.md`, `example-child-ridealong.md`): Self-contained ridealongs using only `echo` commands, with waypoints and a parent→child dive link, designed to demonstrate and explain ridealong mechanics non-destructively.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
+
+This implementation is a good start, but has some bugs.
+
+In this iteration we will correct the following bugs:
+- When we are in remote control and we send a command to enter a ridealong from the web console the ridealong begins in local-control instead of remote.
+- When we end a ridealong it kicks us out of connected mode but it should not
+- When we are executing a ridealong in local-control we cannot see the output appearing in the output window of LR
+
+
+[`1d708f4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1d708f44745e1d1d68b74202208b5e4d68950ce5)
+
+## Reply B
+
+All six edits are in place and look correct. The changes are entirely in `federation-command/main.go`:
+
+1. **Bug 1** — Moved the `__ridealong:` intercept before the `IsConnected()` gate in the `reprRemoteCmdMsg` handler, allowing ridealong control commands through whenever the blinker is in `BlinkerConnected` or `BlinkerRidealong` mode. This means web-console ridealong controls work after FC transitions into ridealong mode.
+
+2. **Bug 2** — Added a `ridealongPrevState BlinkerState` field to `appModel`. Before entering ridealong mode (`executeCommandCore`) the current blinker state is saved. In `exitRidealong()`, the prior state is restored: `BlinkerConnected` returns to remote-control (with `SendState("remote-control")` to LR and input blurred), `BlinkerLocalControl` returns to local-control (input focused), and any other state falls back to idle. This keeps the LR connection alive after a ridealong ends.
+
+3. **Bug 3** — Changed both `buildRunCmd(... "")` calls in `executeRidealongCommand` and `executeRidealongCustomCmd` to pass `m.reprOutPath`, and added `sendNewOutputToRepr` forwarding in both `ridealongCmdDoneMsg` and `ridealongCustomCmdDoneMsg` handlers. Ridealong command output is now tee'd to the repr file and forwarded to the LR output window.
+
+
+## <REPLACE-Revision|Retry> C
 
 <REPLACE-PROMPT>
 

@@ -54,6 +54,10 @@ echo "Ridealongs can have as many steps as you like."
 ```
 
 ```ridealong
+agent -p "We can check if our agent is up and running - are you up and running agent?"
+```
+
+```ridealong
 echo "The previous step's exit code appears if it was non-zero."
 ```
 

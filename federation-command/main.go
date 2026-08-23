@@ -322,8 +322,9 @@ type appModel struct {
 	pendingCmd string // deferred command waiting for roll-up animation to finish
 
 	// Ridealong state
-	ridealong         *Ridealong
-	ridealongDynapane RidealongDynapane
+	ridealong          *Ridealong
+	ridealongDynapane  RidealongDynapane
+	ridealongPrevState BlinkerState // blinker state before ridealong started, for restore on exit
 
 	// Condoc state
 	condoc         *CondocSession
@@ -877,13 +878,17 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Restart listener regardless of whether we execute the command.
 		listenCmd := listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop)
-		if !m.blinker.IsConnected() {
+		// Intercept ridealong control commands before the IsConnected gate so they
+		// continue to work after FC transitions from BlinkerConnected to BlinkerRidealong.
+		if strings.HasPrefix(msg.cmd, "__ridealong:") {
+			if m.blinker.IsConnected() || m.blinker.IsRidealongMode() {
+				newM, ridCmd := m.handleRidealongRemoteCmd(strings.TrimPrefix(msg.cmd, "__ridealong:"))
+				return newM, tea.Batch(ridCmd, listenCmd)
+			}
 			return m, listenCmd
 		}
-		// Intercept ridealong control commands before executing as shell commands.
-		if strings.HasPrefix(msg.cmd, "__ridealong:") {
-			newM, ridCmd := m.handleRidealongRemoteCmd(strings.TrimPrefix(msg.cmd, "__ridealong:"))
-			return newM, tea.Batch(ridCmd, listenCmd)
+		if !m.blinker.IsConnected() {
+			return m, listenCmd
 		}
 		// Echo the command to LR's output pane so the remote operator sees it.
 		if m.reprClient != nil {
@@ -934,6 +939,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 
 		// Deactivate autoplay on non-zero exit code.
 		if msg.exitCode != 0 && m.ridealong != nil {
@@ -1004,6 +1013,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 
@@ -1967,7 +1980,7 @@ func (m appModel) executeRidealongCustomCmd(text string) (appModel, tea.Cmd) {
 		return m, tea.Sequence(echo, deferRidealongExec(agentCmd, mkDone))
 	}
 
-	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath, "")
+	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, mkDone))
 }
 
@@ -2009,10 +2022,23 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	m.ridealong = nil
 	m.sendRidealongState()
 	m.ridealongDynapane.Deactivate()
-	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
 	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
-	m.input.Focus()
+	// Restore the control mode that was active before the ridealong started.
+	switch m.ridealongPrevState {
+	case BlinkerConnected:
+		if m.reprClient != nil {
+			m.reprClient.SendState("remote-control")
+		}
+		m.blinker.SetState(BlinkerConnected)
+		m.input.Blur()
+	case BlinkerLocalControl:
+		m.blinker.SetState(BlinkerLocalControl)
+		m.input.Focus()
+	default:
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+	}
 	m.prevInputLen = 0
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("ridealong ended")),
@@ -2202,7 +2228,7 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	}
 
 	// Regular command — run via subprocess
-	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath, "")
+	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -2328,6 +2354,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			ridealong.EnableDebug(logPath)
 			debugMsg = tea.Println(successStyle.Render("ridealong debug scrollback log: " + logPath))
 		}
+		m.ridealongPrevState = m.blinker.State()
 		m.ridealong = ridealong
 		m.blinker.SetState(BlinkerRidealong)
 		m.input.SetValue(ridealong.CurrentCommand())

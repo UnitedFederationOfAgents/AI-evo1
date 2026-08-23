@@ -30,6 +30,13 @@ When this increment is complete we will be able to `make build && make run` and 
 ```
 
 
+### Step 2 - <REPLACE-TITLE>
+
+```prompt
+<REPLACE-PROMPT>
+```
+
+
 ## Human-Prompt
 
-The flow of the condoc is now within the first step.
+Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.

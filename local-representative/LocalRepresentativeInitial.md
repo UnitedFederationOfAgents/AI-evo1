@@ -30,13 +30,19 @@ When this increment is complete we will be able to `make build && make run` and 
 ```
 
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Integrate secondary modes of federation-command with local-representative.
+
+[Step 2 Prompt](localRepresentativeInitialImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+During this step we will first look at our options for implementing integration between federation-command functions like ridealongs and condoc mode.
+
+We want to have as similar of an experience as possible on the web UI compared to the terminal UI. The user maintains the same paradigm of selecting between local and remote control, and both consoles are able to see the selectable option and which option the other console selects as they select it (when permitted due to local/remote control).
+
+First, in a pure-response capacity with no code updates, we will describe three paths to implementation with distinct levels of effort/comprehensiveness.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

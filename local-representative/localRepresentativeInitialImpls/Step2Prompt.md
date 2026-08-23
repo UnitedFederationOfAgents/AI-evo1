@@ -148,7 +148,35 @@ All six edits are in place and look correct. The changes are entirely in `federa
 3. **Bug 3** — Changed both `buildRunCmd(... "")` calls in `executeRidealongCommand` and `executeRidealongCustomCmd` to pass `m.reprOutPath`, and added `sendNewOutputToRepr` forwarding in both `ridealongCmdDoneMsg` and `ridealongCustomCmdDoneMsg` handlers. Ridealong command output is now tee'd to the repr file and forwarded to the LR output window.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
+
+This implementation is another step in the right direction.
+
+We are now able to see and control ridealongs in the LR console successfully in general.
+
+We have a couple of bugs to fix again, however:
+- We have regression in FC now where when we are in the standard entry portion of the CLI up and down are changing states when they should not be. (They should be allowing us to cycle through previous commands)
+- When we enter child ridealongs we do not see the update immediately, we have to wait for another step change before the view corrects itself
+
+Let's also adjust our 'agent' call in our new example ridealong so that it invokes clod rather than a real agent.
+
+
+[`1b8a0a9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1b8a0a9bb9485a6b30d9c1fa48f36262b6dad867)
+
+## Reply C
+
+All three changes are in place and look correct.
+
+**Summary of changes made:**
+
+1. **Bug 1 (up/down changing states in standard CLI entry):** Removed `m.blinker.IsLocalControl()` from the disconnect guard in both `handleHistoryUp()` and `handleHistoryDown()` — local-control mode now falls through to history cycling instead of disconnecting. Also guarded the `BlinkerInactive` state assignment with `!m.blinker.IsRemoteControlActive()` so the local-control blinker state is preserved while cycling history.
+
+2. **Bug 2 (child ridealong state not updating immediately):** Added `m.sendRidealongState()` in `enterDiveStep()` right after `m.ridealong = child` is set, matching the pattern used at every other ridealong state transition site.
+
+3. **Example ridealong agent call:** Changed `agent -p "..."` to `clod -p "..."` on the relevant ridealong step in `federation-command/docs/example-ridealong.md`.
+
+
+## <REPLACE-Revision|Retry> D
 
 <REPLACE-PROMPT>
 

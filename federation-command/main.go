@@ -1273,7 +1273,7 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 		connectCmd := m.blinker.StartConnecting()
 		return m, tea.Batch(connectCmd, attemptConnectCmd())
 	}
-	if m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
 		m.disconnectRepr()
 		m.blinker.SetState(BlinkerSelect)
@@ -1291,8 +1291,8 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 		m.input.SetValue(m.history[m.historyIdx])
 		m.input.CursorEnd()
 		m.prevInputLen = len(m.input.Value())
-		// History item selected - deactivate blinker
-		if m.blinker.State() != BlinkerInactive {
+		// History item selected - deactivate blinker (preserve LR control states)
+		if m.blinker.State() != BlinkerInactive && !m.blinker.IsRemoteControlActive() {
 			m.blinker.SetState(BlinkerInactive)
 		}
 	}
@@ -1305,7 +1305,7 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 		connectCmd := m.blinker.StartConnecting()
 		return m, tea.Batch(connectCmd, attemptConnectCmd())
 	}
-	if m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
 		m.disconnectRepr()
 		m.blinker.SetState(BlinkerSelect)
@@ -1325,15 +1325,15 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 		m.input.CursorEnd()
 		m.prevInputLen = len(m.input.Value())
 
-		// If we're back to empty input (stash was empty), resume blinker
+		// If we're back to empty input (stash was empty), resume blinker (preserve LR control states)
 		if m.input.Value() == "" {
 			if m.blinker.State() == BlinkerInactive {
 				m.blinker.SetState(BlinkerIdle)
 				return m, m.blinker.ResetTick()
 			}
 		} else {
-			// Has content - ensure blinker is inactive
-			if m.blinker.State() != BlinkerInactive {
+			// Has content - ensure blinker is inactive (preserve LR control states)
+			if m.blinker.State() != BlinkerInactive && !m.blinker.IsRemoteControlActive() {
 				m.blinker.SetState(BlinkerInactive)
 			}
 		}
@@ -2108,6 +2108,7 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 	m.ridealong = child
 	m.input.SetValue(child.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(child), m.blinker.ResetTick())
 }
 

@@ -54,7 +54,7 @@ echo "Ridealongs can have as many steps as you like."
 ```
 
 ```ridealong
-agent -p "We can check if our agent is up and running - are you up and running agent?"
+clod -p "We can check if our agent is up and running - are you up and running agent?"
 ```
 
 ```ridealong

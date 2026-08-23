@@ -11,15 +11,21 @@ import (
 type BlinkerState int
 
 const (
-	BlinkerIdle      BlinkerState = iota // Blinking with hollow grey circle (default)
-	BlinkerInactive                      // Blank, not blinking (user has typed)
-	BlinkerSelect                        // Blinking with solid grey circle (blinker select mode)
-	BlinkerRidealong                     // Blinking red/blue for ridealong mode (always on)
-	BlinkerCondoc                        // Blinking green/yellow for condoc mode (always on)
+	BlinkerIdle       BlinkerState = iota // Blinking with hollow grey circle (default)
+	BlinkerInactive                       // Blank, not blinking (user has typed)
+	BlinkerSelect                         // Blinking with solid grey circle (blinker select mode)
+	BlinkerRidealong                      // Blinking red/blue for ridealong mode (always on)
+	BlinkerCondoc                         // Blinking green/yellow for condoc mode (always on)
+	BlinkerConnecting                     // Fast blue blink while connecting to local-representative
+	BlinkerConnected                      // Slow blue blink when connected to local-representative (remote control)
+	BlinkerLocalControl                   // Slow orange blink when connected but FC has local control
 )
 
 // Standard cursor blink interval (typical terminal cursor blink rate)
 const BlinkInterval = 530 * time.Millisecond
+
+// ConnectingBlinkInterval is the fast blue flash rate while connecting to LR
+const ConnectingBlinkInterval = 100 * time.Millisecond
 
 // Blinker manages the blinker slot state and rendering
 type Blinker struct {
@@ -46,6 +52,9 @@ type BlinkerTickMsg struct{ gen int }
 // BlinkerFlashMsg is sent during flash animation
 type BlinkerFlashMsg struct{}
 
+// BlinkerConnectingTickMsg drives the fast blue flash during a connection attempt.
+type BlinkerConnectingTickMsg struct{}
+
 // tickCmd schedules the next tick, capturing the current generation.
 func (b *Blinker) tickCmd() tea.Cmd {
 	gen := b.gen
@@ -58,6 +67,13 @@ func (b *Blinker) tickCmd() tea.Cmd {
 func blinkerFlashCmd() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return BlinkerFlashMsg{}
+	})
+}
+
+// connectingTickCmd drives the fast blue pulse while a connection attempt is in flight.
+func connectingTickCmd() tea.Cmd {
+	return tea.Tick(ConnectingBlinkInterval, func(t time.Time) tea.Msg {
+		return BlinkerConnectingTickMsg{}
 	})
 }
 
@@ -99,6 +115,14 @@ var (
 
 	blinkerYellowStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("220"))
+
+	// Connected/connecting style - dark blue (connecting fast blink, local-control slow blink)
+	blinkerConnectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("33"))
+
+	// Remote-control style - light blue, alternates with blinkerConnectedStyle for remote-control indication
+	blinkerConnectedLightStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("81"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
@@ -114,8 +138,9 @@ func (b *Blinker) Tick() tea.Cmd {
 	if b.state == BlinkerInactive {
 		return nil
 	}
-	if b.state == BlinkerRidealong || b.state == BlinkerCondoc {
-		// In ridealong/condoc mode, toggle colour each tick (always visible)
+	if b.state == BlinkerRidealong || b.state == BlinkerCondoc || b.state == BlinkerConnected {
+		// Toggle colour each tick (always visible): ridealong/condoc alternate their colours;
+		// BlinkerConnected alternates dark-blue/light-blue for remote-control indication.
 		b.ridealongBlue = !b.ridealongBlue
 		b.visible = true
 	} else {
@@ -161,6 +186,25 @@ func (b *Blinker) SetState(state BlinkerState) {
 	}
 }
 
+// StartConnecting switches to BlinkerConnecting and returns the fast tick command.
+// It invalidates the normal tick chain so the two don't interfere.
+func (b *Blinker) StartConnecting() tea.Cmd {
+	b.state = BlinkerConnecting
+	b.visible = true
+	b.gen++ // invalidate any running normal tick chain
+	return connectingTickCmd()
+}
+
+// ConnectingTick toggles the connecting flash and reschedules itself.
+// Returns nil once the state is no longer BlinkerConnecting, ending the chain.
+func (b *Blinker) ConnectingTick() tea.Cmd {
+	if b.state != BlinkerConnecting {
+		return nil
+	}
+	b.visible = !b.visible
+	return connectingTickCmd()
+}
+
 // State returns the current blinker state
 func (b *Blinker) State() BlinkerState {
 	return b.state
@@ -174,6 +218,21 @@ func (b *Blinker) IsSelectMode() bool {
 // IsRidealongMode returns true if the blinker is in ridealong mode
 func (b *Blinker) IsRidealongMode() bool {
 	return b.state == BlinkerRidealong
+}
+
+// IsConnecting returns true while a connection attempt to LR is in flight.
+func (b *Blinker) IsConnecting() bool {
+	return b.state == BlinkerConnecting
+}
+
+// IsConnected returns true when FC has an active connection to LR in remote control mode.
+func (b *Blinker) IsConnected() bool {
+	return b.state == BlinkerConnected
+}
+
+// IsLocalControl returns true when FC is connected to LR but has local control.
+func (b *Blinker) IsLocalControl() bool {
+	return b.state == BlinkerLocalControl
 }
 
 // View renders the blinker slot
@@ -219,6 +278,26 @@ func (b *Blinker) View() string {
 		} else {
 			content = blinkerYellowStyle.Render(SolidBlock)
 		}
+	case BlinkerConnecting:
+		if b.visible {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = " "
+		}
+	case BlinkerConnected:
+		// Remote control: always visible, alternates dark-blue / light-blue.
+		if b.ridealongBlue {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = blinkerConnectedLightStyle.Render(SolidBlock)
+		}
+	case BlinkerLocalControl:
+		// Local control: slow on/off blue blink (user's blinking cursor already signals local mode).
+		if b.visible {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = " "
+		}
 	}
 
 	return openBracket + content + closeBracket
@@ -227,6 +306,11 @@ func (b *Blinker) View() string {
 // IsCondocMode returns true if the blinker is in condoc mode
 func (b *Blinker) IsCondocMode() bool {
 	return b.state == BlinkerCondoc
+}
+
+// IsRemoteControlActive returns true when FC is connected to LR (remote or local control).
+func (b *Blinker) IsRemoteControlActive() bool {
+	return b.state == BlinkerConnected || b.state == BlinkerLocalControl
 }
 
 // ShouldBlink returns true if the blinker should be ticking

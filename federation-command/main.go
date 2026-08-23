@@ -25,6 +25,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
+	"representable"
 )
 
 // Version information
@@ -34,6 +35,7 @@ const Version = "0.1.0"
 const (
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 	DefaultAgent       = "claude"
+	DefaultLRAddr      = "localhost:8082" // local-representative representable TCP address
 )
 
 // Mode constants for agent permission levels
@@ -320,8 +322,9 @@ type appModel struct {
 	pendingCmd string // deferred command waiting for roll-up animation to finish
 
 	// Ridealong state
-	ridealong         *Ridealong
-	ridealongDynapane RidealongDynapane
+	ridealong          *Ridealong
+	ridealongDynapane  RidealongDynapane
+	ridealongPrevState BlinkerState // blinker state before ridealong started, for restore on exit
 
 	// Condoc state
 	condoc         *CondocSession
@@ -330,6 +333,13 @@ type appModel struct {
 	// Visual log state (scrollback-log)
 	visualLogFile *os.File
 	visualLogPath string
+
+	// Representable connection to local-representative
+	reprClient    *representable.Client
+	remoteCmdCh   chan string   // receives commands sent from LR to execute in FC
+	listenerStop  chan struct{} // closed to cancel the active listenForRemoteCmdCmd goroutine
+	reprOutPath   string       // temp file path for tee'd output when LR is connected
+	reprOutOffset int64        // bytes already forwarded from reprOutPath
 
 	quitting    bool
 	windowWidth int
@@ -395,6 +405,127 @@ func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd 
 	}
 }
 
+// reprConnectedMsg is sent when a TCP connection to local-representative succeeds.
+type reprConnectedMsg struct {
+	client *representable.Client
+}
+
+// reprConnectFailedMsg is sent when the connection attempt times out or errors.
+type reprConnectFailedMsg struct{}
+
+// reprRemoteCmdMsg is sent when LR delivers a command for FC to execute.
+type reprRemoteCmdMsg struct{ cmd string }
+
+// ridealongStatePayload is sent over the representable data channel to broadcast ridealong state.
+type ridealongStatePayload struct {
+	Active       bool     `json:"active"`
+	Title        string   `json:"title,omitempty"`
+	CurrentIndex int      `json:"current_index,omitempty"`
+	TotalSteps   int      `json:"total_steps,omitempty"`
+	CurrentCmd   string   `json:"current_cmd,omitempty"`
+	PrevCmd      string   `json:"prev_cmd,omitempty"`
+	PrevExitCode int      `json:"prev_exit_code,omitempty"`
+	NextCmd      string   `json:"next_cmd,omitempty"`
+	Autoplay     bool     `json:"autoplay,omitempty"`
+	Countdown    string   `json:"countdown,omitempty"`
+	Waypoints    []string `json:"waypoints,omitempty"`
+}
+
+// condocStatePayload is sent over the representable data channel to broadcast condoc state.
+type condocStatePayload struct {
+	Active    bool   `json:"active"`
+	Name      string `json:"name,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	StepNum   int    `json:"step_num,omitempty"`
+	StatusMsg string `json:"status_msg,omitempty"`
+}
+
+// sendRidealongState pushes the current ridealong state to local-representative.
+func (m appModel) sendRidealongState() {
+	if m.reprClient == nil {
+		return
+	}
+	if m.ridealong == nil || !m.ridealong.IsActive() {
+		m.reprClient.SendData("ridealong-state", ridealongStatePayload{Active: false})
+		return
+	}
+	r := m.ridealong
+	prevCmd, prevExitCode := r.PreviousCommand()
+	m.reprClient.SendData("ridealong-state", ridealongStatePayload{
+		Active:       true,
+		Title:        r.DisplayTitle(),
+		CurrentIndex: r.currentIndex,
+		TotalSteps:   len(r.steps),
+		CurrentCmd:   r.CurrentCommand(),
+		PrevCmd:      prevCmd,
+		PrevExitCode: prevExitCode,
+		NextCmd:      r.NextCommand(),
+		Autoplay:     r.autoplay,
+		Countdown:    r.CountdownDisplay(),
+		Waypoints:    r.waypointOrder,
+	})
+}
+
+// sendCondocState pushes the current condoc state to local-representative.
+func (m appModel) sendCondocState() {
+	if m.reprClient == nil {
+		return
+	}
+	if m.condoc == nil || !m.condoc.active {
+		m.reprClient.SendData("condoc-state", condocStatePayload{Active: false})
+		return
+	}
+	cs := m.condoc
+	m.reprClient.SendData("condoc-state", condocStatePayload{
+		Active:    true,
+		Name:      cs.description,
+		Phase:     cs.phase.label(),
+		StepNum:   cs.stepNum,
+		StatusMsg: cs.statusMsg,
+	})
+}
+
+// attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
+func attemptConnectCmd() tea.Cmd {
+	return func() tea.Msg {
+		client, err := representable.Connect(DefaultLRAddr, "federation-command", 3*time.Second)
+		if err != nil {
+			return reprConnectFailedMsg{}
+		}
+		return reprConnectedMsg{client: client}
+	}
+}
+
+// listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
+func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case cmd := <-ch:
+			return reprRemoteCmdMsg{cmd: cmd}
+		case <-stop:
+			return nil
+		}
+	}
+}
+
+// disconnectRepr closes the representable client and resets the listener stop channel
+// so any in-flight listenForRemoteCmdCmd goroutine exits.
+func (m *appModel) disconnectRepr() {
+	if m.reprClient != nil {
+		m.reprClient.Close()
+		m.reprClient = nil
+	}
+	// Cancel the running listener goroutine by closing the old stop channel.
+	close(m.listenerStop)
+	m.listenerStop = make(chan struct{})
+	// Clean up output capture temp file.
+	if m.reprOutPath != "" {
+		os.Remove(m.reprOutPath)
+		m.reprOutPath = ""
+		m.reprOutOffset = 0
+	}
+}
+
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
 	ti := textinput.New()
 	ti.Focus()
@@ -421,6 +552,8 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		logFile:      logFile,
 		encoder:      encoder,
 		blinker:      NewBlinker(),
+		remoteCmdCh:  make(chan string, 8),
+		listenerStop: make(chan struct{}),
 	}
 
 	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
@@ -560,11 +693,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				return m, m.blinker.ResetTick()
 			}
-			// Exit blinker select mode if active
-			if m.blinker.IsSelectMode() {
+			// Exit blinker select/connecting/connected/local-control mode if active
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+				m.disconnectRepr()
 				m.blinker.SetState(BlinkerIdle)
 				m.input.Focus()
-				return m, nil // tick chain is already running (select→idle, same gen)
+				return m, m.blinker.ResetTick()
 			}
 			if m.input.Value() == "" {
 				m.quitting = true
@@ -605,9 +739,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleBackspace()
 
 		default:
-			// Handle other keys in blinker select mode
-			if m.blinker.IsSelectMode() {
-				// Flash the blinker to alert user they're in select mode
+			// Reject keys (with a flash) in select/connecting/remote-control states.
+			// Local-control falls through so the user can type normally.
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
 				cmd := m.blinker.StartFlash()
 				return m, cmd
 			}
@@ -627,8 +761,14 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
-		// Reset blinker to idle state after command completes
-		m.blinker.SetState(BlinkerIdle)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
+		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
 		m.prevInputLen = 0
 		return m, m.blinker.ResetTick()
 
@@ -643,6 +783,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 		var postOutput string
 		if msg.execErr != nil {
 			if _, ok := msg.execErr.(*exec.ExitError); ok {
@@ -653,8 +797,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
-		// Reset blinker to idle state after agent completes
-		m.blinker.SetState(BlinkerIdle)
+		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
 		m.prevInputLen = 0
 		return m, tea.Batch(tea.Println(postOutput), m.blinker.ResetTick())
 
@@ -684,6 +830,75 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BlinkerFlashMsg:
 		cmd := m.blinker.Flash()
 		return m, cmd
+
+	case BlinkerConnectingTickMsg:
+		cmd := m.blinker.ConnectingTick()
+		return m, cmd
+
+	case reprConnectedMsg:
+		if !m.blinker.IsConnecting() {
+			// Arrived after cancellation; discard and close.
+			msg.client.Close()
+			return m, nil
+		}
+		if m.reprClient != nil {
+			m.reprClient.Close()
+		}
+		m.reprClient = msg.client
+		// Wire up remote command delivery via the channel.
+		ch := m.remoteCmdCh
+		m.reprClient.SetCommandHandler(func(cmd string) {
+			select {
+			case ch <- cmd:
+			default: // drop if full
+			}
+		})
+		// Create temp file for output capture.
+		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
+			tf.Close()
+			m.reprOutPath = tf.Name()
+			m.reprOutOffset = 0
+		}
+		// Announce initial control mode so LR shows the entry field immediately.
+		m.reprClient.SendState("remote-control")
+		m.blinker.SetState(BlinkerConnected)
+		return m, tea.Batch(m.blinker.ResetTick(), listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop))
+
+	case reprConnectFailedMsg:
+		if m.blinker.IsConnecting() {
+			// Failed to connect — return to select mode so user can try again.
+			m.blinker.SetState(BlinkerSelect)
+			return m, m.blinker.ResetTick()
+		}
+		return m, nil
+
+	case reprRemoteCmdMsg:
+		if msg.cmd == "" {
+			return m, nil
+		}
+		// Restart listener regardless of whether we execute the command.
+		listenCmd := listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop)
+		// Intercept ridealong control commands before the IsConnected gate so they
+		// continue to work after FC transitions from BlinkerConnected to BlinkerRidealong.
+		if strings.HasPrefix(msg.cmd, "__ridealong:") {
+			if m.blinker.IsConnected() || m.blinker.IsRidealongMode() {
+				newM, ridCmd := m.handleRidealongRemoteCmd(strings.TrimPrefix(msg.cmd, "__ridealong:"))
+				return newM, tea.Batch(ridCmd, listenCmd)
+			}
+			return m, listenCmd
+		}
+		if !m.blinker.IsConnected() {
+			return m, listenCmd
+		}
+		// Echo the command to LR's output pane so the remote operator sees it.
+		if m.reprClient != nil {
+			m.reprClient.SendLog(msg.cmd)
+		}
+		// Execute the command directly (bypass handleEnter's key-rejection checks).
+		echoLine := m.input.Prompt + msg.cmd
+		echo := m.printlnLogged(echoLine)
+		newM, execCmd := m.executeCommand(msg.cmd)
+		return newM, tea.Batch(tea.Sequence(echo, execCmd), listenCmd)
 
 	case DynapaneTickMsg:
 		cmd := m.dynapane.Tick()
@@ -724,6 +939,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 
 		// Deactivate autoplay on non-zero exit code.
 		if msg.exitCode != 0 && m.ridealong != nil {
@@ -794,6 +1013,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 
@@ -802,19 +1025,29 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ---- condoc messages ----
 	case condocTickMsg:
-		return m.handleCondocTick()
+		newM, cmd := m.handleCondocTick()
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocGitDoneMsg:
-		return m.handleCondocGitDone(msg)
+		newM, cmd := m.handleCondocGitDone(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocPullDoneMsg:
-		return m.handleCondocPullDone(msg)
+		newM, cmd := m.handleCondocPullDone(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocAgentStepDoneMsg:
-		return m.handleCondocAgentDone(msg)
+		newM, cmd := m.handleCondocAgentDone(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case condocRetryReadyMsg:
-		return m.handleCondocRetryReady(msg)
+		newM, cmd := m.handleCondocRetryReady(msg)
+		newM.sendCondocState()
+		return newM, cmd
 
 	case revertGitDoneMsg:
 		return m.handleCondocRevertDone(msg)
@@ -830,10 +1063,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 
-	// Track input changes to manage blinker state
+	// Track input changes to manage blinker state.
+	// Don't deactivate the indicator while in remote/local-control mode so the
+	// orange/blue dot remains visible to the user even when they are typing.
 	currentLen := len(m.input.Value())
 	if currentLen != m.prevInputLen {
-		if currentLen > 0 && m.ridealong == nil {
+		if currentLen > 0 && m.ridealong == nil && !m.blinker.IsRemoteControlActive() {
 			// User has typed something - deactivate blinker
 			if m.blinker.State() != BlinkerInactive {
 				m.blinker.SetState(BlinkerInactive)
@@ -924,8 +1159,8 @@ func wrapAtWidth(s string, width int) string {
 }
 
 func (m appModel) handleEnter() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash and do nothing
-	if m.blinker.IsSelectMode() {
+	// Reject Enter in select/connecting/remote-control states.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		cmd := m.blinker.StartFlash()
 		return m, cmd
 	}
@@ -1016,6 +1251,11 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 		return m, echo
 	}
 
+	// In local-control mode, stream the command to LR for display.
+	if m.blinker.IsLocalControl() && m.reprClient != nil {
+		m.reprClient.SendLog(line)
+	}
+
 	newM, execCmd := m.executeCommand(line)
 	return newM, tea.Sequence(echo, execCmd)
 }
@@ -1028,10 +1268,16 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash
 	if m.blinker.IsSelectMode() {
-		cmd := m.blinker.StartFlash()
-		return m, cmd
+		// Up in select mode: initiate LR connection attempt.
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd())
+	}
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
+		// Cancel/disconnect — return to select mode (not back to terminal).
+		m.disconnectRepr()
+		m.blinker.SetState(BlinkerSelect)
+		return m, m.blinker.ResetTick()
 	}
 
 	if len(m.history) == 0 || m.inMultiLine {
@@ -1045,8 +1291,8 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 		m.input.SetValue(m.history[m.historyIdx])
 		m.input.CursorEnd()
 		m.prevInputLen = len(m.input.Value())
-		// History item selected - deactivate blinker
-		if m.blinker.State() != BlinkerInactive {
+		// History item selected - deactivate blinker (preserve LR control states)
+		if m.blinker.State() != BlinkerInactive && !m.blinker.IsRemoteControlActive() {
 			m.blinker.SetState(BlinkerInactive)
 		}
 	}
@@ -1054,10 +1300,16 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 }
 
 func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash
 	if m.blinker.IsSelectMode() {
-		cmd := m.blinker.StartFlash()
-		return m, cmd
+		// Down in select mode: initiate LR connection attempt.
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd())
+	}
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
+		// Cancel/disconnect — return to select mode (not back to terminal).
+		m.disconnectRepr()
+		m.blinker.SetState(BlinkerSelect)
+		return m, m.blinker.ResetTick()
 	}
 
 	if m.inMultiLine {
@@ -1073,15 +1325,15 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 		m.input.CursorEnd()
 		m.prevInputLen = len(m.input.Value())
 
-		// If we're back to empty input (stash was empty), resume blinker
+		// If we're back to empty input (stash was empty), resume blinker (preserve LR control states)
 		if m.input.Value() == "" {
 			if m.blinker.State() == BlinkerInactive {
 				m.blinker.SetState(BlinkerIdle)
 				return m, m.blinker.ResetTick()
 			}
 		} else {
-			// Has content - ensure blinker is inactive
-			if m.blinker.State() != BlinkerInactive {
+			// Has content - ensure blinker is inactive (preserve LR control states)
+			if m.blinker.State() != BlinkerInactive && !m.blinker.IsRemoteControlActive() {
 				m.blinker.SetState(BlinkerInactive)
 			}
 		}
@@ -1156,10 +1408,10 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 	if cursorPos == 0 && inputVal == "" {
 		switch m.blinker.State() {
 		case BlinkerIdle:
-			// Enter blinker select mode — tick chain is already running, no new one needed
+			// Left selects the blinker (solid grey dot); up or down then initiates connection.
 			m.blinker.SetState(BlinkerSelect)
 			m.input.Blur()
-			return m, nil
+			return m, m.blinker.ResetTick()
 		case BlinkerInactive:
 			// Resume idle blinking from stopped state
 			m.blinker.SetState(BlinkerIdle)
@@ -1168,6 +1420,14 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 			// Already in select mode, flash to indicate we can't go further left
 			cmd := m.blinker.StartFlash()
 			return m, cmd
+		case BlinkerLocalControl:
+			// Return to remote control — LR entry field re-appears.
+			if m.reprClient != nil {
+				m.reprClient.SendState("remote-control")
+			}
+			m.blinker.SetState(BlinkerConnected)
+			m.input.Blur()
+			return m, m.blinker.ResetTick()
 		}
 	}
 
@@ -1190,12 +1450,22 @@ func (m appModel) handleRight() (appModel, tea.Cmd) {
 		return m, cmd
 	}
 
-	// If in blinker select mode, exit to idle mode and restore cursor
-	// Tick chain is still running (select→idle, same gen) so no new tick needed.
-	if m.blinker.IsSelectMode() {
+	// Right while in select/connecting mode: cancel and return to idle.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() {
+		m.disconnectRepr()
 		m.blinker.SetState(BlinkerIdle)
 		m.input.Focus()
-		return m, textinput.Blink
+		return m, m.blinker.ResetTick()
+	}
+
+	// Right while in remote control (connected): switch to local control.
+	if m.blinker.IsConnected() {
+		if m.reprClient != nil {
+			m.reprClient.SendState("local-control")
+		}
+		m.blinker.SetState(BlinkerLocalControl)
+		m.input.Focus()
+		return m, tea.Batch(textinput.Blink, m.blinker.ResetTick())
 	}
 
 	inputVal := m.input.Value()
@@ -1597,6 +1867,45 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	}
 }
 
+// handleRidealongRemoteCmd dispatches a ridealong control action received from local-representative.
+// The action is the string after "__ridealong:" in the command.
+func (m appModel) handleRidealongRemoteCmd(action string) (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.IsActive() {
+		return m, nil
+	}
+	switch {
+	case action == "execute":
+		return m.executeRidealongCommand()
+	case action == "exit":
+		return m.exitRidealong()
+	case action == "autoplay":
+		if m.ridealong.autoplay {
+			m.ridealong.AutoplayDeactivate()
+		} else {
+			m.ridealong.EnableAutoplay()
+		}
+		m.sendRidealongState()
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	case strings.HasPrefix(action, "waypoint:"):
+		name := strings.TrimPrefix(action, "waypoint:")
+		if m.ridealong.JumpToWaypoint(name) {
+			if m.ridealong.IsDiveStep() {
+				return m.enterDiveStep()
+			}
+			m.input.SetValue(m.ridealong.CurrentCommand())
+			m.blinker.SetState(BlinkerRidealong)
+		}
+		m.sendRidealongState()
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	case strings.HasPrefix(action, "custom:"):
+		text := strings.TrimSpace(strings.TrimPrefix(action, "custom:"))
+		if text != "" {
+			return m.executeRidealongCustomCmd(text)
+		}
+	}
+	return m, nil
+}
+
 // handleCustomCmdKey handles key presses while the custom command sub-menu is open.
 func (m appModel) handleCustomCmdKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	r := m.ridealong
@@ -1671,7 +1980,7 @@ func (m appModel) executeRidealongCustomCmd(text string) (appModel, tea.Cmd) {
 		return m, tea.Sequence(echo, deferRidealongExec(agentCmd, mkDone))
 	}
 
-	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, mkDone))
 }
 
@@ -1689,6 +1998,7 @@ func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
 	}
 	m.input.SetValue(r.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
 }
 
@@ -1710,15 +2020,33 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	}
 	m.ridealong.Deactivate()
 	m.ridealong = nil
+	m.sendRidealongState()
 	m.ridealongDynapane.Deactivate()
-	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
 	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
-	m.input.Focus()
+	// Restore the control mode that was active before the ridealong started.
+	switch m.ridealongPrevState {
+	case BlinkerConnected:
+		if m.reprClient != nil {
+			m.reprClient.SendState("remote-control")
+		}
+		m.blinker.SetState(BlinkerConnected)
+		m.input.Blur()
+	case BlinkerLocalControl:
+		if m.reprClient != nil {
+			m.reprClient.SendState("local-control")
+		}
+		m.blinker.SetState(BlinkerLocalControl)
+		m.input.Focus()
+	default:
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+	}
 	m.prevInputLen = 0
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("ridealong ended")),
 		finishedLogMsg,
+		textinput.Blink,
 		m.blinker.ResetTick(),
 	)
 }
@@ -1746,6 +2074,7 @@ func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
 	if exitCode != 0 && m.ridealong.debug && m.ridealong.autoProposeFix {
 		return m.reviewLastRidealongStep()
 	}
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 }
 
@@ -1783,6 +2112,7 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 	m.ridealong = child
 	m.input.SetValue(child.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(child), m.blinker.ResetTick())
 }
 
@@ -1903,7 +2233,7 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	}
 
 	// Regular command — run via subprocess
-	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -2029,11 +2359,13 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			ridealong.EnableDebug(logPath)
 			debugMsg = tea.Println(successStyle.Render("ridealong debug scrollback log: " + logPath))
 		}
+		m.ridealongPrevState = m.blinker.State()
 		m.ridealong = ridealong
 		m.blinker.SetState(BlinkerRidealong)
 		m.input.SetValue(ridealong.CurrentCommand())
 		m.input.Blur() // Disable normal input in ridealong mode
 		m.logRecord(line, cmdTime, deltaMs, 0)
+		m.sendRidealongState()
 		cmd := tea.Batch(debugMsg, m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
 		return m, cmd
 	}
@@ -2063,6 +2395,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		m.blinker.SetState(BlinkerCondoc)
 		m.input.Blur()
 		m.logRecord(line, cmdTime, deltaMs, 0)
+		m.sendCondocState()
 		return m, tea.Batch(
 			tea.Println(successStyle.Render("condoc: proposal written to "+filePath+" — add !HANDOFF! to accept")),
 			m.condocDynapane.Activate(cs),
@@ -2270,6 +2603,10 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errOutput)
 		}
+		if m.reprOutPath != "" {
+			agentCmd.Env = append(agentCmd.Env, "FORCE_COLOR=1", "CLICOLOR_FORCE=1")
+			agentCmd = teeCommandAppend(agentCmd, m.reprOutPath)
+		}
 		return m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
 			return agentDoneMsg{
 				exitCode: extractExitCode(err),
@@ -2329,7 +2666,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	}
 
 	// Regular command - wrap with clauditable
-	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return cmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -2341,13 +2678,21 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 }
 
 // buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
-// If logPath is non-empty, command output is tee'd to that file (non-interactive commands only).
+// logPath and reprOutPath are optional tee targets (non-interactive commands only).
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
+func buildRunCmd(cmdLine, sessionDir, logPath, reprOutPath string) *exec.Cmd {
 	actualCmd := cmdLine
-	if logPath != "" {
-		escapedPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
-		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escapedPath)
+	escape := func(p string) string {
+		return "'" + strings.ReplaceAll(p, "'", "'\\''") + "'"
+	}
+	switch {
+	case logPath != "" && reprOutPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s | tee -a %s",
+			cmdLine, escape(logPath), escape(reprOutPath))
+	case logPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escape(logPath))
+	case reprOutPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escape(reprOutPath))
 	}
 
 	clauditablePath, err := findBinary("clauditable")
@@ -2368,11 +2713,40 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 	return cmd
 }
 
+// sendNewOutputToRepr reads lines appended to path since offset and sends each via client.SendOutput.
+// Returns the new file offset after reading.
+func sendNewOutputToRepr(path string, offset int64, client *representable.Client) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return offset
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() <= offset {
+		return offset
+	}
+	if _, err := f.Seek(offset, 0); err != nil {
+		return offset
+	}
+	buf := make([]byte, fi.Size()-offset)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return offset
+	}
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		if line != "" {
+			client.SendOutput(stripAnsiCodes(line))
+		}
+	}
+	return offset + int64(n)
+}
+
 // buildAgentCmd builds an exec.Cmd for agent invocation, parsing mode flags and -provide-records.
 // Returns (nil, errMsg) if the invocation is invalid.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
 func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	mode := ModeRead
+	selectedAgent := agent
 	args := parseArgs(input)
 	var promptParts []string
 	var provideRecordsSessions []string
@@ -2387,6 +2761,11 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 			mode = ModeWrite
 		case "-x":
 			mode = ModeExecute
+		case "-a":
+			if i+1 < len(args) {
+				i++
+				selectedAgent = args[i]
+			}
 		case "-provide-records":
 			if i+1 < len(args) {
 				i++
@@ -2409,7 +2788,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 
 	var agentArgs []string
 	agentArgs = append(agentArgs, "-"+mode)
-	agentArgs = append(agentArgs, "-a", agent)
+	agentArgs = append(agentArgs, "-a", selectedAgent)
 	if model != "" {
 		agentArgs = append(agentArgs, "-m", model)
 	}
@@ -2431,7 +2810,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	env = append(env,
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT="+agent,
+		"UFA_AGENT="+selectedAgent,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2991,7 +3370,7 @@ func parseArgs(input string) []string {
 
 // stripAnsiCodes removes ANSI escape sequences from a string
 func stripAnsiCodes(s string) string {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[mG]`)
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansiRegex.ReplaceAllString(s, "")
 }
 

@@ -196,11 +196,6 @@ Here's a summary of what was changed:
 **Bug 2 (agent command for ridealong):** `buildAgentCmd` now recognises a `-a AGENT` flag that overrides the current session agent for that invocation. The `example-ridealong.md` step was updated from the bare `clod -p "..."` invocation to `agent -a clod -p "..."`, keeping it within the FC `agent` command paradigm while still targeting the clod agent explicitly.
 
 
-## <REPLACE-Revision|Retry> E
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1787493355 (Sun Aug 23 01:55:55 PM UTC 2026).

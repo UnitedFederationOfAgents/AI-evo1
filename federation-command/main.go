@@ -2444,6 +2444,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			return m, tea.Println(errOutput)
 		}
 		if m.reprOutPath != "" {
+			agentCmd.Env = append(agentCmd.Env, "FORCE_COLOR=1", "CLICOLOR_FORCE=1")
 			agentCmd = teeCommandAppend(agentCmd, m.reprOutPath)
 		}
 		return m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
@@ -2574,7 +2575,7 @@ func sendNewOutputToRepr(path string, offset int64, client *representable.Client
 	}
 	for _, line := range strings.Split(string(buf[:n]), "\n") {
 		if line != "" {
-			client.SendOutput(line)
+			client.SendOutput(stripAnsiCodes(line))
 		}
 	}
 	return offset + int64(n)
@@ -3203,7 +3204,7 @@ func parseArgs(input string) []string {
 
 // stripAnsiCodes removes ANSI escape sequences from a string
 func stripAnsiCodes(s string) string {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[mG]`)
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansiRegex.ReplaceAllString(s, "")
 }
 

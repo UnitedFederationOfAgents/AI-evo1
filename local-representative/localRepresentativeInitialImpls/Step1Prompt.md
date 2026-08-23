@@ -202,7 +202,30 @@ Both changes look correct. The fix is complete.
 **Revision G summary:** The root cause was that `agent` commands bypassed the output capture pipeline entirely. Two changes were made to `federation-command/main.go`: (1) at the `agent <args>` dispatch site, the built `agentCmd` is now wrapped with the existing `teeCommandAppend` helper when `m.reprOutPath` is set, so agent output gets tee'd to the same capture file as regular commands; (2) in the `agentDoneMsg` handler, a call to `sendNewOutputToRepr()` was added (mirroring the identical block already in `cmdDoneMsg`) to flush whatever was written to that file and forward it to local-representative via `SendOutput`.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
+
+The most recent fix to have the embedded-command-specific text pass correctly to the local-representative output WORKED, but it also caused us to lose our text colouration in the federation-command terminal. We want to maintain that text colouring, let's fix this regression.
+
+
+[`5998b30`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5998b306b888c58cd1919e37471c7d157ca89d07)
+
+## Reply H
+
+The build requires approval — the changes are syntactically straightforward (two env appends and one function call change), so I'm confident they compile correctly given `regexp` is already imported and `stripAnsiCodes` is already defined in scope.
+
+
+---
+
+Three targeted changes were made to `federation-command/main.go` to restore text coloring without breaking LR output:
+
+1. **`FORCE_COLOR=1` / `CLICOLOR_FORCE=1` added to agent env** (at the repr capture block): before wrapping the agent command with `teeCommandAppend`, these env vars are appended so `clauditable`/`claude` outputs ANSI color codes even when its stdout is a pipe rather than a TTY — restoring the colors visible in the FC terminal.
+
+2. **`sendNewOutputToRepr` now strips ANSI codes** before calling `client.SendOutput`, so the color escape sequences forced by `FORCE_COLOR=1` don't leak as raw garbage into the LR web UI.
+
+3. **`stripAnsiCodes` regex broadened** from `[mG]` to `[a-zA-Z]`, covering all CSI escape sequences rather than just SGR-color and cursor-column codes, ensuring the strip is complete for the wider range of codes that `FORCE_COLOR=1` can produce.
+
+
+## <REPLACE-Revision|Retry> I
 
 <REPLACE-PROMPT>
 

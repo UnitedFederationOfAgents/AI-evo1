@@ -1,4 +1,4 @@
-.PHONY: test test-all build-all clean-all deploy-dev-binaries
+.PHONY: test test-all build-all clean-all deploy-dev-binaries check-dev-deps
 
 # Sub-projects in this directory
 SUBPROJECTS = clauditable clod ambiguous-agent federation-command dungeon-keeper condoccer local-representative
@@ -40,8 +40,12 @@ clean-all:
 	@echo ""
 	@echo "=== All sub-projects cleaned ==="
 
+# Verify OS-level dependencies are present without making changes
+check-dev-deps:
+	@./scripts/install-dev-deps.sh --check
+
 # Clean dev bin dir and deploy all binaries there
-deploy-dev-binaries:
+deploy-dev-binaries: check-dev-deps
 	@echo "Cleaning $(DEV_BIN_DIR)..."
 	rm -rf $(DEV_BIN_DIR)
 	mkdir -p $(DEV_BIN_DIR)

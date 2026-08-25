@@ -183,10 +183,16 @@ install_go() {
     rm -rf "${GO_INSTALL_DIR}/go"
     tar -C "${GO_INSTALL_DIR}" -xzf "${tmp}/${tarball}"
     rm -rf "$tmp"
+    # Symlink into /usr/local/bin so all processes (make, non-login shells, etc.) find it
+    ln -sf "${GO_INSTALL_DIR}/go/bin/go" /usr/local/bin/go
+    ln -sf "${GO_INSTALL_DIR}/go/bin/gofmt" /usr/local/bin/gofmt
+    # Also write a profile.d entry for interactive login shells (sets up full GOPATH etc.)
+    printf 'export PATH="%s/go/bin:${PATH}"\n' "${GO_INSTALL_DIR}" > /etc/profile.d/golang.sh
+    chmod 644 /etc/profile.d/golang.sh
     # Make the freshly installed go available for the rest of this script
     export PATH="${GO_INSTALL_DIR}/go/bin:${PATH}"
     info "Installed to ${GO_INSTALL_DIR}/go"
-    info "Add '${GO_INSTALL_DIR}/go/bin' to your PATH if not already configured."
+    info "Symlinked go and gofmt into /usr/local/bin — available to all processes immediately."
 }
 
 install_node_npm() {

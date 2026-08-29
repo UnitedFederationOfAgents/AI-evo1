@@ -294,3 +294,95 @@ body {
   font-style: italic;
   margin-top: 8px;
 }
+
+/* ---- FC control panel ---- */
+
+.fc-status { font-size: 13px; }
+.fc-status-disconnected { color: #555; font-style: italic; }
+
+.fc-panel { display: flex; flex-direction: column; gap: 12px; }
+
+.fc-output {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.fc-log-empty { color: #555; font-style: italic; }
+.fc-log-line { padding: 2px 0; color: #d4d4d4; }
+.fc-log-prompt { color: #5bb8ff; margin-right: 6px; user-select: none; }
+.fc-log-state { padding: 5px 0; color: #555; font-style: italic; font-size: 11px; text-align: center; }
+.fc-log-output { padding: 1px 0 1px 14px; color: #888; white-space: pre-wrap; word-break: break-all; }
+
+.fc-command-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.fc-cmd-prompt { color: #5bb8ff; font-size: 14px; flex-shrink: 0; }
+.fc-cmd-input { flex: 1; background: transparent; border: none; outline: none; color: #d4d4d4; font-family: inherit; font-size: 13px; min-width: 0; }
+.fc-cmd-input::placeholder { color: #555; }
+.fc-cmd-send { background: #1a3a5c; border: 1px solid #2e5c8a; border-radius: 3px; color: #5bb8ff; font-family: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; flex-shrink: 0; }
+.fc-cmd-send:hover { background: #2e5c8a; }
+
+/* ---- Ridealong panel ---- */
+
+.ra-panel { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #4a2e6e; border-radius: 6px; padding: 14px 16px; }
+.ra-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ra-icon { font-size: 15px; }
+.ra-title { font-size: 12px; font-weight: 700; color: #b388ff; text-transform: uppercase; letter-spacing: 0.08em; }
+.ra-file { font-size: 12px; color: #666; font-style: italic; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ra-progress { font-size: 11px; color: #888; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+.ra-steps { display: flex; flex-direction: column; gap: 3px; background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 4px; padding: 10px 12px; }
+.ra-step { display: flex; align-items: baseline; gap: 6px; font-size: 12px; min-height: 18px; }
+.ra-step-marker { flex-shrink: 0; }
+.ra-step-marker-prev { color: #555; }
+.ra-step-marker-current { color: #ffe066; font-size: 13px; }
+.ra-step-marker-next { color: #555; }
+.ra-step-prev .ra-step-text { color: #555; }
+.ra-step-current .ra-step-text { color: #ffe066; font-weight: 600; }
+.ra-step-next .ra-step-text { color: #555; }
+.ra-step-empty { font-style: italic; }
+.ra-exit-code { color: #e05c5c; font-size: 11px; font-weight: 700; margin-left: 4px; flex-shrink: 0; }
+.ra-countdown { color: #ffe066; font-size: 11px; margin-left: 6px; flex-shrink: 0; }
+.ra-controls { display: flex; flex-direction: column; gap: 8px; }
+.ra-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ra-btn { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #aaa; font-family: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; transition: background 0.1s, border-color 0.1s, color 0.1s; }
+.ra-btn:hover { background: #2a2a2a; border-color: #555; color: #d4d4d4; }
+.ra-btn-primary { background: #1a3a1a; border-color: #2e7a2e; color: #6ec96e; }
+.ra-btn-primary:hover { background: #2e5a2e; border-color: #4ec94e; }
+.ra-btn-danger { background: #3a1a1a; border-color: #7a2e2e; color: #c96e6e; }
+.ra-btn-danger:hover { background: #5a2e2e; border-color: #c94e4e; }
+.ra-btn-active { background: #2a1a4a; border-color: #6a3e9a; color: #b388ff; }
+.ra-btn-active:hover { background: #3a2a5a; border-color: #9a5ecc; }
+.ra-btn-waypoint { background: #1a2a3a; border-color: #2e5c8a; color: #5bb8ff; }
+.ra-btn-waypoint:hover { background: #2e3a4a; border-color: #4e8cca; }
+.ra-waypoints { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ra-waypoints-label { font-size: 11px; color: #555; flex-shrink: 0; }
+.ra-custom { display: flex; align-items: center; gap: 8px; background: #141414; border: 1px solid #2a2a2a; border-radius: 4px; padding: 6px 10px; }
+.ra-cmd-prompt { color: #b388ff; font-size: 14px; flex-shrink: 0; }
+.ra-cmd-input { flex: 1; background: transparent; border: none; outline: none; color: #d4d4d4; font-family: inherit; font-size: 13px; min-width: 0; }
+.ra-cmd-input::placeholder { color: #444; }
+.ra-observe-hint { font-size: 11px; color: #555; font-style: italic; text-align: center; padding: 2px 0; }
+
+/* ---- Condoc panel ---- */
+
+.condoc-panel { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #1e4a2e; border-radius: 6px; padding: 14px 16px; }
+.condoc-header { display: flex; align-items: center; gap: 8px; }
+.condoc-icon { font-size: 15px; }
+.condoc-title { font-size: 12px; font-weight: 700; color: #6ec96e; text-transform: uppercase; letter-spacing: 0.08em; }
+.condoc-name { font-size: 12px; color: #666; font-style: italic; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.condoc-status { background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 4px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.condoc-phase { display: flex; align-items: center; gap: 10px; }
+.condoc-step { font-size: 11px; color: #888; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 10px; padding: 1px 8px; flex-shrink: 0; }
+.condoc-phase-label { font-size: 13px; color: #6ec96e; font-weight: 600; }
+.condoc-msg { font-size: 11px; color: #888; font-style: italic; }

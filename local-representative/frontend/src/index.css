@@ -22,6 +22,93 @@ body {
   overflow: hidden;
 }
 
+/* ---- Agent-coordinator connection bar ---- */
+
+.ac-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #3c3c3c;
+  padding: 5px 12px;
+  flex-shrink: 0;
+  height: 34px;
+}
+
+.ac-panel-connected {
+  background: #141e14;
+}
+
+.ac-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.ac-addr {
+  font-size: 12px;
+  color: #4ec94e;
+  flex: 1;
+}
+
+.ac-input {
+  background: #111;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  width: 120px;
+  outline: none;
+}
+
+.ac-input-port {
+  width: 60px;
+}
+
+.ac-input::placeholder { color: #555; }
+.ac-input:focus { border-color: #555; }
+
+.ac-sep {
+  color: #555;
+  font-size: 13px;
+}
+
+.ac-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ac-btn-connect {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.ac-btn-connect:hover {
+  background: #2e5a2e;
+}
+
+.ac-btn-disconnect {
+  background: #3a1a1a;
+  border: 1px solid #7a2e2e;
+  color: #c96e6e;
+  margin-left: auto;
+}
+
+.ac-btn-disconnect:hover {
+  background: #5a2e2e;
+}
+
 /* ---- Tab bar ---- */
 
 .tab-bar {

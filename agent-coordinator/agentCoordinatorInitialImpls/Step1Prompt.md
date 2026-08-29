@@ -39,3 +39,26 @@ We will create the backend logic necessary for agent-coordinator to host connect
 This increment will add the backend logic and widgetry necessary on local-representative for the user to have it reach out and form the connection (LR is always the client). It will allow the entry of the host and port (defaulting to 'localhost' and the port we are choosing for AC). When LR is connected to AC it will pass the sub-application UIs through such that they are essentially a mirror of each other.
 
 When this increment is done we will be able to run AC, FC and LR and see no health status for the LR instance in AC upon launch. When the user connects both FC to LR and then LR to AC we will be able to see and/or use (depending on local/remoter mode just like in LR) the FC command prompt from AC.
+
+
+prompt: [`282033e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/282033eda58f7b351258548cc062c2084897b7f1) → reply: [`5824029`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/582402958a669516357c00c8dbc45864eec28e1f)
+
+## Reply A
+
+Here is a summary of what was implemented:
+
+**representable** — Added `DisconnectCh() <-chan struct{}` to `Client`: a `disconnected` channel is initialized in `Connect()` and closed via `defer` when `readLoop()` exits (whether from a drop or `Close()`). This lets callers block until the connection is gone.
+
+**agent-coordinator** — Wired in `representable.Server` on port 8084. Hosts are discovered dynamically: the first data message from an LR name creates a `hostState` entry. State changes, FC logs, ridealong/condoc updates, and disconnects all fan out to browser clients as host-scoped WS messages (`lr-state`, `lr-fc-state`, `lr-fc-log`, `lr-ridealong-state`, `lr-condoc-state`). Browser commands (`lr-command`, `lr-ridealong-command`) are forwarded to the target LR via `reprServer.SendCommand`. The frontend gained full FC/ridealong/condoc panels scoped to the selected host.
+
+**local-representative** — Added `-name` flag (defaults to system hostname), AC connection management (`connectAC`/`disconnectAC` with lifecycle goroutine), and state mirroring: every FC state change, log entry, ridealong/condoc update, and periodic service status push is forwarded to AC via the representable client. Commands arriving from AC are forwarded to FC. The frontend gained a compact `ACConnectionPanel` above the tab bar with host/port inputs and connect/disconnect button.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

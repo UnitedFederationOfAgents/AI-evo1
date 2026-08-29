@@ -37,3 +37,9 @@ export interface CondocStateMsg {
   step_num?: number
   status_msg?: string
 }
+
+export interface ACStateMsg {
+  connected: boolean
+  host?: string
+  port?: string
+}

@@ -28,11 +28,14 @@ The `agent-coordinator` skeleton is complete. Here is a summary of what was crea
 **Top-level Makefile**: `agent-coordinator` added to `SUBPROJECTS`. Running `make build && make run` inside `agent-coordinator/` will build the frontend, embed it into the Go binary, and start the server.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Now let's add the first connection.
 
+We will do this by leveraging the common code -- 'representable' -- which we already use to coordinate sub-applications with local-representative.
 
-## Human-Prompt
+We will create the backend logic necessary for agent-coordinator to host connections from local representatives, and it will now show indications of which ones are connected. It will expect and allow only one for a particular host. It will use a new distinct port for the TCP connection where it hosts. Later it will be a potential client as well, but for now it will only be the server.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This increment will add the backend logic and widgetry necessary on local-representative for the user to have it reach out and form the connection (LR is always the client). It will allow the entry of the host and port (defaulting to 'localhost' and the port we are choosing for AC). When LR is connected to AC it will pass the sub-application UIs through such that they are essentially a mirror of each other.
+
+When this increment is done we will be able to run AC, FC and LR and see no health status for the LR instance in AC upon launch. When the user connects both FC to LR and then LR to AC we will be able to see and/or use (depending on local/remoter mode just like in LR) the FC command prompt from AC.

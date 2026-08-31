@@ -54,11 +54,37 @@ Here is a summary of what was implemented:
 **local-representative** — Added `-name` flag (defaults to system hostname), AC connection management (`connectAC`/`disconnectAC` with lifecycle goroutine), and state mirroring: every FC state change, log entry, ridealong/condoc update, and periodic service status push is forwarded to AC via the representable client. Commands arriving from AC are forwarded to FC. The frontend gained a compact `ACConnectionPanel` above the tab bar with host/port inputs and connect/disconnect button.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Now that we have a baseline for AG we will create some documentation about how it will fit in the bigger picture and how it will facilitate some distributed use-cases. We will create a FUTURE-STATE.md file to discuss these prospective next steps.
 
+We can record our information and some questions and design decisions we'll have to address during implementation.
 
-## Human-Prompt
+--- Planning Discussion and Documentation Below ---
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Autolaunch chains:
+We will have this organized so that on startup we will be able to connect the full chain of participants in the network. Agent Coordinator will be able to auto-launch and serve for the top-level participant, and will be able to serve AND connect to an upper-tier AG for a lower-tier participant. Local Representative will be able to auto-launch, serve, and connect to a specific AG. Federation Command will be able to auto-launch and connect to LR. This means that when a system launches it will be able to form a full chain which reaches out and joins with the top level Agent Coordinator of interest.
+
+Coordinated distributed sessions:
+Currently sessions only exist on localhost and may not be exchanged using UFA. Several new use-cases will be implemented around session, which will overlap with each other. The coordinated sessions use-case is the most relevant to the Agent Coordinator. With distributed sessions we will be able to replicate session records and reports from other nodes into our agent-host-files. At first this use-case will likely copy them verbatim, but in subsequent increments the sessions will be "telescopically visible" - that is to say that sessions will not fully copy, they will copy the indexing files and more session data will be available on-demand.
+
+Summarized sessions:
+Sessions will undergo general improvement which will tie in with the distributed use-case. One aspect which will appear is for summaries to be generated of sessions in an ongoing fashion. This will allow humans and agents to see at-a-glance what a session related to and to navigate using a style of heuristic tree (brief documents create summary and link into the more detailed layers).
+
+Cleaned sessions:
+Sessions will also be pre-digested and made safe. Best-effort secret removal will take place and any records with huge volumes of text (such as from loading bars) will have shorter versions created and only reveal the large volumes with more intentional inspection. Secrets will also be guarded from going over the wire by default.
+
+File exchange:
+Both because of the need for distributed sessions, and more generally to facilitate various distributed interactions, file-transfer capability will be built in to the AG interaction. It is likely that LR will be the application which manages this interaction directly.
+
+Network topology view:
+Agent Coordinator will create a visual presentation of which nodes and applications are visible on the network and how they are connected. This will offer a momentary view as well as an over-time one.
+
+Distributed ridealongs:
+Currently ridealongs are strictly a same-box federation command capability. They are intended to expand, both to more varieties of interaction (like RPA), and also to support decentralized operation.
+
+Surfacing evidence:
+The capabilities of producing inward-looking analysis reports, running test automation, generating demo content, and launching versions of software for manual test are to be brought under a broad umbrella of "surfacing evidence". This will form a loose coupling to UFA allowing projects to implement the idea of surfacing evidence in a way which can be integrated with UFA broadly and in a distributed way.
+
+Full lifetime capture (interaction with on-my-machine):
+This is more of a specific case of surfacing evidence in a full end-to-end way than a fully distinct item. With OMM we are able to deploy a full system as code. UFA will allow this process to automatically initiate a full life-cycle evaluation, where all logs and signals associated with the lifetime may be gathered as surfaced evidence, and the system may be destroyed or retired to a dormant state following the exercise.

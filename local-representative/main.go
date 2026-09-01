@@ -124,11 +124,13 @@ type Server struct {
 	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
 
 	// System tab: LR's own process plus any child applications it launches.
-	heartbeatPort string            // representable port, passed to launched children
-	selfStart     time.Time         // when this LR process started
-	binOverrides  map[string]string // app name -> explicit binary path (from config)
+	heartbeatPort string                  // representable port, passed to launched children
+	selfStart     time.Time               // when this LR process started
+	binOverrides  map[string]string       // app name -> explicit binary path (from config)
+	terminalCmd   string                  // command prefix that hosts an interactive child in a terminal
 	procMu        sync.Mutex
-	managed       map[string]*managedProc
+	managed       map[string]*managedProc // instance id -> running/finished child
+	instanceSeq   map[string]int          // app name -> highest instance ordinal handed out
 }
 
 func newServer(lrName string) *Server {
@@ -141,6 +143,7 @@ func newServer(lrName string) *Server {
 		selfStart:    time.Now(),
 		binOverrides: make(map[string]string),
 		managed:      make(map[string]*managedProc),
+		instanceSeq:  make(map[string]int),
 	}
 }
 
@@ -533,17 +536,24 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				Name string `json:"name"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Name != "" {
-				if err := s.launchManaged(payload.Name); err != nil {
+				if _, err := s.launchManaged(payload.Name); err != nil {
 					log.Printf("launch-app %q: %v", payload.Name, err)
 				}
 			}
 		case "terminate-app":
 			var payload struct {
-				Name string `json:"name"`
+				ID   string `json:"id"`
+				Name string `json:"name"` // backward-compat: dismiss by app name when a single instance is present
 			}
-			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Name != "" {
-				if err := s.terminateManaged(payload.Name); err != nil {
-					log.Printf("terminate-app %q: %v", payload.Name, err)
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				target := payload.ID
+				if target == "" {
+					target = payload.Name
+				}
+				if target != "" {
+					if err := s.terminateManaged(target); err != nil {
+						log.Printf("terminate-app %q: %v", target, err)
+					}
 				}
 			}
 		}
@@ -610,8 +620,9 @@ type appConfig struct {
 	autoConnect   bool
 	acHost        string
 	acPort        string
-	autoLaunch    []string // child applications to launch on startup
+	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
 	fcBin         string   // explicit path to the federation-command binary
+	terminal      string   // command prefix used to host an interactive child in a terminal
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -653,6 +664,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		acPort:        pick("ac-port", defaults.acPort),
 		autoLaunch:    splitList(pick("auto-launch", strings.Join(defaults.autoLaunch, ","))),
 		fcBin:         pick("fc-bin", defaults.fcBin),
+		terminal:      pick("terminal", defaults.terminal),
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -678,8 +690,9 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
-	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup (e.g. federation-command)")
+	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup; each token is \"app\" or \"app:N\" (e.g. federation-command:2)")
 	fcBin := flag.String("fc-bin", "", "path to the federation-command binary (default: search next to LR, the dev bin dir, then PATH)")
+	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -700,6 +713,7 @@ func main() {
 		acPort:        *acPort,
 		autoLaunch:    splitList(*autoLaunch),
 		fcBin:         *fcBin,
+		terminal:      *terminal,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -707,6 +721,7 @@ func main() {
 
 	s := newServer(cfg.name)
 	s.heartbeatPort = cfg.heartbeatPort
+	s.terminalCmd = cfg.terminal
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}

@@ -373,27 +373,66 @@ func TestParseCLIArgsRejectsBadConfig(t *testing.T) {
 }
 
 // TestAutoConnectControlState verifies a completed background auto-connect adopts
-// remote control only when the user was angling for it (dot selected or a manual
-// connect already in flight); an active entry-prompt session keeps local control.
+// remote control when --remote was passed (preferRemote), or when the user was
+// angling for it (dot selected or a manual connect already in flight); an active
+// entry-prompt session otherwise keeps local control.
 func TestAutoConnectControlState(t *testing.T) {
 	tests := []struct {
-		name  string
-		state BlinkerState
-		want  BlinkerState
+		name         string
+		state        BlinkerState
+		preferRemote bool
+		want         BlinkerState
 	}{
-		{"dot selected -> remote", BlinkerSelect, BlinkerConnected},
-		{"manual connect in flight -> remote", BlinkerConnecting, BlinkerConnected},
-		{"idle entry prompt -> local", BlinkerIdle, BlinkerLocalControl},
-		{"typing at prompt -> local", BlinkerInactive, BlinkerLocalControl},
+		{"dot selected -> remote", BlinkerSelect, false, BlinkerConnected},
+		{"manual connect in flight -> remote", BlinkerConnecting, false, BlinkerConnected},
+		{"idle entry prompt -> local", BlinkerIdle, false, BlinkerLocalControl},
+		{"typing at prompt -> local", BlinkerInactive, false, BlinkerLocalControl},
+		{"--remote forces remote from idle", BlinkerIdle, true, BlinkerConnected},
+		{"--remote forces remote while typing", BlinkerInactive, true, BlinkerConnected},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := NewBlinker()
 			b.SetState(tt.state)
-			if got := autoConnectControlState(&b); got != tt.want {
-				t.Errorf("autoConnectControlState(%v) = %v, want %v", tt.state, got, tt.want)
+			if got := autoConnectControlState(&b, tt.preferRemote); got != tt.want {
+				t.Errorf("autoConnectControlState(%v, %v) = %v, want %v", tt.state, tt.preferRemote, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestParseCLIArgsRemote verifies --remote (flag and config key) sets cfg.remote.
+func TestParseCLIArgsRemote(t *testing.T) {
+	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+
+	cfg, handled, err := parseCLIArgs([]string{"--remote"})
+	if err != nil || handled {
+		t.Fatalf("unexpected handled=%v err=%v", handled, err)
+	}
+	if !cfg.remote {
+		t.Error("--remote flag did not set cfg.remote")
+	}
+
+	cfg, _, err = parseCLIArgs(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.remote {
+		t.Error("cfg.remote should default to false")
+	}
+
+	dir := t.TempDir()
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "remote: true\n")
+	conf, err := ufaconfig.Load("federation-command", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg, _, err = parseCLIArgsWithConfig(nil, conf)
+	if err != nil {
+		t.Fatalf("parseCLIArgsWithConfig: %v", err)
+	}
+	if !cfg.remote {
+		t.Error("remote: true in config did not set cfg.remote")
 	}
 }

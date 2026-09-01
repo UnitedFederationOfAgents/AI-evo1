@@ -357,6 +357,7 @@ type appModel struct {
 	lrAddr              string    // representable address used for both manual and auto connects
 	autoConnect         bool      // true while the background retry loop is still running
 	autoConnectDeadline time.Time // stop retrying once this instant has passed
+	remoteDefault       bool      // --remote: adopt remote control (not local) when a connection is established
 
 	quitting    bool
 	windowWidth int
@@ -533,12 +534,14 @@ func autoConnectDialCmd(addr string) tea.Cmd {
 }
 
 // autoConnectControlState decides which control mode a completed background
-// auto-connect adopts. If the blinker dot is selected — or a manual connect is
-// already in flight — the user is angling for remote control, so honour that.
-// Otherwise the user is mid-entry at the prompt and we take local control so the
-// foreground session is not yanked away.
-func autoConnectControlState(b *Blinker) BlinkerState {
-	if b.IsSelectMode() || b.IsConnecting() {
+// auto-connect adopts. preferRemote (from --remote) forces remote control so a
+// fully machine-driven auto-launch/auto-connect chain lands ready to drive from
+// local-representative. Otherwise: if the blinker dot is selected — or a manual
+// connect is already in flight — the user is angling for remote control, so
+// honour that; if the user is mid-entry at the prompt we take local control so
+// the foreground session is not yanked away.
+func autoConnectControlState(b *Blinker, preferRemote bool) BlinkerState {
+	if preferRemote || b.IsSelectMode() || b.IsConnecting() {
 		return BlinkerConnected
 	}
 	return BlinkerLocalControl
@@ -608,21 +611,22 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 	currentModel := os.Getenv(EnvAgentModel)
 
 	m := appModel{
-		input:        ti,
-		cwd:          cwd,
-		oldCwd:       cwd,
-		currentAgent: currentAgent,
-		currentModel: currentModel,
-		sessionID:    sessionID,
-		sessionDir:   sessionDir,
-		recordsPath:  recordsPath,
-		logFile:      logFile,
-		encoder:      encoder,
-		blinker:      NewBlinker(),
-		remoteCmdCh:  make(chan string, 8),
-		listenerStop: make(chan struct{}),
-		lrAddr:       cfg.lrAddr,
-		autoConnect:  cfg.autoConnect,
+		input:         ti,
+		cwd:           cwd,
+		oldCwd:        cwd,
+		currentAgent:  currentAgent,
+		currentModel:  currentModel,
+		sessionID:     sessionID,
+		sessionDir:    sessionDir,
+		recordsPath:   recordsPath,
+		logFile:       logFile,
+		encoder:       encoder,
+		blinker:       NewBlinker(),
+		remoteCmdCh:   make(chan string, 8),
+		listenerStop:  make(chan struct{}),
+		lrAddr:        cfg.lrAddr,
+		autoConnect:   cfg.autoConnect,
+		remoteDefault: cfg.remote,
 	}
 
 	if cfg.autoConnect {
@@ -737,10 +741,17 @@ func (m appModel) Init() tea.Cmd {
 		cmds = append(cmds, tea.Println(devNotice))
 	}
 	if m.autoConnect {
+		adopts := "local control unless the dot is selected"
+		if m.remoteDefault {
+			adopts = "remote control"
+		}
 		acNotice := successStyle.Render(fmt.Sprintf(
-			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background)",
-			m.lrAddr, autoConnectInterval, autoConnectWindow))
+			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background; adopts %s)",
+			m.lrAddr, autoConnectInterval, autoConnectWindow, adopts))
 		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr), m.blinker.accentTickCmd())
+	} else if m.remoteDefault {
+		cmds = append(cmds, tea.Println(sessionStyle.Render(
+			"  remote-control mode: will take remote control when a connection to local-representative is established")))
 	}
 	return tea.Batch(cmds...)
 }
@@ -947,7 +958,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Success — adopt the connection (mirrors the reprConnectedMsg path).
 		// Whether we land in remote or local control depends on what the CLI was
 		// doing when the background dial completed (see autoConnectControlState).
-		controlState := autoConnectControlState(&m.blinker)
+		controlState := autoConnectControlState(&m.blinker, m.remoteDefault)
 		wantsRemote := controlState == BlinkerConnected
 		m.autoConnect = false
 		m.blinker.DisableAccent()
@@ -3660,12 +3671,14 @@ func renderSessions(recordsPath string, currentSession string) string {
 // and finally the command-line flags. See README.md for the config keys.
 type cliConfig struct {
 	autoConnect bool   // --auto-connect / auto-connect: dial local-representative in the background on startup
+	remote      bool   // --remote / remote: adopt remote control (not local) once a connection is established
 	lrAddr      string // local-representative representable address (--lr-host / --lr-port override host / port)
 }
 
 // Config-file keys recognised for federation-command (see README.md).
 const (
 	cfgKeyAutoConnect = "auto-connect"
+	cfgKeyRemote      = "remote"
 	cfgKeyLRHost      = "lr-host"
 	cfgKeyLRPort      = "lr-port"
 )
@@ -3693,6 +3706,9 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	if cfg.autoConnect, err = conf.Bool(cfgKeyAutoConnect, false); err != nil {
 		return cfg, false, err
 	}
+	if cfg.remote, err = conf.Bool(cfgKeyRemote, false); err != nil {
+		return cfg, false, err
+	}
 	port, err := conf.Int(cfgKeyLRPort, DefaultLRPort)
 	if err != nil {
 		return cfg, false, err
@@ -3710,6 +3726,8 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 			return cfg, true, nil
 		case arg == "--auto-connect" || arg == "-auto-connect":
 			cfg.autoConnect = true
+		case arg == "--remote" || arg == "-remote":
+			cfg.remote = true
 		case arg == "--lr-host" || arg == "-lr-host":
 			if i+1 >= len(args) {
 				return cfg, false, fmt.Errorf("--lr-host requires a value")

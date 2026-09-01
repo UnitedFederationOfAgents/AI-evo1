@@ -23,8 +23,9 @@ make build      # build frontend + Go binary
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
 | `--ac-host` | `ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
 | `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
-| `--auto-launch` | `auto-launch` | — | comma/space-separated child applications to launch on startup (e.g. `federation-command`) |
+| `--auto-launch` | `auto-launch` | — | comma/space-separated child applications to launch on startup; each token is `app` or `app:N` (e.g. `federation-command:2`) |
 | `--fc-bin` | `fc-bin` | — | explicit path to the `federation-command` binary (default: search next to LR, the dev bin dir, then `$PATH`) |
+| `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` or `tmux new-session -d -s fc` |
 
 ## Configuration files
 
@@ -53,7 +54,8 @@ name: edge-1
 dev: false
 ac-host: 10.0.0.5
 ac-port: "8084"
-auto-launch: federation-command
+auto-launch: federation-command:2
+terminal: xterm -e
 ```
 
 ## Auto-connecting to agent-coordinator
@@ -79,11 +81,33 @@ process (its PID and uptime) alongside any child applications it manages. From
 here you can:
 
 - **launch** a child application — currently `federation-command`, started with
-  `--auto-connect --lr-port <repr-port>` so it dials straight back into this LR;
-- **terminate** a managed application (SIGTERM, escalating to SIGKILL after a
-  grace period), or **dismiss** one that has already exited;
-- read each managed process's PID, status (`running` / `exited` / `failed`) and
+  `--auto-connect --remote --lr-port <repr-port>` so it dials straight back into
+  this LR and comes up in remote control, ready to drive from the dashboard;
+- **terminate** a managed instance (SIGTERM to its process group, escalating to
+  SIGKILL after a grace period), or **dismiss** one that has already exited;
+- read each managed instance's PID, status (`running` / `exited` / `failed`) and
   exit code.
+
+`federation-command` is **N-per-host**: the launch button stays enabled while
+instances run and each press starts another, listed as `federation-command #1`,
+`#2`, … Terminate/dismiss act on the individual instance.
+
+`federation-command` is an interactive shell, so LR hosts each instance in its
+own terminal window. It probes for a terminal emulator / multiplexer on `$PATH`
+(`xterm`, `konsole`, `alacritty`, `kitty`, `foot`, `wezterm`, `xfce4-terminal`,
+then `x-terminal-emulator`, `gnome-terminal`, `tmux`, `screen`); set
+`--terminal` / `terminal` to an explicit command prefix (`terminal: "xterm -e"`,
+`terminal: "tmux new-session -d -s fc"`) to override, or to supply one in an
+environment where none is on `$PATH`. If nothing is found LR records the launch
+as `failed` with an actionable message rather than letting FC die inside its
+input reader ("error creating cancelreader").
+
+Foreground terminals (`xterm -e`, `konsole -e`, `alacritty -e`, `kitty`, `foot`,
+…) keep full lifecycle tracking — PID, status and terminate all act on the real
+instance. Detached multiplexers / terminals that double-fork (`tmux`, `screen`,
+`gnome-terminal`) return immediately, so LR shows the launcher's exit and can no
+longer track that instance's PID; prefer a foreground terminal when you need the
+system tab to manage FC.
 
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
@@ -92,13 +116,15 @@ executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 ### Auto-launch chains
 
 Set `auto-launch` (config or `--auto-launch`) to a list of child applications and
-LR starts them automatically once it is up — no separate terminal needed. With
+LR starts them automatically once it is up. Each token is `app` or `app:N`, so
+`federation-command:3` brings up three instances. With
 
 ```yaml
 # ~/.ufa/config/local-representative.yaml
 auto-launch: federation-command
 ```
 
-a single `./local-representative` brings up LR **and** an auto-connecting
-`federation-command`, completing the FC → LR chain from one entrypoint. Combine
-with `auto-connect` to extend the chain up to `agent-coordinator`.
+a single `./local-representative` brings up LR **and** an auto-connecting,
+remote-controlled `federation-command`, completing the FC → LR chain from one
+entrypoint. Combine with `auto-connect` to extend the chain up to
+`agent-coordinator`.

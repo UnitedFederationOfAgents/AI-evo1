@@ -4,8 +4,11 @@ import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg,
 const TABS = ['federation-command', 'condoccer', 'worker', 'system'] as const
 type Tab = typeof TABS[number]
 
-// Applications the system tab offers a launch button for.
-const LAUNCHABLE_APPS = ['federation-command'] as const
+// Applications the system tab offers a launch button for. `multi` apps are
+// N-per-host (launch stays enabled while instances run); others are singletons.
+const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
+  { name: 'federation-command', multi: true },
+]
 
 interface LogEntry {
   kind: 'cmd' | 'output' | 'state'
@@ -64,9 +67,9 @@ function useStatusWS() {
     }
   }, [])
 
-  const terminateApp = useCallback((name: string) => {
+  const terminateApp = useCallback((id: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'terminate-app', payload: { name } }))
+      wsRef.current.send(JSON.stringify({ type: 'terminate-app', payload: { id } }))
     }
   }, [])
 
@@ -443,16 +446,20 @@ function SystemProcRow({
 }: {
   proc: ProcInfo
   nowSec: number
-  onTerminate?: (name: string) => void
+  onTerminate?: (id: string) => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
     : `exit ${proc.exit_code}`
 
+  const label = proc.managed && proc.instance > 0
+    ? `${proc.name} #${proc.instance}`
+    : proc.name
+
   return (
     <div className={`sys-row sys-row-${proc.status}`}>
       <span className="sys-col sys-col-name">
-        {proc.name}
+        {label}
         {!proc.managed && <span className="sys-self-tag">this process</span>}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
@@ -462,7 +469,7 @@ function SystemProcRow({
         {proc.managed && onTerminate && (
           <button
             className="sys-btn sys-btn-terminate"
-            onClick={() => onTerminate(proc.name)}
+            onClick={() => onTerminate(proc.instance_id)}
           >
             {proc.status === 'running' ? 'terminate' : 'dismiss'}
           </button>
@@ -479,7 +486,7 @@ function SystemPanel({
 }: {
   state: SystemStateMsg | null
   onLaunch: (name: string) => void
-  onTerminate: (name: string) => void
+  onTerminate: (id: string) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
@@ -492,8 +499,8 @@ function SystemPanel({
     return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
   }
 
-  const isRunning = (name: string) =>
-    state.managed.some(p => p.name === name && p.status === 'running')
+  const runningCount = (name: string) =>
+    state.managed.filter(p => p.name === name && p.status === 'running').length
 
   return (
     <div className="sys-panel">
@@ -507,7 +514,7 @@ function SystemPanel({
         </div>
         <SystemProcRow proc={state.self} nowSec={nowSec} />
         {state.managed.map(p => (
-          <SystemProcRow key={p.name} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
+          <SystemProcRow key={p.instance_id} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
         ))}
         {state.managed.length === 0 && (
           <div className="sys-row sys-row-none">no managed applications</div>
@@ -516,16 +523,21 @@ function SystemPanel({
 
       <div className="sys-launch">
         <span className="sys-launch-label">launch</span>
-        {LAUNCHABLE_APPS.map(name => (
-          <button
-            key={name}
-            className="sys-btn sys-btn-launch"
-            disabled={isRunning(name)}
-            onClick={() => onLaunch(name)}
-          >
-            {isRunning(name) ? `${name} (running)` : name}
-          </button>
-        ))}
+        {LAUNCHABLE_APPS.map(({ name, multi }) => {
+          const n = runningCount(name)
+          return (
+            <button
+              key={name}
+              className="sys-btn sys-btn-launch"
+              disabled={!multi && n > 0}
+              onClick={() => onLaunch(name)}
+            >
+              {multi
+                ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
+                : (n > 0 ? `${name} (running)` : name)}
+            </button>
+          )
+        })}
       </div>
     </div>
   )

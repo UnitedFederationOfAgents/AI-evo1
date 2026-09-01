@@ -51,3 +51,26 @@ Another side-note we can implement with federation-command in stride is that whe
 We also need LR to be able to handle launching N instances of FC. (Some sub-applications are one per host, others are N, FC is N-per-host)
 
 Let's make these corrections and updates in this next revision.
+
+
+prompt: [`4f2aac5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4f2aac56cc48115e9d29f795dd5a500f7dedf3e9) → reply: [`b44bf39`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b44bf398945934570bc59855806621ef34a32389)
+
+## Reply A
+
+I've implemented Revision A. Go/npm build tooling is still blocked in this session (needs interactive approval), so changes were verified by hand as before — `make build` in `local-representative/` and `go test ./...` in both `local-representative/` and `federation-command/` still need to be run.
+
+**1. FC now launches in a real terminal (fixes the `cancelreader` crash).** `local-representative/procman.go` gained `wrapInTerminal`: `launchSpec` has a `terminal` flag, and for `federation-command` LR now execs it via a terminal emulator/multiplexer instead of directly. It honours a new `--terminal` / `terminal` config prefix (e.g. `terminal: "xterm -e"` or `terminal: "tmux new-session -d -s fc"`), else probes `$PATH` (foreground emulators first for lifecycle tracking, `gnome-terminal`/`tmux`/`screen` last); if none is found it records a `failed` entry with an actionable message rather than letting FC die in its input reader. Process-group setup is unchanged so terminate still tears down the whole tree.
+
+**2. Remote-by-default in the machine-driven chain.** `federation-command` gained a `--remote` / `remote` config option (`cliConfig.remote` → `appModel.remoteDefault`); `autoConnectControlState` now takes a `preferRemote` bool and returns `BlinkerConnected` when set, so a completed background auto-connect adopts remote control instead of local. LR passes `--auto-connect --remote` for every FC it launches (system tab and auto-launch).
+
+**3. N instances of FC.** `Server.managed` is now keyed by a generated instance id (`federation-command#1`, `#2`, …) with a per-app `instanceSeq`; `launchSpec.singleton` distinguishes one-per-host from N-per-host apps (FC is N). `launchManaged` returns the new id and only blocks a second launch for singletons; `terminateManaged` takes an instance id (or a bare app name when unambiguous). Auto-launch tokens accept `app:N` (`parseAutoLaunchEntry`). Frontend: `ProcInfo` carries `instance_id`/`instance`, rows are keyed/labelled per instance and terminate by id, and the FC launch button stays enabled with a running count. Tests updated/added across `procman_test.go` and `federation-command/main_test.go`, and both READMEs document the new flags, `app:N` syntax, terminal hosting, and remote-by-default behaviour.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

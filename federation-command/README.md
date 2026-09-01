@@ -18,6 +18,7 @@ make build
 | --- | --- | --- | --- |
 | `--config <dir>` | — | `~/.ufa/config` | directory holding the `ufa-configurable` YAML files |
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) |
+| `--remote` | `remote` | `false` | when a connection is established via `--auto-connect`, adopt **remote control** rather than local control — for fully machine-driven auto-launch/auto-connect chains |
 | `--lr-host <host>` | `lr-host` | `localhost` | `local-representative` host for auto-connect and the manual blinker connect |
 | `--lr-port <n>` | `lr-port` | `8082` | `local-representative` `representable` port (same two flows) |
 | `--version`, `-v` | — | — | print version and exit |
@@ -54,3 +55,13 @@ lr-port: 8082
 With the above, `./federation-command` behaves like
 `./federation-command --auto-connect --lr-host 10.0.0.5`, and
 `./federation-command --lr-host localhost` overrides just the host.
+
+## Remote-by-default in an auto-launch chain
+
+When `local-representative` launches `federation-command` itself (its **system**
+tab, or an `auto-launch` config entry), it starts it with
+`--auto-connect --remote`. `--remote` makes the completed background connect land
+in **remote control** — the foreground terminal shows the shell but LR drives it —
+so a chain that begins with a single `./local-representative` comes up fully
+ready to operate from the dashboard. Without `--remote`, an auto-connect that
+finishes while you are typing at the prompt keeps local control instead.

@@ -88,11 +88,6 @@ I've implemented Revision C. Go build/test tooling is blocked in this session (r
 **federation-command** — `parseCLIArgs` now loads the config files (honoring `--config`) and hands off to a new testable `parseCLIArgsWithConfig`, which seeds `auto-connect`/`lr-port`/`lr-host` from `global.yaml` → `federation-command.yaml` and then lets flags override; added a matching `--lr-host` flag for parity with LR. **local-representative** — added a `--config` flag plus `appConfig`/`resolveConfig`, which layers `global.yaml` → `local-representative.yaml` under every existing flag (`port`, `repr-port`, `name`, `dev`, `auto-connect`, `ac-host`, `ac-port`), using `flag.Visit` so an explicitly-set flag always wins. Both apps got new tests for the precedence chain and malformed-value rejection, and a new/updated `README.md` documenting every config key with example `global.yaml` / per-app YAML; FC's `brief-tour.md` gained a short config-files note.
 
 
-## <REPLACE-Revision|Retry> D
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1788282422 (Tue Sep 1 05:07:02 PM UTC 2026).

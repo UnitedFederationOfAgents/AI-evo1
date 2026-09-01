@@ -66,11 +66,10 @@ I've implemented Revision A. Go/npm build tooling is still blocked in this sessi
 **3. N instances of FC.** `Server.managed` is now keyed by a generated instance id (`federation-command#1`, `#2`, …) with a per-app `instanceSeq`; `launchSpec.singleton` distinguishes one-per-host from N-per-host apps (FC is N). `launchManaged` returns the new id and only blocks a second launch for singletons; `terminateManaged` takes an instance id (or a bare app name when unambiguous). Auto-launch tokens accept `app:N` (`parseAutoLaunchEntry`). Frontend: `ProcInfo` carries `instance_id`/`instance`, rows are keyed/labelled per instance and terminate by id, and the FC launch button stays enabled with a running count. Tests updated/added across `procman_test.go` and `federation-command/main_test.go`, and both READMEs document the new flags, `app:N` syntax, terminal hosting, and remote-by-default behaviour.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+This increment now looks good - let's make an adjustment to ensure that FC comes up and connects in remote.
 
+If we can launch the terminal so that it does not take foreground that would be even more ideal, but if that introduces any significant complexity then let's go without it.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also respond with a snippet we can use to write a config which will cause LR to go through the full auto-launch/auto-connect chain with no intervention so we can test that.

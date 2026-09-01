@@ -357,7 +357,7 @@ function ACConnectionPanel({
   onConnect,
   onDisconnect,
 }: {
-  acState: { connected: boolean; host?: string; port?: string }
+  acState: { connected: boolean; host?: string; port?: string; connecting?: boolean }
   onConnect: (host: string, port: string) => void
   onDisconnect: () => void
 }) {
@@ -370,6 +370,16 @@ function ACConnectionPanel({
         <span className="ac-label">agent-coordinator</span>
         <span className="ac-addr">{acState.host}:{acState.port}</span>
         <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>disconnect</button>
+      </div>
+    )
+  }
+
+  if (acState.connecting) {
+    return (
+      <div className="ac-panel ac-panel-connecting">
+        <span className="ac-label">agent-coordinator</span>
+        <span className="ac-connecting">auto-connecting… {acState.host}:{acState.port}</span>
+        <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>cancel</button>
       </div>
     )
   }

@@ -42,4 +42,5 @@ export interface ACStateMsg {
   connected: boolean
   host?: string
   port?: string
+  connecting?: boolean // background --auto-connect retry loop is still trying
 }

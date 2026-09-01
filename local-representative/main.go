@@ -19,6 +19,17 @@ import (
 //go:embed frontend/dist
 var embeddedFrontend embed.FS
 
+// Auto-connect (--auto-connect) tuning: on startup local-representative dials
+// agent-coordinator in the background, retrying on an interval until the window
+// elapses. Mirrors federation-command's --auto-connect.
+const (
+	autoConnectInterval = 10 * time.Second
+	autoConnectWindow   = 10 * time.Minute
+
+	defaultACHost = "localhost"
+	defaultACPort = "8084"
+)
+
 // ServiceStatus is the health status of a monitored service.
 type ServiceStatus struct {
 	Name   string `json:"name"`
@@ -70,6 +81,9 @@ type ACStateMsg struct {
 	Connected bool   `json:"connected"`
 	Host      string `json:"host,omitempty"`
 	Port      string `json:"port,omitempty"`
+	// Connecting is true while the background --auto-connect retry loop is still
+	// attempting to reach agent-coordinator (visible indication in the UI).
+	Connecting bool `json:"connecting,omitempty"`
 }
 
 // wsMsg is the wire format for all WebSocket messages.
@@ -101,10 +115,12 @@ type Server struct {
 	condocMu    sync.RWMutex
 	condocState *CondocStateMsg
 
-	acMu    sync.RWMutex
-	acClient *representable.Client
-	acHost  string
-	acPort  string
+	acMu                sync.RWMutex
+	acClient            *representable.Client
+	acHost              string
+	acPort              string
+	acAutoConnecting    bool          // true while the startup --auto-connect retry loop is trying
+	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
 }
 
 func newServer(lrName string) *Server {
@@ -206,10 +222,27 @@ func (s *Server) getACState() ACStateMsg {
 	s.acMu.RLock()
 	defer s.acMu.RUnlock()
 	return ACStateMsg{
-		Connected: s.acClient != nil,
-		Host:      s.acHost,
-		Port:      s.acPort,
+		Connected:  s.acClient != nil,
+		Host:       s.acHost,
+		Port:       s.acPort,
+		Connecting: s.acAutoConnecting,
 	}
+}
+
+// acStateMsg builds an ac-state payload for an explicit host/port, stamping the
+// current auto-connect retry status so the UI can show a "connecting…" hint even
+// before connectAC has recorded the target on the Server.
+func (s *Server) acStateMsg(connected bool, host, port string) ACStateMsg {
+	s.acMu.RLock()
+	connecting := s.acAutoConnecting
+	s.acMu.RUnlock()
+	return ACStateMsg{Connected: connected, Host: host, Port: port, Connecting: connecting}
+}
+
+func (s *Server) setACAutoConnecting(v bool) {
+	s.acMu.Lock()
+	s.acAutoConnecting = v
+	s.acMu.Unlock()
 }
 
 // pushStateToAC sends a full state snapshot to the agent-coordinator.
@@ -246,7 +279,7 @@ func (s *Server) connectAC(host, port string) {
 		stillPending := s.acHost == host && s.acPort == port && s.acClient == nil
 		s.acMu.RUnlock()
 		if stillPending {
-			s.broadcast("ac-state", ACStateMsg{Connected: false, Host: host, Port: port})
+			s.broadcast("ac-state", s.acStateMsg(false, host, port))
 		}
 		return
 	}
@@ -269,7 +302,7 @@ func (s *Server) connectAC(host, port string) {
 	})
 
 	s.pushStateToAC()
-	s.broadcast("ac-state", ACStateMsg{Connected: true, Host: host, Port: port})
+	s.broadcast("ac-state", s.acStateMsg(true, host, port))
 	log.Printf("connected to agent-coordinator at %s", addr)
 
 	// Block until the connection drops (either remotely or via Close).
@@ -282,7 +315,7 @@ func (s *Server) connectAC(host, port string) {
 	s.acMu.Unlock()
 
 	log.Printf("disconnected from agent-coordinator at %s", addr)
-	s.broadcast("ac-state", ACStateMsg{Connected: false, Host: host, Port: port})
+	s.broadcast("ac-state", s.acStateMsg(false, host, port))
 }
 
 // disconnectAC closes the AC connection; the connectAC goroutine handles cleanup.
@@ -292,6 +325,94 @@ func (s *Server) disconnectAC() {
 	s.acMu.Unlock()
 	if client != nil {
 		client.Close()
+	}
+}
+
+// startAutoConnectAC launches the background agent-coordinator auto-connect loop.
+// It is a no-op if a loop is already running.
+func (s *Server) startAutoConnectAC(host, port string) {
+	s.acMu.Lock()
+	if s.acAutoConnectCancel != nil {
+		s.acMu.Unlock()
+		return
+	}
+	cancel := make(chan struct{})
+	s.acAutoConnectCancel = cancel
+	s.acMu.Unlock()
+	go s.autoConnectAC(host, port, cancel)
+}
+
+// stopAutoConnectAC cancels the background auto-connect retry loop if it is
+// running. Called when the operator drives an explicit connect/disconnect from
+// the UI, which supersedes auto-connect.
+func (s *Server) stopAutoConnectAC() {
+	s.acMu.Lock()
+	if s.acAutoConnectCancel != nil {
+		close(s.acAutoConnectCancel)
+		s.acAutoConnectCancel = nil
+	}
+	s.acMu.Unlock()
+}
+
+// autoConnectAC dials agent-coordinator in the background on startup, retrying
+// every autoConnectInterval until it connects or autoConnectWindow elapses. This
+// mirrors federation-command's --auto-connect: it prints on startup that the mode
+// is selected, keeps a visible "connecting" indicator live in the UI while it
+// retries, and prints once when it gives up. Runs in its own goroutine; closing
+// cancel stops it.
+func (s *Server) autoConnectAC(host, port string, cancel chan struct{}) {
+	defer func() {
+		s.acMu.Lock()
+		if s.acAutoConnectCancel == cancel {
+			s.acAutoConnectCancel = nil
+		}
+		s.acMu.Unlock()
+	}()
+
+	deadline := time.Now().Add(autoConnectWindow)
+	log.Printf("auto-connect enabled: dialing agent-coordinator at %s:%s every %s for up to %s (runs in background)",
+		host, port, autoConnectInterval, autoConnectWindow)
+
+	// finish clears the retry indicator and pushes a final ac-state to the UI.
+	finish := func() {
+		s.setACAutoConnecting(false)
+		s.broadcast("ac-state", s.acStateMsg(s.getACClient() != nil, host, port))
+	}
+
+	for {
+		select {
+		case <-cancel:
+			finish()
+			return
+		default:
+		}
+		if s.getACClient() != nil {
+			finish() // connected another way in the meantime
+			return
+		}
+
+		s.setACAutoConnecting(true)
+		s.broadcast("ac-state", s.acStateMsg(false, host, port))
+		log.Printf("auto-connect: attempting connection to agent-coordinator at %s:%s", host, port)
+		go s.connectAC(host, port)
+
+		select {
+		case <-cancel:
+			finish()
+			return
+		case <-time.After(autoConnectInterval):
+		}
+
+		if s.getACClient() != nil {
+			finish() // the attempt landed a connection
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("auto-connect: gave up after %s — agent-coordinator at %s:%s did not respond",
+				autoConnectWindow, host, port)
+			finish()
+			return
+		}
 	}
 }
 
@@ -381,6 +502,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				Port string `json:"port"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.stopAutoConnectAC() // an explicit connect supersedes auto-connect
 				host := payload.Host
 				if host == "" {
 					host = "localhost"
@@ -392,6 +514,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				go s.connectAC(host, port)
 			}
 		case "disconnect-ac":
+			s.stopAutoConnectAC()
 			s.disconnectAC()
 		}
 	}
@@ -458,6 +581,9 @@ func main() {
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
 	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
+	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
+	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
 	flag.Parse()
 
 	s := newServer(*name)
@@ -535,6 +661,11 @@ func main() {
 	log.Printf("representable server listening on tcp://localhost:%s", *reprPort)
 
 	go s.broadcastLoop()
+
+	if *autoConnect {
+		log.Printf("auto-connect configuration selected for agent-coordinator at %s:%s", *acHost, *acPort)
+		s.startAutoConnectAC(*acHost, *acPort)
+	}
 
 	addr := ":" + *port
 	log.Printf("local-representative %q listening on http://localhost%s", *name, addr)

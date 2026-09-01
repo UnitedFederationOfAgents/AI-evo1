@@ -57,3 +57,20 @@ I executed Revision A. Go build/test tooling is blocked in this session (require
 We have made a fix attempt for the local/remote control issue but it has failed - to avoid getting sidetracked we will record information about this bug in TODO.md at the repo root, but we will move on for now.
 
 Next we will implement auto-connect for local-representative. The same 10-minute-attempt-with-visible-indication paradigm will be followed. In this case since it will be connecting to an agent-coordinator it will allow optional arguments for host/IP AND port. It will default to localhost.
+
+
+prompt: [`79dc977`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/79dc9775bba9c69724aa7c48b89f5daf12ec21e9) → reply: [`2409155`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/24091550bdaffc8f58c24fe589e8d4c98cfed2a1)
+
+## Reply B
+
+I recorded the failed local/remote-control fix in a new repo-root `TODO.md` (open bug, with repro, suspected cause, and next steps), then implemented `--auto-connect` for local-representative in `local-representative/main.go`: new `--auto-connect`, `--ac-host` (default `localhost`), and `--ac-port` (default `8084`) flags drive a background retry loop (`autoConnectAC`/`startAutoConnectAC`/`stopAutoConnectAC`) that dials agent-coordinator every 10s for up to 10 minutes, printing on startup and on give-up, mirroring FC's paradigm; an explicit connect/disconnect from the dashboard cancels it. Visible indication flows through a new `Connecting` field on `ACStateMsg`, surfaced in the browser via `types.ts`/`App.tsx`/`index.css` as a pulsing "auto-connecting…" panel state. Added `local-representative/main_test.go` (retry-indicator + start/stop lifecycle) and a `local-representative/README.md` documenting the flags; Go/npm build tooling is blocked in this session so changes were verified by hand and still need a `make build`.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -52,11 +52,8 @@ I executed Revision A. Go build/test tooling is blocked in this session (require
 - **`federation-command/docs/brief-tour.md`** — Documented that auto-connect success adopts remote vs. local control based on what the CLI was doing at connect time.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+We have made a fix attempt for the local/remote control issue but it has failed - to avoid getting sidetracked we will record information about this bug in TODO.md at the repo root, but we will move on for now.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Next we will implement auto-connect for local-representative. The same 10-minute-attempt-with-visible-indication paradigm will be followed. In this case since it will be connecting to an agent-coordinator it will allow optional arguments for host/IP AND port. It will default to localhost.

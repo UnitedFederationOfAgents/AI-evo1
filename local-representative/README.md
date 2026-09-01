@@ -23,6 +23,8 @@ make build      # build frontend + Go binary
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
 | `--ac-host` | `ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
 | `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
+| `--auto-launch` | `auto-launch` | — | comma/space-separated child applications to launch on startup (e.g. `federation-command`) |
+| `--fc-bin` | `fc-bin` | — | explicit path to the `federation-command` binary (default: search next to LR, the dev bin dir, then `$PATH`) |
 
 ## Configuration files
 
@@ -51,6 +53,7 @@ name: edge-1
 dev: false
 ac-host: 10.0.0.5
 ac-port: "8084"
+auto-launch: federation-command
 ```
 
 ## Auto-connecting to agent-coordinator
@@ -68,3 +71,34 @@ the dashboard supersedes and cancels the background loop.
 ./local-representative --auto-connect                       # localhost:8084
 ./local-representative --auto-connect --ac-host 10.0.0.5 --ac-port 9000
 ```
+
+## System tab
+
+The dashboard's right-most tab, **system**, shows `local-representative` as a
+process (its PID and uptime) alongside any child applications it manages. From
+here you can:
+
+- **launch** a child application — currently `federation-command`, started with
+  `--auto-connect --lr-port <repr-port>` so it dials straight back into this LR;
+- **terminate** a managed application (SIGTERM, escalating to SIGKILL after a
+  grace period), or **dismiss** one that has already exited;
+- read each managed process's PID, status (`running` / `exited` / `failed`) and
+  exit code.
+
+The launch binary is resolved by looking next to the `local-representative`
+executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
+`$PATH`; `--fc-bin` / `fc-bin` overrides that.
+
+### Auto-launch chains
+
+Set `auto-launch` (config or `--auto-launch`) to a list of child applications and
+LR starts them automatically once it is up — no separate terminal needed. With
+
+```yaml
+# ~/.ufa/config/local-representative.yaml
+auto-launch: federation-command
+```
+
+a single `./local-representative` brings up LR **and** an auto-connecting
+`federation-command`, completing the FC → LR chain from one entrypoint. Combine
+with `auto-connect` to extend the chain up to `agent-coordinator`.

@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg } from './types'
 
-const TABS = ['federation-command', 'condoccer', 'worker'] as const
+const TABS = ['federation-command', 'condoccer', 'worker', 'system'] as const
 type Tab = typeof TABS[number]
+
+// Applications the system tab offers a launch button for.
+const LAUNCHABLE_APPS = ['federation-command'] as const
 
 interface LogEntry {
   kind: 'cmd' | 'output' | 'state'
@@ -17,6 +20,7 @@ function useStatusWS() {
   const [ridealongState, setRidealongState] = useState<RidealongStateMsg | null>(null)
   const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
+  const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -51,6 +55,18 @@ function useStatusWS() {
   const disconnectFromAC = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'disconnect-ac', payload: {} }))
+    }
+  }, [])
+
+  const launchApp = useCallback((name: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'launch-app', payload: { name } }))
+    }
+  }, [])
+
+  const terminateApp = useCallback((name: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'terminate-app', payload: { name } }))
     }
   }, [])
 
@@ -114,6 +130,9 @@ function useStatusWS() {
           case 'ac-state':
             setAcState(msg.payload as ACStateMsg)
             break
+          case 'system-state':
+            setSystemState(msg.payload as SystemStateMsg)
+            break
         }
       } catch {
         // ignore malformed messages
@@ -129,7 +148,7 @@ function useStatusWS() {
     }
   }, [connect])
 
-  return { connected, services, fcState, fcLog, ridealongState, condocState, acState, sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC }
+  return { connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp }
 }
 
 function FCCommandPanel({
@@ -409,12 +428,116 @@ function ACConnectionPanel({
   )
 }
 
+function formatUptime(startedAt: number, nowSec: number): string {
+  if (!startedAt) return '—'
+  const secs = Math.max(0, nowSec - startedAt)
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
+}
+
+function SystemProcRow({
+  proc,
+  nowSec,
+  onTerminate,
+}: {
+  proc: ProcInfo
+  nowSec: number
+  onTerminate?: (name: string) => void
+}) {
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  return (
+    <div className={`sys-row sys-row-${proc.status}`}>
+      <span className="sys-col sys-col-name">
+        {proc.name}
+        {!proc.managed && <span className="sys-self-tag">this process</span>}
+      </span>
+      <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
+      <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
+      <span className="sys-col sys-col-detail" title={proc.detail}>{detail}</span>
+      <span className="sys-col sys-col-actions">
+        {proc.managed && onTerminate && (
+          <button
+            className="sys-btn sys-btn-terminate"
+            onClick={() => onTerminate(proc.name)}
+          >
+            {proc.status === 'running' ? 'terminate' : 'dismiss'}
+          </button>
+        )}
+      </span>
+    </div>
+  )
+}
+
+function SystemPanel({
+  state,
+  onLaunch,
+  onTerminate,
+}: {
+  state: SystemStateMsg | null
+  onLaunch: (name: string) => void
+  onTerminate: (name: string) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (!state) {
+    return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+
+  const isRunning = (name: string) =>
+    state.managed.some(p => p.name === name && p.status === 'running')
+
+  return (
+    <div className="sys-panel">
+      <div className="sys-table">
+        <div className="sys-row sys-row-head">
+          <span className="sys-col sys-col-name">process</span>
+          <span className="sys-col sys-col-pid">pid</span>
+          <span className="sys-col sys-col-status">status</span>
+          <span className="sys-col sys-col-detail">uptime</span>
+          <span className="sys-col sys-col-actions" />
+        </div>
+        <SystemProcRow proc={state.self} nowSec={nowSec} />
+        {state.managed.map(p => (
+          <SystemProcRow key={p.name} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
+        ))}
+        {state.managed.length === 0 && (
+          <div className="sys-row sys-row-none">no managed applications</div>
+        )}
+      </div>
+
+      <div className="sys-launch">
+        <span className="sys-launch-label">launch</span>
+        {LAUNCHABLE_APPS.map(name => (
+          <button
+            key={name}
+            className="sys-btn sys-btn-launch"
+            disabled={isRunning(name)}
+            onClick={() => onLaunch(name)}
+          >
+            {isRunning(name) ? `${name} (running)` : name}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('federation-command')
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState,
+    ridealongState, condocState, acState, systemState,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
+    launchApp, terminateApp,
   } = useStatusWS()
 
   const getStatus = (name: string): string => {
@@ -449,30 +572,40 @@ export default function App() {
       <div className="main-pane">
         <div className="service-view">
           <div className="service-name">{activeTab}</div>
-          <div className={`health-indicator health-${getStatus(activeTab)}`}>
-            <span className="health-dot" />
-            <span className="health-label">{getStatus(activeTab)}</span>
-          </div>
-          {activeTab === 'federation-command' && (
+          {activeTab === 'system' ? (
+            <SystemPanel
+              state={systemState}
+              onLaunch={launchApp}
+              onTerminate={terminateApp}
+            />
+          ) : (
             <>
-              {ridealongState && (
-                <RidealongPanel
-                  state={ridealongState}
-                  fcState={fcState}
-                  sendRidealongCommand={sendRidealongCommand}
-                />
+              <div className={`health-indicator health-${getStatus(activeTab)}`}>
+                <span className="health-dot" />
+                <span className="health-label">{getStatus(activeTab)}</span>
+              </div>
+              {activeTab === 'federation-command' && (
+                <>
+                  {ridealongState && (
+                    <RidealongPanel
+                      state={ridealongState}
+                      fcState={fcState}
+                      sendRidealongCommand={sendRidealongCommand}
+                    />
+                  )}
+                  {condocState && !ridealongState && (
+                    <CondocPanel
+                      state={condocState}
+                      fcState={fcState}
+                    />
+                  )}
+                  <FCCommandPanel
+                    fcState={fcState}
+                    fcLog={fcLog}
+                    sendCommand={sendCommand}
+                  />
+                </>
               )}
-              {condocState && !ridealongState && (
-                <CondocPanel
-                  state={condocState}
-                  fcState={fcState}
-                />
-              )}
-              <FCCommandPanel
-                fcState={fcState}
-                fcLog={fcLog}
-                sendCommand={sendCommand}
-              />
             </>
           )}
         </div>

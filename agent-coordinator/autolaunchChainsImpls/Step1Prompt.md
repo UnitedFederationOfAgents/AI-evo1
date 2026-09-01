@@ -66,11 +66,12 @@ prompt: [`79dc977`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7
 I recorded the failed local/remote-control fix in a new repo-root `TODO.md` (open bug, with repro, suspected cause, and next steps), then implemented `--auto-connect` for local-representative in `local-representative/main.go`: new `--auto-connect`, `--ac-host` (default `localhost`), and `--ac-port` (default `8084`) flags drive a background retry loop (`autoConnectAC`/`startAutoConnectAC`/`stopAutoConnectAC`) that dials agent-coordinator every 10s for up to 10 minutes, printing on startup and on give-up, mirroring FC's paradigm; an explicit connect/disconnect from the dashboard cancels it. Visible indication flows through a new `Connecting` field on `ACStateMsg`, surfaced in the browser via `types.ts`/`App.tsx`/`index.css` as a pulsing "auto-connecting…" panel state. Added `local-representative/main_test.go` (retry-indicator + start/stop lifecycle) and a `local-representative/README.md` documenting the flags; Go/npm build tooling is blocked in this session so changes were verified by hand and still need a `make build`.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Now let's add configurability through config files.
 
+We'll use common code called 'ufa-configurable' to make this possible. We'll make both federation-command and local-representative configurable in this increment.
 
-## Human-Prompt
+The config file locations may be updated through a launch argument. By default the apllications will look for ~/.ufa/config/<sub-application>.yaml and ~/.ufa/config/global.yaml (specific config wins over global.yaml on a per-item basis. arguments win over configs.)
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will make sure all available configuration options are available through these yaml files and we will document example configs in the READMEs of the sub-applications.

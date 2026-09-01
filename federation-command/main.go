@@ -531,6 +531,18 @@ func autoConnectDialCmd(addr string) tea.Cmd {
 	}
 }
 
+// autoConnectControlState decides which control mode a completed background
+// auto-connect adopts. If the blinker dot is selected — or a manual connect is
+// already in flight — the user is angling for remote control, so honour that.
+// Otherwise the user is mid-entry at the prompt and we take local control so the
+// foreground session is not yanked away.
+func autoConnectControlState(b *Blinker) BlinkerState {
+	if b.IsSelectMode() || b.IsConnecting() {
+		return BlinkerConnected
+	}
+	return BlinkerLocalControl
+}
+
 // autoConnectRetryCmd schedules the next background dial attempt.
 func autoConnectRetryCmd() tea.Cmd {
 	return tea.Tick(autoConnectInterval, func(t time.Time) tea.Msg {
@@ -932,6 +944,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, autoConnectRetryCmd()
 		}
 		// Success — adopt the connection (mirrors the reprConnectedMsg path).
+		// Whether we land in remote or local control depends on what the CLI was
+		// doing when the background dial completed (see autoConnectControlState).
+		controlState := autoConnectControlState(&m.blinker)
+		wantsRemote := controlState == BlinkerConnected
 		m.autoConnect = false
 		m.blinker.DisableAccent()
 		m.reprClient = msg.client
@@ -947,14 +963,27 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reprOutPath = tf.Name()
 			m.reprOutOffset = 0
 		}
-		m.reprClient.SendState("remote-control")
-		m.blinker.SetState(BlinkerConnected)
+		m.blinker.SetState(controlState)
+		var controlNotice string
+		if wantsRemote {
+			controlNotice = "auto-connect: connected to local-representative at " + m.lrAddr + " (remote control)"
+			m.reprClient.SendState("remote-control")
+			m.input.Blur()
+		} else {
+			controlNotice = "auto-connect: connected to local-representative at " + m.lrAddr + " (local control — press → for remote)"
+			m.reprClient.SendState("local-control")
+			m.input.Focus()
+		}
 		resetTick := m.blinker.ResetTick()
-		return m, tea.Batch(
-			tea.Println(successStyle.Render("auto-connect: connected to local-representative at "+m.lrAddr)),
+		cmds := []tea.Cmd{
+			tea.Println(successStyle.Render(controlNotice)),
 			resetTick,
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
-		)
+		}
+		if !wantsRemote {
+			cmds = append(cmds, textinput.Blink)
+		}
+		return m, tea.Batch(cmds...)
 
 	case reprConnectedMsg:
 		if !m.blinker.IsConnecting() {

@@ -37,3 +37,26 @@ Result: launching `./federation-command --auto-connect` in one terminal and `loc
 This implementation looks good - the only immediately visible issue is that when the auto-connect happens the CLI is yanked out of local mode and into remote. We will update this so that if the CLI has the dot selected (aka - would-be remote mode) when the connection occurs then it will go into remote mode, but if the connection occurs during CLI entry-prompt operation then we go into local mode.
 
 Let's correct this now.
+
+
+prompt: [`bf3b7a8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bf3b7a8129fd5aa36c1a4612ef4f8dd30138ad04) → reply: [`f9e534f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f9e534f299857f589cb2129817b3bc4feceb55bd)
+
+## Reply A
+
+I executed Revision A. Go build/test tooling is blocked in this session (requires interactive approval), so I verified the changes by hand as the original reply did.
+
+**What changed:**
+
+- **`federation-command/main.go`** — On a successful background auto-connect, FC no longer unconditionally jumps into remote-control mode. Added `autoConnectControlState(*Blinker)` which returns `BlinkerConnected` (remote) only when the blinker dot is selected or a manual connect is already in flight, and `BlinkerLocalControl` otherwise. The `autoConnectResultMsg` success handler now uses it: remote path sends `remote-control` and blurs the input (unchanged behavior for that case); local path sends `local-control`, keeps the input focused, emits `textinput.Blink`, and prints a "(local control — press → for remote)" notice.
+- **`federation-command/main_test.go`** — Added `TestAutoConnectControlState` covering dot-selected/connecting → remote and idle/typing → local.
+- **`federation-command/docs/brief-tour.md`** — Documented that auto-connect success adopts remote vs. local control based on what the CLI was doing at connect time.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

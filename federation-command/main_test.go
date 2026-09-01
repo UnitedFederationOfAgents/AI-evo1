@@ -305,3 +305,29 @@ func TestParseCLIArgs(t *testing.T) {
 		})
 	}
 }
+
+// TestAutoConnectControlState verifies a completed background auto-connect adopts
+// remote control only when the user was angling for it (dot selected or a manual
+// connect already in flight); an active entry-prompt session keeps local control.
+func TestAutoConnectControlState(t *testing.T) {
+	tests := []struct {
+		name  string
+		state BlinkerState
+		want  BlinkerState
+	}{
+		{"dot selected -> remote", BlinkerSelect, BlinkerConnected},
+		{"manual connect in flight -> remote", BlinkerConnecting, BlinkerConnected},
+		{"idle entry prompt -> local", BlinkerIdle, BlinkerLocalControl},
+		{"typing at prompt -> local", BlinkerInactive, BlinkerLocalControl},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewBlinker()
+			b.SetState(tt.state)
+			if got := autoConnectControlState(&b); got != tt.want {
+				t.Errorf("autoConnectControlState(%v) = %v, want %v", tt.state, got, tt.want)
+			}
+		})
+	}
+}

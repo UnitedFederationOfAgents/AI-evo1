@@ -34,8 +34,16 @@ export AGENT_SESSION=my-session
 Passing `--auto-connect` makes federation-command dial local-representative in the
 background on startup, retrying every 10 seconds for up to 10 minutes. The attempt
 runs without blocking the shell; while it is in progress the blinker adds a brief
-blue "accent" pulse on top of its normal mode. On success FC enters remote-control
-mode automatically; if the window elapses first, FC prints that it gave up.
+blue "accent" pulse on top of its normal mode. If the window elapses first, FC
+prints that it gave up.
+
+On success, the control mode FC adopts depends on what you were doing when the
+connection landed:
+
+- If the blinker dot is **selected** (or you already started a manual connect),
+  FC takes **remote control** — you were angling for it.
+- Otherwise you were mid-entry at the prompt, so FC takes **local control** and
+  leaves your foreground session intact. Press `→` to hand control to LR.
 
 ```bash
 ./federation-command --auto-connect            # default representable port (8082)

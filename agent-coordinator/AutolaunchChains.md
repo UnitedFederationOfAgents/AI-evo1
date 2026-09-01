@@ -28,13 +28,21 @@ Once this increment is complete we will be able to launch FC in one terminal and
 ```
 
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Add system management to local-representative and facilitate full autolaunch chain from the single entrypoint.
+
+[Step 2 Prompt](autolaunchChainsImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Next we will add the capability to local-respresentative to launch applications itself.
+
+LR will gain a 'system' tab (to the right of all other tabs) where it will display itself as a process. It will also have the widgets needed to launch other applications (for now we will start with only federation-command).
+
+The config will also support the configuration of auto-launch configuration for each application, so that when LR launches it will automatically launch child applications.
+
+The system tab allows the termination of managed applications and lists some basic data like PID.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

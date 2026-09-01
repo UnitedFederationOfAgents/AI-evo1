@@ -32,11 +32,8 @@ I've implemented Step 1 of AutolaunchChains. Since Go build/test tooling is bloc
 Result: launching `./federation-command --auto-connect` in one terminal and `local-representative` in another now connects automatically without manual blinker interaction.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+This implementation looks good - the only immediately visible issue is that when the auto-connect happens the CLI is yanked out of local mode and into remote. We will update this so that if the CLI has the dot selected (aka - would-be remote mode) when the connection occurs then it will go into remote mode, but if the connection occurs during CLI entry-prompt operation then we go into local mode.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's correct this now.

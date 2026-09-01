@@ -413,6 +413,9 @@ func TestParseCLIArgsRemote(t *testing.T) {
 	if !cfg.remote {
 		t.Error("--remote flag did not set cfg.remote")
 	}
+	if !cfg.autoConnect {
+		t.Error("--remote should imply --auto-connect so FC dials LR and lands in remote")
+	}
 
 	cfg, _, err = parseCLIArgs(nil)
 	if err != nil {
@@ -420,6 +423,9 @@ func TestParseCLIArgsRemote(t *testing.T) {
 	}
 	if cfg.remote {
 		t.Error("cfg.remote should default to false")
+	}
+	if cfg.autoConnect {
+		t.Error("cfg.autoConnect should default to false when --remote is absent")
 	}
 
 	dir := t.TempDir()
@@ -434,5 +440,8 @@ func TestParseCLIArgsRemote(t *testing.T) {
 	}
 	if !cfg.remote {
 		t.Error("remote: true in config did not set cfg.remote")
+	}
+	if !cfg.autoConnect {
+		t.Error("remote: true in config should imply auto-connect")
 	}
 }

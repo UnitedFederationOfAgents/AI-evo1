@@ -71,6 +71,15 @@ type managedProc struct {
 	pid        int
 	startedAt  time.Time
 
+	// Set when the instance is hosted in a detached terminal multiplexer
+	// (tmux/screen): the launcher returns immediately and the child keeps
+	// running inside its own session, so LR can't wait(2) on it. It tears the
+	// session down with killCmd on terminate and shows attachHint in the UI.
+	detached   bool
+	termLabel  string   // chosen terminal, e.g. "tmux" ("" when launched directly)
+	killCmd    []string // argv that stops a detached session (nil if unknown)
+	attachHint string   // how an operator reconnects to interact
+
 	mu          sync.Mutex
 	status      string // "running", "exited", "failed"
 	exitCode    int
@@ -212,12 +221,16 @@ type terminalCandidate struct {
 }
 
 // terminalCandidates lists the terminal emulators / multiplexers probed, in
-// order, when no explicit "terminal" override is configured. Foreground
-// emulators come first because LR can then track the hosted instance's PID and
-// lifecycle; the double-forking / detached ones (gnome-terminal, tmux, screen)
-// are last-resort. tmux and screen are special-cased in wrapInTerminal because
-// they need a generated session name.
+// order, when no explicit "terminal" override is configured. Detached
+// multiplexers (tmux, screen) come first: they host the child in a real PTY
+// without popping a window or grabbing the desktop foreground, which is what the
+// machine-driven auto-launch chain wants (and the only thing that works on a
+// headless host). Windowed emulators follow for interactive desktop use. tmux
+// and screen are special-cased in wrapInTerminal because they need a generated
+// session name.
 var terminalCandidates = []terminalCandidate{
+	{prog: "tmux", args: nil},
+	{prog: "screen", args: nil},
 	{prog: "xterm", args: []string{"-e"}},
 	{prog: "konsole", args: []string{"-e"}},
 	{prog: "alacritty", args: []string{"-e"}},
@@ -227,23 +240,42 @@ var terminalCandidates = []terminalCandidate{
 	{prog: "xfce4-terminal", args: []string{"-x"}},
 	{prog: "x-terminal-emulator", args: []string{"-e"}},
 	{prog: "gnome-terminal", args: []string{"--"}},
-	{prog: "tmux", args: nil},
-	{prog: "screen", args: nil},
 }
 
-// wrapInTerminal returns the program and argv to exec so that bin (with appArgs)
-// runs inside an interactive terminal. It honours the configured "terminal"
-// override first — a space-separated command prefix, e.g. `xterm -e` or
-// `tmux new-session -d -s fc` — otherwise it probes terminalCandidates on $PATH.
-// If nothing is found it returns an actionable error rather than letting
-// federation-command fail deep inside its input reader ("error creating
-// cancelreader").
-func (s *Server) wrapInTerminal(bin string, appArgs []string) (string, []string, error) {
+// terminalHosting records how a terminal-wrapped launch runs so the reaper and
+// terminate path can treat a detached multiplexer session (which returns control
+// the instant it is created) differently from a foreground emulator LR waits on.
+type terminalHosting struct {
+	detached   bool     // launcher backgrounds the child in its own session
+	label      string   // chosen terminal, e.g. "tmux"
+	killCmd    []string // argv that stops a detached session (nil if unknown)
+	attachHint string   // how an operator reconnects to interact
+}
+
+// wrapInTerminal returns the program, argv and hosting metadata to exec so that
+// bin (with appArgs) runs inside an interactive terminal. It honours the
+// configured "terminal" override first — a space-separated command prefix, e.g.
+// `xterm -e` or `tmux new-session -d -s fc` — otherwise it probes
+// terminalCandidates on $PATH, preferring a detached tmux/screen session that
+// never takes the foreground. If nothing is found it returns an actionable error
+// rather than letting federation-command fail deep inside its input reader
+// ("error creating cancelreader").
+func (s *Server) wrapInTerminal(bin string, appArgs []string) (string, []string, terminalHosting, error) {
 	child := append([]string{bin}, appArgs...)
 
 	if ov := strings.TrimSpace(s.terminalCmd); ov != "" {
 		parts := strings.Fields(ov)
-		return parts[0], append(append([]string{}, parts[1:]...), child...), nil
+		h := terminalHosting{label: filepath.Base(parts[0])}
+		// A `-d` / `-dm` in the override (tmux/screen style) means the launcher
+		// detaches; LR then can't wait on the child. We don't know the session
+		// name the operator chose, so teardown falls back to "close it yourself".
+		for _, p := range parts[1:] {
+			if p == "-d" || p == "-dm" || p == "-dmS" || strings.HasPrefix(p, "-dm") {
+				h.detached = true
+				h.attachHint = "attach to the '" + h.label + "' session you configured"
+			}
+		}
+		return parts[0], append(append([]string{}, parts[1:]...), child...), h, nil
 	}
 
 	for _, c := range terminalCandidates {
@@ -254,18 +286,31 @@ func (s *Server) wrapInTerminal(bin string, appArgs []string) (string, []string,
 		switch c.prog {
 		case "tmux":
 			sess := "fc-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-			return path, append([]string{"new-session", "-d", "-s", sess}, child...), nil
+			return path, append([]string{"new-session", "-d", "-s", sess}, child...),
+				terminalHosting{
+					detached:   true,
+					label:      "tmux",
+					killCmd:    []string{path, "kill-session", "-t", sess},
+					attachHint: "tmux attach -t " + sess,
+				}, nil
 		case "screen":
 			sess := "fc-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-			return path, append([]string{"-dmS", sess}, child...), nil
+			return path, append([]string{"-dmS", sess}, child...),
+				terminalHosting{
+					detached:   true,
+					label:      "screen",
+					killCmd:    []string{path, "-S", sess, "-X", "quit"},
+					attachHint: "screen -r " + sess,
+				}, nil
 		default:
-			return path, append(append([]string{}, c.args...), child...), nil
+			return path, append(append([]string{}, c.args...), child...),
+				terminalHosting{label: c.prog}, nil
 		}
 	}
-	return "", nil, fmt.Errorf(
+	return "", nil, terminalHosting{}, fmt.Errorf(
 		"no terminal found to host %s (it is an interactive shell); set 'terminal' in config "+
-			"(e.g. terminal: \"xterm -e\" or terminal: \"tmux new-session -d -s fc\") or install one of: "+
-			"x-terminal-emulator, gnome-terminal, konsole, xterm, tmux, screen",
+			"(e.g. terminal: \"tmux new-session -d -s fc\" or terminal: \"xterm -e\") or install one of: "+
+			"tmux, screen, x-terminal-emulator, gnome-terminal, konsole, xterm",
 		filepath.Base(bin))
 }
 
@@ -295,10 +340,13 @@ func (s *Server) launchManaged(app string) (string, error) {
 
 	appArgs := spec.buildArgs(s)
 	prog, args := bin, appArgs
+	var hosting terminalHosting
 	if spec.terminal {
 		// Interactive TUI shells must run in a real terminal or their input
-		// reader dies on startup. Wrap the launch in a terminal emulator.
-		prog, args, err = s.wrapInTerminal(bin, appArgs)
+		// reader dies on startup. Wrap the launch in a terminal emulator, or
+		// preferably a detached tmux/screen session that never takes the
+		// foreground.
+		prog, args, hosting, err = s.wrapInTerminal(bin, appArgs)
 		if err != nil {
 			s.recordLaunchFailure(app, instance, id, err)
 			return id, err
@@ -328,12 +376,19 @@ func (s *Server) launchManaged(app string) (string, error) {
 		pid:        cmd.Process.Pid,
 		startedAt:  time.Now(),
 		status:     "running",
+		detached:   hosting.detached,
+		termLabel:  hosting.label,
+		killCmd:    hosting.killCmd,
+		attachHint: hosting.attachHint,
 	}
 	s.procMu.Lock()
 	s.managed[id] = p
 	s.procMu.Unlock()
 
 	log.Printf("system: launched %s (pid %d): %s %v", id, p.pid, prog, args)
+	if hosting.detached && hosting.attachHint != "" {
+		log.Printf("system: %s runs in a detached %s session — %s", id, hosting.label, hosting.attachHint)
+	}
 
 	go s.reapManaged(p)
 
@@ -344,6 +399,23 @@ func (s *Server) launchManaged(app string) (string, error) {
 // reapManaged waits for a child to exit and records its final status.
 func (s *Server) reapManaged(p *managedProc) {
 	err := p.cmd.Wait()
+
+	if p.detached && err == nil {
+		// A detached multiplexer launcher (tmux new-session -d, screen -dmS)
+		// returns as soon as the session exists; federation-command keeps
+		// running inside it. We can't wait(2) on the real child, so record it as
+		// running-but-untracked and point the operator at how to attach.
+		p.mu.Lock()
+		p.status = "running"
+		p.pid = 0
+		if p.detail == "" {
+			p.detail = "hosted in a detached " + p.termLabel + " session — " + p.attachHint
+		}
+		p.mu.Unlock()
+		log.Printf("system: %s handed off to a detached %s session — %s", p.instanceID, p.termLabel, p.attachHint)
+		s.broadcastSystemState()
+		return
+	}
 
 	p.mu.Lock()
 	switch {
@@ -382,6 +454,25 @@ func (s *Server) terminateManaged(target string) error {
 	s.procMu.Unlock()
 	if p == nil {
 		return fmt.Errorf("%q is not managed by this local-representative", target)
+	}
+
+	if p.detached {
+		// LR never owned the child directly (it runs inside a detached
+		// tmux/screen session), so there is no process group to signal. Tear the
+		// session down with the recorded command and drop the entry.
+		s.procMu.Lock()
+		delete(s.managed, id)
+		s.procMu.Unlock()
+		if len(p.killCmd) > 0 {
+			log.Printf("system: stopping detached session for %s: %v", id, p.killCmd)
+			if out, err := exec.Command(p.killCmd[0], p.killCmd[1:]...).CombinedOutput(); err != nil {
+				log.Printf("system: %s session teardown failed: %v (%s)", id, err, strings.TrimSpace(string(out)))
+			}
+		} else {
+			log.Printf("system: %s ran in a detached terminal LR cannot address — close its session manually", id)
+		}
+		s.broadcastSystemState()
+		return nil
 	}
 
 	if p.state() != "running" {

@@ -50,11 +50,12 @@ func TestParseAutoLaunchEntry(t *testing.T) {
 	}
 }
 
-// TestWrapInTerminal verifies a configured "terminal" prefix is honoured.
+// TestWrapInTerminal verifies a configured "terminal" prefix is honoured, and
+// that a detached tmux/screen-style override is recognised as such.
 func TestWrapInTerminal(t *testing.T) {
 	s := newServer("test-lr")
 	s.terminalCmd = "myterm -e"
-	prog, args, err := s.wrapInTerminal("/bin/fc", []string{"--auto-connect", "--remote"})
+	prog, args, hosting, err := s.wrapInTerminal("/bin/fc", []string{"--auto-connect", "--remote"})
 	if err != nil {
 		t.Fatalf("wrapInTerminal: %v", err)
 	}
@@ -69,6 +70,53 @@ func TestWrapInTerminal(t *testing.T) {
 		if args[i] != want[i] {
 			t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
 		}
+	}
+	if hosting.detached {
+		t.Errorf("a plain %q override should not be detached", s.terminalCmd)
+	}
+
+	s.terminalCmd = "tmux new-session -d -s fc"
+	_, args, hosting, err = s.wrapInTerminal("/bin/fc", []string{"--remote"})
+	if err != nil {
+		t.Fatalf("wrapInTerminal (tmux override): %v", err)
+	}
+	if !hosting.detached {
+		t.Errorf("a `-d` tmux override should be detached, got %+v", hosting)
+	}
+	if got := args[len(args)-1]; got != "--remote" {
+		t.Errorf("child args not appended after override: last = %q", got)
+	}
+}
+
+// TestTerminateDetachedDoesNotSignal verifies terminate on a detached instance
+// tears down via killCmd and never falls into a pid-group kill (pid 0 would
+// signal LR's own group).
+func TestTerminateDetachedDoesNotSignal(t *testing.T) {
+	s := newServer("test-lr")
+	const id = "federation-command#1"
+	s.procMu.Lock()
+	s.managed[id] = &managedProc{
+		app:        "federation-command",
+		instanceID: id,
+		instance:   1,
+		pid:        0,
+		startedAt:  time.Now(),
+		status:     "running",
+		detached:   true,
+		termLabel:  "tmux",
+		killCmd:    []string{"true"}, // stand-in teardown command that always succeeds
+		attachHint: "tmux attach -t fc-x",
+	}
+	s.procMu.Unlock()
+
+	if err := s.terminateManaged(id); err != nil {
+		t.Fatalf("terminateManaged(detached): %v", err)
+	}
+	s.procMu.Lock()
+	_, still := s.managed[id]
+	s.procMu.Unlock()
+	if still {
+		t.Fatal("detached instance should be dropped after terminate")
 	}
 }
 

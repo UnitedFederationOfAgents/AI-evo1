@@ -73,3 +73,44 @@ This increment now looks good - let's make an adjustment to ensure that FC comes
 If we can launch the terminal so that it does not take foreground that would be even more ideal, but if that introduces any significant complexity then let's go without it.
 
 Let's also respond with a snippet we can use to write a config which will cause LR to go through the full auto-launch/auto-connect chain with no intervention so we can test that.
+
+
+prompt: [`3aee3d8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3aee3d8e60631dcd53d52b612db844a17277c834) → reply: [`b49a0d5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b49a0d550e39ee8ea50b767d66f3d68683d7b808)
+
+## Reply B
+
+I implemented Revision B. Build/test tooling is still blocked in this session (needs interactive approval), so changes were verified by hand — `make build` in `local-representative/` and `go test ./...` in both `local-representative/` and `federation-command/` still need to be run.
+
+## What changed
+
+**1. FC is guaranteed to come up and connect in remote.** In `federation-command`, `--remote` / `remote:` now **implies `--auto-connect`** (`parseCLIArgsWithConfig` sets `cfg.autoConnect = true` whenever `cfg.remote`). Previously `--remote` only chose the control mode *if* a background dial was already configured; now requesting remote is sufficient on its own — FC dials LR on startup and `autoConnectControlState(preferRemote=true)` lands it in remote control. Updated the dead `else if m.remoteDefault` branch in `Init()`, both README entries, and added assertions to `TestParseCLIArgsRemote`.
+
+**2. Terminal launch no longer takes the foreground.** In `local-representative/procman.go`, `terminalCandidates` now probes **`tmux` and `screen` first** — LR hosts each FC in a detached session (`tmux new-session -d -s fc-<id>`): no window, never grabs focus, and a real PTY so `cancelreader` is happy. `wrapInTerminal` returns a `terminalHosting{detached,label,killCmd,attachHint}`; for detached instances `reapManaged` records them as `running` (PID shown as `—`, detail carries the `tmux attach -t …` hint) instead of treating the launcher's immediate exit as "exited", and `terminateManaged` tears the session down via `tmux kill-session` / `screen -X quit` instead of a `kill(-pid)` that would hit pid 0. Windowed emulators remain as fallback with full PID tracking. The deeper "track the detached child's real PID" work was skipped as disproportionate per your note; the limitation (an FC that crashes inside its session still shows `running`) is documented. The system tab also now shows `federation-command control: remote / local / not connected` so you can confirm the chain landed in remote. Tests + both READMEs updated.
+
+**3. Full hands-off chain config.** Install `tmux`, then:
+
+```yaml
+# ~/.ufa/config/local-representative.yaml
+auto-connect: true                 # dial agent-coordinator on startup
+ac-host: localhost
+ac-port: "8084"
+auto-launch: federation-command    # or "federation-command:3" for three FC instances
+# no 'terminal:' key needed — tmux is autodetected and used detached
+```
+
+```bash
+./agent-coordinator      # one terminal (or already running)
+./local-representative     # another — no flags
+```
+
+LR starts its `representable` server, auto-launches FC into a detached tmux session (`--auto-connect --remote`), and auto-connects up to `agent-coordinator`. FC dials LR in the background and adopts remote control with no interaction; the **system** tab shows `federation-command control: remote` once the chain is up. `tmux attach -t fc-<id>` (id shown in the system tab detail column) to watch or drive FC directly.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

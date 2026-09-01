@@ -481,10 +481,12 @@ function SystemProcRow({
 
 function SystemPanel({
   state,
+  fcState,
   onLaunch,
   onTerminate,
 }: {
   state: SystemStateMsg | null
+  fcState: string
   onLaunch: (name: string) => void
   onTerminate: (id: string) => void
 }) {
@@ -502,8 +504,20 @@ function SystemPanel({
   const runningCount = (name: string) =>
     state.managed.filter(p => p.name === name && p.status === 'running').length
 
+  const fcRunning = runningCount('federation-command') > 0
+  const fcControl =
+    fcState === 'remote-control' ? 'remote'
+    : fcState === 'local-control' ? 'local'
+    : 'not connected'
+
   return (
     <div className="sys-panel">
+      {fcRunning && (
+        <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
+          federation-command control: <strong>{fcControl}</strong>
+          {fcControl !== 'remote' && ' — expected remote in a machine-driven chain'}
+        </div>
+      )}
       <div className="sys-table">
         <div className="sys-row sys-row-head">
           <span className="sys-col sys-col-name">process</span>
@@ -587,6 +601,7 @@ export default function App() {
           {activeTab === 'system' ? (
             <SystemPanel
               state={systemState}
+              fcState={fcState}
               onLaunch={launchApp}
               onTerminate={terminateApp}
             />

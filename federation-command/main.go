@@ -749,9 +749,6 @@ func (m appModel) Init() tea.Cmd {
 			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background; adopts %s)",
 			m.lrAddr, autoConnectInterval, autoConnectWindow, adopts))
 		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr), m.blinker.accentTickCmd())
-	} else if m.remoteDefault {
-		cmds = append(cmds, tea.Println(sessionStyle.Render(
-			"  remote-control mode: will take remote control when a connection to local-representative is established")))
 	}
 	return tea.Batch(cmds...)
 }
@@ -3671,7 +3668,7 @@ func renderSessions(recordsPath string, currentSession string) string {
 // and finally the command-line flags. See README.md for the config keys.
 type cliConfig struct {
 	autoConnect bool   // --auto-connect / auto-connect: dial local-representative in the background on startup
-	remote      bool   // --remote / remote: adopt remote control (not local) once a connection is established
+	remote      bool   // --remote / remote: adopt remote control (not local) once a connection is established; implies auto-connect
 	lrAddr      string // local-representative representable address (--lr-host / --lr-port override host / port)
 }
 
@@ -3756,6 +3753,12 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 			}
 		}
 		// Unknown arguments are ignored for backward compatibility.
+	}
+	// --remote is only meaningful once a connection exists, so in a machine-driven
+	// launch chain it implies --auto-connect: FC dials local-representative in the
+	// background on startup and adopts remote control the moment it lands.
+	if cfg.remote {
+		cfg.autoConnect = true
 	}
 	cfg.lrAddr = fmt.Sprintf("%s:%d", host, port)
 	return cfg, false, nil

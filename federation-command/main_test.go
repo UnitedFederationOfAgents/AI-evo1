@@ -4,9 +4,20 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	ufaconfig "ufa-configurable"
 )
+
+// writeConfigFile is a test helper for laying down ufa-configurable YAML files.
+func writeConfigFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
 
 // TestVersion verifies that the --version flag works correctly
 func TestVersion(t *testing.T) {
@@ -255,6 +266,9 @@ func TestModeDescription(t *testing.T) {
 
 // TestParseCLIArgs verifies startup flag parsing for auto-connect and --lr-port.
 func TestParseCLIArgs(t *testing.T) {
+	// Isolate from any real ~/.ufa/config on the host running the tests.
+	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+
 	defaultAddr := "localhost:8082"
 
 	tests := []struct {
@@ -303,6 +317,58 @@ func TestParseCLIArgs(t *testing.T) {
 				t.Errorf("lrAddr = %q, want %q", cfg.lrAddr, tt.wantAddr)
 			}
 		})
+	}
+}
+
+// TestParseCLIArgsConfigFilePrecedence verifies config files feed cliConfig
+// (per-app file beating global.yaml per key) and that command-line flags still
+// win over both.
+func TestParseCLIArgsConfigFilePrecedence(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigFile(t, filepath.Join(dir, "global.yaml"), "lr-host: globalhost\nlr-port: 7000\n")
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\nlr-port: 7100\n")
+
+	conf, err := ufaconfig.Load("federation-command", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Config only: app file wins over global for lr-port; global supplies lr-host.
+	cfg, handled, err := parseCLIArgsWithConfig(nil, conf)
+	if err != nil || handled {
+		t.Fatalf("unexpected handled=%v err=%v", handled, err)
+	}
+	if !cfg.autoConnect {
+		t.Errorf("auto-connect from config not applied")
+	}
+	if cfg.lrAddr != "globalhost:7100" {
+		t.Errorf("lrAddr = %q, want globalhost:7100", cfg.lrAddr)
+	}
+
+	// Flags beat config on a per-item basis.
+	cfg, _, err = parseCLIArgsWithConfig([]string{"--lr-host", "flaghost", "--lr-port=9999"}, conf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.lrAddr != "flaghost:9999" {
+		t.Errorf("lrAddr = %q, want flaghost:9999", cfg.lrAddr)
+	}
+	if !cfg.autoConnect {
+		t.Errorf("auto-connect from config should still apply when unrelated flags are set")
+	}
+}
+
+// TestParseCLIArgsRejectsBadConfig verifies a malformed config value is a
+// startup error rather than being silently ignored.
+func TestParseCLIArgsRejectsBadConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: banana\n")
+	conf, err := ufaconfig.Load("federation-command", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, _, err := parseCLIArgsWithConfig(nil, conf); err == nil {
+		t.Fatalf("expected error for non-boolean auto-connect")
 	}
 }
 

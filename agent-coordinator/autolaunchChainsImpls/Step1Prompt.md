@@ -75,3 +75,24 @@ We'll use common code called 'ufa-configurable' to make this possible. We'll mak
 The config file locations may be updated through a launch argument. By default the apllications will look for ~/.ufa/config/<sub-application>.yaml and ~/.ufa/config/global.yaml (specific config wins over global.yaml on a per-item basis. arguments win over configs.)
 
 We will make sure all available configuration options are available through these yaml files and we will document example configs in the READMEs of the sub-applications.
+
+
+prompt: [`e29f705`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e29f7054400ea38a774ded988384d4ae63822d65) → reply: [`7505fdd`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7505fdd2abf4f3125992a2b9e888497d78f39801)
+
+## Reply C
+
+I've implemented Revision C. Go build/test tooling is blocked in this session (requires interactive approval), so I verified the changes by hand as the previous replies did.
+
+**New shared module `ufa-configurable/`** (`ufaconfig` package, wired in like `representable` via `replace` directives): `Load(app, dir)` reads `<dir>/global.yaml` then `<dir>/<app>.yaml`, merging per-key with the app file winning; `String`/`Bool`/`Int` accessors fall back to caller defaults and error on malformed present values; `ExtractConfigDir` pulls a `--config <dir>` override out of an args slice; `DefaultDir()` resolves `$UFA_CONFIG_DIR` or `~/.ufa/config`. It parses a deliberately small flat `key: value` YAML subset (comments, quotes, no new deps) and rejects nesting/sequences so typos surface. Ships with `configurable_test.go`, a `Makefile`, a `README.md`, and is added to the root `Makefile` `SUBPROJECTS`.
+
+**federation-command** — `parseCLIArgs` now loads the config files (honoring `--config`) and hands off to a new testable `parseCLIArgsWithConfig`, which seeds `auto-connect`/`lr-port`/`lr-host` from `global.yaml` → `federation-command.yaml` and then lets flags override; added a matching `--lr-host` flag for parity with LR. **local-representative** — added a `--config` flag plus `appConfig`/`resolveConfig`, which layers `global.yaml` → `local-representative.yaml` under every existing flag (`port`, `repr-port`, `name`, `dev`, `auto-connect`, `ac-host`, `ac-port`), using `flag.Visit` so an explicitly-set flag always wins. Both apps got new tests for the precedence chain and malformed-value rejection, and a new/updated `README.md` documenting every config key with example `global.yaml` / per-app YAML; FC's `brief-tour.md` gained a short config-files note.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

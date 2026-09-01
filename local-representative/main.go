@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"representable"
+	ufaconfig "ufa-configurable"
 )
 
 //go:embed frontend/dist
@@ -571,12 +572,58 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	return mux
 }
 
+// appConfig is local-representative's fully-resolved startup configuration.
+type appConfig struct {
+	httpPort      string
+	heartbeatPort string
+	name          string
+	dev           bool
+	autoConnect   bool
+	acHost        string
+	acPort        string
+}
+
+// resolveConfig layers the ufa-configurable config files beneath the parsed
+// flags: a flag named in setOnCLI keeps its command-line value, otherwise the
+// config files (per-app over global) supply it, otherwise the flag default in
+// defaults is used. Config keys match the flag names.
+func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults appConfig) (appConfig, error) {
+	pick := func(key, cur string) string {
+		if setOnCLI[key] {
+			return cur
+		}
+		return conf.String(key, cur)
+	}
+	pickBool := func(key string, cur bool) (bool, error) {
+		if setOnCLI[key] {
+			return cur, nil
+		}
+		return conf.Bool(key, cur)
+	}
+	out := appConfig{
+		httpPort:      pick("port", defaults.httpPort),
+		heartbeatPort: pick("repr-port", defaults.heartbeatPort),
+		name:          pick("name", defaults.name),
+		acHost:        pick("ac-host", defaults.acHost),
+		acPort:        pick("ac-port", defaults.acPort),
+	}
+	var err error
+	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
+		return out, err
+	}
+	if out.autoConnect, err = pickBool("auto-connect", defaults.autoConnect); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func main() {
 	defaultName, _ := os.Hostname()
 	if defaultName == "" {
 		defaultName = "local"
 	}
 
+	configDir := flag.String("config", "", "directory holding ufa-configurable YAML files (default ~/.ufa/config)")
 	port := flag.String("port", "8081", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
 	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
@@ -586,9 +633,30 @@ func main() {
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
 	flag.Parse()
 
-	s := newServer(*name)
+	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
+	// a flag set explicitly on the command line always wins.
+	conf, err := ufaconfig.Load("local-representative", *configDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	setOnCLI := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setOnCLI[f.Name] = true })
+	cfg, err := resolveConfig(conf, setOnCLI, appConfig{
+		httpPort:      *port,
+		heartbeatPort: *reprPort,
+		name:          *name,
+		dev:           *dev,
+		autoConnect:   *autoConnect,
+		acHost:        *acHost,
+		acPort:        *acPort,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	reprSrv, err := representable.NewServer(":" + *reprPort)
+	s := newServer(cfg.name)
+
+	reprSrv, err := representable.NewServer(":" + cfg.heartbeatPort)
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
@@ -658,22 +726,22 @@ func main() {
 		}
 	})
 
-	log.Printf("representable server listening on tcp://localhost:%s", *reprPort)
+	log.Printf("representable server listening on tcp://localhost:%s", cfg.heartbeatPort)
 
 	go s.broadcastLoop()
 
-	if *autoConnect {
-		log.Printf("auto-connect configuration selected for agent-coordinator at %s:%s", *acHost, *acPort)
-		s.startAutoConnectAC(*acHost, *acPort)
+	if cfg.autoConnect {
+		log.Printf("auto-connect configuration selected for agent-coordinator at %s:%s", cfg.acHost, cfg.acPort)
+		s.startAutoConnectAC(cfg.acHost, cfg.acPort)
 	}
 
-	addr := ":" + *port
-	log.Printf("local-representative %q listening on http://localhost%s", *name, addr)
-	if *dev {
+	addr := ":" + cfg.httpPort
+	log.Printf("local-representative %q listening on http://localhost%s", cfg.name, addr)
+	if cfg.dev {
 		log.Printf("dev mode: connect frontend to ws://localhost%s/ws", addr)
 	}
 
-	if err := http.ListenAndServe(addr, s.setupRoutes(*dev)); err != nil {
+	if err := http.ListenAndServe(addr, s.setupRoutes(cfg.dev)); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -13,15 +13,45 @@ make build      # build frontend + Go binary
 
 ## Flags
 
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--port` | `8081` | HTTP port for the dashboard / WebSocket |
-| `--repr-port` | `8082` | TCP port for the `representable` heartbeat server FC dials |
-| `--name` | hostname | identifier reported to `agent-coordinator` |
-| `--dev` | `false` | dev mode: don't serve the embedded frontend |
-| `--auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
-| `--ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
-| `--ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
+| Flag | Config key | Default | Purpose |
+| --- | --- | --- | --- |
+| `--config` | — | `~/.ufa/config` | directory holding the `ufa-configurable` YAML files |
+| `--port` | `port` | `8081` | HTTP port for the dashboard / WebSocket |
+| `--repr-port` | `repr-port` | `8082` | TCP port for the `representable` heartbeat server FC dials |
+| `--name` | `name` | hostname | identifier reported to `agent-coordinator` |
+| `--dev` | `dev` | `false` | dev mode: don't serve the embedded frontend |
+| `--auto-connect` | `auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
+| `--ac-host` | `ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
+| `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
+
+## Configuration files
+
+Every flag except `--config` can also be set from YAML, via the shared
+[`ufa-configurable`](../ufa-configurable) loader. On startup LR reads:
+
+    ~/.ufa/config/global.yaml               # shared across all sub-applications
+    ~/.ufa/config/local-representative.yaml # local-representative overrides
+
+Pass `--config <dir>` (or set `$UFA_CONFIG_DIR`) to look elsewhere. Precedence,
+highest first: **command-line flag → `local-representative.yaml` →
+`global.yaml` → built-in default** (resolved per key, so a single value in
+`global.yaml` still applies even when the app file sets other keys).
+
+The format is a flat `key: value` mapping; `#` comments and blank lines are
+ignored.
+
+```yaml
+# ~/.ufa/config/global.yaml — applies to every sub-application
+auto-connect: true
+
+# ~/.ufa/config/local-representative.yaml — local-representative only
+port: 8081
+repr-port: 8082
+name: edge-1
+dev: false
+ac-host: 10.0.0.5
+ac-port: "8084"
+```
 
 ## Auto-connecting to agent-coordinator
 

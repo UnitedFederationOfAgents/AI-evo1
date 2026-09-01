@@ -27,6 +27,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
 	"representable"
+	ufaconfig "ufa-configurable"
 )
 
 // Version information
@@ -3653,17 +3654,54 @@ func renderSessions(recordsPath string, currentSession string) string {
 	return b.String()
 }
 
-// cliConfig holds startup options parsed from command-line arguments. There is no
-// config-file support yet — these are driven purely by flags.
+// cliConfig holds federation-command's resolved startup options. Values come
+// from (lowest to highest priority) the built-in defaults,
+// ~/.ufa/config/global.yaml, the per-app ~/.ufa/config/federation-command.yaml,
+// and finally the command-line flags. See README.md for the config keys.
 type cliConfig struct {
-	autoConnect bool   // --auto-connect: dial local-representative in the background on startup
-	lrAddr      string // local-representative representable address (--lr-port overrides the port)
+	autoConnect bool   // --auto-connect / auto-connect: dial local-representative in the background on startup
+	lrAddr      string // local-representative representable address (--lr-host / --lr-port override host / port)
 }
 
-// parseCLIArgs interprets federation-command's startup flags. handled is true when
-// the args triggered a terminal action (e.g. --version) and main should just exit.
+// Config-file keys recognised for federation-command (see README.md).
+const (
+	cfgKeyAutoConnect = "auto-connect"
+	cfgKeyLRHost      = "lr-host"
+	cfgKeyLRPort      = "lr-port"
+)
+
+// parseCLIArgs loads the ufa-configurable config files (honouring a --config
+// directory override) and then applies command-line flags on top. handled is
+// true when the args triggered a terminal action (e.g. --version) and main
+// should just exit.
 func parseCLIArgs(args []string) (cfg cliConfig, handled bool, err error) {
-	port := DefaultLRPort
+	configDir, rest, err := ufaconfig.ExtractConfigDir(args)
+	if err != nil {
+		return cfg, false, err
+	}
+	conf, err := ufaconfig.Load("federation-command", configDir)
+	if err != nil {
+		return cfg, false, err
+	}
+	return parseCLIArgsWithConfig(rest, conf)
+}
+
+// parseCLIArgsWithConfig seeds cliConfig from conf, then lets the flags in args
+// override it (flags always win). args must already have any --config flag
+// removed.
+func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfig, handled bool, err error) {
+	if cfg.autoConnect, err = conf.Bool(cfgKeyAutoConnect, false); err != nil {
+		return cfg, false, err
+	}
+	port, err := conf.Int(cfgKeyLRPort, DefaultLRPort)
+	if err != nil {
+		return cfg, false, err
+	}
+	if port <= 0 || port > 65535 {
+		return cfg, false, fmt.Errorf("invalid %s value %d in config (want 1-65535)", cfgKeyLRPort, port)
+	}
+	host := conf.String(cfgKeyLRHost, DefaultLRHost)
+
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -3672,6 +3710,16 @@ func parseCLIArgs(args []string) (cfg cliConfig, handled bool, err error) {
 			return cfg, true, nil
 		case arg == "--auto-connect" || arg == "-auto-connect":
 			cfg.autoConnect = true
+		case arg == "--lr-host" || arg == "-lr-host":
+			if i+1 >= len(args) {
+				return cfg, false, fmt.Errorf("--lr-host requires a value")
+			}
+			i++
+			host = args[i]
+		case strings.HasPrefix(arg, "--lr-host="):
+			host = strings.TrimPrefix(arg, "--lr-host=")
+		case strings.HasPrefix(arg, "-lr-host="):
+			host = strings.TrimPrefix(arg, "-lr-host=")
 		case arg == "--lr-port" || arg == "-lr-port":
 			if i+1 >= len(args) {
 				return cfg, false, fmt.Errorf("--lr-port requires a value")
@@ -3691,7 +3739,7 @@ func parseCLIArgs(args []string) (cfg cliConfig, handled bool, err error) {
 		}
 		// Unknown arguments are ignored for backward compatibility.
 	}
-	cfg.lrAddr = fmt.Sprintf("%s:%d", DefaultLRHost, port)
+	cfg.lrAddr = fmt.Sprintf("%s:%d", host, port)
 	return cfg, false, nil
 }
 

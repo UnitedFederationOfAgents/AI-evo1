@@ -50,8 +50,17 @@ connection landed:
 ./federation-command --auto-connect --lr-port 9090
 ```
 
-`--lr-port` overrides the port for both the background auto-connect and the manual
-blinker connect flow; it defaults to 8082.
+`--lr-host` / `--lr-port` override the target for both the background auto-connect
+and the manual blinker connect flow; they default to `localhost:8082`.
+
+## Configuration files
+
+`--auto-connect`, `--lr-host` and `--lr-port` can also be set from YAML via the
+shared `ufa-configurable` loader, read on startup from
+`~/.ufa/config/global.yaml` and `~/.ufa/config/federation-command.yaml`
+(override the directory with `--config <dir>`). Command-line flags win over the
+per-app file, which wins over `global.yaml`, which wins over the built-in
+defaults. See [../README.md](../README.md) for an example config.
 
 ## Session Management
 

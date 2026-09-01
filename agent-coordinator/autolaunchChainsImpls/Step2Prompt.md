@@ -35,11 +35,19 @@ I've implemented Step 2 of AutolaunchChains. Go/npm build tooling is blocked in 
 Result: `./local-representative` with `auto-launch: federation-command` in config brings up LR and an auto-connecting FC from one command, and the system tab lets you launch/terminate FC and see its PID.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Our implementation does not work fully. The widgets on LR look good, but pressing 'LAUNCH' for federation command fails with this error:
+```
+2026/09/01 17:41:28 system: launched federation-command (pid 410880): /AI-evo1-dev/bin/federation-command [--auto-connect --lr-host localhost --lr-port 8082]
+2026/09/01 17:41:28 [federation-command] error: error creating cancelreader: add reader to epoll interest list
+2026/09/01 17:41:28 system: federation-command (pid 410880) failed (exit 1)
+```
 
+For clarity - federation-command should launch by popping a new terminal that runs federation-command, since it is a shell that must run somewhere where the user may interact with it.
 
-## Human-Prompt
+Another side-note we can implement with federation-command in stride is that whenever it is going through a full auto-launch/auto-connect chain that it should be in remote mode by default. This facilitates the full machine-driven chain of events.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We also need LR to be able to handle launching N instances of FC. (Some sub-applications are one per host, others are N, FC is N-per-host)
+
+Let's make these corrections and updates in this next revision.

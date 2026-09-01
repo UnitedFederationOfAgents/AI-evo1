@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,13 @@ type CondocStateMsg struct {
 	StatusMsg string `json:"status_msg,omitempty"`
 }
 
+// ACStateMsg is the payload of "ac-state" WebSocket messages.
+type ACStateMsg struct {
+	Connected bool   `json:"connected"`
+	Host      string `json:"host,omitempty"`
+	Port      string `json:"port,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -82,6 +90,7 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
+	lrName     string
 
 	fcMu    sync.RWMutex
 	fcState string // "remote-control", "local-control", or "" (disconnected)
@@ -91,14 +100,20 @@ type Server struct {
 
 	condocMu    sync.RWMutex
 	condocState *CondocStateMsg
+
+	acMu    sync.RWMutex
+	acClient *representable.Client
+	acHost  string
+	acPort  string
 }
 
-func newServer() *Server {
+func newServer(lrName string) *Server {
 	return &Server{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		clients: make(map[*wsClient]bool),
+		lrName:  lrName,
 	}
 }
 
@@ -155,6 +170,12 @@ func (s *Server) setFCState(state string) {
 	s.fcState = state
 	s.fcMu.Unlock()
 	s.broadcast("fc-state", FCStateMsg{State: state})
+	s.acMu.RLock()
+	ac := s.acClient
+	s.acMu.RUnlock()
+	if ac != nil {
+		ac.SendData("fc-state", FCStateMsg{State: state})
+	}
 }
 
 func (s *Server) getRidealongState() RidealongStateMsg {
@@ -173,6 +194,105 @@ func (s *Server) getCondocState() CondocStateMsg {
 		return CondocStateMsg{Active: false}
 	}
 	return *s.condocState
+}
+
+func (s *Server) getACClient() *representable.Client {
+	s.acMu.RLock()
+	defer s.acMu.RUnlock()
+	return s.acClient
+}
+
+func (s *Server) getACState() ACStateMsg {
+	s.acMu.RLock()
+	defer s.acMu.RUnlock()
+	return ACStateMsg{
+		Connected: s.acClient != nil,
+		Host:      s.acHost,
+		Port:      s.acPort,
+	}
+}
+
+// pushStateToAC sends a full state snapshot to the agent-coordinator.
+func (s *Server) pushStateToAC() {
+	ac := s.getACClient()
+	if ac == nil {
+		return
+	}
+	ac.SendData("services", s.currentStatus())
+	ac.SendData("fc-state", FCStateMsg{State: s.getFCState()})
+	ac.SendData("ridealong-state", s.getRidealongState())
+	ac.SendData("condoc-state", s.getCondocState())
+}
+
+// connectAC dials agent-coordinator and maintains the connection lifecycle.
+// Must be called in its own goroutine.
+func (s *Server) connectAC(host, port string) {
+	s.acMu.Lock()
+	if s.acClient != nil {
+		s.acClient.Close()
+		s.acClient = nil
+	}
+	s.acHost = host
+	s.acPort = port
+	s.acMu.Unlock()
+
+	addr := host + ":" + port
+	log.Printf("connecting to agent-coordinator at %s as %q", addr, s.lrName)
+
+	client, err := representable.Connect(addr, s.lrName, 5*time.Second)
+	if err != nil {
+		log.Printf("failed to connect to agent-coordinator: %v", err)
+		s.acMu.RLock()
+		stillPending := s.acHost == host && s.acPort == port && s.acClient == nil
+		s.acMu.RUnlock()
+		if stillPending {
+			s.broadcast("ac-state", ACStateMsg{Connected: false, Host: host, Port: port})
+		}
+		return
+	}
+
+	s.acMu.Lock()
+	// If a newer connectAC call changed the target, abandon this connection.
+	if s.acHost != host || s.acPort != port {
+		s.acMu.Unlock()
+		client.Close()
+		return
+	}
+	s.acClient = client
+	s.acMu.Unlock()
+
+	// Forward commands from AC to FC.
+	client.SetCommandHandler(func(cmd string) {
+		if s.reprServer != nil {
+			s.reprServer.SendCommand("federation-command", cmd)
+		}
+	})
+
+	s.pushStateToAC()
+	s.broadcast("ac-state", ACStateMsg{Connected: true, Host: host, Port: port})
+	log.Printf("connected to agent-coordinator at %s", addr)
+
+	// Block until the connection drops (either remotely or via Close).
+	<-client.DisconnectCh()
+
+	s.acMu.Lock()
+	if s.acClient == client {
+		s.acClient = nil
+	}
+	s.acMu.Unlock()
+
+	log.Printf("disconnected from agent-coordinator at %s", addr)
+	s.broadcast("ac-state", ACStateMsg{Connected: false, Host: host, Port: port})
+}
+
+// disconnectAC closes the AC connection; the connectAC goroutine handles cleanup.
+func (s *Server) disconnectAC() {
+	s.acMu.Lock()
+	client := s.acClient
+	s.acMu.Unlock()
+	if client != nil {
+		client.Close()
+	}
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -198,6 +318,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "fc-state", FCStateMsg{State: s.getFCState()})
 		s.sendToClient(c, "ridealong-state", s.getRidealongState())
 		s.sendToClient(c, "condoc-state", s.getCondocState())
+		s.sendToClient(c, "ac-state", s.getACState())
 	}()
 
 	// Write pump.
@@ -253,6 +374,26 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		switch m.Type {
+		case "connect-ac":
+			var payload struct {
+				Host string `json:"host"`
+				Port string `json:"port"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				host := payload.Host
+				if host == "" {
+					host = "localhost"
+				}
+				port := payload.Port
+				if port == "" {
+					port = "8084"
+				}
+				go s.connectAC(host, port)
+			}
+		case "disconnect-ac":
+			s.disconnectAC()
+		}
 	}
 }
 
@@ -261,7 +402,11 @@ func (s *Server) broadcastLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		s.broadcast("status", s.currentStatus())
+		status := s.currentStatus()
+		s.broadcast("status", status)
+		if ac := s.getACClient(); ac != nil {
+			ac.SendData("services", status)
+		}
 	}
 }
 
@@ -304,12 +449,18 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 }
 
 func main() {
+	defaultName, _ := os.Hostname()
+	if defaultName == "" {
+		defaultName = "local"
+	}
+
 	port := flag.String("port", "8081", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
+	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
 	flag.Parse()
 
-	s := newServer()
+	s := newServer(*name)
 
 	reprSrv, err := representable.NewServer(":" + *reprPort)
 	if err != nil {
@@ -330,14 +481,27 @@ func main() {
 				s.condocState = nil
 				s.condocMu.Unlock()
 				s.broadcast("condoc-state", CondocStateMsg{Active: false})
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("ridealong-state", RidealongStateMsg{Active: false})
+					ac.SendData("condoc-state", CondocStateMsg{Active: false})
+				}
 			}
 		}
 	})
+
 	reprSrv.SetLogHandler(func(name, line, kind string) {
 		if name == "federation-command" {
 			s.broadcast("fc-log", FCLogMsg{Line: line, Kind: kind})
+			if ac := s.getACClient(); ac != nil {
+				if kind == "output" {
+					ac.SendOutput(line)
+				} else {
+					ac.SendLog(line)
+				}
+			}
 		}
 	})
+
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
 		if name != "federation-command" {
 			return
@@ -350,6 +514,9 @@ func main() {
 				s.ridealongState = &payload
 				s.ridealongMu.Unlock()
 				s.broadcast("ridealong-state", payload)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("ridealong-state", payload)
+				}
 			}
 		case "condoc-state":
 			var payload CondocStateMsg
@@ -358,6 +525,9 @@ func main() {
 				s.condocState = &payload
 				s.condocMu.Unlock()
 				s.broadcast("condoc-state", payload)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("condoc-state", payload)
+				}
 			}
 		}
 	})
@@ -367,7 +537,7 @@ func main() {
 	go s.broadcastLoop()
 
 	addr := ":" + *port
-	log.Printf("local-representative listening on http://localhost%s", addr)
+	log.Printf("local-representative %q listening on http://localhost%s", *name, addr)
 	if *dev {
 		log.Printf("dev mode: connect frontend to ws://localhost%s/ws", addr)
 	}

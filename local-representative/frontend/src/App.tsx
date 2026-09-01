@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'worker'] as const
 type Tab = typeof TABS[number]
@@ -16,6 +16,7 @@ function useStatusWS() {
   const [fcLog, setFcLog] = useState<LogEntry[]>([])
   const [ridealongState, setRidealongState] = useState<RidealongStateMsg | null>(null)
   const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
+  const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -35,6 +36,21 @@ function useStatusWS() {
         type: 'ridealong-command',
         payload: { action },
       }))
+    }
+  }, [])
+
+  const connectToAC = useCallback((host: string, port: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'connect-ac',
+        payload: { host, port },
+      }))
+    }
+  }, [])
+
+  const disconnectFromAC = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'disconnect-ac', payload: {} }))
     }
   }, [])
 
@@ -95,6 +111,9 @@ function useStatusWS() {
             setCondocState(payload.active ? payload : null)
             break
           }
+          case 'ac-state':
+            setAcState(msg.payload as ACStateMsg)
+            break
         }
       } catch {
         // ignore malformed messages
@@ -110,7 +129,7 @@ function useStatusWS() {
     }
   }, [connect])
 
-  return { connected, services, fcState, fcLog, ridealongState, condocState, sendCommand, sendRidealongCommand }
+  return { connected, services, fcState, fcLog, ridealongState, condocState, acState, sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC }
 }
 
 function FCCommandPanel({
@@ -333,12 +352,59 @@ function CondocPanel({
   )
 }
 
+function ACConnectionPanel({
+  acState,
+  onConnect,
+  onDisconnect,
+}: {
+  acState: { connected: boolean; host?: string; port?: string }
+  onConnect: (host: string, port: string) => void
+  onDisconnect: () => void
+}) {
+  const [host, setHost] = useState(acState.host ?? 'localhost')
+  const [port, setPort] = useState(acState.port ?? '8084')
+
+  if (acState.connected) {
+    return (
+      <div className="ac-panel ac-panel-connected">
+        <span className="ac-label">agent-coordinator</span>
+        <span className="ac-addr">{acState.host}:{acState.port}</span>
+        <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>disconnect</button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="ac-panel">
+      <span className="ac-label">agent-coordinator</span>
+      <input
+        className="ac-input"
+        type="text"
+        value={host}
+        placeholder="host"
+        onChange={e => setHost(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') onConnect(host, port) }}
+      />
+      <span className="ac-sep">:</span>
+      <input
+        className="ac-input ac-input-port"
+        type="text"
+        value={port}
+        placeholder="port"
+        onChange={e => setPort(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') onConnect(host, port) }}
+      />
+      <button className="ac-btn ac-btn-connect" onClick={() => onConnect(host, port)}>connect</button>
+    </div>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('federation-command')
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState,
-    sendCommand, sendRidealongCommand,
+    ridealongState, condocState, acState,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
   } = useStatusWS()
 
   const getStatus = (name: string): string => {
@@ -347,6 +413,11 @@ export default function App() {
 
   return (
     <div className="app">
+      <ACConnectionPanel
+        acState={acState}
+        onConnect={connectToAC}
+        onDisconnect={disconnectFromAC}
+      />
       <div className="tab-bar">
         <span className="app-title">local-representative</span>
         <div className="tabs">

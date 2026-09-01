@@ -39,13 +39,14 @@ type ServerMsg struct {
 
 // Client connects to local-representative and sends periodic heartbeats.
 type Client struct {
-	conn      net.Conn
-	name      string
-	done      chan struct{}
-	once      sync.Once
-	writeMu   sync.Mutex // serialises writes to conn
-	handlerMu sync.Mutex
-	cmdHandler func(string)
+	conn         net.Conn
+	name         string
+	done         chan struct{}
+	disconnected chan struct{} // closed when readLoop exits (connection dropped or closed)
+	once         sync.Once
+	writeMu      sync.Mutex // serialises writes to conn
+	handlerMu    sync.Mutex
+	cmdHandler   func(string)
 }
 
 // Connect dials addr (TCP) with the given timeout and returns a running Client.
@@ -55,9 +56,10 @@ func Connect(addr, name string, connectTimeout time.Duration) (*Client, error) {
 		return nil, err
 	}
 	c := &Client{
-		conn: conn,
-		name: name,
-		done: make(chan struct{}),
+		conn:         conn,
+		name:         name,
+		done:         make(chan struct{}),
+		disconnected: make(chan struct{}),
 	}
 	go c.heartbeatLoop()
 	go c.readLoop()
@@ -124,7 +126,14 @@ func (c *Client) heartbeatLoop() {
 	}
 }
 
+// DisconnectCh returns a channel that is closed when the TCP connection drops
+// (either because the remote end closed it or because Close was called).
+func (c *Client) DisconnectCh() <-chan struct{} {
+	return c.disconnected
+}
+
 func (c *Client) readLoop() {
+	defer close(c.disconnected)
 	scanner := bufio.NewScanner(c.conn)
 	for scanner.Scan() {
 		var sm ServerMsg

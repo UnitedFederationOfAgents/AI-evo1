@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -35,7 +36,17 @@ const Version = "0.1.0"
 const (
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 	DefaultAgent       = "claude"
-	DefaultLRAddr      = "localhost:8082" // local-representative representable TCP address
+	// local-representative representable TCP endpoint. --lr-port overrides the port.
+	DefaultLRHost = "localhost"
+	DefaultLRPort = 8082
+)
+
+// Auto-connect (--auto-connect) tuning: on startup FC dials local-representative
+// in the background, retrying on an interval until the window elapses.
+const (
+	autoConnectInterval    = 10 * time.Second
+	autoConnectWindow      = 10 * time.Minute
+	autoConnectDialTimeout = 3 * time.Second
 )
 
 // Mode constants for agent permission levels
@@ -341,6 +352,11 @@ type appModel struct {
 	reprOutPath   string       // temp file path for tee'd output when LR is connected
 	reprOutOffset int64        // bytes already forwarded from reprOutPath
 
+	// Auto-connect: background retry loop that dials local-representative on startup.
+	lrAddr              string    // representable address used for both manual and auto connects
+	autoConnect         bool      // true while the background retry loop is still running
+	autoConnectDeadline time.Time // stop retrying once this instant has passed
+
 	quitting    bool
 	windowWidth int
 }
@@ -486,14 +502,52 @@ func (m appModel) sendCondocState() {
 }
 
 // attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
-func attemptConnectCmd() tea.Cmd {
+func attemptConnectCmd(addr string) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(DefaultLRAddr, "federation-command", 3*time.Second)
+		client, err := representable.Connect(addr, "federation-command", 3*time.Second)
 		if err != nil {
 			return reprConnectFailedMsg{}
 		}
 		return reprConnectedMsg{client: client}
 	}
+}
+
+// autoConnectTickMsg fires on the auto-connect retry interval.
+type autoConnectTickMsg struct{}
+
+// autoConnectResultMsg carries the outcome of one background dial attempt;
+// client is nil when the attempt failed.
+type autoConnectResultMsg struct{ client *representable.Client }
+
+// autoConnectDialCmd performs one background connection attempt to local-representative.
+// It never blocks the UI: the dial runs inside the returned tea.Cmd goroutine.
+func autoConnectDialCmd(addr string) tea.Cmd {
+	return func() tea.Msg {
+		client, err := representable.Connect(addr, "federation-command", autoConnectDialTimeout)
+		if err != nil {
+			return autoConnectResultMsg{}
+		}
+		return autoConnectResultMsg{client: client}
+	}
+}
+
+// autoConnectRetryCmd schedules the next background dial attempt.
+func autoConnectRetryCmd() tea.Cmd {
+	return tea.Tick(autoConnectInterval, func(t time.Time) tea.Msg {
+		return autoConnectTickMsg{}
+	})
+}
+
+// autoConnectGaveUp disables the background retry loop and returns the notice /
+// blinker commands to emit when the window elapses without a connection.
+func (m *appModel) autoConnectGaveUp() tea.Cmd {
+	m.autoConnect = false
+	m.blinker.DisableAccent()
+	return tea.Batch(
+		tea.Println(errorStyle.Render(fmt.Sprintf(
+			"auto-connect: gave up after %s — local-representative at %s did not respond", autoConnectWindow, m.lrAddr))),
+		m.blinker.ResetTick(),
+	)
 }
 
 // listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
@@ -526,7 +580,7 @@ func (m *appModel) disconnectRepr() {
 	}
 }
 
-func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
+func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder, cfg cliConfig) appModel {
 	ti := textinput.New()
 	ti.Focus()
 	ti.PromptStyle = lipgloss.NewStyle() // pass-through: prompt is already ANSI-styled
@@ -554,6 +608,13 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		blinker:      NewBlinker(),
 		remoteCmdCh:  make(chan string, 8),
 		listenerStop: make(chan struct{}),
+		lrAddr:       cfg.lrAddr,
+		autoConnect:  cfg.autoConnect,
+	}
+
+	if cfg.autoConnect {
+		m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+		m.blinker.EnableAccent()
 	}
 
 	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
@@ -661,6 +722,12 @@ func (m appModel) Init() tea.Cmd {
 	if devBins := devBinaries(); len(devBins) > 0 {
 		devNotice := devWarningStyle.Render("⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): " + strings.Join(devBins, ", "))
 		cmds = append(cmds, tea.Println(devNotice))
+	}
+	if m.autoConnect {
+		acNotice := successStyle.Render(fmt.Sprintf(
+			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background)",
+			m.lrAddr, autoConnectInterval, autoConnectWindow))
+		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr), m.blinker.accentTickCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -835,12 +902,69 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.blinker.ConnectingTick()
 		return m, cmd
 
+	case AccentBlinkMsg:
+		cmd := m.blinker.AccentTick(msg.gen)
+		return m, cmd
+
+	case autoConnectTickMsg:
+		if !m.autoConnect || m.reprClient != nil {
+			return m, nil // already connected, or the loop was cancelled
+		}
+		if time.Now().After(m.autoConnectDeadline) {
+			cmd := m.autoConnectGaveUp()
+			return m, cmd
+		}
+		return m, autoConnectDialCmd(m.lrAddr)
+
+	case autoConnectResultMsg:
+		if !m.autoConnect || m.reprClient != nil {
+			if msg.client != nil {
+				msg.client.Close() // connected another way meanwhile
+			}
+			return m, nil
+		}
+		if msg.client == nil {
+			// Attempt failed — retry after the interval unless the window has closed.
+			if time.Now().After(m.autoConnectDeadline) {
+				cmd := m.autoConnectGaveUp()
+				return m, cmd
+			}
+			return m, autoConnectRetryCmd()
+		}
+		// Success — adopt the connection (mirrors the reprConnectedMsg path).
+		m.autoConnect = false
+		m.blinker.DisableAccent()
+		m.reprClient = msg.client
+		ch := m.remoteCmdCh
+		m.reprClient.SetCommandHandler(func(cmd string) {
+			select {
+			case ch <- cmd:
+			default: // drop if full
+			}
+		})
+		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
+			tf.Close()
+			m.reprOutPath = tf.Name()
+			m.reprOutOffset = 0
+		}
+		m.reprClient.SendState("remote-control")
+		m.blinker.SetState(BlinkerConnected)
+		resetTick := m.blinker.ResetTick()
+		return m, tea.Batch(
+			tea.Println(successStyle.Render("auto-connect: connected to local-representative at "+m.lrAddr)),
+			resetTick,
+			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+		)
+
 	case reprConnectedMsg:
 		if !m.blinker.IsConnecting() {
 			// Arrived after cancellation; discard and close.
 			msg.client.Close()
 			return m, nil
 		}
+		// A manual connection supersedes any in-flight background auto-connect.
+		m.autoConnect = false
+		m.blinker.DisableAccent()
 		if m.reprClient != nil {
 			m.reprClient.Close()
 		}
@@ -1271,7 +1395,7 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 	if m.blinker.IsSelectMode() {
 		// Up in select mode: initiate LR connection attempt.
 		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd())
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr))
 	}
 	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
@@ -1303,7 +1427,7 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 	if m.blinker.IsSelectMode() {
 		// Down in select mode: initiate LR connection attempt.
 		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd())
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr))
 	}
 	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
@@ -3500,13 +3624,65 @@ func renderSessions(recordsPath string, currentSession string) string {
 	return b.String()
 }
 
-func main() {
-	for _, arg := range os.Args[1:] {
-		switch arg {
-		case "--version", "-v":
+// cliConfig holds startup options parsed from command-line arguments. There is no
+// config-file support yet — these are driven purely by flags.
+type cliConfig struct {
+	autoConnect bool   // --auto-connect: dial local-representative in the background on startup
+	lrAddr      string // local-representative representable address (--lr-port overrides the port)
+}
+
+// parseCLIArgs interprets federation-command's startup flags. handled is true when
+// the args triggered a terminal action (e.g. --version) and main should just exit.
+func parseCLIArgs(args []string) (cfg cliConfig, handled bool, err error) {
+	port := DefaultLRPort
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--version" || arg == "-v":
 			fmt.Printf("federation-command %s\n", Version)
-			return
+			return cfg, true, nil
+		case arg == "--auto-connect" || arg == "-auto-connect":
+			cfg.autoConnect = true
+		case arg == "--lr-port" || arg == "-lr-port":
+			if i+1 >= len(args) {
+				return cfg, false, fmt.Errorf("--lr-port requires a value")
+			}
+			i++
+			if port, err = parseLRPort(args[i]); err != nil {
+				return cfg, false, err
+			}
+		case strings.HasPrefix(arg, "--lr-port="):
+			if port, err = parseLRPort(strings.TrimPrefix(arg, "--lr-port=")); err != nil {
+				return cfg, false, err
+			}
+		case strings.HasPrefix(arg, "-lr-port="):
+			if port, err = parseLRPort(strings.TrimPrefix(arg, "-lr-port=")); err != nil {
+				return cfg, false, err
+			}
 		}
+		// Unknown arguments are ignored for backward compatibility.
+	}
+	cfg.lrAddr = fmt.Sprintf("%s:%d", DefaultLRHost, port)
+	return cfg, false, nil
+}
+
+// parseLRPort validates a --lr-port value.
+func parseLRPort(s string) (int, error) {
+	p, err := strconv.Atoi(s)
+	if err != nil || p <= 0 || p > 65535 {
+		return 0, fmt.Errorf("invalid --lr-port value %q (want 1-65535)", s)
+	}
+	return p, nil
+}
+
+func main() {
+	cfg, handled, err := parseCLIArgs(os.Args[1:])
+	if handled {
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	recordsPath := os.Getenv(EnvAgentRecordsPath)
@@ -3540,7 +3716,7 @@ func main() {
 
 	encoder := json.NewEncoder(logFile)
 
-	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder)
+	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder, cfg)
 
 	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
 	if _, err := p.Run(); err != nil {

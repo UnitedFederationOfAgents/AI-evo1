@@ -29,6 +29,22 @@ export AGENT_SESSION=my-session
 ./federation-command
 ```
 
+## Auto-Connecting to local-representative
+
+Passing `--auto-connect` makes federation-command dial local-representative in the
+background on startup, retrying every 10 seconds for up to 10 minutes. The attempt
+runs without blocking the shell; while it is in progress the blinker adds a brief
+blue "accent" pulse on top of its normal mode. On success FC enters remote-control
+mode automatically; if the window elapses first, FC prints that it gave up.
+
+```bash
+./federation-command --auto-connect            # default representable port (8082)
+./federation-command --auto-connect --lr-port 9090
+```
+
+`--lr-port` overrides the port for both the background auto-connect and the manual
+blinker connect flow; it defaults to 8082.
+
 ## Session Management
 
 Once inside federation-command, each shell instance creates a session directory for record-keeping:

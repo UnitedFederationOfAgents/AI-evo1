@@ -27,6 +27,14 @@ const BlinkInterval = 530 * time.Millisecond
 // ConnectingBlinkInterval is the fast blue flash rate while connecting to LR
 const ConnectingBlinkInterval = 100 * time.Millisecond
 
+// Accent blink: a brief blue pulse overlaid on whatever mode is active, used to
+// signal that a background auto-connect attempt is in progress. accentBlinkGap is
+// the quiet time between pulses; accentBlinkDur is how long each pulse shows.
+const (
+	accentBlinkGap = 3 * time.Second
+	accentBlinkDur = 130 * time.Millisecond
+)
+
 // Blinker manages the blinker slot state and rendering
 type Blinker struct {
 	state         BlinkerState
@@ -35,6 +43,10 @@ type Blinker struct {
 	flashCount    int  // Number of remaining flash cycles
 	gen           int  // Generation counter; invalidates stale tick timers on state changes
 	ridealongBlue bool // For ridealong mode: toggles between red (false) and blue (true)
+
+	accentEnabled bool // When true, a brief blue accent pulse is overlaid on the current mode
+	accentOn      bool // Whether the accent pulse is currently showing
+	accentGen     int  // Generation counter for the independent accent tick chain
 }
 
 // NewBlinker creates a new blinker in the default idle (blinking) state
@@ -54,6 +66,10 @@ type BlinkerFlashMsg struct{}
 
 // BlinkerConnectingTickMsg drives the fast blue flash during a connection attempt.
 type BlinkerConnectingTickMsg struct{}
+
+// AccentBlinkMsg drives the accent-blink chain; gen must match the blinker's
+// current accentGen or the tick is ignored (stale from a disabled chain).
+type AccentBlinkMsg struct{ gen int }
 
 // tickCmd schedules the next tick, capturing the current generation.
 func (b *Blinker) tickCmd() tea.Cmd {
@@ -75,6 +91,46 @@ func connectingTickCmd() tea.Cmd {
 	return tea.Tick(ConnectingBlinkInterval, func(t time.Time) tea.Msg {
 		return BlinkerConnectingTickMsg{}
 	})
+}
+
+// accentTickCmd schedules the next accent-blink transition, capturing the current
+// accent generation so a disabled/re-enabled chain ignores stale ticks.
+func (b *Blinker) accentTickCmd() tea.Cmd {
+	gen := b.accentGen
+	d := accentBlinkGap
+	if b.accentOn {
+		d = accentBlinkDur
+	}
+	return tea.Tick(d, func(t time.Time) tea.Msg {
+		return AccentBlinkMsg{gen: gen}
+	})
+}
+
+// EnableAccent turns on the background accent blink. The caller is responsible for
+// emitting the initial tick (Init does this via accentTickCmd); a running program
+// should batch b.accentTickCmd() alongside enabling.
+func (b *Blinker) EnableAccent() {
+	b.accentEnabled = true
+	b.accentOn = false
+	b.accentGen++
+}
+
+// DisableAccent stops the accent blink and invalidates its tick chain.
+func (b *Blinker) DisableAccent() {
+	b.accentEnabled = false
+	b.accentOn = false
+	b.accentGen++
+}
+
+// AccentTick advances the accent-blink cycle: it flips accentOn and reschedules
+// itself. It returns nil once the accent blink has been disabled or the tick is
+// stale, ending the chain.
+func (b *Blinker) AccentTick(gen int) tea.Cmd {
+	if !b.accentEnabled || gen != b.accentGen {
+		return nil
+	}
+	b.accentOn = !b.accentOn
+	return b.accentTickCmd()
 }
 
 // ResetTick starts a fresh tick chain by incrementing the generation, which
@@ -123,6 +179,10 @@ var (
 	// Remote-control style - light blue, alternates with blinkerConnectedStyle for remote-control indication
 	blinkerConnectedLightStyle = lipgloss.NewStyle().
 					Foreground(lipgloss.Color("81"))
+
+	// Accent-blink style - vivid blue pulse overlaid on the current mode during background auto-connect
+	blinkerAccentStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("27"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
@@ -298,6 +358,12 @@ func (b *Blinker) View() string {
 		} else {
 			content = " "
 		}
+	}
+
+	// Accent blink: brief vivid-blue pulse overlaid on whatever mode is active,
+	// signalling that a background auto-connect attempt is still in progress.
+	if b.accentOn {
+		content = blinkerAccentStyle.Render(SolidBlock)
 	}
 
 	return openBracket + content + closeBracket

@@ -252,3 +252,56 @@ func TestModeDescription(t *testing.T) {
 		})
 	}
 }
+
+// TestParseCLIArgs verifies startup flag parsing for auto-connect and --lr-port.
+func TestParseCLIArgs(t *testing.T) {
+	defaultAddr := "localhost:8082"
+
+	tests := []struct {
+		name        string
+		args        []string
+		wantAuto    bool
+		wantAddr    string
+		wantHandled bool
+		wantErr     bool
+	}{
+		{"no args", nil, false, defaultAddr, false, false},
+		{"auto-connect long", []string{"--auto-connect"}, true, defaultAddr, false, false},
+		{"auto-connect short", []string{"-auto-connect"}, true, defaultAddr, false, false},
+		{"lr-port separate", []string{"--lr-port", "9001"}, false, "localhost:9001", false, false},
+		{"lr-port equals", []string{"--lr-port=9002"}, false, "localhost:9002", false, false},
+		{"auto-connect with port", []string{"--auto-connect", "--lr-port", "9003"}, true, "localhost:9003", false, false},
+		{"version handled", []string{"--version"}, false, "", true, false},
+		{"lr-port missing value", []string{"--lr-port"}, false, "", false, true},
+		{"lr-port not a number", []string{"--lr-port", "abc"}, false, "", false, true},
+		{"lr-port out of range", []string{"--lr-port", "70000"}, false, "", false, true},
+		{"unknown ignored", []string{"--frobnicate", "--auto-connect"}, true, defaultAddr, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, handled, err := parseCLIArgs(tt.args)
+			if handled != tt.wantHandled {
+				t.Fatalf("handled = %v, want %v", handled, tt.wantHandled)
+			}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if handled {
+				return
+			}
+			if cfg.autoConnect != tt.wantAuto {
+				t.Errorf("autoConnect = %v, want %v", cfg.autoConnect, tt.wantAuto)
+			}
+			if cfg.lrAddr != tt.wantAddr {
+				t.Errorf("lrAddr = %q, want %q", cfg.lrAddr, tt.wantAddr)
+			}
+		})
+	}
+}

@@ -130,11 +130,10 @@ I've implemented Revision C. Build/test tooling is still blocked in this session
 **Known remaining limitation (not addressed here):** every FC instance still connects to LR's `representable` server under the name `"federation-command"`, so with N instances they share one connection-state slot — the system-tab `control:` indicator and `fc-log` are aggregate, and one instance disconnecting resets shared ridealong/condoc state. Giving each instance a distinct representable identity is a larger change (LR's name-matched handlers plus per-instance frontend state) and wasn't in scope for this revision.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Now let's make some updates to close the full loop with provisioning a new system and having it come up in a way we can fully control it.
 
+We will update agent-coordinator so that it may control the 'system' functionality in each local-representative.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also remove the duplicate '--remote' argument for FC and simply have the auto-connect imply this.

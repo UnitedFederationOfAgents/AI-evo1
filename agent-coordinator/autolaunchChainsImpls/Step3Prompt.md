@@ -45,11 +45,12 @@ Rewrote `INITIAL-SETUP.md` as the **localhost path**: AC and the full oauth2-pro
 Moved the cloud-compute design into a new `INITIAL-CLOUD.md`, reframed as a later increment gated on first solving machine-to-machine auth for the unauthenticated `:8084` representable-TCP port, keeping the `e2-micro` host, GCP Secret Manager + VM service account for secrets, and the shared OAuth client, with its origin-check and session-lifetime questions cross-linked back to `INITIAL-SETUP.md`.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's implement our INITIAL-SETUP.md as a ridealong. (We can see existing 'tour' documents in the repo for references)
 
+We will explain the manual steps in the human-readable text of the document.
 
-## Human-Prompt
+We will create (if does not exist) and use the ~/usa-web-init folder (and optional subfolders) to hold any secrets and/or generated IDs we need rather than putting them in the scope of AI-evo1.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's create this ridealong now -- when we have completed its execution we should have our instance of agent-coordinator web-accessible.

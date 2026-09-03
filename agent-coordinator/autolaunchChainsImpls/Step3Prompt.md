@@ -85,3 +85,42 @@ Let's integrate condoccer with the rest of the stack:
 - Let's make it 'representable' and give it the ability to auto-connect
 - Let's forward the UI through LR and AC
 - Let's allow LR and AC to launch it (one per box in this case)
+
+
+prompt: [`99a8fce`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/99a8fce96beefb48721034d51bca4ccf336b2634) → reply: [`7afff72`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7afff72a592334697ffd7dce7cc5f3369eef95e3)
+
+## Reply D
+
+I implemented Revision D as a code change across the stack (matching how Steps 1–2 were done), since the ask is concrete engineering rather than a doc edit. I could not run `go build`/`go test`/`npm build` here — those require approval in this non-interactive session — so the build/test commands are listed at the end for you to run.
+
+## What changed
+
+**condoccer — now `representable` + auto-connecting** (`condoccer/main.go`, new `condoccer/repr.go`, `go.mod`)
+- New flags `--auto-connect`, `--lr-host`, `--lr-port`, `--name`. With `--auto-connect` it dials LR's `representable` server (10s retries / 10m window, then reconnect-on-drop) as client `condoccer`, heartbeating like FC.
+- Pushes `data`/`"condoccer-state"` (its HTTP port + a condoc summary) on connect and whenever `watchLoop` sees the condoc list change.
+- Accepts `__condoccer:action <json>` / `__condoccer:refresh` relayed from AC→LR→condoccer.
+
+**UI forwarded through LR and AC** (no re-implementation)
+- LR reverse-proxies `/condoccer/*` → condoccer on loopback (`proxyToCondoccer`, carries the `/ws` upgrade).
+- AC reverse-proxies `/host/<lr-name>/*` → that host's LR (`proxyToHost`), which in turn forwards `/condoccer/*`. AC learns the LR HTTP port via a new `lr-http` data message and the peer IP via a new `representable.Server.PeerHost`.
+- condoccer frontend made prefix-safe: `vite base: './'` + WS URL derived from `window.location.pathname`.
+- LR and AC dashboards render the forwarded condoccer UI in an iframe on their existing **condoccer** tab; new `lr-condoccer-state` WS message gates it.
+
+**LR & AC can launch condoccer, one per box**
+- `condoccer` added to LR `managedApps` as `singleton: true, terminal: false`, launched with `--auto-connect --lr-port <repr> --port <condoccer-port>`. New `--condoccer-port` (8080) / `--condoccer-root` flags+config. LR service health now reflects condoccer's real heartbeat.
+- AC's existing `__system:launch/terminate` path already reaches it; `condoccer` added to both frontends' `LAUNCHABLE_APPS`.
+
+**Tests / docs**: `TestCondoccerManagedSpec` (procman_test.go), new `condoccer/repr_test.go`; updated `agent-coordinator/docs/architecture.md`, `local-representative/README.md`, and `web-exposure-poc/INITIAL-SETUP.md` (condoccer now rides the same Tailscale + oauth2-proxy front door, `:8084` still not exposed).
+
+## To verify
+`go test ./...` in `representable`, `condoccer`, `local-representative`, `agent-coordinator`; `make build` in `condoccer`, `local-representative`, `agent-coordinator` (rebuilds the embedded frontends — required for the proxy path). `go mod tidy` in `condoccer` first.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

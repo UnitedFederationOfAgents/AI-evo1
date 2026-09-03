@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -82,6 +84,41 @@ type CondocStateMsg struct {
 	Phase     string `json:"phase,omitempty"`
 	StepNum   int    `json:"step_num,omitempty"`
 	StatusMsg string `json:"status_msg,omitempty"`
+}
+
+// CondocInfo mirrors condoccer's per-condoc summary row (see condoccer/main.go).
+type CondocInfo struct {
+	Path          string `json:"path"`
+	Name          string `json:"name"`
+	Phase         string `json:"phase"`
+	StepNum       int    `json:"stepNum"`
+	StepFile      string `json:"stepFile,omitempty"`
+	SubstepFile   string `json:"substepFile,omitempty"`
+	SubstepLetter string `json:"substepLetter,omitempty"`
+}
+
+// CondoccerStateMsg matches the condoccer-state payload forwarded up from LR
+// (originating at a managed condoccer). HTTPPort is condoccer's own port on the
+// LR box; the coordinator reverse-proxies its UI at /host/<id>/condoccer/.
+type CondoccerStateMsg struct {
+	HTTPPort string       `json:"http_port"`
+	Root     string       `json:"root"`
+	Condocs  []CondocInfo `json:"condocs"`
+}
+
+// LRHTTPMsg matches the lr-http payload: the HTTP port an LR's dashboard listens
+// on, used to build the /host/<id>/ reverse-proxy target.
+type LRHTTPMsg struct {
+	Port string `json:"port"`
+}
+
+// LRCondoccerMsg is the host-scoped "lr-condoccer-state" message sent to browser
+// clients: a per-host condoc summary plus whether the forwarded UI is available.
+type LRCondoccerMsg struct {
+	HostID    string       `json:"host_id"`
+	Available bool         `json:"available"`
+	Root      string       `json:"root,omitempty"`
+	Condocs   []CondocInfo `json:"condocs,omitempty"`
 }
 
 // ProcInfo mirrors one row of local-representative's system tab: LR itself or a
@@ -165,13 +202,15 @@ type wsClient struct {
 
 // hostState tracks the live state of a connected local-representative.
 type hostState struct {
-	mu        sync.RWMutex
-	connected bool
-	services  []ServiceStatus
-	fcState   string
-	ridealong *RidealongStateMsg
-	condoc    *CondocStateMsg
-	system    *SystemStateMsg
+	mu         sync.RWMutex
+	connected  bool
+	services   []ServiceStatus
+	fcState    string
+	ridealong  *RidealongStateMsg
+	condoc     *CondocStateMsg
+	system     *SystemStateMsg
+	condoccer  *CondoccerStateMsg
+	lrHTTPPort string
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -264,6 +303,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	ridealong := hs.ridealong
 	condoc := hs.condoc
 	system := hs.system
+	condoccer := hs.condoccer
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -285,6 +325,16 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 	}
+	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
+}
+
+// condoccerMsg builds a host-scoped lr-condoccer-state payload; a nil state means
+// no managed condoccer is currently reporting on that host.
+func condoccerMsg(hostID string, cc *CondoccerStateMsg) LRCondoccerMsg {
+	if cc == nil || cc.HTTPPort == "" {
+		return LRCondoccerMsg{HostID: hostID, Available: false}
+	}
+	return LRCondoccerMsg{HostID: hostID, Available: true, Root: cc.Root, Condocs: cc.Condocs}
 }
 
 func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
@@ -438,9 +488,59 @@ func (s *Server) broadcastLoop() {
 	}
 }
 
+// proxyToHost reverse-proxies /host/<hostID>/* to that host's local-representative
+// dashboard, which in turn forwards /condoccer/* down to condoccer. This is the
+// "forward the UI through AC" half of the chain: a browser on the coordinator —
+// including one reaching it through the web-exposure path — drives condoccer on
+// any connected box over a single origin, with no direct link to that box.
+func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/host/")
+	hostID, _, _ := strings.Cut(rest, "/")
+	if hostID == "" {
+		http.Error(w, "missing host id", http.StatusBadRequest)
+		return
+	}
+	s.hostsMu.RLock()
+	hs, ok := s.hostStates[hostID]
+	s.hostsMu.RUnlock()
+	if !ok {
+		http.Error(w, "unknown host: "+hostID, http.StatusNotFound)
+		return
+	}
+	hs.mu.RLock()
+	port := hs.lrHTTPPort
+	connected := hs.connected
+	hs.mu.RUnlock()
+	if !connected || port == "" {
+		http.Error(w, "local-representative on "+hostID+" is not reachable", http.StatusBadGateway)
+		return
+	}
+	host := ""
+	if s.reprServer != nil {
+		host = s.reprServer.PeerHost(hostID)
+	}
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	target := &url.URL{Scheme: "http", Host: host + ":" + port}
+	prefix := "/host/" + hostID
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = "/" + strings.TrimPrefix(strings.TrimPrefix(req.URL.Path, prefix), "/")
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/host/", s.proxyToHost)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -499,6 +599,8 @@ func main() {
 			hs.ridealong = nil
 			hs.condoc = nil
 			hs.system = nil
+			hs.condoccer = nil
+			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
@@ -506,6 +608,7 @@ func main() {
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
+			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
 		}
 	})
 
@@ -574,6 +677,25 @@ func main() {
 				s.broadcast("lr-system-state", LRSystemStateMsg{
 					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed,
 				})
+			}
+		case "condoccer-state":
+			var payload CondoccerStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var cc *CondoccerStateMsg
+				if payload.HTTPPort != "" {
+					cc = &payload
+				}
+				hs.mu.Lock()
+				hs.condoccer = cc
+				hs.mu.Unlock()
+				s.broadcast("lr-condoccer-state", condoccerMsg(name, cc))
+			}
+		case "lr-http":
+			var payload LRHTTPMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.lrHTTPPort = payload.Port
+				hs.mu.Unlock()
 			}
 		}
 	})

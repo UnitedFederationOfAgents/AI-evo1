@@ -31,7 +31,13 @@ function useCondocWS() {
   )
 
   useEffect(() => {
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
+    // Derive the WebSocket URL from the path this document was served under, so
+    // it also works when reverse-proxied beneath a prefix (/condoccer/ via
+    // local-representative, /host/<id>/condoccer/ via agent-coordinator).
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+    const base = dir.endsWith('/') ? dir.slice(0, -1) : dir
+    const wsUrl = `${proto}://${window.location.host}${base}/ws`
 
     function connect() {
       const ws = new WebSocket(wsUrl)

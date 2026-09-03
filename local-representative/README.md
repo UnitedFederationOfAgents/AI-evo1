@@ -26,6 +26,8 @@ make build      # build frontend + Go binary
 | `--auto-launch` | `auto-launch` | — | comma/space-separated child applications to launch on startup; each token is `app` or `app:N` (e.g. `federation-command:2`) |
 | `--fc-bin` | `fc-bin` | — | explicit path to the `federation-command` binary (default: search next to LR, the dev bin dir, then `$PATH`) |
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
+| `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
+| `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
 
 ## Configuration files
 
@@ -96,6 +98,16 @@ here you can:
 instances run and each press starts another, listed as `federation-command #1`,
 `#2`, … Terminate/dismiss act on the individual instance.
 
+`condoccer` is **one-per-box** (singleton): the launch button disables while an
+instance runs. It is launched with `--auto-connect --lr-port <repr-port> --port
+<condoccer-port>`, so it dials this LR's `representable` server as `condoccer`,
+heartbeats alongside `federation-command`, and pushes its condoc summary up the
+chain. Its browser UI is **forwarded, not embedded**: LR reverse-proxies
+`/condoccer/*` to the managed condoccer on loopback (the **condoccer** tab shows
+it in an iframe), and `agent-coordinator` reverse-proxies `/host/<name>/*` back
+through this LR — so the coordinator dashboard (and anything reaching it through
+the web-exposure path) can drive condoccer on this box with no shell here.
+
 `federation-command` is an interactive shell and must run in a real terminal or
 its input reader dies on startup ("error creating cancelreader"). It should be
 **visible** — the operator wants to see FC come up — so LR probes `$PATH` for a
@@ -157,6 +169,11 @@ a single `./local-representative` brings up LR **and** an auto-connecting,
 remote-controlled `federation-command`, completing the FC → LR chain from one
 entrypoint. Combine with `auto-connect` to extend the chain up to
 `agent-coordinator`.
+
+Add `condoccer` to the list (`auto-launch: federation-command condoccer`) to also
+bring up the one-per-box `condoccer`, auto-connected to LR and with its UI
+forwarded at `/condoccer/`. `condoccer:N` is accepted but only the first instance
+starts — it is a singleton.
 
 ### Full hands-off chain (agent-coordinator → LR → FC)
 

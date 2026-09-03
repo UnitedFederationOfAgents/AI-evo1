@@ -45,9 +45,31 @@ type launchSpec struct {
 }
 
 // managedApps is the fixed set of applications local-representative knows how to
-// launch. For now only federation-command; adding an entry here is all it takes
-// to expose another app on the system tab and to auto-launch.
+// launch. Adding an entry here is all it takes to expose another app on the
+// system tab and to auto-launch.
 var managedApps = map[string]launchSpec{
+	"condoccer": {
+		binName:   "condoccer",
+		singleton: true,  // condoccer is one-per-box: it serves a single repo view
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server) []string {
+			// Bring condoccer up already wired to this LR: --auto-connect makes it
+			// retry the representable heartbeat to our server in the background and
+			// push its condoc summary once landed, and --port fixes the HTTP port
+			// LR reverse-proxies its UI from (see proxyToCondoccer).
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.condoccerPort,
+				"--name", "condoccer",
+			}
+			if s.condoccerRoot != "" {
+				args = append(args, "--root", s.condoccerRoot)
+			}
+			return args
+		},
+	},
 	"federation-command": {
 		binName:   "federation-command",
 		singleton: false, // federation-command is N-per-host

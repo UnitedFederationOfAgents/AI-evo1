@@ -66,6 +66,17 @@ machine dials **outbound** to Tailscale; Funnel carries inbound traffic back
 over that WireGuard tunnel, so the host needs **zero inbound firewall rules**
 and no router/port-forward changes.
 
+### Reaching condoccer through the same path
+
+`condoccer` joins the autolaunch chain as a `representable` client of
+local-representative (one instance per box, `--auto-connect`), and AC **reverse-
+proxies its browser UI**: `https://<host>.<tailnet>.ts.net/host/<lr-name>/condoccer/`
+→ that host's LR `/condoccer/` → condoccer on loopback. So the exact same
+Tailscale + oauth2-proxy front door that gates AC also gates condoccer — no
+second OAuth client, no second Funnel, no extra port. The only widening of scope
+is that the one allowlisted identity can now also drive condocs on any connected
+box; the unauthenticated `:8084` representable-TCP port is still **not** exposed.
+
 ## Decisions
 
 - **Ingress: Tailscale Funnel** (public HTTPS), not `tailscale serve`

@@ -45,8 +45,22 @@ Local-representative connects to AC using `representable.Client`. Messages:
 | LR → AC | `data` / `"ridealong-state"` | `RidealongStateMsg` |
 | LR → AC | `data` / `"condoc-state"` | `CondocStateMsg` |
 | LR → AC | `data` / `"system-state"` | `SystemStateMsg` — LR's system tab (self + managed apps) |
+| LR → AC | `data` / `"condoccer-state"` | `CondoccerStateMsg` — condoc summary + condoccer's HTTP port, relayed from a managed condoccer |
+| LR → AC | `data` / `"lr-http"` | `LRHTTPMsg` — LR's dashboard HTTP port, so AC can reverse-proxy `/host/<id>/…` back to it |
 | LR → AC | `log` (cmd/output) | FC command echo / output forwarded upstream |
 | AC → LR | `command` | plain cmd or `__ridealong:action` → forwarded to FC; `__system:launch <app>` / `__system:terminate <id>` → LR's process manager |
+
+### condoccer in the chain
+
+condoccer is itself a `representable.Client` of LR (`--auto-connect`, name `condoccer`,
+one instance per box). It heartbeats to LR's `:8082` server and pushes
+`data` / `"condoccer-state"` (its HTTP port + a condoc summary). Its browser UI is
+**forwarded, not re-implemented**: LR reverse-proxies `/condoccer/*` → condoccer's
+loopback port, and AC reverse-proxies `/host/<id>/*` → that host's LR (which in
+turn forwards `/condoccer/*`). A browser on AC — including one arriving through
+the Tailscale + oauth2-proxy web-exposure path — therefore drives condoccer on
+any connected box over a single origin. `AC → LR` `__condoccer:action <json>` /
+`__condoccer:refresh` commands are relayed to condoccer for out-of-band control.
 
 ## WebSocket Protocol (AC ↔ Browser)
 
@@ -61,6 +75,7 @@ Local-representative connects to AC using `representable.Client`. Messages:
 | `lr-ridealong-state` | `{ host_id, active, ...fields }` | Ridealong state for a host |
 | `lr-condoc-state` | `{ host_id, active, ...fields }` | Condoc state for a host |
 | `lr-system-state` | `{ host_id, active, self, managed[] }` | Host's system tab (LR process + managed apps) |
+| `lr-condoccer-state` | `{ host_id, available, root?, condocs[]? }` | Host's condoc summary; `available` gates the forwarded `/host/<id>/condoccer/` iframe |
 
 ### Client → Server
 

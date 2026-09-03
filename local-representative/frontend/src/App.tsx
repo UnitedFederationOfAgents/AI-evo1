@@ -8,6 +8,7 @@ type Tab = typeof TABS[number]
 // N-per-host (launch stays enabled while instances run); others are singletons.
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'federation-command', multi: true },
+  { name: 'condoccer', multi: false },
 ]
 
 interface LogEntry {
@@ -632,6 +633,19 @@ export default function App() {
                     sendCommand={sendCommand}
                   />
                 </>
+              )}
+              {activeTab === 'condoccer' && (
+                getStatus('condoccer') === 'healthy' ? (
+                  <iframe
+                    className="condoccer-frame"
+                    src="/condoccer/"
+                    title="condoccer"
+                  />
+                ) : (
+                  <div className="service-empty">
+                    condoccer is not running on this host — launch it from the system tab
+                  </div>
+                )
               )}
             </>
           )}

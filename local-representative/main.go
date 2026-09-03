@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -87,6 +89,33 @@ type ACStateMsg struct {
 	Connecting bool `json:"connecting,omitempty"`
 }
 
+// CondocInfo mirrors condoccer's per-condoc summary row (see condoccer/main.go).
+type CondocInfo struct {
+	Path          string `json:"path"`
+	Name          string `json:"name"`
+	Phase         string `json:"phase"`
+	StepNum       int    `json:"stepNum"`
+	StepFile      string `json:"stepFile,omitempty"`
+	SubstepFile   string `json:"substepFile,omitempty"`
+	SubstepLetter string `json:"substepLetter,omitempty"`
+}
+
+// CondoccerStateMsg is the "condoccer-state" payload: a managed condoccer pushes
+// it to LR over representable, and LR forwards a copy up to agent-coordinator and
+// out to browser clients so the forwarded condoccer view has a summary + the
+// port to reverse-proxy from.
+type CondoccerStateMsg struct {
+	HTTPPort string       `json:"http_port"`
+	Root     string       `json:"root"`
+	Condocs  []CondocInfo `json:"condocs"`
+}
+
+// LRHTTPMsg tells agent-coordinator which HTTP port this LR's dashboard listens
+// on, so AC can reverse-proxy the forwarded condoccer UI back through this LR.
+type LRHTTPMsg struct {
+	Port string `json:"port"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -125,12 +154,19 @@ type Server struct {
 
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
+	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
+	condoccerPort string                  // HTTP port a managed condoccer serves on / is proxied from
+	condoccerRoot string                  // repo root a managed condoccer scans (empty: condoccer's default)
 	selfStart     time.Time               // when this LR process started
 	binOverrides  map[string]string       // app name -> explicit binary path (from config)
 	terminalCmd   string                  // command prefix that hosts an interactive child in a terminal
 	procMu        sync.Mutex
 	managed       map[string]*managedProc // instance id -> running/finished child
 	instanceSeq   map[string]int          // app name -> highest instance ordinal handed out
+
+	// Latest condoc summary pushed up by a managed condoccer over representable.
+	condoccerMu    sync.RWMutex
+	condoccerState *CondoccerStateMsg
 }
 
 func newServer(lrName string) *Server {
@@ -180,10 +216,14 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("federation-command") {
 		fcStatus = "healthy"
 	}
+	condoccerStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("condoccer") {
+		condoccerStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
-			{Name: "condoccer", Status: "healthy"},
+			{Name: "condoccer", Status: condoccerStatus},
 			{Name: "worker", Status: "healthy"},
 		},
 	}
@@ -224,6 +264,12 @@ func (s *Server) getCondocState() CondocStateMsg {
 		return CondocStateMsg{Active: false}
 	}
 	return *s.condocState
+}
+
+func (s *Server) getCondoccerState() *CondoccerStateMsg {
+	s.condoccerMu.RLock()
+	defer s.condoccerMu.RUnlock()
+	return s.condoccerState
 }
 
 func (s *Server) getACClient() *representable.Client {
@@ -270,6 +316,10 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("ridealong-state", s.getRidealongState())
 	ac.SendData("condoc-state", s.getCondocState())
 	ac.SendData("system-state", s.systemState())
+	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
+	if cc := s.getCondoccerState(); cc != nil {
+		ac.SendData("condoccer-state", *cc)
+	}
 }
 
 // connectAC dials agent-coordinator and maintains the connection lifecycle.
@@ -461,6 +511,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "condoc-state", s.getCondocState())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
+		if cc := s.getCondoccerState(); cc != nil {
+			s.sendToClient(c, "condoccer-state", *cc)
+		}
 	}()
 
 	// Write pump.
@@ -579,9 +632,41 @@ func (s *Server) broadcastLoop() {
 	}
 }
 
+// proxyToCondoccer reverse-proxies /condoccer/* to a managed condoccer's HTTP
+// server on loopback, stripping the /condoccer prefix. This is how the condoccer
+// UI is "forwarded through LR": a browser (or agent-coordinator's /host/<id>/
+// proxy) reaches condoccer without condoccer needing its own ingress. WebSocket
+// upgrades on /condoccer/ws are carried through by httputil.ReverseProxy.
+func (s *Server) proxyToCondoccer(w http.ResponseWriter, r *http.Request) {
+	port := s.condoccerPort
+	if cc := s.getCondoccerState(); cc != nil && cc.HTTPPort != "" {
+		port = cc.HTTPPort // trust the port condoccer actually reported
+	}
+	if port == "" {
+		http.Error(w, "condoccer port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/condoccer")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "condoccer not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +714,8 @@ type appConfig struct {
 	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
 	fcBin         string   // explicit path to the federation-command binary
 	terminal      string   // command prefix used to host an interactive child in a terminal
+	condoccerPort string   // HTTP port a managed condoccer serves on / is reverse-proxied from
+	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -671,6 +758,8 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		autoLaunch:    splitList(pick("auto-launch", strings.Join(defaults.autoLaunch, ","))),
 		fcBin:         pick("fc-bin", defaults.fcBin),
 		terminal:      pick("terminal", defaults.terminal),
+		condoccerPort: pick("condoccer-port", defaults.condoccerPort),
+		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -699,6 +788,8 @@ func main() {
 	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup; each token is \"app\" or \"app:N\" (e.g. federation-command:2)")
 	fcBin := flag.String("fc-bin", "", "path to the federation-command binary (default: search next to LR, the dev bin dir, then PATH)")
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
+	condoccerPort := flag.String("condoccer-port", "8080", "HTTP port a managed condoccer serves on; its UI is reverse-proxied at /condoccer/")
+	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -720,6 +811,8 @@ func main() {
 		autoLaunch:    splitList(*autoLaunch),
 		fcBin:         *fcBin,
 		terminal:      *terminal,
+		condoccerPort: *condoccerPort,
+		condoccerRoot: *condoccerRoot,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -727,6 +820,9 @@ func main() {
 
 	s := newServer(cfg.name)
 	s.heartbeatPort = cfg.heartbeatPort
+	s.httpPort = cfg.httpPort
+	s.condoccerPort = cfg.condoccerPort
+	s.condoccerRoot = cfg.condoccerRoot
 	s.terminalCmd = cfg.terminal
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
@@ -740,6 +836,19 @@ func main() {
 
 	// Track FC control mode changes and forward log entries to browser clients.
 	reprSrv.SetStateChangeHandler(func(name, state string) {
+		if name == "condoccer" {
+			if state == "disconnected" {
+				s.condoccerMu.Lock()
+				s.condoccerState = nil
+				s.condoccerMu.Unlock()
+				empty := CondoccerStateMsg{}
+				s.broadcast("condoccer-state", empty)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("condoccer-state", empty)
+				}
+			}
+			return
+		}
 		if name == "federation-command" {
 			s.setFCState(state)
 			if state == "disconnected" {
@@ -773,6 +882,21 @@ func main() {
 	})
 
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if name == "condoccer" {
+			if dataType == "condoccer-state" {
+				var payload CondoccerStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.condoccerMu.Lock()
+					s.condoccerState = &payload
+					s.condoccerMu.Unlock()
+					s.broadcast("condoccer-state", payload)
+					if ac := s.getACClient(); ac != nil {
+						ac.SendData("condoccer-state", payload)
+					}
+				}
+			}
+			return
+		}
 		if name != "federation-command" {
 			return
 		}

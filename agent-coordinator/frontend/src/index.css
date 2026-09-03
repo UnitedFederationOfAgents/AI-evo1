@@ -295,6 +295,14 @@ body {
   margin-top: 8px;
 }
 
+.condoccer-frame {
+  width: 100%;
+  min-height: 70vh;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #1e1e1e;
+}
+
 /* ---- FC control panel ---- */
 
 .fc-status { font-size: 13px; }

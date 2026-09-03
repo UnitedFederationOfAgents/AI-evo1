@@ -206,6 +206,19 @@ body {
   color: #cccccc;
 }
 
+.service-empty {
+  font-size: 14px;
+  color: #888888;
+}
+
+.condoccer-frame {
+  width: 100%;
+  min-height: 70vh;
+  border: 1px solid #333333;
+  border-radius: 6px;
+  background: #1e1e1e;
+}
+
 .health-indicator {
   display: flex;
   align-items: center;

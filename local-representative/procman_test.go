@@ -162,6 +162,39 @@ func TestFederationCommandBuildEnv(t *testing.T) {
 	}
 }
 
+// TestCondoccerManagedSpec verifies condoccer is registered as a one-per-box
+// (singleton), non-terminal managed app, and that its launch args wire it back
+// into this LR's representable server with a fixed HTTP port for the /condoccer/
+// reverse proxy.
+func TestCondoccerManagedSpec(t *testing.T) {
+	spec, ok := managedApps["condoccer"]
+	if !ok {
+		t.Fatal("condoccer should be a managed application")
+	}
+	if !spec.singleton {
+		t.Error("condoccer should be a singleton (one per box)")
+	}
+	if spec.terminal {
+		t.Error("condoccer is a plain HTTP server — it must not be terminal-hosted")
+	}
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.condoccerPort = "8080"
+	args := strings.Join(spec.buildArgs(s), " ")
+	for _, want := range []string{"--auto-connect", "--lr-port 8082", "--port 8080", "--name condoccer"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("condoccer buildArgs %q missing %q", args, want)
+		}
+	}
+	if strings.Contains(args, "--root") {
+		t.Errorf("condoccer buildArgs should omit --root when condoccerRoot is unset: %q", args)
+	}
+	s.condoccerRoot = "/repo"
+	if a := strings.Join(spec.buildArgs(s), " "); !strings.Contains(a, "--root /repo") {
+		t.Errorf("condoccer buildArgs should pass --root when set: %q", a)
+	}
+}
+
 // TestTerminateDetachedDoesNotSignal verifies terminate on a detached instance
 // tears down via killCmd and never falls into a pid-group kill (pid 0 would
 // signal LR's own group).

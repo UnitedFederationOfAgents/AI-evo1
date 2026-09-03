@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, ProcInfo, ServiceStatus,
 } from './types'
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'federation-command', multi: true },
+  { name: 'condoccer', multi: false },
 ]
 
 interface LogEntry {
@@ -22,6 +23,7 @@ interface HostClientState {
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
+  condoccer?: LRCondoccerMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -149,6 +151,14 @@ function useCoordinatorWS() {
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), system: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-condoccer-state': {
+            const p = msg.payload as LRCondoccerMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), condoccer: p.available ? p : undefined },
             }))
             break
           }
@@ -612,6 +622,19 @@ function LRView({
                 sendLRCommand={sendLRCommand}
               />
             </>
+          )}
+          {activeTab === 'condoccer' && active && (
+            data.condoccer ? (
+              <iframe
+                className="condoccer-frame"
+                src={`/host/${host.id}/condoccer/`}
+                title={`condoccer on ${host.label}`}
+              />
+            ) : (
+              <div className="service-empty">
+                condoccer is not running on this host — launch it from the system tab
+              </div>
+            )
           )}
           {activeTab !== 'federation-command' && activeTab !== 'system' && !active && (
             <div className="service-empty">local-representative on this host is not connected</div>

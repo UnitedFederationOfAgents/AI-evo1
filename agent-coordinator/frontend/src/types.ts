@@ -72,3 +72,20 @@ export interface LRSystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
 }
+
+export interface CondocInfo {
+  path: string
+  name: string
+  phase: string
+  stepNum: number
+  stepFile?: string
+  substepFile?: string
+  substepLetter?: string
+}
+
+export interface LRCondoccerMsg {
+  host_id: string
+  available: boolean
+  root?: string
+  condocs?: CondocInfo[]
+}

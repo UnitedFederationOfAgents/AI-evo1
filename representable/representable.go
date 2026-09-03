@@ -158,6 +158,7 @@ type connState struct {
 	connected bool
 	state     string   // "remote-control" or "local-control"
 	conn      net.Conn // nil when disconnected
+	peerHost  string   // remote IP/host of the most recent connection
 }
 
 func (cs *connState) update() {
@@ -182,6 +183,11 @@ func (cs *connState) getState() string {
 func (cs *connState) setConn(conn net.Conn) {
 	cs.mu.Lock()
 	cs.conn = conn
+	if conn != nil {
+		if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+			cs.peerHost = host
+		}
+	}
 	cs.mu.Unlock()
 }
 
@@ -266,6 +272,21 @@ func (s *Server) IsHealthy(name string) bool {
 		return false
 	}
 	return cs.IsHealthy()
+}
+
+// PeerHost returns the remote IP/host of the named client's most recent
+// connection, or "" if the client is unknown. It survives a disconnect so a
+// caller can still reach back to a briefly-dropped peer's HTTP endpoint.
+func (s *Server) PeerHost(name string) string {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.peerHost
 }
 
 // GetState returns the current control state of a named client ("remote-control",

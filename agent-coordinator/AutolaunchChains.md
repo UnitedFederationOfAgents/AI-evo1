@@ -43,13 +43,21 @@ The system tab allows the termination of managed applications and lists some bas
 ```
 
 
-### Step 3 - <REPLACE-TITLE>
+### Step 3 - Create initial web-exposure path for agent-coordinator using oauth2-proxy and tailscale.
+
+[Step 3 Prompt](autolaunchChainsImpls/Step3Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+We will create a subfolder in agent-coordinator called 'web-exposure-poc' where we will create a document INITIAL-SETUP.md explaining how we will use tailscale and oauth2-proxy to create a safe exposure path to agent-coordinator.
+
+Note that we have GCP, AWS, and Azure capabilities available for our use. We will prefer GCP but minimize use of cloud resources generally. The first identity we allow to connect will be a Google Account.
+
+We will be using terraform as much as possible to stand up the resources we need.
+
+Let's concisely record our full plan at a high level in INITIAL-SETUP.md.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the third step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the third step.

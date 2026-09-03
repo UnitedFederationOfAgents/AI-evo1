@@ -77,11 +77,11 @@ prompt: [`3edfa30`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3
 Applied both Revision C adjustments. Renamed the out-of-repo store from `~/usa-web-init` to `~/ufa-web-init` everywhere it appeared (all nine ridealong chapters plus the store-layout, decisions, and teardown prose). Split the single file back into two: `RIDEALONG.md` now holds the executable waypointed ridealong (the former Revision B content), and `INITIAL-SETUP.md` is restored as the localhost-path design document (rationale, decisions, open questions), with the two files cross-linking each other and `INITIAL-SETUP.md`'s folder layout / secrets / bring-up sections updated to name the `~/ufa-web-init/` store and point at `RIDEALONG.md`. `INITIAL-CLOUD.md` needed no changes — its `INITIAL-SETUP.md` links still resolve.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Now let's make one more improvement so that we can use the full chain through to condoccer -
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's integrate condoccer with the rest of the stack:
+- Let's make it 'representable' and give it the ability to auto-connect
+- Let's forward the UI through LR and AC
+- Let's allow LR and AC to launch it (one per box in this case)

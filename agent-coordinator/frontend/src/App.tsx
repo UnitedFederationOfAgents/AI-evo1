@@ -57,7 +57,8 @@ function useCoordinatorWS() {
   }, [])
 
   const connect = useCallback(() => {
-    const ws = new WebSocket(`ws://${window.location.host}/ws`)
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
     wsRef.current = ws
 
     ws.onopen = () => setConnected(true)

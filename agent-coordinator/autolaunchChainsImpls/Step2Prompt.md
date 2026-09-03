@@ -156,11 +156,6 @@ Build/test tooling is still blocked in this session (needs interactive approval)
 **2. Removed the duplicate `--remote` for FC — auto-connect implies it.** `federation-command` no longer has a `--remote`/`-remote` flag, `remote:` config key, or `FC_REMOTE` env var; `cfg.remote` is now derived as `cfg.remote = cfg.autoConnect`, so any auto-connect (flag, config, or `FC_AUTO_CONNECT`) lands the completed background connect in remote control. `local-representative` drops `--remote` from FC's launch argv and `FC_REMOTE=1` from its launch env. Tests updated (`TestAutoConnectImpliesRemote`, `TestParseCLIArgsEnvOverrides`, `TestFederationCommandBuildEnv`, `TestHandleSystemCommand` added) and the FC / LR READMEs plus `agent-coordinator/docs/architecture.md` document the new protocol messages and the single-switch remote behaviour.
 
 
-## <REPLACE-Revision|Retry> E
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1788454556 (Thu Sep 3 04:55:56 PM UTC 2026).

@@ -68,3 +68,20 @@ Rewrote `agent-coordinator/web-exposure-poc/INITIAL-SETUP.md` as an executable *
 Let's make minor adjustments:
 - We want '~/ufa-web-init' rather than '~/usa-web-init'
 - We want to keep this ridealong as RIDEALONG.md but to also keep INITIAL-SETUP.md
+
+
+prompt: [`3edfa30`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3edfa30e55e8af6223aa2cb7a340b83afaff3ee6) → reply: [`fa819f6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fa819f6c01aa884b17ba6faf6ee2f7dff3a8c994)
+
+## Reply C
+
+Applied both Revision C adjustments. Renamed the out-of-repo store from `~/usa-web-init` to `~/ufa-web-init` everywhere it appeared (all nine ridealong chapters plus the store-layout, decisions, and teardown prose). Split the single file back into two: `RIDEALONG.md` now holds the executable waypointed ridealong (the former Revision B content), and `INITIAL-SETUP.md` is restored as the localhost-path design document (rationale, decisions, open questions), with the two files cross-linking each other and `INITIAL-SETUP.md`'s folder layout / secrets / bring-up sections updated to name the `~/ufa-web-init/` store and point at `RIDEALONG.md`. `INITIAL-CLOUD.md` needed no changes — its `INITIAL-SETUP.md` links still resolve.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

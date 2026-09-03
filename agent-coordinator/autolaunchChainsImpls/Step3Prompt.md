@@ -63,11 +63,8 @@ prompt: [`031be5d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0
 Rewrote `agent-coordinator/web-exposure-poc/INITIAL-SETUP.md` as an executable **ridealong**: nine waypointed chapters (`prereqs` → `secrets` → `tailscale` → `google` → `start-ac` → `oauth2-proxy` → `funnel` → `verify` → `teardown`), each with `​```ridealong` command steps and prose that spells out the manual pieces — the full GCP-console walkthrough for creating the Google OAuth consent screen + web client, and the one-time `tailscale up` machine approval — right before the steps that consume their output. All secrets and generated IDs (OAuth client id/secret, cookie secret, Funnel hostname, redirect URL, pids/logs) are created under a new `~/usa-web-init/` tree (`chmod 700`, `secrets/` at `0600`) that lives outside the AI-evo1 repo; the client id/secret are read in via interactive `read` prompts so they never hit the repo, shell history, or a config file. Running it to completion builds AC, starts it plus oauth2-proxy on loopback, and publishes the chain via Tailscale Funnel so the one allowlisted Google account can reach agent-coordinator on the public internet; the carried-over design rationale, decisions, and the AC-origin-check / session-lifetime open questions are preserved, and `INITIAL-CLOUD.md` is untouched.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make minor adjustments:
+- We want '~/ufa-web-init' rather than '~/usa-web-init'
+- We want to keep this ridealong as RIDEALONG.md but to also keep INITIAL-SETUP.md

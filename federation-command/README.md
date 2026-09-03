@@ -17,8 +17,7 @@ make build
 | Flag | Config key | Default | Purpose |
 | --- | --- | --- | --- |
 | `--config <dir>` | — | `~/.ufa/config` | directory holding the `ufa-configurable` YAML files |
-| `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) |
-| `--remote` | `remote` | `false` | adopt **remote control** rather than local control once connected; **implies `--auto-connect`** so FC dials `local-representative` on startup and lands in remote — for fully machine-driven auto-launch/auto-connect chains |
+| `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) **and adopt remote control** once connected — for fully machine-driven auto-launch/auto-connect chains |
 | `--lr-host <host>` | `lr-host` | `localhost` | `local-representative` host for auto-connect and the manual blinker connect |
 | `--lr-port <n>` | `lr-port` | `8082` | `local-representative` `representable` port (same two flows) |
 | `--version`, `-v` | — | — | print version and exit |
@@ -35,8 +34,7 @@ flags and above the config file:
 
 | Variable | Equivalent | Notes |
 | --- | --- | --- |
-| `FC_AUTO_CONNECT` | `--auto-connect` | truthy = any value except `0`/`false`/`no`/`off`/empty |
-| `FC_REMOTE` | `--remote` | truthy as above; implies `FC_AUTO_CONNECT` |
+| `FC_AUTO_CONNECT` | `--auto-connect` | truthy = any value except `0`/`false`/`no`/`off`/empty; also selects remote control |
 | `FC_LR_HOST` | `--lr-host` | non-empty value overrides the host |
 | `FC_LR_PORT` | `--lr-port` | non-empty value overrides the port (validated 1–65535) |
 
@@ -73,18 +71,18 @@ With the above, `./federation-command` behaves like
 
 ## Remote-by-default in an auto-launch chain
 
-When `local-representative` launches `federation-command` itself (its **system**
-tab, or an `auto-launch` config entry), it starts it with `--auto-connect
---remote` *and* `FC_AUTO_CONNECT=1 FC_REMOTE=1` (from a visible terminal it hosts
-for you — see `local-representative`'s README). `--remote` / `FC_REMOTE` implies
-auto-connect and makes the completed background connect land in **remote
-control** — the terminal shows the shell but LR drives it — so a chain that
-begins with a single `./local-representative` comes up fully ready to operate
-from the dashboard.
+Auto-connect *is* the remote-control switch — there is no separate `--remote`
+flag. When `local-representative` launches `federation-command` itself (its
+**system** tab, an `auto-launch` config entry, or a command from
+`agent-coordinator`), it starts it with `--auto-connect` *and*
+`FC_AUTO_CONNECT=1` (from a visible terminal it hosts for you — see
+`local-representative`'s README). The completed background connect then lands in
+**remote control** — the terminal shows the shell but LR drives it — so a chain
+that begins with a single `./local-representative` comes up fully ready to
+operate from the dashboard.
 
-While a `--remote` FC waits for that first connection its **local input is
+While an auto-connect FC waits for that first connection its **local input is
 suspended** (the prompt does not accept keystrokes), closing the window in which
 the FC terminal would otherwise be locally controllable. Input is handed back if
-auto-connect gives up after 10 minutes, or stays with LR once it connects.
-Without `--remote`, an auto-connect that finishes while you are typing at the
-prompt keeps local control instead.
+auto-connect gives up after 10 minutes, or stays with LR once it connects. An FC
+started *without* auto-connect is always locally controlled.

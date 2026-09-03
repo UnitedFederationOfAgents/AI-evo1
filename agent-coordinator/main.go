@@ -84,6 +84,26 @@ type CondocStateMsg struct {
 	StatusMsg string `json:"status_msg,omitempty"`
 }
 
+// ProcInfo mirrors one row of local-representative's system tab: LR itself or a
+// child application instance it manages.
+type ProcInfo struct {
+	Name       string `json:"name"`
+	InstanceID string `json:"instance_id"`
+	Instance   int    `json:"instance"`
+	PID        int    `json:"pid"`
+	Status     string `json:"status"`
+	Managed    bool   `json:"managed"`
+	StartedAt  int64  `json:"started_at"`
+	ExitCode   int    `json:"exit_code"`
+	Detail     string `json:"detail,omitempty"`
+}
+
+// SystemStateMsg matches the system-state payload sent from LR over representable.
+type SystemStateMsg struct {
+	Self    ProcInfo   `json:"self"`
+	Managed []ProcInfo `json:"managed"`
+}
+
 // Host-scoped WS message types sent to browser clients.
 
 type LRFCStateMsg struct {
@@ -121,6 +141,16 @@ type LRCondocMsg struct {
 	StatusMsg string `json:"status_msg,omitempty"`
 }
 
+// LRSystemStateMsg is the host-scoped "lr-system-state" message sent to browser
+// clients: local-representative's system tab for one host. Active is false when
+// that LR is not connected to the coordinator.
+type LRSystemStateMsg struct {
+	HostID  string     `json:"host_id"`
+	Active  bool       `json:"active"`
+	Self    ProcInfo   `json:"self"`
+	Managed []ProcInfo `json:"managed"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -141,6 +171,7 @@ type hostState struct {
 	fcState   string
 	ridealong *RidealongStateMsg
 	condoc    *CondocStateMsg
+	system    *SystemStateMsg
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -232,6 +263,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	fcState := hs.fcState
 	ridealong := hs.ridealong
 	condoc := hs.condoc
+	system := hs.system
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -245,6 +277,13 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 		s.sendToClient(c, "lr-condoc-state", condocMsg(name, condoc))
 	} else {
 		s.sendToClient(c, "lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
+	}
+	if system != nil {
+		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{
+			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed,
+		})
+	} else {
+		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 	}
 }
 
@@ -368,6 +407,24 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				payload.HostID != "" && payload.Action != "" && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__ridealong:"+payload.Action)
 			}
+		case "lr-launch-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+				Name   string `json:"name"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Name != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:launch "+payload.Name)
+			}
+		case "lr-terminate-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+				ID     string `json:"id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.ID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:terminate "+payload.ID)
+			}
 		}
 	}
 }
@@ -441,12 +498,14 @@ func main() {
 			hs.fcState = ""
 			hs.ridealong = nil
 			hs.condoc = nil
+			hs.system = nil
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, State: ""})
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
+			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 		}
 	})
 
@@ -505,6 +564,16 @@ func main() {
 				}
 				hs.mu.Unlock()
 				s.broadcast("lr-condoc-state", condocMsg(name, &payload))
+			}
+		case "system-state":
+			var payload SystemStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.system = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-system-state", LRSystemStateMsg{
+					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed,
+				})
 			}
 		}
 	})

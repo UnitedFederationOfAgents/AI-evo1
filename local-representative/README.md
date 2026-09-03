@@ -81,12 +81,12 @@ process (its PID and uptime) alongside any child applications it manages. From
 here you can:
 
 - **launch** a child application — currently `federation-command`, started with
-  `--auto-connect --remote --lr-port <repr-port>` *and* the matching `FC_*`
-  environment variables (`FC_AUTO_CONNECT`, `FC_REMOTE`, `FC_LR_HOST`,
-  `FC_LR_PORT`) so it dials straight back into this LR and comes up in **remote
-  control**, ready to drive from the dashboard. The env vars are belt-and-braces:
-  a terminal wrapper that mangles trailing argv can't drop `--remote` and leave
-  FC stuck in local control;
+  `--auto-connect --lr-port <repr-port>` *and* the matching `FC_*` environment
+  variables (`FC_AUTO_CONNECT`, `FC_LR_HOST`, `FC_LR_PORT`) so it dials straight
+  back into this LR and comes up in **remote control** (auto-connect implies
+  remote — there is no separate `--remote` flag), ready to drive from the
+  dashboard. The env vars are belt-and-braces: a terminal wrapper that mangles
+  trailing argv can't drop `--auto-connect` and leave FC stuck in local control;
 - **terminate** a managed instance (SIGTERM to its process group, escalating to
   SIGKILL after a grace period), or **dismiss** one that has already exited;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
@@ -127,6 +127,16 @@ detached session; the system tab lists it as `running` with an *attach hint*
 The **system** tab also shows `federation-command control: remote / local / not
 connected` above the launch button whenever an instance is running, so you can
 confirm the machine-driven chain landed in remote control.
+
+### Driving the system tab from agent-coordinator
+
+When LR is connected to an `agent-coordinator`, it mirrors this system tab up
+over the `representable` channel (a `system-state` data message on every change)
+and accepts `__system:launch <app>` / `__system:terminate <instance-id>` commands
+back. The coordinator dashboard gains a matching **system** tab per host, so an
+operator can launch and terminate managed applications on any connected LR
+without a shell on that host — closing the loop for provisioning a new machine
+and bringing it up fully remote-controlled.
 
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
@@ -173,9 +183,10 @@ Then:
 LR starts its `representable` server, auto-launches `federation-command` in a
 terminal window (visible, but not focus-stealing), and auto-connects to
 `agent-coordinator`. FC dials LR in the background and adopts **remote control**
-(via `--remote` / `FC_REMOTE`, which imply `--auto-connect`; its local input
-stays suspended until LR connects). No further interaction is required; the
-dashboard's **system** tab shows `federation-command control: remote` once the
-chain is up. Watch or drive FC directly in its terminal window (or, if you chose
-the tmux/screen fallback, `tmux attach -t fc-<id>` using the id in the system
-tab's detail column).
+(auto-connect implies it; FC's local input stays suspended until LR connects).
+No further interaction is required; the dashboard's **system** tab shows
+`federation-command control: remote` once the chain is up. Watch or drive FC
+directly in its terminal window (or, if you chose the tmux/screen fallback,
+`tmux attach -t fc-<id>` using the id in the system tab's detail column). The
+same **system** tab is available in `agent-coordinator` for every connected LR,
+so the launch/terminate controls work from the coordinator too.

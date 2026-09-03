@@ -54,22 +54,23 @@ var managedApps = map[string]launchSpec{
 		terminal:  true,  // it is an interactive shell — needs a real terminal
 		buildArgs: func(s *Server) []string {
 			// Bring FC up already wired to this LR. --auto-connect makes it retry
-			// the heartbeat connection in the background, --lr-port points it at
-			// our representable server, and --remote makes it adopt remote control
-			// on connect: a fully machine-driven auto-launch chain lands ready to
-			// drive from local-representative rather than in the foreground.
-			return []string{"--auto-connect", "--remote", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+			// the heartbeat connection in the background and adopt remote control
+			// the moment it lands (auto-connect implies remote — there is no
+			// separate --remote flag), and --lr-port points it at our
+			// representable server: a fully machine-driven auto-launch chain lands
+			// ready to drive from local-representative rather than in the foreground.
+			return []string{"--auto-connect", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
 		},
 		buildEnv: func(s *Server) []string {
 			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
 			// wrapper can swallow or re-quote trailing argv, which would drop
-			// --remote and leave FC connecting in *local* control — unusable in a
+			// --auto-connect and leave FC in *local* control — unusable in a
 			// machine-driven chain because it then needs a keystroke at the FC
 			// terminal to hand control to LR. Environment variables pass through
 			// every wrapper untouched, and FC honours them below CLI flags.
+			// FC_AUTO_CONNECT alone is sufficient: it also selects remote control.
 			return []string{
 				"FC_AUTO_CONNECT=1",
-				"FC_REMOTE=1",
 				"FC_LR_HOST=localhost",
 				"FC_LR_PORT=" + s.heartbeatPort,
 			}
@@ -153,7 +154,46 @@ func (s *Server) systemState() SystemStateMsg {
 }
 
 func (s *Server) broadcastSystemState() {
-	s.broadcast("system-state", s.systemState())
+	st := s.systemState()
+	s.broadcast("system-state", st)
+	// Mirror the system tab up to agent-coordinator so an operator can drive
+	// this LR's process management from the coordinator dashboard.
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("system-state", st)
+	}
+}
+
+// handleSystemCommand executes a system-tab action requested remotely by
+// agent-coordinator. AC delivers these over the representable command channel
+// with a "__system:" prefix (mirroring "__ridealong:"); connectAC routes them
+// here instead of forwarding them to federation-command. Recognised forms:
+//
+//	__system:launch <app>
+//	__system:terminate <instance-id-or-app>
+func (s *Server) handleSystemCommand(raw string) {
+	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
+	verb, arg, _ := strings.Cut(rest, " ")
+	arg = strings.TrimSpace(arg)
+	switch verb {
+	case "launch":
+		if arg == "" {
+			log.Printf("system: remote launch command missing application name")
+			return
+		}
+		if _, err := s.launchManaged(arg); err != nil {
+			log.Printf("system: remote launch %q failed: %v", arg, err)
+		}
+	case "terminate":
+		if arg == "" {
+			log.Printf("system: remote terminate command missing target")
+			return
+		}
+		if err := s.terminateManaged(arg); err != nil {
+			log.Printf("system: remote terminate %q failed: %v", arg, err)
+		}
+	default:
+		log.Printf("system: ignoring unrecognised remote system command %q", raw)
+	}
 }
 
 // nextInstanceLocked allocates the next per-app ordinal and its instance id.

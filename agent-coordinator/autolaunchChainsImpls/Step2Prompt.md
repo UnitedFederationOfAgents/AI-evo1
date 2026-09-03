@@ -137,3 +137,30 @@ Now let's make some updates to close the full loop with provisioning a new syste
 We will update agent-coordinator so that it may control the 'system' functionality in each local-representative.
 
 Let's also remove the duplicate '--remote' argument for FC and simply have the auto-connect imply this.
+
+
+prompt: [`1deef1f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1deef1fc0af09a90c60a1d73bf09d10192a39a4b) → reply: [`a1f240e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a1f240ec22f6e6b56a1b5ba26564ed4eeda2c748)
+
+## Reply D
+
+Build/test tooling is still blocked in this session (needs interactive approval), so changes were verified by hand — `make build` in `local-representative/` and `agent-coordinator/`, plus `go test ./...` in `local-representative/`, `agent-coordinator/`, and `federation-command/`, still need to be run.
+
+## What changed
+
+**1. agent-coordinator can now drive each LR's system tab.**
+- **LR → AC:** `local-representative` mirrors its system tab up the `representable` channel — `pushStateToAC` sends an initial `system-state` data message and `broadcastSystemState` now also pushes to the connected AC client on every change.
+- **AC → LR:** LR's AC command handler recognises a `__system:` prefix (mirroring `__ridealong:`) and routes `__system:launch <app>` / `__system:terminate <instance-id>` to a new `handleSystemCommand` (→ `launchManaged` / `terminateManaged`) instead of forwarding to FC.
+- **agent-coordinator:** new `ProcInfo` / `SystemStateMsg` / `LRSystemStateMsg` types, a `system` field on `hostState`, a `system-state` data handler that broadcasts host-scoped `lr-system-state`, snapshot + disconnect wiring, and `lr-launch-app` / `lr-terminate-app` client commands that emit the `__system:` strings.
+- **AC frontend:** a `system` tab per host (right of the service tabs) with a `SystemPanel` (process table, PID/status/uptime, launch/terminate/dismiss, FC control indicator) mirroring LR's own, plus the `lr-system-state` handler, the two new senders, types, and CSS.
+
+**2. Removed the duplicate `--remote` for FC — auto-connect implies it.** `federation-command` no longer has a `--remote`/`-remote` flag, `remote:` config key, or `FC_REMOTE` env var; `cfg.remote` is now derived as `cfg.remote = cfg.autoConnect`, so any auto-connect (flag, config, or `FC_AUTO_CONNECT`) lands the completed background connect in remote control. `local-representative` drops `--remote` from FC's launch argv and `FC_REMOTE=1` from its launch env. Tests updated (`TestAutoConnectImpliesRemote`, `TestParseCLIArgsEnvOverrides`, `TestFederationCommandBuildEnv`, `TestHandleSystemCommand` added) and the FC / LR READMEs plus `agent-coordinator/docs/architecture.md` document the new protocol messages and the single-switch remote behaviour.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -373,9 +373,9 @@ func TestParseCLIArgsRejectsBadConfig(t *testing.T) {
 }
 
 // TestAutoConnectControlState verifies a completed background auto-connect adopts
-// remote control when --remote was passed (preferRemote), or when the user was
-// angling for it (dot selected or a manual connect already in flight); an active
-// entry-prompt session otherwise keeps local control.
+// remote control when preferRemote is set (which auto-connect always sets), or
+// when the user was angling for it (dot selected or a manual connect already in
+// flight); an active entry-prompt session otherwise keeps local control.
 func TestAutoConnectControlState(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -387,8 +387,8 @@ func TestAutoConnectControlState(t *testing.T) {
 		{"manual connect in flight -> remote", BlinkerConnecting, false, BlinkerConnected},
 		{"idle entry prompt -> local", BlinkerIdle, false, BlinkerLocalControl},
 		{"typing at prompt -> local", BlinkerInactive, false, BlinkerLocalControl},
-		{"--remote forces remote from idle", BlinkerIdle, true, BlinkerConnected},
-		{"--remote forces remote while typing", BlinkerInactive, true, BlinkerConnected},
+		{"preferRemote forces remote from idle", BlinkerIdle, true, BlinkerConnected},
+		{"preferRemote forces remote while typing", BlinkerInactive, true, BlinkerConnected},
 	}
 
 	for _, tt := range tests {
@@ -402,34 +402,40 @@ func TestAutoConnectControlState(t *testing.T) {
 	}
 }
 
-// TestParseCLIArgsRemote verifies --remote (flag and config key) sets cfg.remote.
-func TestParseCLIArgsRemote(t *testing.T) {
+// TestAutoConnectImpliesRemote verifies there is no separate --remote switch:
+// auto-connect (flag, config key, or FC_AUTO_CONNECT) is what selects remote
+// control, and an FC started without it stays locally controlled. A stray
+// --remote / remote: is ignored for backward compatibility.
+func TestAutoConnectImpliesRemote(t *testing.T) {
 	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
 
-	cfg, handled, err := parseCLIArgs([]string{"--remote"})
+	cfg, handled, err := parseCLIArgs([]string{"--auto-connect"})
 	if err != nil || handled {
 		t.Fatalf("unexpected handled=%v err=%v", handled, err)
 	}
-	if !cfg.remote {
-		t.Error("--remote flag did not set cfg.remote")
-	}
-	if !cfg.autoConnect {
-		t.Error("--remote should imply --auto-connect so FC dials LR and lands in remote")
+	if !cfg.autoConnect || !cfg.remote {
+		t.Errorf("--auto-connect should set autoConnect and imply remote: %+v", cfg)
 	}
 
 	cfg, _, err = parseCLIArgs(nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.remote {
-		t.Error("cfg.remote should default to false")
+	if cfg.remote || cfg.autoConnect {
+		t.Errorf("defaults should be local control (no auto-connect): %+v", cfg)
 	}
-	if cfg.autoConnect {
-		t.Error("cfg.autoConnect should default to false when --remote is absent")
+
+	// A leftover --remote flag no longer does anything on its own.
+	cfg, _, err = parseCLIArgs([]string{"--remote"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.autoConnect || cfg.remote {
+		t.Errorf("bare --remote should be ignored now: %+v", cfg)
 	}
 
 	dir := t.TempDir()
-	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "remote: true\n")
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\n")
 	conf, err := ufaconfig.Load("federation-command", dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -438,11 +444,8 @@ func TestParseCLIArgsRemote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseCLIArgsWithConfig: %v", err)
 	}
-	if !cfg.remote {
-		t.Error("remote: true in config did not set cfg.remote")
-	}
-	if !cfg.autoConnect {
-		t.Error("remote: true in config should imply auto-connect")
+	if !cfg.autoConnect || !cfg.remote {
+		t.Errorf("auto-connect: true in config should imply remote: %+v", cfg)
 	}
 }
 
@@ -450,61 +453,49 @@ func TestParseCLIArgsRemote(t *testing.T) {
 // local-representative when it auto-launches FC through a terminal wrapper)
 // configure the LR connection, sitting above the config file and below CLI flags.
 func TestParseCLIArgsEnvOverrides(t *testing.T) {
-	t.Run("FC_REMOTE implies auto-connect", func(t *testing.T) {
+	t.Run("FC_AUTO_CONNECT implies remote and sets the address", func(t *testing.T) {
 		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
-		t.Setenv("FC_REMOTE", "1")
+		t.Setenv("FC_AUTO_CONNECT", "1")
 		t.Setenv("FC_LR_HOST", "reprhost")
 		t.Setenv("FC_LR_PORT", "8091")
 		cfg, handled, err := parseCLIArgs(nil)
 		if err != nil || handled {
 			t.Fatalf("unexpected handled=%v err=%v", handled, err)
 		}
-		if !cfg.remote || !cfg.autoConnect {
-			t.Errorf("FC_REMOTE did not set remote+autoConnect: %+v", cfg)
+		if !cfg.autoConnect || !cfg.remote {
+			t.Errorf("FC_AUTO_CONNECT did not set autoConnect+remote: %+v", cfg)
 		}
 		if cfg.lrAddr != "reprhost:8091" {
 			t.Errorf("lrAddr = %q, want reprhost:8091", cfg.lrAddr)
 		}
 	})
 
-	t.Run("FC_AUTO_CONNECT alone", func(t *testing.T) {
-		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
-		t.Setenv("FC_AUTO_CONNECT", "true")
-		cfg, _, err := parseCLIArgs(nil)
+	t.Run("FC_AUTO_CONNECT=off keeps local control", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\n")
+		conf, err := ufaconfig.Load("federation-command", dir)
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("Load: %v", err)
 		}
-		if !cfg.autoConnect || cfg.remote {
-			t.Errorf("FC_AUTO_CONNECT should set only autoConnect: %+v", cfg)
+		t.Setenv("FC_AUTO_CONNECT", "off")
+		cfg, _, err := parseCLIArgsWithConfig(nil, conf)
+		if err != nil {
+			t.Fatalf("parseCLIArgsWithConfig: %v", err)
+		}
+		if cfg.autoConnect || cfg.remote {
+			t.Errorf("FC_AUTO_CONNECT=off should override auto-connect: true from the config file: %+v", cfg)
 		}
 	})
 
 	t.Run("CLI flag beats env", func(t *testing.T) {
 		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
-		t.Setenv("FC_REMOTE", "0")
-		cfg, _, err := parseCLIArgs([]string{"--remote"})
+		t.Setenv("FC_AUTO_CONNECT", "0")
+		cfg, _, err := parseCLIArgs([]string{"--auto-connect"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !cfg.remote {
-			t.Error("--remote flag should win over FC_REMOTE=0")
-		}
-	})
-
-	t.Run("env beats config file", func(t *testing.T) {
-		dir := t.TempDir()
-		writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "remote: true\n")
-		conf, err := ufaconfig.Load("federation-command", dir)
-		if err != nil {
-			t.Fatalf("Load: %v", err)
-		}
-		t.Setenv("FC_REMOTE", "off")
-		cfg, _, err := parseCLIArgsWithConfig(nil, conf)
-		if err != nil {
-			t.Fatalf("parseCLIArgsWithConfig: %v", err)
-		}
-		if cfg.remote {
-			t.Error("FC_REMOTE=off should override remote: true from the config file")
+		if !cfg.autoConnect || !cfg.remote {
+			t.Errorf("--auto-connect flag should win over FC_AUTO_CONNECT=0: %+v", cfg)
 		}
 	})
 

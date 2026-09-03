@@ -357,7 +357,7 @@ type appModel struct {
 	lrAddr              string    // representable address used for both manual and auto connects
 	autoConnect         bool      // true while the background retry loop is still running
 	autoConnectDeadline time.Time // stop retrying once this instant has passed
-	remoteDefault       bool      // --remote: adopt remote control (not local) when a connection is established
+	remoteDefault       bool      // auto-connect implies this: adopt remote control (not local) when the background connection is established
 
 	quitting    bool
 	windowWidth int
@@ -534,12 +534,12 @@ func autoConnectDialCmd(addr string) tea.Cmd {
 }
 
 // autoConnectControlState decides which control mode a completed background
-// auto-connect adopts. preferRemote (from --remote) forces remote control so a
-// fully machine-driven auto-launch/auto-connect chain lands ready to drive from
-// local-representative. Otherwise: if the blinker dot is selected — or a manual
-// connect is already in flight — the user is angling for remote control, so
-// honour that; if the user is mid-entry at the prompt we take local control so
-// the foreground session is not yanked away.
+// auto-connect adopts. preferRemote (set whenever auto-connect is configured)
+// forces remote control so a fully machine-driven auto-launch/auto-connect chain
+// lands ready to drive from local-representative. Otherwise: if the blinker dot
+// is selected — or a manual connect is already in flight — the user is angling
+// for remote control, so honour that; if the user is mid-entry at the prompt we
+// take local control so the foreground session is not yanked away.
 func autoConnectControlState(b *Blinker, preferRemote bool) BlinkerState {
 	if preferRemote || b.IsSelectMode() || b.IsConnecting() {
 		return BlinkerConnected
@@ -3685,14 +3685,13 @@ func renderSessions(recordsPath string, currentSession string) string {
 // README.md for the config keys.
 type cliConfig struct {
 	autoConnect bool   // --auto-connect / auto-connect / FC_AUTO_CONNECT: dial local-representative in the background on startup
-	remote      bool   // --remote / remote / FC_REMOTE: adopt remote control (not local) once a connection is established; implies auto-connect
+	remote      bool   // derived: true whenever autoConnect is set — a machine-driven auto-launch/auto-connect chain always adopts remote control (no separate --remote flag)
 	lrAddr      string // local-representative representable address (--lr-host / --lr-port / FC_LR_HOST / FC_LR_PORT override host / port)
 }
 
 // Config-file keys recognised for federation-command (see README.md).
 const (
 	cfgKeyAutoConnect = "auto-connect"
-	cfgKeyRemote      = "remote"
 	cfgKeyLRHost      = "lr-host"
 	cfgKeyLRPort      = "lr-port"
 )
@@ -3704,7 +3703,6 @@ const (
 // flags.
 const (
 	envAutoConnect = "FC_AUTO_CONNECT"
-	envRemote      = "FC_REMOTE"
 	envLRHost      = "FC_LR_HOST"
 	envLRPort      = "FC_LR_PORT"
 )
@@ -3747,9 +3745,6 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	if cfg.autoConnect, err = conf.Bool(cfgKeyAutoConnect, false); err != nil {
 		return cfg, false, err
 	}
-	if cfg.remote, err = conf.Bool(cfgKeyRemote, false); err != nil {
-		return cfg, false, err
-	}
 	port, err := conf.Int(cfgKeyLRPort, DefaultLRPort)
 	if err != nil {
 		return cfg, false, err
@@ -3764,9 +3759,6 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	// even when a terminal wrapper mangles trailing argv.
 	if v, set := envTruthy(envAutoConnect); set {
 		cfg.autoConnect = v
-	}
-	if v, set := envTruthy(envRemote); set {
-		cfg.remote = v
 	}
 	if v := strings.TrimSpace(os.Getenv(envLRHost)); v != "" {
 		host = v
@@ -3785,8 +3777,6 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 			return cfg, true, nil
 		case arg == "--auto-connect" || arg == "-auto-connect":
 			cfg.autoConnect = true
-		case arg == "--remote" || arg == "-remote":
-			cfg.remote = true
 		case arg == "--lr-host" || arg == "-lr-host":
 			if i+1 >= len(args) {
 				return cfg, false, fmt.Errorf("--lr-host requires a value")
@@ -3816,12 +3806,12 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 		}
 		// Unknown arguments are ignored for backward compatibility.
 	}
-	// --remote is only meaningful once a connection exists, so in a machine-driven
-	// launch chain it implies --auto-connect: FC dials local-representative in the
-	// background on startup and adopts remote control the moment it lands.
-	if cfg.remote {
-		cfg.autoConnect = true
-	}
+	// Remote control is no longer a separate switch: auto-connect implies it.
+	// Whenever FC is told to dial local-representative in the background it is
+	// part of a machine-driven auto-launch/auto-connect chain, which must land in
+	// remote control so local-representative can drive it without a keystroke at
+	// the FC terminal.
+	cfg.remote = cfg.autoConnect
 	cfg.lrAddr = fmt.Sprintf("%s:%d", host, port)
 	return cfg, false, nil
 }

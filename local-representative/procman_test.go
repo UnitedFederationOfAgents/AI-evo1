@@ -56,14 +56,14 @@ func TestParseAutoLaunchEntry(t *testing.T) {
 func TestWrapInTerminal(t *testing.T) {
 	s := newServer("test-lr")
 	s.terminalCmd = "myterm -e"
-	prog, args, hosting, err := s.wrapInTerminal("/bin/fc", []string{"--auto-connect", "--remote"})
+	prog, args, hosting, err := s.wrapInTerminal("/bin/fc", []string{"--auto-connect", "--lr-port", "8082"})
 	if err != nil {
 		t.Fatalf("wrapInTerminal: %v", err)
 	}
 	if prog != "myterm" {
 		t.Errorf("prog = %q, want myterm", prog)
 	}
-	want := []string{"-e", "/bin/fc", "--auto-connect", "--remote"}
+	want := []string{"-e", "/bin/fc", "--auto-connect", "--lr-port", "8082"}
 	if len(args) != len(want) {
 		t.Fatalf("args = %v, want %v", args, want)
 	}
@@ -77,14 +77,14 @@ func TestWrapInTerminal(t *testing.T) {
 	}
 
 	s.terminalCmd = "tmux new-session -d -s fc"
-	_, args, hosting, err = s.wrapInTerminal("/bin/fc", []string{"--remote"})
+	_, args, hosting, err = s.wrapInTerminal("/bin/fc", []string{"--auto-connect"})
 	if err != nil {
 		t.Fatalf("wrapInTerminal (tmux override): %v", err)
 	}
 	if !hosting.detached {
 		t.Errorf("a `-d` tmux override should be detached, got %+v", hosting)
 	}
-	if got := args[len(args)-1]; got != "--remote" {
+	if got := args[len(args)-1]; got != "--auto-connect" {
 		t.Errorf("child args not appended after override: last = %q", got)
 	}
 }
@@ -135,7 +135,9 @@ func TestTerminalLaunchEnvStripsActivationTokens(t *testing.T) {
 }
 
 // TestFederationCommandBuildEnv verifies FC is auto-launched with the FC_*
-// connection variables so --remote survives a terminal wrapper that mangles argv.
+// connection variables so auto-connect (which also selects remote control)
+// survives a terminal wrapper that mangles trailing argv. There is no separate
+// FC_REMOTE any more.
 func TestFederationCommandBuildEnv(t *testing.T) {
 	spec, ok := managedApps["federation-command"]
 	if !ok || spec.buildEnv == nil {
@@ -149,8 +151,11 @@ func TestFederationCommandBuildEnv(t *testing.T) {
 			got[k] = v
 		}
 	}
-	if got["FC_REMOTE"] != "1" || got["FC_AUTO_CONNECT"] != "1" {
-		t.Errorf("buildEnv should force remote auto-connect, got %v", got)
+	if got["FC_AUTO_CONNECT"] != "1" {
+		t.Errorf("buildEnv should force auto-connect, got %v", got)
+	}
+	if _, set := got["FC_REMOTE"]; set {
+		t.Errorf("FC_REMOTE should no longer be set (auto-connect implies remote), got %v", got)
 	}
 	if got["FC_LR_PORT"] != "8082" {
 		t.Errorf("FC_LR_PORT = %q, want 8082", got["FC_LR_PORT"])
@@ -311,6 +316,50 @@ func TestLaunchNInstancesAndTerminate(t *testing.T) {
 	}
 
 	_ = s.terminateManaged(id2)
+}
+
+// TestHandleSystemCommand verifies the "__system:" commands agent-coordinator
+// sends over the representable channel drive launchManaged / terminateManaged.
+func TestHandleSystemCommand(t *testing.T) {
+	const app = "test-syscmd"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: false,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+
+	s.handleSystemCommand("__system:launch " + app)
+	s.procMu.Lock()
+	n := len(s.managed)
+	var id string
+	for k := range s.managed {
+		id = k
+	}
+	s.procMu.Unlock()
+	if n != 1 || id == "" {
+		t.Fatalf("remote launch did not start an instance (managed=%d)", n)
+	}
+
+	s.procMu.Lock()
+	p := s.managed[id]
+	s.procMu.Unlock()
+
+	s.handleSystemCommand("__system:terminate " + id)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && p.state() == "running" {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if p.state() == "running" {
+		t.Fatal("remote terminate did not stop the instance")
+	}
+
+	// Unknown verbs and missing args are ignored without panicking.
+	s.handleSystemCommand("__system:launch")
+	s.handleSystemCommand("__system:bogus x")
+	_ = s.terminateManaged(id)
 }
 
 // TestLaunchManagedSingleton verifies a singleton app rejects a second launch

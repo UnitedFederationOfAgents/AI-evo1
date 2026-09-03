@@ -269,6 +269,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("fc-state", FCStateMsg{State: s.getFCState()})
 	ac.SendData("ridealong-state", s.getRidealongState())
 	ac.SendData("condoc-state", s.getCondocState())
+	ac.SendData("system-state", s.systemState())
 }
 
 // connectAC dials agent-coordinator and maintains the connection lifecycle.
@@ -308,8 +309,13 @@ func (s *Server) connectAC(host, port string) {
 	s.acClient = client
 	s.acMu.Unlock()
 
-	// Forward commands from AC to FC.
+	// Commands from AC: "__system:" commands drive this LR's own system tab
+	// (launch/terminate managed apps); everything else is forwarded to FC.
 	client.SetCommandHandler(func(cmd string) {
+		if strings.HasPrefix(cmd, "__system:") {
+			s.handleSystemCommand(cmd)
+			return
+		}
 		if s.reprServer != nil {
 			s.reprServer.SendCommand("federation-command", cmd)
 		}

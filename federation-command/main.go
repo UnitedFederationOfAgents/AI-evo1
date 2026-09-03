@@ -559,11 +559,18 @@ func autoConnectRetryCmd() tea.Cmd {
 func (m *appModel) autoConnectGaveUp() tea.Cmd {
 	m.autoConnect = false
 	m.blinker.DisableAccent()
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		tea.Println(errorStyle.Render(fmt.Sprintf(
 			"auto-connect: gave up after %s — local-representative at %s did not respond", autoConnectWindow, m.lrAddr))),
 		m.blinker.ResetTick(),
-	)
+	}
+	if m.remoteDefault && !m.input.Focused() {
+		// We suppressed local input while waiting for the machine-driven chain;
+		// hand the terminal back now that it will not arrive.
+		m.input.Focus()
+		cmds = append(cmds, textinput.Blink)
+	}
+	return tea.Batch(cmds...)
 }
 
 // listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
@@ -632,6 +639,15 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 	if cfg.autoConnect {
 		m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
 		m.blinker.EnableAccent()
+	}
+
+	if cfg.remote {
+		// Machine-driven chain: local-representative will drive this FC over the
+		// representable channel. Don't accept local keystrokes while the
+		// background auto-connect completes — otherwise there is a window where
+		// the FC terminal is locally controllable, which the paradigm forbids.
+		// autoConnectGaveUp / a completed connect restore focus as appropriate.
+		m.input.Blur()
 	}
 
 	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
@@ -743,7 +759,7 @@ func (m appModel) Init() tea.Cmd {
 	if m.autoConnect {
 		adopts := "local control unless the dot is selected"
 		if m.remoteDefault {
-			adopts = "remote control"
+			adopts = "remote control — local input suspended until local-representative connects"
 		}
 		acNotice := successStyle.Render(fmt.Sprintf(
 			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background; adopts %s)",
@@ -3665,11 +3681,12 @@ func renderSessions(recordsPath string, currentSession string) string {
 // cliConfig holds federation-command's resolved startup options. Values come
 // from (lowest to highest priority) the built-in defaults,
 // ~/.ufa/config/global.yaml, the per-app ~/.ufa/config/federation-command.yaml,
-// and finally the command-line flags. See README.md for the config keys.
+// the FC_* environment variables, and finally the command-line flags. See
+// README.md for the config keys.
 type cliConfig struct {
-	autoConnect bool   // --auto-connect / auto-connect: dial local-representative in the background on startup
-	remote      bool   // --remote / remote: adopt remote control (not local) once a connection is established; implies auto-connect
-	lrAddr      string // local-representative representable address (--lr-host / --lr-port override host / port)
+	autoConnect bool   // --auto-connect / auto-connect / FC_AUTO_CONNECT: dial local-representative in the background on startup
+	remote      bool   // --remote / remote / FC_REMOTE: adopt remote control (not local) once a connection is established; implies auto-connect
+	lrAddr      string // local-representative representable address (--lr-host / --lr-port / FC_LR_HOST / FC_LR_PORT override host / port)
 }
 
 // Config-file keys recognised for federation-command (see README.md).
@@ -3679,6 +3696,33 @@ const (
 	cfgKeyLRHost      = "lr-host"
 	cfgKeyLRPort      = "lr-port"
 )
+
+// Environment variables recognised for the local-representative connection.
+// local-representative sets these when it auto-launches FC so the machine-driven
+// chain survives being started inside a terminal emulator / tmux / screen that
+// could otherwise drop trailing argv. Priority: config file < environment < CLI
+// flags.
+const (
+	envAutoConnect = "FC_AUTO_CONNECT"
+	envRemote      = "FC_REMOTE"
+	envLRHost      = "FC_LR_HOST"
+	envLRPort      = "FC_LR_PORT"
+)
+
+// envTruthy interprets a boolean-ish environment variable. Unset, "", "0",
+// "false", "no" and "off" (any case) are false; anything else is true.
+func envTruthy(key string) (val, set bool) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false, true
+	default:
+		return true, true
+	}
+}
 
 // parseCLIArgs loads the ufa-configurable config files (honouring a --config
 // directory override) and then applies command-line flags on top. handled is
@@ -3714,6 +3758,24 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 		return cfg, false, fmt.Errorf("invalid %s value %d in config (want 1-65535)", cfgKeyLRPort, port)
 	}
 	host := conf.String(cfgKeyLRHost, DefaultLRHost)
+
+	// Environment overrides sit between the config file and the CLI flags: a
+	// launcher (local-representative) sets FC_* so the connection is configured
+	// even when a terminal wrapper mangles trailing argv.
+	if v, set := envTruthy(envAutoConnect); set {
+		cfg.autoConnect = v
+	}
+	if v, set := envTruthy(envRemote); set {
+		cfg.remote = v
+	}
+	if v := strings.TrimSpace(os.Getenv(envLRHost)); v != "" {
+		host = v
+	}
+	if v := strings.TrimSpace(os.Getenv(envLRPort)); v != "" {
+		if port, err = parseLRPort(v); err != nil {
+			return cfg, false, fmt.Errorf("%s: %w", envLRPort, err)
+		}
+	}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]

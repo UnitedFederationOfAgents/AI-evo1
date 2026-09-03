@@ -445,3 +445,74 @@ func TestParseCLIArgsRemote(t *testing.T) {
 		t.Error("remote: true in config should imply auto-connect")
 	}
 }
+
+// TestParseCLIArgsEnvOverrides verifies the FC_* environment variables (set by
+// local-representative when it auto-launches FC through a terminal wrapper)
+// configure the LR connection, sitting above the config file and below CLI flags.
+func TestParseCLIArgsEnvOverrides(t *testing.T) {
+	t.Run("FC_REMOTE implies auto-connect", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_REMOTE", "1")
+		t.Setenv("FC_LR_HOST", "reprhost")
+		t.Setenv("FC_LR_PORT", "8091")
+		cfg, handled, err := parseCLIArgs(nil)
+		if err != nil || handled {
+			t.Fatalf("unexpected handled=%v err=%v", handled, err)
+		}
+		if !cfg.remote || !cfg.autoConnect {
+			t.Errorf("FC_REMOTE did not set remote+autoConnect: %+v", cfg)
+		}
+		if cfg.lrAddr != "reprhost:8091" {
+			t.Errorf("lrAddr = %q, want reprhost:8091", cfg.lrAddr)
+		}
+	})
+
+	t.Run("FC_AUTO_CONNECT alone", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_AUTO_CONNECT", "true")
+		cfg, _, err := parseCLIArgs(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.autoConnect || cfg.remote {
+			t.Errorf("FC_AUTO_CONNECT should set only autoConnect: %+v", cfg)
+		}
+	})
+
+	t.Run("CLI flag beats env", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_REMOTE", "0")
+		cfg, _, err := parseCLIArgs([]string{"--remote"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.remote {
+			t.Error("--remote flag should win over FC_REMOTE=0")
+		}
+	})
+
+	t.Run("env beats config file", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "remote: true\n")
+		conf, err := ufaconfig.Load("federation-command", dir)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		t.Setenv("FC_REMOTE", "off")
+		cfg, _, err := parseCLIArgsWithConfig(nil, conf)
+		if err != nil {
+			t.Fatalf("parseCLIArgsWithConfig: %v", err)
+		}
+		if cfg.remote {
+			t.Error("FC_REMOTE=off should override remote: true from the config file")
+		}
+	})
+
+	t.Run("bad FC_LR_PORT is an error", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_LR_PORT", "not-a-port")
+		if _, _, err := parseCLIArgs(nil); err == nil {
+			t.Fatal("expected an error for a non-numeric FC_LR_PORT")
+		}
+	})
+}

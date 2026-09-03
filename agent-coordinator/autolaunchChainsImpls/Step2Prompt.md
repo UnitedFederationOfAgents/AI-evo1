@@ -113,3 +113,28 @@ Let's adjust this further - the terminals should be visible, they should simply 
 We will have the issue where we are launching FC instances through LR system but they connect in 'local control'. This breaks the overall system paradigm because we cannot then use them for input without having manual action at the launching terminal.
 
 Let's make these corrections now.
+
+
+prompt: [`c9006c1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c9006c182428d2e9c8b4bc5b704c217b09c40bb6) → reply: [`f6ddefe`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f6ddefec0cc48873deee627cac27d3d5d84a4a94)
+
+## Reply C
+
+I've implemented Revision C. Build/test tooling is still blocked in this session (needs interactive approval), so changes were verified by hand — `make build` in `local-representative/` and `go test ./...` in both `local-representative/` and `federation-command/` still need to be run.
+
+## What changed
+
+**1. Terminals are visible again, but don't steal focus.** Reverted Reply B's "detached multiplexer first" strategy in `local-representative/procman.go`: `terminalCandidates` now probes windowed emulators first (foreground-execing ones — `xterm`, `konsole`, `alacritty`, `kitty`, `foot`, `wezterm` — ahead of the double-forkers), with `tmux`/`screen` demoted to a headless last resort. New `terminalLaunchEnv()` builds the child environment with `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN` stripped — those are the X11/Wayland startup-notification tokens a new window uses to ask the WM to raise/focus it, so an EWMH-compliant WM now maps FC's terminal *visible but unfocused*. It's wired into the terminal-launch `cmd.Env` only (non-terminal launches keep `os.Environ()`). Comments, the `--terminal` docs, the autodetect list, and the "full hands-off chain" section of the README were updated to match.
+
+**2. FC launched via LR lands in remote control, not local.** Root cause: a terminal/multiplexer wrapper can swallow or re-quote trailing argv, dropping `--remote` so FC connects but stays locally controllable. Fix: `launchSpec` gained `buildEnv`, and LR now also passes `FC_AUTO_CONNECT=1 FC_REMOTE=1 FC_LR_HOST=localhost FC_LR_PORT=<repr-port>` in the child environment (env survives every wrapper untouched). `federation-command` honours the `FC_*` vars in `parseCLIArgsWithConfig`, slotted between the config file and CLI flags (`FC_REMOTE` implies auto-connect, same as `--remote`). Additionally, when `--remote`/`FC_REMOTE` is set FC now **blurs its input at startup** so the FC terminal never accepts local keystrokes during the connect window; focus is handed back only if auto-connect gives up after 10 minutes. Tests added: `TestParseCLIArgsEnvOverrides` (FC) and `TestTerminalCandidatesPreferVisible` / `TestTerminalLaunchEnvStripsActivationTokens` / `TestFederationCommandBuildEnv` (LR); both READMEs document the env vars and the input-suspension behaviour.
+
+**Known remaining limitation (not addressed here):** every FC instance still connects to LR's `representable` server under the name `"federation-command"`, so with N instances they share one connection-state slot — the system-tab `control:` indicator and `fc-log` are aggregate, and one instance disconnecting resets shared ridealong/condoc state. Giving each instance a distinct representable identity is a larger change (LR's name-matched handlers plus per-instance frontend state) and wasn't in scope for this revision.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -41,6 +41,7 @@ type launchSpec struct {
 	singleton bool                     // true: at most one running instance per host; false: N-per-host
 	terminal  bool                     // true: an interactive TUI that must be hosted in a terminal
 	buildArgs func(s *Server) []string // argv after the program name
+	buildEnv  func(s *Server) []string // extra KEY=VALUE entries appended to the child environment
 }
 
 // managedApps is the fixed set of applications local-representative knows how to
@@ -58,6 +59,20 @@ var managedApps = map[string]launchSpec{
 			// on connect: a fully machine-driven auto-launch chain lands ready to
 			// drive from local-representative rather than in the foreground.
 			return []string{"--auto-connect", "--remote", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+		},
+		buildEnv: func(s *Server) []string {
+			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
+			// wrapper can swallow or re-quote trailing argv, which would drop
+			// --remote and leave FC connecting in *local* control — unusable in a
+			// machine-driven chain because it then needs a keystroke at the FC
+			// terminal to hand control to LR. Environment variables pass through
+			// every wrapper untouched, and FC honours them below CLI flags.
+			return []string{
+				"FC_AUTO_CONNECT=1",
+				"FC_REMOTE=1",
+				"FC_LR_HOST=localhost",
+				"FC_LR_PORT=" + s.heartbeatPort,
+			}
 		},
 	},
 }
@@ -221,16 +236,16 @@ type terminalCandidate struct {
 }
 
 // terminalCandidates lists the terminal emulators / multiplexers probed, in
-// order, when no explicit "terminal" override is configured. Detached
-// multiplexers (tmux, screen) come first: they host the child in a real PTY
-// without popping a window or grabbing the desktop foreground, which is what the
-// machine-driven auto-launch chain wants (and the only thing that works on a
-// headless host). Windowed emulators follow for interactive desktop use. tmux
-// and screen are special-cased in wrapInTerminal because they need a generated
-// session name.
+// order, when no explicit "terminal" override is configured. A visible window is
+// what we want: the operator should see federation-command come up. Foreground
+// emulators (xterm, konsole, alacritty, kitty, foot, wezterm) come first because
+// LR execs the child directly under them and keeps full PID / lifecycle /
+// terminate tracking. The double-forking emulators follow. tmux and screen are
+// last: they only produce a *detached* (invisible) session, so they are a
+// headless last resort, not the preferred host. Focus stealing is handled
+// separately — see terminalLaunchEnv. tmux and screen are special-cased in
+// wrapInTerminal because they need a generated session name.
 var terminalCandidates = []terminalCandidate{
-	{prog: "tmux", args: nil},
-	{prog: "screen", args: nil},
 	{prog: "xterm", args: []string{"-e"}},
 	{prog: "konsole", args: []string{"-e"}},
 	{prog: "alacritty", args: []string{"-e"}},
@@ -240,6 +255,27 @@ var terminalCandidates = []terminalCandidate{
 	{prog: "xfce4-terminal", args: []string{"-x"}},
 	{prog: "x-terminal-emulator", args: []string{"-e"}},
 	{prog: "gnome-terminal", args: []string{"--"}},
+	{prog: "tmux", args: nil},
+	{prog: "screen", args: nil},
+}
+
+// terminalLaunchEnv returns the environment for a terminal-hosted child with the
+// X11 / Wayland startup-notification tokens stripped. DESKTOP_STARTUP_ID and
+// XDG_ACTIVATION_TOKEN are how a newly mapped window asks the window manager /
+// compositor to raise and focus it; without them an EWMH-compliant WM maps the
+// terminal window *visible but unfocused*, so an auto-launched federation-command
+// no longer steals focus from whatever the operator is doing. The window is
+// still shown — this only suppresses the activation request, not the window.
+func terminalLaunchEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		if strings.HasPrefix(kv, "DESKTOP_STARTUP_ID=") || strings.HasPrefix(kv, "XDG_ACTIVATION_TOKEN=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // terminalHosting records how a terminal-wrapped launch runs so the reaper and
@@ -256,9 +292,11 @@ type terminalHosting struct {
 // bin (with appArgs) runs inside an interactive terminal. It honours the
 // configured "terminal" override first — a space-separated command prefix, e.g.
 // `xterm -e` or `tmux new-session -d -s fc` — otherwise it probes
-// terminalCandidates on $PATH, preferring a detached tmux/screen session that
-// never takes the foreground. If nothing is found it returns an actionable error
-// rather than letting federation-command fail deep inside its input reader
+// terminalCandidates on $PATH, preferring a visible windowed emulator (which
+// keeps full lifecycle tracking) and falling back to a detached tmux/screen
+// session only where no emulator exists. Focus stealing by the new window is
+// suppressed via terminalLaunchEnv. If nothing is found it returns an actionable
+// error rather than letting federation-command fail deep inside its input reader
 // ("error creating cancelreader").
 func (s *Server) wrapInTerminal(bin string, appArgs []string) (string, []string, terminalHosting, error) {
 	child := append([]string{bin}, appArgs...)
@@ -309,8 +347,8 @@ func (s *Server) wrapInTerminal(bin string, appArgs []string) (string, []string,
 	}
 	return "", nil, terminalHosting{}, fmt.Errorf(
 		"no terminal found to host %s (it is an interactive shell); set 'terminal' in config "+
-			"(e.g. terminal: \"tmux new-session -d -s fc\" or terminal: \"xterm -e\") or install one of: "+
-			"tmux, screen, x-terminal-emulator, gnome-terminal, konsole, xterm",
+			"(e.g. terminal: \"xterm -e\", or terminal: \"tmux new-session -d -s fc\" for a detached fallback) "+
+			"or install one of: xterm, konsole, gnome-terminal, x-terminal-emulator, tmux, screen",
 		filepath.Base(bin))
 }
 
@@ -343,9 +381,9 @@ func (s *Server) launchManaged(app string) (string, error) {
 	var hosting terminalHosting
 	if spec.terminal {
 		// Interactive TUI shells must run in a real terminal or their input
-		// reader dies on startup. Wrap the launch in a terminal emulator, or
-		// preferably a detached tmux/screen session that never takes the
-		// foreground.
+		// reader dies on startup. Wrap the launch in a visible terminal emulator
+		// (falling back to a detached tmux/screen session only where none is
+		// installed); terminalLaunchEnv keeps the window from stealing focus.
 		prog, args, hosting, err = s.wrapInTerminal(bin, appArgs)
 		if err != nil {
 			s.recordLaunchFailure(app, instance, id, err)
@@ -354,7 +392,16 @@ func (s *Server) launchManaged(app string) (string, error) {
 	}
 
 	cmd := exec.Command(prog, args...)
-	cmd.Env = os.Environ()
+	if spec.terminal {
+		// Visible terminal window, but without the startup-notification token
+		// that would make the WM raise/focus it over the operator's work.
+		cmd.Env = terminalLaunchEnv()
+	} else {
+		cmd.Env = os.Environ()
+	}
+	if spec.buildEnv != nil {
+		cmd.Env = append(cmd.Env, spec.buildEnv(s)...)
+	}
 	// Own process group so terminate can signal the whole child tree (terminal
 	// wrapper included).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

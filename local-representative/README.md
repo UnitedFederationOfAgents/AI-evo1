@@ -25,7 +25,7 @@ make build      # build frontend + Go binary
 | `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
 | `--auto-launch` | `auto-launch` | — | comma/space-separated child applications to launch on startup; each token is `app` or `app:N` (e.g. `federation-command:2`) |
 | `--fc-bin` | `fc-bin` | — | explicit path to the `federation-command` binary (default: search next to LR, the dev bin dir, then `$PATH`) |
-| `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `tmux new-session -d -s fc` (detached, no window — preferred) or `xterm -e` |
+| `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 
 ## Configuration files
 
@@ -55,7 +55,7 @@ dev: false
 ac-host: 10.0.0.5
 ac-port: "8084"
 auto-launch: federation-command:2
-terminal: tmux new-session -d -s fc   # optional; tmux/screen are autodetected
+terminal: xterm -e                   # optional; an emulator on $PATH is autodetected
 ```
 
 ## Auto-connecting to agent-coordinator
@@ -81,8 +81,12 @@ process (its PID and uptime) alongside any child applications it manages. From
 here you can:
 
 - **launch** a child application — currently `federation-command`, started with
-  `--auto-connect --remote --lr-port <repr-port>` so it dials straight back into
-  this LR and comes up in remote control, ready to drive from the dashboard;
+  `--auto-connect --remote --lr-port <repr-port>` *and* the matching `FC_*`
+  environment variables (`FC_AUTO_CONNECT`, `FC_REMOTE`, `FC_LR_HOST`,
+  `FC_LR_PORT`) so it dials straight back into this LR and comes up in **remote
+  control**, ready to drive from the dashboard. The env vars are belt-and-braces:
+  a terminal wrapper that mangles trailing argv can't drop `--remote` and leave
+  FC stuck in local control;
 - **terminate** a managed instance (SIGTERM to its process group, escalating to
   SIGKILL after a grace period), or **dismiss** one that has already exited;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
@@ -93,32 +97,32 @@ instances run and each press starts another, listed as `federation-command #1`,
 `#2`, … Terminate/dismiss act on the individual instance.
 
 `federation-command` is an interactive shell and must run in a real terminal or
-its input reader dies on startup ("error creating cancelreader"). LR probes
-`$PATH` in this order, **detached multiplexers first** so the launch never pops a
-window or grabs the desktop foreground:
+its input reader dies on startup ("error creating cancelreader"). It should be
+**visible** — the operator wants to see FC come up — so LR probes `$PATH` for a
+windowed emulator first and only falls back to a detached multiplexer where no
+emulator exists:
 
-    tmux, screen,                          # detached session — preferred
     xterm, konsole, alacritty, kitty, foot, wezterm, xfce4-terminal,
-    x-terminal-emulator, gnome-terminal   # windowed emulators
+    x-terminal-emulator, gnome-terminal   # visible window — preferred
+    tmux, screen                          # detached (invisible) — last resort
+
+The new window is launched with `DESKTOP_STARTUP_ID` / `XDG_ACTIVATION_TOKEN`
+stripped from its environment, so an EWMH-compliant window manager / Wayland
+compositor maps it **visible but unfocused** — an auto-launched FC no longer
+steals focus from whatever the operator is doing. (Final behaviour is
+WM-dependent; this suppresses the activation request, not the window.)
 
 Set `--terminal` / `terminal` to an explicit command prefix
-(`terminal: "tmux new-session -d -s fc"`, `terminal: "xterm -e"`) to override, or
+(`terminal: "xterm -e"`, `terminal: "tmux new-session -d -s fc"`) to override, or
 to supply one where none is on `$PATH`. If nothing is found LR records the launch
 as `failed` with an actionable message.
 
-With **tmux** (or **screen**) LR starts each instance in its own detached session
-(`tmux new-session -d -s fc-<id>`) — no window, never in the foreground. The
-system tab lists the instance as `running` with an *attach hint*
-(`tmux attach -t fc-<id>`) in its detail column; because the child lives inside
-the multiplexer rather than as an LR child process, its PID shows as `—` and
+Windowed emulators keep full lifecycle tracking — real PID, status and a
+process-group **terminate**. If you deliberately choose **tmux**/**screen** (or a
+`terminal:` override containing `-d`/`-dm`) LR starts each instance in its own
+detached session; the system tab lists it as `running` with an *attach hint*
+(`tmux attach -t fc-<id>`) in its detail column, its PID shows as `—`, and
 **terminate** tears the session down with `tmux kill-session` (`screen -X quit`).
-A configured `terminal:` override containing `-d`/`-dm` is treated the same way,
-except LR does not know the session name, so terminate just drops the entry and
-you close the session yourself.
-
-Windowed emulators (`xterm -e`, `konsole -e`, …) keep full lifecycle tracking —
-real PID, status and a process-group terminate — but pop a window that generally
-grabs focus; use one only when you want FC visible on a desktop.
 
 The **system** tab also shows `federation-command control: remote / local / not
 connected` above the launch button whenever an instance is running, so you can
@@ -146,7 +150,8 @@ entrypoint. Combine with `auto-connect` to extend the chain up to
 
 ### Full hands-off chain (agent-coordinator → LR → FC)
 
-Install `tmux` (so FC is hosted detached, no window), then write:
+Have a terminal emulator on `$PATH` (`xterm`, `konsole`, …) so FC comes up in a
+visible window, then write:
 
 ```yaml
 # ~/.ufa/config/local-representative.yaml
@@ -154,8 +159,8 @@ auto-connect: true                 # dial agent-coordinator on startup
 ac-host: localhost
 ac-port: "8084"
 auto-launch: federation-command    # "federation-command:3" for three FC instances
-# no 'terminal:' key needed — tmux is autodetected and used detached.
-# override only for a specific emulator, e.g.  terminal: "xterm -e"
+# no 'terminal:' key needed — an emulator on $PATH is autodetected.
+# override only if you want a specific one, e.g.  terminal: "xterm -e"
 ```
 
 Then:
@@ -165,10 +170,12 @@ Then:
 ./local-representative          # in another — no flags needed
 ```
 
-LR starts its `representable` server, auto-launches `federation-command` into a
-detached `tmux` session, and auto-connects to `agent-coordinator`. FC dials LR in
-the background and adopts **remote control** (`--remote` implies `--auto-connect`
-and forces remote). No further interaction is required; the dashboard's **system**
-tab shows `federation-command control: remote` once the chain is up. Attach with
-`tmux attach -t fc-<id>` (see the system tab's detail column) to watch or drive FC
-directly.
+LR starts its `representable` server, auto-launches `federation-command` in a
+terminal window (visible, but not focus-stealing), and auto-connects to
+`agent-coordinator`. FC dials LR in the background and adopts **remote control**
+(via `--remote` / `FC_REMOTE`, which imply `--auto-connect`; its local input
+stays suspended until LR connects). No further interaction is required; the
+dashboard's **system** tab shows `federation-command control: remote` once the
+chain is up. Watch or drive FC directly in its terminal window (or, if you chose
+the tmux/screen fallback, `tmux attach -t fc-<id>` using the id in the system
+tab's detail column).

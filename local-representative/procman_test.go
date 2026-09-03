@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,6 +86,74 @@ func TestWrapInTerminal(t *testing.T) {
 	}
 	if got := args[len(args)-1]; got != "--remote" {
 		t.Errorf("child args not appended after override: last = %q", got)
+	}
+}
+
+// TestTerminalCandidatesPreferVisible verifies windowed emulators are probed
+// before the detached-only multiplexers, so an auto-launched federation-command
+// gets a visible window whenever a real emulator is installed.
+func TestTerminalCandidatesPreferVisible(t *testing.T) {
+	idx := map[string]int{}
+	for i, c := range terminalCandidates {
+		idx[c.prog] = i
+	}
+	n := len(terminalCandidates)
+	if idx["tmux"] < n-2 || idx["screen"] < n-2 {
+		t.Errorf("tmux/screen should be the last-resort candidates, got tmux=%d screen=%d of %d",
+			idx["tmux"], idx["screen"], n)
+	}
+	for _, emu := range []string{"xterm", "konsole", "alacritty", "gnome-terminal"} {
+		if idx[emu] > idx["tmux"] {
+			t.Errorf("windowed emulator %s (%d) should be probed before tmux (%d)", emu, idx[emu], idx["tmux"])
+		}
+	}
+}
+
+// TestTerminalLaunchEnvStripsActivationTokens verifies the startup-notification
+// tokens are removed so the terminal window does not steal focus, while the rest
+// of the environment is preserved.
+func TestTerminalLaunchEnvStripsActivationTokens(t *testing.T) {
+	t.Setenv("DESKTOP_STARTUP_ID", "someid")
+	t.Setenv("XDG_ACTIVATION_TOKEN", "tok")
+	t.Setenv("FC_KEEP_ME", "yes")
+
+	env := terminalLaunchEnv()
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DESKTOP_STARTUP_ID=") || strings.HasPrefix(kv, "XDG_ACTIVATION_TOKEN=") {
+			t.Fatalf("terminalLaunchEnv did not strip %q", kv)
+		}
+	}
+	found := false
+	for _, kv := range env {
+		if kv == "FC_KEEP_ME=yes" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("terminalLaunchEnv dropped an unrelated variable")
+	}
+}
+
+// TestFederationCommandBuildEnv verifies FC is auto-launched with the FC_*
+// connection variables so --remote survives a terminal wrapper that mangles argv.
+func TestFederationCommandBuildEnv(t *testing.T) {
+	spec, ok := managedApps["federation-command"]
+	if !ok || spec.buildEnv == nil {
+		t.Fatal("federation-command should define buildEnv")
+	}
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	got := map[string]string{}
+	for _, kv := range spec.buildEnv(s) {
+		if k, v, found := strings.Cut(kv, "="); found {
+			got[k] = v
+		}
+	}
+	if got["FC_REMOTE"] != "1" || got["FC_AUTO_CONNECT"] != "1" {
+		t.Errorf("buildEnv should force remote auto-connect, got %v", got)
+	}
+	if got["FC_LR_PORT"] != "8082" {
+		t.Errorf("FC_LR_PORT = %q, want 8082", got["FC_LR_PORT"])
 	}
 }
 

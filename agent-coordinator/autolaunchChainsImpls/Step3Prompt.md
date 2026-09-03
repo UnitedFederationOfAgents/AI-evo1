@@ -34,3 +34,22 @@ Secrets delivery -- We will use cloud secrets managers when we go to the cloud, 
 Host choice -- for INITIAL-SETUP we'll use localhost, for INITIAL-CLOUD we are happy with e2-micro
 
 For 'AC origin checks' and 'Session lifetime' we will elaborate on the questions.
+
+
+prompt: [`e68a5f5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e68a5f5658d915ff3c035b4dc2d70445ee60d496) → reply: [`73b59e0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/73b59e017d3d68f129021ec55aa6d359224fc360)
+
+## Reply A
+
+Rewrote `INITIAL-SETUP.md` as the **localhost path**: AC and the full oauth2-proxy chain run as local processes on the always-on workstation, with Tailscale Funnel providing public HTTPS ingress and the only cloud dependency being the Google OAuth client needed for "Sign in with Google." I folded in the resolved decisions (Funnel over Serve, localhost host, local secret store injected via env vars, optional one-time `tailscale up` instead of a minted auth key) and expanded the "AC origin checks" and "Session lifetime" open questions into detailed sub-questions rather than one-liners.
+
+Moved the cloud-compute design into a new `INITIAL-CLOUD.md`, reframed as a later increment gated on first solving machine-to-machine auth for the unauthenticated `:8084` representable-TCP port, keeping the `e2-micro` host, GCP Secret Manager + VM service account for secrets, and the shared OAuth client, with its origin-check and session-lifetime questions cross-linked back to `INITIAL-SETUP.md`.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -106,11 +106,10 @@ auto-launch: federation-command    # or "federation-command:3" for three FC inst
 LR starts its `representable` server, auto-launches FC into a detached tmux session (`--auto-connect --remote`), and auto-connects up to `agent-coordinator`. FC dials LR in the background and adopts remote control with no interaction; the **system** tab shows `federation-command control: remote` once the chain is up. `tmux attach -t fc-<id>` (id shown in the system tab detail column) to watch or drive FC directly.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's adjust this further - the terminals should be visible, they should simply not steal focus as they launch. We can revert the previous implementation and work from there or we can move forward depending on what is more convenient there.
 
+We will have the issue where we are launching FC instances through LR system but they connect in 'local control'. This breaks the overall system paradigm because we cannot then use them for input without having manual action at the launching terminal.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make these corrections now.

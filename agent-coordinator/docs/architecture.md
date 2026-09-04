@@ -53,13 +53,19 @@ Local-representative connects to AC using `representable.Client`. Messages:
 ### condoccer in the chain
 
 condoccer is itself a `representable.Client` of LR (`--auto-connect`, name `condoccer`,
-one instance per box). It heartbeats to LR's `:8082` server and pushes
-`data` / `"condoccer-state"` (its HTTP port + a condoc summary). Its browser UI is
-**forwarded, not re-implemented**: LR reverse-proxies `/condoccer/*` → condoccer's
-loopback port, and AC reverse-proxies `/host/<id>/*` → that host's LR (which in
-turn forwards `/condoccer/*`). A browser on AC — including one arriving through
-the Tailscale + oauth2-proxy web-exposure path — therefore drives condoccer on
-any connected box over a single origin. `AC → LR` `__condoccer:action <json>` /
+one instance per box) whenever LR is the one launching it — LR's `condoccer`
+managed-app spec always passes `--auto-connect`, so a condoccer that comes up
+through the autolaunch chain is wired in without any manual step. It heartbeats
+to LR's `:8082` server and pushes `data` / `"condoccer-state"` (its HTTP port +
+a condoc summary). `--auto-connect` isn't mandatory, though: condoccer's own UI
+has a connect/disconnect widget (bottom of the sidebar) so a condoccer started
+by hand, or one whose auto-connect window gave up, can link to LR on demand and
+drop the link again. Its browser UI is **forwarded, not re-implemented**: LR
+reverse-proxies `/condoccer/*` → condoccer's loopback port, and AC
+reverse-proxies `/host/<id>/*` → that host's LR (which in turn forwards
+`/condoccer/*`). A browser on AC — including one arriving through the
+Tailscale + oauth2-proxy web-exposure path — therefore drives condoccer on any
+connected box over a single origin. `AC → LR` `__condoccer:action <json>` /
 `__condoccer:refresh` commands are relayed to condoccer for out-of-band control.
 
 ## WebSocket Protocol (AC ↔ Browser)

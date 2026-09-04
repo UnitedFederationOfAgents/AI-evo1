@@ -30,14 +30,69 @@ type CondoccerStateMsg struct {
 	Condocs  []CondocInfo `json:"condocs"`
 }
 
-// autoConnectLR maintains condoccer's representable connection to
+// ReprStatusMsg is the "repr-status" WebSocket payload pushed to the frontend
+// so its manual connect/disconnect widget reflects condoccer's actual link to
+// local-representative, whichever of --auto-connect or the widget started it.
+type ReprStatusMsg struct {
+	Status string `json:"status"` // "disconnected" | "connecting" | "connected"
+	Host   string `json:"host,omitempty"`
+	Port   string `json:"port,omitempty"`
+}
+
+// startConnectLoop launches a fresh connectLoop dialling host:port, first
+// stopping any loop already running (an earlier --auto-connect or widget
+// "connect"). Used both for --auto-connect at startup and for the frontend's
+// manual "Connect" button.
+func (s *Server) startConnectLoop(host, port string) {
+	s.stopConnectLoop()
+	stopCh := make(chan struct{})
+	s.reprMu.Lock()
+	s.reprStop = stopCh
+	s.reprHost = host
+	s.reprPort = port
+	s.reprMu.Unlock()
+	go s.connectLoop(host, port, stopCh)
+}
+
+// stopConnectLoop signals any running connectLoop to give up rather than
+// retry, and closes an active connection if there is one. It's the
+// "disconnect" half of the manual widget; startConnectLoop also calls it
+// first so a fresh "connect" replaces rather than layers on a prior attempt.
+func (s *Server) stopConnectLoop() {
+	s.reprMu.Lock()
+	stopCh := s.reprStop
+	client := s.reprClient
+	s.reprStop = nil
+	s.reprClient = nil
+	s.reprMu.Unlock()
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if client != nil {
+		client.Close()
+	}
+	if stopCh != nil || client != nil {
+		s.setReprStatus("disconnected")
+	}
+}
+
+// connectLoop maintains condoccer's representable connection to
 // local-representative. It retries every autoConnectInterval for up to
 // autoConnectWindow to establish the link; once connected it pushes the current
 // condoc summary and blocks until the connection drops, then starts a fresh
-// window. Runs in its own goroutine.
-func (s *Server) autoConnectLR(host, port string) {
+// window. It gives up instead of retrying as soon as stopCh is closed — that's
+// how a widget "disconnect" (or a replacing "connect") ends a previous loop.
+// Runs in its own goroutine.
+func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 	addr := net.JoinHostPort(host, port)
 	for {
+		select {
+		case <-stopCh:
+			return
+		default:
+		}
+
+		s.setReprStatus("connecting")
 		deadline := time.Now().Add(autoConnectWindow)
 		var client *representable.Client
 		for client == nil {
@@ -46,9 +101,16 @@ func (s *Server) autoConnectLR(host, port string) {
 				client = c
 				break
 			}
+			select {
+			case <-stopCh:
+				s.setReprStatus("disconnected")
+				return
+			default:
+			}
 			if time.Now().After(deadline) {
-				log.Printf("auto-connect: gave up after %s — local-representative at %s did not respond",
+				log.Printf("connect: gave up after %s — local-representative at %s did not respond",
 					autoConnectWindow, addr)
+				s.setReprStatus("disconnected")
 				return
 			}
 			time.Sleep(autoConnectInterval)
@@ -58,6 +120,7 @@ func (s *Server) autoConnectLR(host, port string) {
 		s.reprMu.Lock()
 		s.reprClient = client
 		s.reprMu.Unlock()
+		s.setReprStatus("connected")
 
 		client.SetCommandHandler(s.handleReprCommand)
 		s.pushCondoccerState()
@@ -69,8 +132,48 @@ func (s *Server) autoConnectLR(host, port string) {
 			s.reprClient = nil
 		}
 		s.reprMu.Unlock()
+
+		select {
+		case <-stopCh:
+			s.setReprStatus("disconnected")
+			return
+		default:
+		}
 		log.Printf("disconnected from local-representative at %s — retrying", addr)
 	}
+}
+
+// setReprStatus records the current connection status and pushes it to every
+// WebSocket client so the manual connect/disconnect widget stays live.
+func (s *Server) setReprStatus(status string) {
+	s.reprMu.Lock()
+	s.reprStatus = status
+	host, port := s.reprHost, s.reprPort
+	s.reprMu.Unlock()
+	s.broadcastReprStatus(status, host, port)
+}
+
+// broadcastReprStatus sends a "repr-status" message to every connected
+// WebSocket client.
+func (s *Server) broadcastReprStatus(status, host, port string) {
+	msg := s.marshalMsg("repr-status", ReprStatusMsg{Status: status, Host: host, Port: port})
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for c := range s.clients {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+}
+
+// sendReprStatus sends the current connection status to a single (usually
+// newly-connected) WebSocket client.
+func (s *Server) sendReprStatus(c *wsClient) {
+	s.reprMu.Lock()
+	status, host, port := s.reprStatus, s.reprHost, s.reprPort
+	s.reprMu.Unlock()
+	s.sendToClient(c, "repr-status", ReprStatusMsg{Status: status, Host: host, Port: port})
 }
 
 // pushCondoccerState sends the current condoc summary to local-representative.

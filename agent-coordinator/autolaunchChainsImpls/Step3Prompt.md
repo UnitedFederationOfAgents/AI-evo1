@@ -123,3 +123,28 @@ The implementation so far looks good.
 Now let's add a widget to condoccer to allow manual connect/disconnect (so it will not be mandatory to use auto-connect).
 
 When local-representative-->system launches condoccer we should ensure it uses auto-connect.
+
+
+prompt: [`03797a0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/03797a038d2cd79a83c05138a34dca40cfcf100f) → reply: [`a5186dc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a5186dc2ae9d57040a909cece926bb0c960cd9dd)
+
+## Reply E
+
+## Summary
+
+Implemented Revision E:
+
+1. **Manual connect/disconnect widget** — condoccer's Go server (`repr.go`, `main.go`) now tracks a `disconnected`/`connecting`/`connected` status, exposes `startConnectLoop`/`stopConnectLoop` (used by both `--auto-connect` at startup and new `connect`/`disconnect` WebSocket messages), and pushes `repr-status` updates to clients. The React frontend (`App.tsx`, `types.ts`, `index.css`) adds a small footer widget in every sidebar view with a status dot, host/port fields, and a Connect/Disconnect button, so auto-connect is no longer mandatory. Added `TestStartConnectLoopThenStop` / `TestStopConnectLoopNoopWhenIdle` in `repr_test.go`.
+
+2. **LR→condoccer auto-connect** — already guaranteed: LR's `condoccer` managed-app spec (`local-representative/procman.go`) unconditionally passes `--auto-connect`, and `TestCondoccerManagedSpec` already asserts this, so no code change was needed there; I only documented the invariant (and the new widget) in `agent-coordinator/docs/architecture.md` and `local-representative/README.md`.
+
+I could not run `go build`/`go test`/`npm build` in this non-interactive session (same restriction as Reply D). To verify: `go build ./... && go test ./...` in `condoccer` and `local-representative`, and `make build` in `condoccer` to embed the updated frontend.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

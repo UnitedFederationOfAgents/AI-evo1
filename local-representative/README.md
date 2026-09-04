@@ -107,6 +107,9 @@ chain. Its browser UI is **forwarded, not embedded**: LR reverse-proxies
 it in an iframe), and `agent-coordinator` reverse-proxies `/host/<name>/*` back
 through this LR — so the coordinator dashboard (and anything reaching it through
 the web-exposure path) can drive condoccer on this box with no shell here.
+`--auto-connect` is how LR always launches it, but it isn't mandatory for
+condoccer in general: its UI has its own connect/disconnect widget for the case
+where it's started by hand instead.
 
 `federation-command` is an interactive shell and must run in a real terminal or
 its input reader dies on startup ("error creating cancelreader"). It should be

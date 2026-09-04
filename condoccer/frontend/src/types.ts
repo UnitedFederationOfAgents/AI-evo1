@@ -51,10 +51,19 @@ export interface CondocState {
   completedStepContents?: Record<number, string>
 }
 
+export type ReprStatus = 'disconnected' | 'connecting' | 'connected'
+
+export interface ReprStatusMsg {
+  status: ReprStatus
+  host?: string
+  port?: string
+}
+
 export type ServerMsg =
   | { type: 'list'; payload: { condocs: CondocInfo[] } }
   | { type: 'condoc'; payload: CondocState }
   | { type: 'error'; payload: { message: string } }
+  | { type: 'repr-status'; payload: ReprStatusMsg }
 
 export interface ActionRequest {
   action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert'

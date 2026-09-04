@@ -116,11 +116,10 @@ I implemented Revision D as a code change across the stack (matching how Steps 1
 `go test ./...` in `representable`, `condoccer`, `local-representative`, `agent-coordinator`; `make build` in `condoccer`, `local-representative`, `agent-coordinator` (rebuilds the embedded frontends — required for the proxy path). `go mod tidy` in `condoccer` first.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+The implementation so far looks good.
 
+Now let's add a widget to condoccer to allow manual connect/disconnect (so it will not be mandatory to use auto-connect).
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When local-representative-->system launches condoccer we should ensure it uses auto-connect.

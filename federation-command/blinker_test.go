@@ -150,6 +150,60 @@ func TestBlinkerStartFlash(t *testing.T) {
 	}
 }
 
+// TestBlinkerAccent verifies the auto-connect accent blink overlays the current
+// mode with a brief blue pulse and can be disabled cleanly.
+func TestBlinkerAccent(t *testing.T) {
+	b := NewBlinker()
+
+	// Disabled by default: no pulse, and ticks are inert.
+	if b.accentOn {
+		t.Fatal("expected accentOn to be false on a fresh blinker")
+	}
+	if cmd := b.AccentTick(b.accentGen); cmd != nil {
+		t.Error("expected AccentTick to be a no-op while accent is disabled")
+	}
+
+	b.EnableAccent()
+	if !b.accentEnabled {
+		t.Fatal("expected accentEnabled to be true after EnableAccent")
+	}
+	gen := b.accentGen
+
+	// First tick lights the pulse; View overlays blue regardless of base mode.
+	if cmd := b.AccentTick(gen); cmd == nil {
+		t.Error("expected AccentTick to return a follow-up command while enabled")
+	}
+	if !b.accentOn {
+		t.Fatal("expected accentOn to be true after first AccentTick")
+	}
+	if !strings.Contains(b.View(), SolidBlock) {
+		t.Errorf("expected accent pulse to render a solid block, got %q", b.View())
+	}
+
+	// Second tick clears the pulse.
+	b.AccentTick(gen)
+	if b.accentOn {
+		t.Fatal("expected accentOn to be false after second AccentTick")
+	}
+
+	// Stale ticks (old generation) are ignored.
+	b.EnableAccent()
+	stale := gen
+	if cmd := b.AccentTick(stale); cmd != nil {
+		t.Error("expected stale-generation AccentTick to be ignored")
+	}
+
+	// DisableAccent stops the chain and clears the pulse.
+	b.accentOn = true
+	b.DisableAccent()
+	if b.accentEnabled || b.accentOn {
+		t.Error("expected DisableAccent to clear accentEnabled and accentOn")
+	}
+	if cmd := b.AccentTick(b.accentGen); cmd != nil {
+		t.Error("expected AccentTick to be a no-op after DisableAccent")
+	}
+}
+
 // TestBlinkerShouldBlink verifies ShouldBlink logic
 func TestBlinkerShouldBlink(t *testing.T) {
 	b := NewBlinker()

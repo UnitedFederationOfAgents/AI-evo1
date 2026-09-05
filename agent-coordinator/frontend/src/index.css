@@ -295,6 +295,14 @@ body {
   margin-top: 8px;
 }
 
+.condoccer-frame {
+  width: 100%;
+  min-height: 70vh;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #1e1e1e;
+}
+
 /* ---- FC control panel ---- */
 
 .fc-status { font-size: 13px; }
@@ -386,3 +394,35 @@ body {
 .condoc-step { font-size: 11px; color: #888; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 10px; padding: 1px 8px; flex-shrink: 0; }
 .condoc-phase-label { font-size: 13px; color: #6ec96e; font-weight: 600; }
 .condoc-msg { font-size: 11px; color: #888; font-style: italic; }
+
+/* ---- System panel (host system tab) ---- */
+
+.sys-panel { display: flex; flex-direction: column; gap: 20px; max-width: 720px; }
+.sys-panel-empty { color: #888; font-style: italic; }
+.sys-fc-control { font-size: 12px; padding: 6px 10px; border-radius: 4px; border: 1px solid #3c3c3c; color: #bbb; }
+.sys-fc-control-remote-control { border-color: #2e5a2e; color: #8fd18f; }
+.sys-fc-control-local-control { border-color: #6a5a2e; color: #d1c48f; }
+.sys-table { border: 1px solid #3c3c3c; border-radius: 4px; overflow: hidden; }
+.sys-row { display: grid; grid-template-columns: 1fr 80px 90px 120px 110px; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #2a2a2a; font-size: 12px; }
+.sys-row:last-child { border-bottom: none; }
+.sys-row-head { background: #252526; color: #666; text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; font-weight: 600; }
+.sys-row-none { display: block; color: #666; font-style: italic; padding: 10px 12px; }
+.sys-row-failed { background: #241717; }
+.sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-col-name { color: #d4d4d4; font-weight: 600; }
+.sys-col-pid { color: #9c9c9c; }
+.sys-col-detail { color: #9c9c9c; }
+.sys-self-tag { margin-left: 8px; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; }
+.sys-col-status { font-weight: 600; }
+.sys-status-running { color: #4ec94e; }
+.sys-status-exited { color: #9c9c9c; }
+.sys-status-failed { color: #cc4444; }
+.sys-col-actions { text-align: right; }
+.sys-btn { font-family: inherit; font-size: 11px; padding: 2px 10px; border-radius: 3px; cursor: pointer; }
+.sys-btn:disabled { opacity: 0.5; cursor: default; }
+.sys-btn-terminate { background: #3a1a1a; border: 1px solid #7a2e2e; color: #c96e6e; }
+.sys-btn-terminate:hover { background: #5a2e2e; }
+.sys-launch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+.sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }

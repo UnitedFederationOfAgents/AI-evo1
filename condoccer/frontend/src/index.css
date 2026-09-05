@@ -577,3 +577,66 @@ button:disabled {
 
 .conn-dot.connected    { background: #4ec94e; }
 .conn-dot.disconnected { background: #e07070; }
+.conn-dot.connecting   { background: #d9a800; }
+
+/* ---- Representable connect/disconnect widget ---- */
+
+.repr-footer {
+  flex-shrink: 0;
+  border-top: 1px solid #3c3c3c;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.repr-footer-status {
+  display: flex;
+  align-items: center;
+}
+
+.repr-footer-label {
+  font-size: 11px;
+  color: #aaa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repr-footer-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.repr-footer-input {
+  flex: 1;
+  min-width: 0;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 5px;
+  border-radius: 3px;
+}
+
+.repr-footer-input-port {
+  flex: 0 0 44px;
+}
+
+.repr-footer-addr {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repr-footer-form button {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+}

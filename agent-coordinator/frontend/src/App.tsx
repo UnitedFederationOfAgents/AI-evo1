@@ -1,8 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, ProcInfo, ServiceStatus,
 } from './types'
+
+// Applications the system tab offers a launch button for. `multi` apps are
+// N-per-host (launch stays enabled while instances run); others are singletons.
+const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
+  { name: 'federation-command', multi: true },
+  { name: 'condoccer', multi: false },
+]
 
 interface LogEntry {
   kind: 'cmd' | 'output' | 'state'
@@ -15,6 +22,8 @@ interface HostClientState {
   fcLog: LogEntry[]
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
+  system?: LRSystemStateMsg
+  condoccer?: LRCondoccerMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -37,12 +46,21 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-ridealong-command', payload: { host_id: hostId, action } }))
   }, [])
 
+  const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-launch-app', payload: { host_id: hostId, name } }))
+  }, [])
+
+  const sendLRTerminateApp = useCallback((hostId: string, id: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-terminate-app', payload: { host_id: hostId, id } }))
+  }, [])
+
   const selectHost = useCallback((hostId: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'select-host', payload: { host_id: hostId } }))
   }, [])
 
   const connect = useCallback(() => {
-    const ws = new WebSocket(`ws://${window.location.host}/ws`)
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
     wsRef.current = ws
 
     ws.onopen = () => setConnected(true)
@@ -128,6 +146,22 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-system-state': {
+            const p = msg.payload as LRSystemStateMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), system: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-condoccer-state': {
+            const p = msg.payload as LRCondoccerMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), condoccer: p.available ? p : undefined },
+            }))
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -143,7 +177,10 @@ function useCoordinatorWS() {
     }
   }, [connect])
 
-  return { connected, hosts, hostData, selectHost, sendLRCommand, sendLRRidealongCommand }
+  return {
+    connected, hosts, hostData, selectHost,
+    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+  }
 }
 
 function hostDotClass(status: string): string {
@@ -179,7 +216,10 @@ function HostSidebar({
 }
 
 const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
-type LRService = typeof LR_SERVICES[number]
+// "system" sits to the right of the service tabs, mirroring local-representative's
+// own dashboard: it drives that LR's process management from the coordinator.
+const LR_TABS = [...LR_SERVICES, 'system'] as const
+type LRTab = typeof LR_TABS[number]
 
 function FCCommandPanel({
   hostId, fcState, fcLog, sendLRCommand,
@@ -371,15 +411,149 @@ function CondocPanel({ state, fcState }: { state: LRCondocMsg; fcState: string }
   )
 }
 
+function formatUptime(startedAt: number, nowSec: number): string {
+  if (!startedAt) return '—'
+  const secs = Math.max(0, nowSec - startedAt)
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
+}
+
+function SystemProcRow({
+  proc, nowSec, onTerminate,
+}: {
+  proc: ProcInfo
+  nowSec: number
+  onTerminate?: (id: string) => void
+}) {
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  const label = proc.managed && proc.instance > 0
+    ? `${proc.name} #${proc.instance}`
+    : proc.name
+
+  return (
+    <div className={`sys-row sys-row-${proc.status}`}>
+      <span className="sys-col sys-col-name">
+        {label}
+        {!proc.managed && <span className="sys-self-tag">this LR</span>}
+      </span>
+      <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
+      <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
+      <span className="sys-col sys-col-detail" title={proc.detail}>{detail}</span>
+      <span className="sys-col sys-col-actions">
+        {proc.managed && onTerminate && (
+          <button
+            className="sys-btn sys-btn-terminate"
+            onClick={() => onTerminate(proc.instance_id)}
+          >
+            {proc.status === 'running' ? 'terminate' : 'dismiss'}
+          </button>
+        )}
+      </span>
+    </div>
+  )
+}
+
+function SystemPanel({
+  hostId, state, active, fcState, onLaunch, onTerminate,
+}: {
+  hostId: string
+  state: LRSystemStateMsg | undefined
+  active: boolean
+  fcState: string
+  onLaunch: (hostId: string, name: string) => void
+  onTerminate: (hostId: string, id: string) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (!active) {
+    return <div className="service-empty">local-representative on this host is not connected</div>
+  }
+  if (!state) {
+    return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+
+  const managed = state.managed ?? []
+  const runningCount = (name: string) =>
+    managed.filter(p => p.name === name && p.status === 'running').length
+
+  const fcRunning = runningCount('federation-command') > 0
+  const fcControl =
+    fcState === 'remote-control' ? 'remote'
+    : fcState === 'local-control' ? 'local'
+    : 'not connected'
+
+  return (
+    <div className="sys-panel">
+      {fcRunning && (
+        <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
+          federation-command control: <strong>{fcControl}</strong>
+          {fcControl !== 'remote' && ' — expected remote in a machine-driven chain'}
+        </div>
+      )}
+      <div className="sys-table">
+        <div className="sys-row sys-row-head">
+          <span className="sys-col sys-col-name">process</span>
+          <span className="sys-col sys-col-pid">pid</span>
+          <span className="sys-col sys-col-status">status</span>
+          <span className="sys-col sys-col-detail">uptime</span>
+          <span className="sys-col sys-col-actions" />
+        </div>
+        <SystemProcRow proc={state.self} nowSec={nowSec} />
+        {managed.map(p => (
+          <SystemProcRow
+            key={p.instance_id}
+            proc={p}
+            nowSec={nowSec}
+            onTerminate={id => onTerminate(hostId, id)}
+          />
+        ))}
+        {managed.length === 0 && (
+          <div className="sys-row sys-row-none">no managed applications</div>
+        )}
+      </div>
+
+      <div className="sys-launch">
+        <span className="sys-launch-label">launch</span>
+        {LAUNCHABLE_APPS.map(({ name, multi }) => {
+          const n = runningCount(name)
+          return (
+            <button
+              key={name}
+              className="sys-btn sys-btn-launch"
+              disabled={!multi && n > 0}
+              onClick={() => onLaunch(hostId, name)}
+            >
+              {multi
+                ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
+                : (n > 0 ? `${name} (running)` : name)}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
 }: {
   host: Host
   data: HostClientState
   sendLRCommand: (hostId: string, cmd: string) => void
   sendLRRidealongCommand: (hostId: string, action: string) => void
+  sendLRLaunchApp: (hostId: string, name: string) => void
+  sendLRTerminateApp: (hostId: string, id: string) => void
 }) {
-  const [activeTab, setActiveTab] = useState<LRService>('federation-command')
+  const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
   const lrState = data.lrState
   const active = lrState?.active ?? false
 
@@ -398,7 +572,7 @@ function LRView({
       </div>
       <div className="tab-bar">
         <div className="tabs">
-          {LR_SERVICES.map(svc => (
+          {LR_TABS.map(svc => (
             <button
               key={svc}
               className={`tab${activeTab === svc ? ' tab-active' : ''}`}
@@ -412,10 +586,22 @@ function LRView({
       <div className="main-pane">
         <div className="service-view">
           <div className="service-name">{activeTab}</div>
-          <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
-            <span className="health-dot" />
-            <span className="health-label">{getServiceStatus(activeTab)}</span>
-          </div>
+          {activeTab !== 'system' && (
+            <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
+              <span className="health-dot" />
+              <span className="health-label">{getServiceStatus(activeTab)}</span>
+            </div>
+          )}
+          {activeTab === 'system' && (
+            <SystemPanel
+              hostId={host.id}
+              state={data.system}
+              active={active}
+              fcState={data.fcState}
+              onLaunch={sendLRLaunchApp}
+              onTerminate={sendLRTerminateApp}
+            />
+          )}
           {activeTab === 'federation-command' && (
             <>
               {data.ridealong && (
@@ -437,7 +623,20 @@ function LRView({
               />
             </>
           )}
-          {activeTab !== 'federation-command' && !active && (
+          {activeTab === 'condoccer' && active && (
+            data.condoccer ? (
+              <iframe
+                className="condoccer-frame"
+                src={`/host/${host.id}/condoccer/`}
+                title={`condoccer on ${host.label}`}
+              />
+            ) : (
+              <div className="service-empty">
+                condoccer is not running on this host — launch it from the system tab
+              </div>
+            )
+          )}
+          {activeTab !== 'federation-command' && activeTab !== 'system' && !active && (
             <div className="service-empty">local-representative on this host is not connected</div>
           )}
         </div>
@@ -447,7 +646,10 @@ function LRView({
 }
 
 export default function App() {
-  const { connected, hosts, hostData, selectHost, sendLRCommand, sendLRRidealongCommand } = useCoordinatorWS()
+  const {
+    connected, hosts, hostData, selectHost,
+    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+  } = useCoordinatorWS()
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
 
   const handleSelectHost = (id: string) => {
@@ -479,6 +681,8 @@ export default function App() {
               data={hostData[selectedHost.id] ?? emptyHostState()}
               sendLRCommand={sendLRCommand}
               sendLRRidealongCommand={sendLRRidealongCommand}
+              sendLRLaunchApp={sendLRLaunchApp}
+              sendLRTerminateApp={sendLRTerminateApp}
             />
           ) : (
             <div className="no-selection">

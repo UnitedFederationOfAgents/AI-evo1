@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, Phase, StepSummary } from './types'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, Phase, ReprStatus, ReprStatusMsg, StepSummary } from './types'
 
 // ---- WebSocket hook ----
 
@@ -8,6 +8,9 @@ function useCondocWS() {
   const [condocs, setCondocs] = useState<CondocInfo[]>([])
   const [activeState, setActiveState] = useState<CondocState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
+  const [reprHost, setReprHost] = useState('')
+  const [reprPort, setReprPort] = useState('')
   const wsRef = useRef<WebSocket | null>(null)
   const subscribedRef = useRef<string>('')
 
@@ -30,8 +33,25 @@ function useCondocWS() {
     [send],
   )
 
+  const connectRepr = useCallback(
+    (host: string, port: string) => {
+      send('connect', { host, port })
+    },
+    [send],
+  )
+
+  const disconnectRepr = useCallback(() => {
+    send('disconnect', {})
+  }, [send])
+
   useEffect(() => {
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`
+    // Derive the WebSocket URL from the path this document was served under, so
+    // it also works when reverse-proxied beneath a prefix (/condoccer/ via
+    // local-representative, /host/<id>/condoccer/ via agent-coordinator).
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+    const base = dir.endsWith('/') ? dir.slice(0, -1) : dir
+    const wsUrl = `${proto}://${window.location.host}${base}/ws`
 
     function connect() {
       const ws = new WebSocket(wsUrl)
@@ -66,6 +86,11 @@ function useCondocWS() {
           } else if (msg.type === 'error') {
             const p = msg.payload as { message: string }
             setError(p.message)
+          } else if (msg.type === 'repr-status') {
+            const p = msg.payload as ReprStatusMsg
+            setReprStatus(p.status)
+            if (p.host) setReprHost(p.host)
+            if (p.port) setReprPort(p.port)
           }
         } catch {
           // ignore malformed messages
@@ -77,7 +102,20 @@ function useCondocWS() {
     return () => wsRef.current?.close()
   }, [send])
 
-  return { connected, condocs, activeState, error, subscribe, sendAction, setError }
+  return {
+    connected,
+    condocs,
+    activeState,
+    error,
+    subscribe,
+    sendAction,
+    setError,
+    reprStatus,
+    reprHost,
+    reprPort,
+    connectRepr,
+    disconnectRepr,
+  }
 }
 
 // ---- Navigation ----
@@ -201,6 +239,75 @@ function sectionsToIterations(sections: StepSection[]): Iteration[] {
     .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
 }
 
+// ---- Representable connect/disconnect widget ----
+//
+// condoccer's link to local-representative can come up on its own via
+// --auto-connect, but that's not mandatory: this footer lets a condoccer
+// started without it (or one whose auto-connect window gave up) connect by
+// hand, and lets anyone drop the link with Disconnect.
+
+const REPR_STATUS_LABELS: Record<ReprStatus, string> = {
+  disconnected: 'LR: disconnected',
+  connecting: 'LR: connecting…',
+  connected: 'LR: connected',
+}
+
+interface ReprFooterProps {
+  status: ReprStatus
+  host: string
+  port: string
+  onConnect: (host: string, port: string) => void
+  onDisconnect: () => void
+}
+
+function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterProps) {
+  const [hostInput, setHostInput] = useState(host)
+  const [portInput, setPortInput] = useState(port)
+
+  // Track the address the server reports (its --lr-host/--lr-port defaults,
+  // or whatever it's currently connected/connecting to) until the user edits
+  // the fields themselves.
+  useEffect(() => setHostInput(host), [host])
+  useEffect(() => setPortInput(port), [port])
+
+  return (
+    <div className="repr-footer">
+      <div className="repr-footer-status">
+        <span className={`conn-dot ${status === 'connected' ? 'connected' : status === 'connecting' ? 'connecting' : 'disconnected'}`} />
+        <span className="repr-footer-label">{REPR_STATUS_LABELS[status]}</span>
+      </div>
+      {status === 'disconnected' ? (
+        <div className="repr-footer-form">
+          <input
+            className="repr-footer-input"
+            type="text"
+            placeholder="host"
+            value={hostInput}
+            onChange={(e) => setHostInput(e.target.value)}
+          />
+          <input
+            className="repr-footer-input repr-footer-input-port"
+            type="text"
+            placeholder="port"
+            value={portInput}
+            onChange={(e) => setPortInput(e.target.value)}
+          />
+          <button className="btn-secondary" onClick={() => onConnect(hostInput.trim(), portInput.trim())}>
+            Connect
+          </button>
+        </div>
+      ) : (
+        <div className="repr-footer-form">
+          <span className="repr-footer-addr">{host}:{port}</span>
+          <button className="btn-secondary" onClick={onDisconnect}>
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ---- Sidebar ----
 
 interface SidebarProps {
@@ -217,6 +324,11 @@ interface SidebarProps {
   onEnterSubstep: (substepLetter: string) => void
   onSelectSubstepIter: (id: string) => void
   onNavUp: () => void
+  reprStatus: ReprStatus
+  reprHost: string
+  reprPort: string
+  onReprConnect: (host: string, port: string) => void
+  onReprDisconnect: () => void
 }
 
 function Sidebar({
@@ -233,7 +345,22 @@ function Sidebar({
   onEnterSubstep,
   onSelectSubstepIter,
   onNavUp,
+  reprStatus,
+  reprHost,
+  reprPort,
+  onReprConnect,
+  onReprDisconnect,
 }: SidebarProps) {
+  const reprFooter = (
+    <ReprFooter
+      status={reprStatus}
+      host={reprHost}
+      port={reprPort}
+      onConnect={onReprConnect}
+      onDisconnect={onReprDisconnect}
+    />
+  )
+
   if (navLevel === 'condoc-list') {
     return (
       <div className="sidebar">
@@ -258,6 +385,7 @@ function Sidebar({
             </div>
           ))}
         </div>
+        {reprFooter}
       </div>
     )
   }
@@ -286,6 +414,7 @@ function Sidebar({
             </div>
           ))}
         </div>
+        {reprFooter}
       </div>
     )
   }
@@ -328,6 +457,7 @@ function Sidebar({
             </div>
           ))}
         </div>
+        {reprFooter}
       </div>
     )
   }
@@ -357,11 +487,17 @@ function Sidebar({
             </div>
           ))}
         </div>
+        {reprFooter}
       </div>
     )
   }
 
-  return <div className="sidebar"><div className="sidebar-header"><h1>Condoccer</h1></div></div>
+  return (
+    <div className="sidebar">
+      <div className="sidebar-header"><h1>Condoccer</h1></div>
+      {reprFooter}
+    </div>
+  )
 }
 
 // ---- Meta fields ----
@@ -999,7 +1135,20 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
 // ---- Root app ----
 
 export default function App() {
-  const { connected, condocs, activeState, error, subscribe, sendAction, setError } = useCondocWS()
+  const {
+    connected,
+    condocs,
+    activeState,
+    error,
+    subscribe,
+    sendAction,
+    setError,
+    reprStatus,
+    reprHost,
+    reprPort,
+    connectRepr,
+    disconnectRepr,
+  } = useCondocWS()
 
   const [navLevel, setNavLevel] = useState<NavLevel>('condoc-list')
   const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(null)
@@ -1098,6 +1247,11 @@ export default function App() {
         onEnterSubstep={handleEnterSubstep}
         onSelectSubstepIter={handleSelectSubstepIter}
         onNavUp={handleNavUp}
+        reprStatus={reprStatus}
+        reprHost={reprHost}
+        reprPort={reprPort}
+        onReprConnect={connectRepr}
+        onReprDisconnect={disconnectRepr}
       />
 
       <div className="main-content">

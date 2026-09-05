@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -14,10 +16,22 @@ import (
 
 	"github.com/gorilla/websocket"
 	"representable"
+	ufaconfig "ufa-configurable"
 )
 
 //go:embed frontend/dist
 var embeddedFrontend embed.FS
+
+// Auto-connect (--auto-connect) tuning: on startup local-representative dials
+// agent-coordinator in the background, retrying on an interval until the window
+// elapses. Mirrors federation-command's --auto-connect.
+const (
+	autoConnectInterval = 10 * time.Second
+	autoConnectWindow   = 10 * time.Minute
+
+	defaultACHost = "localhost"
+	defaultACPort = "8084"
+)
 
 // ServiceStatus is the health status of a monitored service.
 type ServiceStatus struct {
@@ -70,6 +84,36 @@ type ACStateMsg struct {
 	Connected bool   `json:"connected"`
 	Host      string `json:"host,omitempty"`
 	Port      string `json:"port,omitempty"`
+	// Connecting is true while the background --auto-connect retry loop is still
+	// attempting to reach agent-coordinator (visible indication in the UI).
+	Connecting bool `json:"connecting,omitempty"`
+}
+
+// CondocInfo mirrors condoccer's per-condoc summary row (see condoccer/main.go).
+type CondocInfo struct {
+	Path          string `json:"path"`
+	Name          string `json:"name"`
+	Phase         string `json:"phase"`
+	StepNum       int    `json:"stepNum"`
+	StepFile      string `json:"stepFile,omitempty"`
+	SubstepFile   string `json:"substepFile,omitempty"`
+	SubstepLetter string `json:"substepLetter,omitempty"`
+}
+
+// CondoccerStateMsg is the "condoccer-state" payload: a managed condoccer pushes
+// it to LR over representable, and LR forwards a copy up to agent-coordinator and
+// out to browser clients so the forwarded condoccer view has a summary + the
+// port to reverse-proxy from.
+type CondoccerStateMsg struct {
+	HTTPPort string       `json:"http_port"`
+	Root     string       `json:"root"`
+	Condocs  []CondocInfo `json:"condocs"`
+}
+
+// LRHTTPMsg tells agent-coordinator which HTTP port this LR's dashboard listens
+// on, so AC can reverse-proxy the forwarded condoccer UI back through this LR.
+type LRHTTPMsg struct {
+	Port string `json:"port"`
 }
 
 // wsMsg is the wire format for all WebSocket messages.
@@ -101,10 +145,28 @@ type Server struct {
 	condocMu    sync.RWMutex
 	condocState *CondocStateMsg
 
-	acMu    sync.RWMutex
-	acClient *representable.Client
-	acHost  string
-	acPort  string
+	acMu                sync.RWMutex
+	acClient            *representable.Client
+	acHost              string
+	acPort              string
+	acAutoConnecting    bool          // true while the startup --auto-connect retry loop is trying
+	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
+
+	// System tab: LR's own process plus any child applications it launches.
+	heartbeatPort string                  // representable port, passed to launched children
+	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
+	condoccerPort string                  // HTTP port a managed condoccer serves on / is proxied from
+	condoccerRoot string                  // repo root a managed condoccer scans (empty: condoccer's default)
+	selfStart     time.Time               // when this LR process started
+	binOverrides  map[string]string       // app name -> explicit binary path (from config)
+	terminalCmd   string                  // command prefix that hosts an interactive child in a terminal
+	procMu        sync.Mutex
+	managed       map[string]*managedProc // instance id -> running/finished child
+	instanceSeq   map[string]int          // app name -> highest instance ordinal handed out
+
+	// Latest condoc summary pushed up by a managed condoccer over representable.
+	condoccerMu    sync.RWMutex
+	condoccerState *CondoccerStateMsg
 }
 
 func newServer(lrName string) *Server {
@@ -112,8 +174,12 @@ func newServer(lrName string) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients: make(map[*wsClient]bool),
-		lrName:  lrName,
+		clients:      make(map[*wsClient]bool),
+		lrName:       lrName,
+		selfStart:    time.Now(),
+		binOverrides: make(map[string]string),
+		managed:      make(map[string]*managedProc),
+		instanceSeq:  make(map[string]int),
 	}
 }
 
@@ -150,10 +216,14 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("federation-command") {
 		fcStatus = "healthy"
 	}
+	condoccerStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("condoccer") {
+		condoccerStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
-			{Name: "condoccer", Status: "healthy"},
+			{Name: "condoccer", Status: condoccerStatus},
 			{Name: "worker", Status: "healthy"},
 		},
 	}
@@ -196,6 +266,12 @@ func (s *Server) getCondocState() CondocStateMsg {
 	return *s.condocState
 }
 
+func (s *Server) getCondoccerState() *CondoccerStateMsg {
+	s.condoccerMu.RLock()
+	defer s.condoccerMu.RUnlock()
+	return s.condoccerState
+}
+
 func (s *Server) getACClient() *representable.Client {
 	s.acMu.RLock()
 	defer s.acMu.RUnlock()
@@ -206,10 +282,27 @@ func (s *Server) getACState() ACStateMsg {
 	s.acMu.RLock()
 	defer s.acMu.RUnlock()
 	return ACStateMsg{
-		Connected: s.acClient != nil,
-		Host:      s.acHost,
-		Port:      s.acPort,
+		Connected:  s.acClient != nil,
+		Host:       s.acHost,
+		Port:       s.acPort,
+		Connecting: s.acAutoConnecting,
 	}
+}
+
+// acStateMsg builds an ac-state payload for an explicit host/port, stamping the
+// current auto-connect retry status so the UI can show a "connecting…" hint even
+// before connectAC has recorded the target on the Server.
+func (s *Server) acStateMsg(connected bool, host, port string) ACStateMsg {
+	s.acMu.RLock()
+	connecting := s.acAutoConnecting
+	s.acMu.RUnlock()
+	return ACStateMsg{Connected: connected, Host: host, Port: port, Connecting: connecting}
+}
+
+func (s *Server) setACAutoConnecting(v bool) {
+	s.acMu.Lock()
+	s.acAutoConnecting = v
+	s.acMu.Unlock()
 }
 
 // pushStateToAC sends a full state snapshot to the agent-coordinator.
@@ -222,6 +315,11 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("fc-state", FCStateMsg{State: s.getFCState()})
 	ac.SendData("ridealong-state", s.getRidealongState())
 	ac.SendData("condoc-state", s.getCondocState())
+	ac.SendData("system-state", s.systemState())
+	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
+	if cc := s.getCondoccerState(); cc != nil {
+		ac.SendData("condoccer-state", *cc)
+	}
 }
 
 // connectAC dials agent-coordinator and maintains the connection lifecycle.
@@ -246,7 +344,7 @@ func (s *Server) connectAC(host, port string) {
 		stillPending := s.acHost == host && s.acPort == port && s.acClient == nil
 		s.acMu.RUnlock()
 		if stillPending {
-			s.broadcast("ac-state", ACStateMsg{Connected: false, Host: host, Port: port})
+			s.broadcast("ac-state", s.acStateMsg(false, host, port))
 		}
 		return
 	}
@@ -261,15 +359,20 @@ func (s *Server) connectAC(host, port string) {
 	s.acClient = client
 	s.acMu.Unlock()
 
-	// Forward commands from AC to FC.
+	// Commands from AC: "__system:" commands drive this LR's own system tab
+	// (launch/terminate managed apps); everything else is forwarded to FC.
 	client.SetCommandHandler(func(cmd string) {
+		if strings.HasPrefix(cmd, "__system:") {
+			s.handleSystemCommand(cmd)
+			return
+		}
 		if s.reprServer != nil {
 			s.reprServer.SendCommand("federation-command", cmd)
 		}
 	})
 
 	s.pushStateToAC()
-	s.broadcast("ac-state", ACStateMsg{Connected: true, Host: host, Port: port})
+	s.broadcast("ac-state", s.acStateMsg(true, host, port))
 	log.Printf("connected to agent-coordinator at %s", addr)
 
 	// Block until the connection drops (either remotely or via Close).
@@ -282,7 +385,7 @@ func (s *Server) connectAC(host, port string) {
 	s.acMu.Unlock()
 
 	log.Printf("disconnected from agent-coordinator at %s", addr)
-	s.broadcast("ac-state", ACStateMsg{Connected: false, Host: host, Port: port})
+	s.broadcast("ac-state", s.acStateMsg(false, host, port))
 }
 
 // disconnectAC closes the AC connection; the connectAC goroutine handles cleanup.
@@ -292,6 +395,94 @@ func (s *Server) disconnectAC() {
 	s.acMu.Unlock()
 	if client != nil {
 		client.Close()
+	}
+}
+
+// startAutoConnectAC launches the background agent-coordinator auto-connect loop.
+// It is a no-op if a loop is already running.
+func (s *Server) startAutoConnectAC(host, port string) {
+	s.acMu.Lock()
+	if s.acAutoConnectCancel != nil {
+		s.acMu.Unlock()
+		return
+	}
+	cancel := make(chan struct{})
+	s.acAutoConnectCancel = cancel
+	s.acMu.Unlock()
+	go s.autoConnectAC(host, port, cancel)
+}
+
+// stopAutoConnectAC cancels the background auto-connect retry loop if it is
+// running. Called when the operator drives an explicit connect/disconnect from
+// the UI, which supersedes auto-connect.
+func (s *Server) stopAutoConnectAC() {
+	s.acMu.Lock()
+	if s.acAutoConnectCancel != nil {
+		close(s.acAutoConnectCancel)
+		s.acAutoConnectCancel = nil
+	}
+	s.acMu.Unlock()
+}
+
+// autoConnectAC dials agent-coordinator in the background on startup, retrying
+// every autoConnectInterval until it connects or autoConnectWindow elapses. This
+// mirrors federation-command's --auto-connect: it prints on startup that the mode
+// is selected, keeps a visible "connecting" indicator live in the UI while it
+// retries, and prints once when it gives up. Runs in its own goroutine; closing
+// cancel stops it.
+func (s *Server) autoConnectAC(host, port string, cancel chan struct{}) {
+	defer func() {
+		s.acMu.Lock()
+		if s.acAutoConnectCancel == cancel {
+			s.acAutoConnectCancel = nil
+		}
+		s.acMu.Unlock()
+	}()
+
+	deadline := time.Now().Add(autoConnectWindow)
+	log.Printf("auto-connect enabled: dialing agent-coordinator at %s:%s every %s for up to %s (runs in background)",
+		host, port, autoConnectInterval, autoConnectWindow)
+
+	// finish clears the retry indicator and pushes a final ac-state to the UI.
+	finish := func() {
+		s.setACAutoConnecting(false)
+		s.broadcast("ac-state", s.acStateMsg(s.getACClient() != nil, host, port))
+	}
+
+	for {
+		select {
+		case <-cancel:
+			finish()
+			return
+		default:
+		}
+		if s.getACClient() != nil {
+			finish() // connected another way in the meantime
+			return
+		}
+
+		s.setACAutoConnecting(true)
+		s.broadcast("ac-state", s.acStateMsg(false, host, port))
+		log.Printf("auto-connect: attempting connection to agent-coordinator at %s:%s", host, port)
+		go s.connectAC(host, port)
+
+		select {
+		case <-cancel:
+			finish()
+			return
+		case <-time.After(autoConnectInterval):
+		}
+
+		if s.getACClient() != nil {
+			finish() // the attempt landed a connection
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("auto-connect: gave up after %s — agent-coordinator at %s:%s did not respond",
+				autoConnectWindow, host, port)
+			finish()
+			return
+		}
 	}
 }
 
@@ -319,6 +510,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "ridealong-state", s.getRidealongState())
 		s.sendToClient(c, "condoc-state", s.getCondocState())
 		s.sendToClient(c, "ac-state", s.getACState())
+		s.sendToClient(c, "system-state", s.systemState())
+		if cc := s.getCondoccerState(); cc != nil {
+			s.sendToClient(c, "condoccer-state", *cc)
+		}
 	}()
 
 	// Write pump.
@@ -381,6 +576,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				Port string `json:"port"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.stopAutoConnectAC() // an explicit connect supersedes auto-connect
 				host := payload.Host
 				if host == "" {
 					host = "localhost"
@@ -392,7 +588,33 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				go s.connectAC(host, port)
 			}
 		case "disconnect-ac":
+			s.stopAutoConnectAC()
 			s.disconnectAC()
+		case "launch-app":
+			var payload struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Name != "" {
+				if _, err := s.launchManaged(payload.Name); err != nil {
+					log.Printf("launch-app %q: %v", payload.Name, err)
+				}
+			}
+		case "terminate-app":
+			var payload struct {
+				ID   string `json:"id"`
+				Name string `json:"name"` // backward-compat: dismiss by app name when a single instance is present
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				target := payload.ID
+				if target == "" {
+					target = payload.Name
+				}
+				if target != "" {
+					if err := s.terminateManaged(target); err != nil {
+						log.Printf("terminate-app %q: %v", target, err)
+					}
+				}
+			}
 		}
 	}
 }
@@ -410,9 +632,41 @@ func (s *Server) broadcastLoop() {
 	}
 }
 
+// proxyToCondoccer reverse-proxies /condoccer/* to a managed condoccer's HTTP
+// server on loopback, stripping the /condoccer prefix. This is how the condoccer
+// UI is "forwarded through LR": a browser (or agent-coordinator's /host/<id>/
+// proxy) reaches condoccer without condoccer needing its own ingress. WebSocket
+// upgrades on /condoccer/ws are carried through by httputil.ReverseProxy.
+func (s *Server) proxyToCondoccer(w http.ResponseWriter, r *http.Request) {
+	port := s.condoccerPort
+	if cc := s.getCondoccerState(); cc != nil && cc.HTTPPort != "" {
+		port = cc.HTTPPort // trust the port condoccer actually reported
+	}
+	if port == "" {
+		http.Error(w, "condoccer port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/condoccer")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "condoccer not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -448,21 +702,133 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	return mux
 }
 
+// appConfig is local-representative's fully-resolved startup configuration.
+type appConfig struct {
+	httpPort      string
+	heartbeatPort string
+	name          string
+	dev           bool
+	autoConnect   bool
+	acHost        string
+	acPort        string
+	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
+	fcBin         string   // explicit path to the federation-command binary
+	terminal      string   // command prefix used to host an interactive child in a terminal
+	condoccerPort string   // HTTP port a managed condoccer serves on / is reverse-proxied from
+	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
+}
+
+// splitList parses a comma/whitespace-separated list, dropping empty entries.
+func splitList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// resolveConfig layers the ufa-configurable config files beneath the parsed
+// flags: a flag named in setOnCLI keeps its command-line value, otherwise the
+// config files (per-app over global) supply it, otherwise the flag default in
+// defaults is used. Config keys match the flag names.
+func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults appConfig) (appConfig, error) {
+	pick := func(key, cur string) string {
+		if setOnCLI[key] {
+			return cur
+		}
+		return conf.String(key, cur)
+	}
+	pickBool := func(key string, cur bool) (bool, error) {
+		if setOnCLI[key] {
+			return cur, nil
+		}
+		return conf.Bool(key, cur)
+	}
+	out := appConfig{
+		httpPort:      pick("port", defaults.httpPort),
+		heartbeatPort: pick("repr-port", defaults.heartbeatPort),
+		name:          pick("name", defaults.name),
+		acHost:        pick("ac-host", defaults.acHost),
+		acPort:        pick("ac-port", defaults.acPort),
+		autoLaunch:    splitList(pick("auto-launch", strings.Join(defaults.autoLaunch, ","))),
+		fcBin:         pick("fc-bin", defaults.fcBin),
+		terminal:      pick("terminal", defaults.terminal),
+		condoccerPort: pick("condoccer-port", defaults.condoccerPort),
+		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
+	}
+	var err error
+	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
+		return out, err
+	}
+	if out.autoConnect, err = pickBool("auto-connect", defaults.autoConnect); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 func main() {
 	defaultName, _ := os.Hostname()
 	if defaultName == "" {
 		defaultName = "local"
 	}
 
+	configDir := flag.String("config", "", "directory holding ufa-configurable YAML files (default ~/.ufa/config)")
 	port := flag.String("port", "8081", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
 	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
+	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
+	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
+	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup; each token is \"app\" or \"app:N\" (e.g. federation-command:2)")
+	fcBin := flag.String("fc-bin", "", "path to the federation-command binary (default: search next to LR, the dev bin dir, then PATH)")
+	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
+	condoccerPort := flag.String("condoccer-port", "8080", "HTTP port a managed condoccer serves on; its UI is reverse-proxied at /condoccer/")
+	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
 	flag.Parse()
 
-	s := newServer(*name)
+	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
+	// a flag set explicitly on the command line always wins.
+	conf, err := ufaconfig.Load("local-representative", *configDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	setOnCLI := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { setOnCLI[f.Name] = true })
+	cfg, err := resolveConfig(conf, setOnCLI, appConfig{
+		httpPort:      *port,
+		heartbeatPort: *reprPort,
+		name:          *name,
+		dev:           *dev,
+		autoConnect:   *autoConnect,
+		acHost:        *acHost,
+		acPort:        *acPort,
+		autoLaunch:    splitList(*autoLaunch),
+		fcBin:         *fcBin,
+		terminal:      *terminal,
+		condoccerPort: *condoccerPort,
+		condoccerRoot: *condoccerRoot,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	reprSrv, err := representable.NewServer(":" + *reprPort)
+	s := newServer(cfg.name)
+	s.heartbeatPort = cfg.heartbeatPort
+	s.httpPort = cfg.httpPort
+	s.condoccerPort = cfg.condoccerPort
+	s.condoccerRoot = cfg.condoccerRoot
+	s.terminalCmd = cfg.terminal
+	if cfg.fcBin != "" {
+		s.binOverrides["federation-command"] = cfg.fcBin
+	}
+
+	reprSrv, err := representable.NewServer(":" + cfg.heartbeatPort)
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
@@ -470,6 +836,19 @@ func main() {
 
 	// Track FC control mode changes and forward log entries to browser clients.
 	reprSrv.SetStateChangeHandler(func(name, state string) {
+		if name == "condoccer" {
+			if state == "disconnected" {
+				s.condoccerMu.Lock()
+				s.condoccerState = nil
+				s.condoccerMu.Unlock()
+				empty := CondoccerStateMsg{}
+				s.broadcast("condoccer-state", empty)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("condoccer-state", empty)
+				}
+			}
+			return
+		}
 		if name == "federation-command" {
 			s.setFCState(state)
 			if state == "disconnected" {
@@ -503,6 +882,21 @@ func main() {
 	})
 
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if name == "condoccer" {
+			if dataType == "condoccer-state" {
+				var payload CondoccerStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.condoccerMu.Lock()
+					s.condoccerState = &payload
+					s.condoccerMu.Unlock()
+					s.broadcast("condoccer-state", payload)
+					if ac := s.getACClient(); ac != nil {
+						ac.SendData("condoccer-state", payload)
+					}
+				}
+			}
+			return
+		}
 		if name != "federation-command" {
 			return
 		}
@@ -532,17 +926,27 @@ func main() {
 		}
 	})
 
-	log.Printf("representable server listening on tcp://localhost:%s", *reprPort)
+	log.Printf("representable server listening on tcp://localhost:%s", cfg.heartbeatPort)
 
 	go s.broadcastLoop()
 
-	addr := ":" + *port
-	log.Printf("local-representative %q listening on http://localhost%s", *name, addr)
-	if *dev {
+	if cfg.autoConnect {
+		log.Printf("auto-connect configuration selected for agent-coordinator at %s:%s", cfg.acHost, cfg.acPort)
+		s.startAutoConnectAC(cfg.acHost, cfg.acPort)
+	}
+
+	if len(cfg.autoLaunch) > 0 {
+		log.Printf("auto-launch configuration selected: %s", strings.Join(cfg.autoLaunch, ", "))
+		s.startAutoLaunch(cfg.autoLaunch)
+	}
+
+	addr := ":" + cfg.httpPort
+	log.Printf("local-representative %q listening on http://localhost%s", cfg.name, addr)
+	if cfg.dev {
 		log.Printf("dev mode: connect frontend to ws://localhost%s/ws", addr)
 	}
 
-	if err := http.ListenAndServe(addr, s.setupRoutes(*dev)); err != nil {
+	if err := http.ListenAndServe(addr, s.setupRoutes(cfg.dev)); err != nil {
 		log.Fatal(err)
 	}
 }

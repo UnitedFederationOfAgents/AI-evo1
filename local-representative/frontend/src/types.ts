@@ -42,4 +42,22 @@ export interface ACStateMsg {
   connected: boolean
   host?: string
   port?: string
+  connecting?: boolean // background --auto-connect retry loop is still trying
+}
+
+export interface ProcInfo {
+  name: string
+  instance_id: string // unique key for a managed instance ("" for self)
+  instance: number    // per-app ordinal (0 for self / first singleton)
+  pid: number
+  status: string // "running" | "exited" | "failed"
+  managed: boolean
+  started_at: number // unix seconds
+  exit_code: number  // meaningful once status != "running"
+  detail?: string
+}
+
+export interface SystemStateMsg {
+  self: ProcInfo
+  managed: ProcInfo[]
 }

@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/gorilla/websocket"
+	"representable"
 )
 
 //go:embed frontend/dist
@@ -486,9 +487,19 @@ type wsClient struct {
 // Server manages WebSocket clients and polls condoc files for changes.
 type Server struct {
 	root     string
+	httpPort string // HTTP port this condoccer serves on (reported to local-representative)
+	name     string // identifier reported to local-representative
 	upgrader websocket.Upgrader
 	mu       sync.RWMutex
 	clients  map[*wsClient]bool
+
+	// representable link to local-representative (see repr.go). nil until connected.
+	reprMu     sync.Mutex
+	reprClient *representable.Client
+	reprStatus string        // "disconnected" | "connecting" | "connected"
+	reprHost   string        // host of the current/last connect attempt (widget default)
+	reprPort   string        // port of the current/last connect attempt (widget default)
+	reprStop   chan struct{} // non-nil while a connectLoop is running; closing it stops retries
 }
 
 func newServer(root string) *Server {
@@ -497,7 +508,8 @@ func newServer(root string) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients: make(map[*wsClient]bool),
+		clients:    make(map[*wsClient]bool),
+		reprStatus: "disconnected",
 	}
 }
 
@@ -579,8 +591,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.clients[c] = true
 	s.mu.Unlock()
 
-	// Send initial condoc list.
+	// Send initial condoc list and representable connection status.
 	go s.sendList(c)
+	go s.sendReprStatus(c)
 
 	// Write pump.
 	go func() {
@@ -642,6 +655,28 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		if err := s.performAction(action); err != nil {
 			s.sendToClient(c, "error", map[string]string{"message": err.Error()})
 		}
+
+	case "connect":
+		// Manual connect: the widget lets a condoccer started without
+		// --auto-connect (or one whose auto-connect gave up) link up to
+		// local-representative on demand.
+		var p struct {
+			Host string `json:"host"`
+			Port string `json:"port"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		host := strings.TrimSpace(p.Host)
+		if host == "" {
+			host = "localhost"
+		}
+		port := strings.TrimSpace(p.Port)
+		if port == "" {
+			port = "8082"
+		}
+		s.startConnectLoop(host, port)
+
+	case "disconnect":
+		s.stopConnectLoop()
 	}
 }
 
@@ -775,6 +810,9 @@ func (s *Server) watchLoop() {
 		if !condocListEqual(lastList, current) {
 			lastList = current
 			s.broadcastList()
+			// Mirror the change up to local-representative (and, through it, to
+			// agent-coordinator) so the forwarded view stays in sync.
+			s.pushCondoccerState()
 		}
 
 		// Collect which condocs have subscribers.
@@ -874,6 +912,10 @@ func main() {
 	port := flag.String("port", "8080", "HTTP port to listen on")
 	root := flag.String("root", ".", "repository root to scan for condocs")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	name := flag.String("name", "condoccer", "identifier reported to local-representative")
+	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
+	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
+	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
 	flag.Parse()
 
 	absRoot, err := filepath.Abs(*root)
@@ -882,7 +924,22 @@ func main() {
 	}
 
 	s := newServer(absRoot)
+	s.httpPort = *port
+	s.name = *name
 	go s.watchLoop()
+
+	if *autoConnect {
+		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",
+			*lrHost, *lrPort, autoConnectInterval, autoConnectWindow)
+		s.startConnectLoop(*lrHost, *lrPort)
+	} else {
+		// No --auto-connect: still record the configured target as the manual
+		// widget's default so a "Connect" click dials the same place
+		// --auto-connect would have.
+		s.reprMu.Lock()
+		s.reprHost, s.reprPort = *lrHost, *lrPort
+		s.reprMu.Unlock()
+	}
 
 	addr := ":" + *port
 	log.Printf("condoccer listening on http://localhost%s (root: %s)", addr, absRoot)

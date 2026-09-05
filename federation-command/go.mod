@@ -2,9 +2,14 @@ module federation-command
 
 go 1.21
 
-require representable v0.0.0
+require (
+	representable v0.0.0
+	ufa-configurable v0.0.0
+)
 
 replace representable => ../representable
+
+replace ufa-configurable => ../ufa-configurable
 
 require (
 	github.com/charmbracelet/bubbles v0.20.0

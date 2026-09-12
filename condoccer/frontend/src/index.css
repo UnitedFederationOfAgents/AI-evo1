@@ -135,18 +135,19 @@ body {
 }
 
 .nav-enter-btn {
-  background: none;
-  border: none;
-  color: #999;
-  font-size: 11px;
+  background: #2a2a2e;
+  border: 1px solid #555;
+  color: #c0c0c0;
+  font-size: 13px;
   cursor: pointer;
-  padding: 1px 4px;
+  padding: 1px 5px;
   margin-left: auto;
   border-radius: 3px;
   font-family: inherit;
   flex-shrink: 0;
+  line-height: 1.2;
 }
-.nav-enter-btn:hover { color: #9d55cc; background: #2a2a2e; }
+.nav-enter-btn:hover { color: #fff; border-color: #9d55cc; background: #3a2a4a; }
 
 .iter-reply   { background: #4da6ff; }
 .iter-revision { background: #d9a800; }

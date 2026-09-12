@@ -824,22 +824,45 @@ func isCondocFile(path string) bool {
 	return false
 }
 
+// logLineIsCommitHeader reports whether a line from "git log --oneline" output
+// is a commit header (short hash + space + message) rather than a filename.
+func logLineIsCommitHeader(line string) bool {
+	// oneline header: 4–40 hex chars followed by a space
+	i := 0
+	for i < len(line) && i < 40 && (line[i] >= '0' && line[i] <= '9' || line[i] >= 'a' && line[i] <= 'f') {
+		i++
+	}
+	return i >= 4 && i < len(line) && line[i] == ' '
+}
+
 func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
 	if !commitHashRe.MatchString(fromCommit) || !commitHashRe.MatchString(toCommit) {
 		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
 		return
 	}
-	out, err := exec.Command("git", "-C", s.root, "diff", "--name-only", fromCommit+".."+toCommit).Output()
+	// Use git log --name-only to collect files from commits starting after fromCommit
+	// up to HEAD (greedy: at most 10 commits). Implementation commits often land just
+	// after the condoc-recorded toCommit, so we search forward from fromCommit rather
+	// than restricting to fromCommit..toCommit.
+	out, err := exec.Command("git", "-C", s.root, "log", "--name-only", "--oneline", "-10", fromCommit+"..HEAD").Output()
 	if err != nil {
-		s.sendToClient(c, "error", map[string]string{"message": "git diff failed: " + err.Error()})
+		s.sendToClient(c, "error", map[string]string{"message": "git log failed: " + err.Error()})
 		return
 	}
-	var files []string
+	fileSet := make(map[string]bool)
 	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if l != "" && !isCondocFile(l) {
-			files = append(files, l)
+		if l == "" || logLineIsCommitHeader(l) {
+			continue
+		}
+		if !isCondocFile(l) {
+			fileSet[l] = true
 		}
 	}
+	var files []string
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	sort.Strings(files)
 	s.sendToClient(c, "diff-list", map[string]interface{}{
 		"fromCommit": fromCommit,
 		"toCommit":   toCommit,
@@ -856,7 +879,7 @@ func (s *Server) handleGetFileDiff(c *wsClient, fromCommit, toCommit, file strin
 		s.sendToClient(c, "error", map[string]string{"message": "invalid file path"})
 		return
 	}
-	out, err := exec.Command("git", "-C", s.root, "diff", fromCommit+".."+toCommit, "--", file).Output()
+	out, err := exec.Command("git", "-C", s.root, "diff", fromCommit+"..HEAD", "--", file).Output()
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": "git diff failed: " + err.Error()})
 		return

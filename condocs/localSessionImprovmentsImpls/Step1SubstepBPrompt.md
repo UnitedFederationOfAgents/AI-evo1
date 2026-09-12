@@ -70,11 +70,8 @@ All four revision items are implemented. Here is a summary of the changes made:
 **`condoccer/frontend/src/index.css`**: `nav-enter-btn` default color raised from `#555` to `#999` (the `⊞` button and other enter icons are now visibly brighter). Added `.diff-file-tree` / `.diff-file-tree-item` / `.diff-file-selected` styles for the new tree view in the main pane. Requires a frontend rebuild (`make build -C condoccer`) to take effect.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's give this one more try - none of these project files we've been modifying are showing up. The 'enter icons' still have a bad appearance as well.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's consider the command 'git log --name-only --oneline -5' and leverage this to correlate commits to those recorded in our condoc records. We'll be greedy if there are other commits in there (let's not assume we are the only agents committing on this repo).

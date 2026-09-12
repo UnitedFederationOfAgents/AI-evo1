@@ -30,11 +30,12 @@ The implementation is complete. Here's a summary of what was accomplished:
 **federation-command/UFA_COMMANDS_NEXT_STEP.md**: Created a concise draft of the full `ufa` command tree (`session list/set/clear`, `agent list/set`, `model list/set/clear`) mapping each to its existing FC built-in, for the next implementation step.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Now that we have archived our sessions we will begin the implementations for session behaviour changes listed in docs/DistributedSessionsBrainstorm.md, starting with the 'new session'/'default session' behaviour.
 
+Every day there will be a new default session. In our current implementation each FC instance creates a new session, but we will adjust it now so that if the session is not specifically set it will implicitly be "default". When the selected session is default it will go to today's default session - it will have the same filename we use today except the '-default' suffix will be present. This '-default' suffix will now be illegal in standard session paths.
 
-## Human-Prompt
+This is also the first time we will distinguish ID and Name for a session. The folder name is the ID of the session. Now when a user uses 'new-session' or 'ufa session new' with no argument they will be prompted to enter the human readable name. If they can these commands with a single argument it will be the human readable name and it will be used to produce a machine/filesystem-efficient ID similar to the default IDs. There is also now a 'session.yaml' in each session folder, created on initial creation of the session.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Similar to how 'ufa session archive' flows through clauditable, so do other session commands such as 'ufa session new'.

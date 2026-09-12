@@ -139,3 +139,7 @@ Brainstorm some aspects of session behaviour to support distributed sessions. Th
 
 - The synchronous parts are ideal right in clbl
 - Maybe session-manager is the right place for everything else so it can add that self-awareness to the picture
+
+----------------------------------------------------------------
+
+## Working Section -- concise extra documentation about decisions taken during implementation

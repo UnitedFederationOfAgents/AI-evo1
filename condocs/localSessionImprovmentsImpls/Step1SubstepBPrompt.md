@@ -41,11 +41,11 @@ The implementation of the condoccer diff views is complete and was already prese
 The built binary and frontend dist already include all this functionality. The implementation satisfies all requirements: single-selection, enter-to-drill navigation from step/substep → files-changed → file-diff, diff preview on file select, and hunk-level highlighting without further drill-down.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's fix this functionality -
 
-
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+- When I enter the file diff view I should see a tree of files that changed in the main pane. Clicking on the filenames in the list pane should bring those up as highlights in the main pane.
+- We cannot see the files in the project that changed in each prompt/revision in the current state, we can only see the condoc files. We want to see the project files changes (that's the point).
+- When we click a file we should ENTER that file, like we enter a substep - the list pane should change to list changes in that file (just line numbers), and when we click them it should warp us to there in the main pane view.
+- The icon for entering the file diff view is too faint, too hard to see.

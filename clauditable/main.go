@@ -61,6 +61,7 @@ func isTerminal(fd uintptr) bool {
 // Environment variable names
 const (
 	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
 	EnvAgentSession            = "AGENT_SESSION"
 	EnvAgentConsolidateRecords = "AGENT_CONSOLIDATE_RECORDS"
 	EnvUFAAgent                = "UFA_AGENT"
@@ -79,6 +80,11 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: clauditable <command> [args...]")
 		os.Exit(1)
+	}
+
+	// archive subcommand: move all sessions to archive directory
+	if os.Args[1] == "archive" {
+		os.Exit(runArchive())
 	}
 
 	// If a parent clauditable already set the guard, pass through without recording.
@@ -562,4 +568,52 @@ func isUnixTimestamp(s string) bool {
 		}
 	}
 	return true
+}
+
+// runArchive moves all session directories from AGENT_RECORDS_PATH to
+// AGENT_RECORDS_ARCHIVE_PATH/<datetime>. Returns an exit code.
+func runArchive() int {
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	archiveBase := getEnvOrDefault(EnvAgentRecordsArchivePath, recordsPath+"-archive")
+
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable archive: failed to read records path %q: %v\n", recordsPath, err)
+		return 1
+	}
+
+	var sessions []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			sessions = append(sessions, entry.Name())
+		}
+	}
+
+	if len(sessions) == 0 {
+		fmt.Println("clauditable archive: no sessions to archive")
+		return 0
+	}
+
+	archiveDir := filepath.Join(archiveBase, time.Now().Format("2006-01-02_15-04-05"))
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable archive: failed to create archive directory %q: %v\n", archiveDir, err)
+		return 1
+	}
+
+	exitCode := 0
+	for _, session := range sessions {
+		src := filepath.Join(recordsPath, session)
+		dst := filepath.Join(archiveDir, session)
+		if err := os.Rename(src, dst); err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable archive: failed to move session %q: %v\n", session, err)
+			exitCode = 1
+		}
+	}
+
+	if exitCode == 0 {
+		fmt.Printf("Archived %d session(s) to %s\n", len(sessions), archiveDir)
+	} else {
+		fmt.Printf("Archived with errors — %d session(s) targeted, destination: %s\n", len(sessions), archiveDir)
+	}
+	return exitCode
 }

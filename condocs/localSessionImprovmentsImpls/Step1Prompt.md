@@ -15,3 +15,26 @@ The only other command we will introduce is 'help', which will also be the defau
 When a federation-command user uses 'ufa session archive' it will move all sessions from the AGENT_RECORDS_PATH to AGENT_RECORDS_ARCHIVE_PATH/<date-time> -- where AGENT_RECORDS_ARCHIVE_PATH defaults to $AGENT_RECORDS_PATH-archive (so for /host-agent-files/agent-records it would be /host-agent-files/agent-records-archive). This will happen via federation-command calling clauditable's entrypoint. Clauditable may also have the entrypoint called directly.
 
 When this increment is complete we will be able to rebuild FC (federation-command) and CLBL (clauditable) and archive our sessions from FC.
+
+
+prompt: [`557119f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/557119f5db0d10f20eac6b91d51f2a8b11d83e3d) → reply: [`25f62f4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/25f62f462dd4151a3c8ffdc14db5de1f2ce2d83b)
+
+## Reply
+
+The implementation is complete. Here's a summary of what was accomplished:
+
+**clauditable/main.go**: Added `AGENT_RECORDS_ARCHIVE_PATH` env constant and a new `archive` subcommand. When invoked as `clauditable archive`, it reads `AGENT_RECORDS_PATH` and `AGENT_RECORDS_ARCHIVE_PATH` (defaulting to `<records-path>-archive`), then moves all session directories into `<archive-path>/<datetime>/`.
+
+**federation-command/main.go**: Added `AGENT_RECORDS_ARCHIVE_PATH` constant, a `ufa` command dispatch in `executeCommandCore`, and the `handleUFACommand` method with `ufa help`, `ufa session help`, and `ufa session archive`. The archive command shows a decorative yellow confirmation box via `tea.ExecProcess` before calling `clauditable archive`.
+
+**federation-command/UFA_COMMANDS_NEXT_STEP.md**: Created a concise draft of the full `ufa` command tree (`session list/set/clear`, `agent list/set`, `model list/set/clear`) mapping each to its existing FC built-in, for the next implementation step.
+
+
+## <REPLACE-Revision|Retry> A
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

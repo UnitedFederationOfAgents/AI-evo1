@@ -60,10 +60,11 @@ const (
 
 // Environment variables
 const (
-	EnvAgentRecordsPath = "AGENT_RECORDS_PATH"
-	EnvAgentName        = "AGENT_NAME"
-	EnvAgentModel       = "AGENT_MODEL"
-	EnvAgentSession     = "AGENT_SESSION"
+	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
+	EnvAgentName               = "AGENT_NAME"
+	EnvAgentModel              = "AGENT_MODEL"
+	EnvAgentSession            = "AGENT_SESSION"
 	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 )
 
@@ -2843,6 +2844,11 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(successStyle.Render("scrollback log cleared: " + path))
 	}
 
+	// ufa [subcommand...]
+	if line == "ufa" || strings.HasPrefix(line, "ufa ") {
+		return m.handleUFACommand(line, cmdTime, deltaMs)
+	}
+
 	// Regular command - wrap with clauditable
 	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
@@ -2853,6 +2859,105 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			deltaMs:  deltaMs,
 		}
 	})
+}
+
+// handleUFACommand dispatches ufa subcommands.
+func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	sub := strings.TrimSpace(strings.TrimPrefix(line, "ufa"))
+
+	switch sub {
+	case "", "help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHelpText())
+
+	case "session", "session help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaSessionHelpText())
+
+	case "session archive":
+		clauditablePath, err := findBinary("clauditable")
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("ufa session archive: clauditable not found — " + err.Error()))
+		}
+		recordsPath := m.recordsPath
+		archivePath := os.Getenv(EnvAgentRecordsArchivePath)
+		if archivePath == "" {
+			archivePath = recordsPath + "-archive"
+		}
+		script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath)
+		cmd := exec.Command("bash", "-c", script)
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return cmdDoneMsg{
+				exitCode: extractExitCode(err),
+				line:     line,
+				cmdTime:  cmdTime,
+				deltaMs:  deltaMs,
+			}
+		})
+
+	default:
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		if strings.HasPrefix(sub, "session ") {
+			unknown := strings.TrimPrefix(sub, "session ")
+			return m, tea.Println(errorStyle.Render("ufa session: unknown subcommand '"+unknown+"'")+"\n"+ufaSessionHelpText())
+		}
+		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
+	}
+}
+
+func ufaHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa — unified federation actions"),
+		"",
+		"  ufa help               show this help",
+		"  ufa session <sub>      session management commands",
+		"",
+		sessionStyle.Render("run 'ufa session help' for session subcommands"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaSessionHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa session — session management"),
+		"",
+		"  ufa session help       show this help",
+		"  ufa session archive    archive all current sessions",
+		"",
+		sessionStyle.Render("archive moves sessions to AGENT_RECORDS_ARCHIVE_PATH/<datetime>"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+// buildArchiveConfirmScript returns a bash script that shows a decorative confirmation
+// dialog before invoking 'clauditable archive'.
+func buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; R='\033[0m'
+records_path=%s
+archive_path=%s
+printf "\n"
+printf "${Y}  ╔═══════════════════════════╗${R}\n"
+printf "${Y}  ║  ⚡ Archive Sessions       ║${R}\n"
+printf "${Y}  ╚═══════════════════════════╝${R}\n"
+printf "\n"
+printf "  ${W}From:${R} $records_path\n"
+printf "  ${W}To:${R}   $archive_path/<datetime>\n"
+printf "\n"
+printf "  This will move all sessions and cannot be easily undone.\n"
+printf "\n"
+read -p "  Type 'yes' to confirm, anything else to cancel: " _ufa_confirm
+if [ "$_ufa_confirm" = "yes" ]; then
+    AGENT_RECORDS_PATH="$records_path" AGENT_RECORDS_ARCHIVE_PATH="$archive_path" %s archive
+else
+    printf "\n  Archive cancelled.\n"
+    exit 1
+fi
+`, escape(recordsPath), escape(archivePath), escape(clauditablePath))
 }
 
 // buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).

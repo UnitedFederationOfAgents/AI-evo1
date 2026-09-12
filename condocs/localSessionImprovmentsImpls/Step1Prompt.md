@@ -1,23 +1,7 @@
-# LocalSessionImprovments
+# Prompt
 
-<!--
-```condoc-yaml
-condoc:
-  startTime: 1788618198
-  controlScheme: same-repo
-  branch: condoc/LocalSessionImprovments-1788618198/main
-  callerPath: ..
-```
--->
+[LocalSessionImprovments](../LocalSessionImprovments.md)
 
-Update local session behaviours in preparation for distributed session support.
-
-
-### Step 1 - Add ability to archive records and archive records in preparation to implement DistributedSessionsBrainstorm.md
-
-[Step 1 Prompt](localSessionImprovmentsImpls/Step1Prompt.md)
-
-```prompt
 We will implement a feature to archive sessions.
 
 This will be implemented through clauditable, and we will give federation-command a command it may use to invoke this.
@@ -31,9 +15,3 @@ The only other command we will introduce is 'help', which will also be the defau
 When a federation-command user uses 'ufa session archive' it will move all sessions from the AGENT_RECORDS_PATH to AGENT_RECORDS_ARCHIVE_PATH/<date-time> -- where AGENT_RECORDS_ARCHIVE_PATH defaults to $AGENT_RECORDS_PATH-archive (so for /host-agent-files/agent-records it would be /host-agent-files/agent-records-archive). This will happen via federation-command calling clauditable's entrypoint. Clauditable may also have the entrypoint called directly.
 
 When this increment is complete we will be able to rebuild FC (federation-command) and CLBL (clauditable) and archive our sessions from FC.
-```
-
-
-## Human-Prompt
-
-The flow of the condoc is now within the first step.

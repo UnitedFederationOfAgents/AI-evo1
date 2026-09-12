@@ -9,3 +9,7 @@ In both cases we will be able to select the list item first, which will bring it
 This increment of implementation should make due with the current file modification behaviours currently operating in condoccer processes and should not modify the document schema or state machine to accomplish this new view behaviour.
 
 This increment will keep only single-selection, we won't consider any multi-select at this point.
+
+!HANDOFF!
+
+!HANDOFF!

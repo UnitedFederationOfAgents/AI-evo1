@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -70,7 +71,7 @@ type wsMsg struct {
 
 // ActionRequest is sent by the client when the user clicks an action button.
 type ActionRequest struct {
-	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert
+	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert, resubmit
 	Path          string `json:"path"`          // condoc path (relative to repo root)
 	Content       string `json:"content,omitempty"`
 	Letter        string `json:"letter,omitempty"`
@@ -124,7 +125,14 @@ var (
 	substepActiveRe      = regexp.MustCompile(`Substep ([A-Z]) is now active\. Interact with the substep file \(([^)]+)\)`)
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
+	commitHashRe         = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
 )
+
+// DiffHunk represents a single @@ hunk in a unified diff.
+type DiffHunk struct {
+	Header  string `json:"header"`
+	LineIdx int    `json:"lineIdx"`
+}
 
 // implDir returns the step-implementation directory adjacent to a condoc main file.
 // e.g. Simple.md → simpleImpls/
@@ -677,6 +685,23 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	case "disconnect":
 		s.stopConnectLoop()
+
+	case "get-diff":
+		var p struct {
+			FromCommit string `json:"fromCommit"`
+			ToCommit   string `json:"toCommit"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		go s.handleGetDiff(c, p.FromCommit, p.ToCommit)
+
+	case "get-file-diff":
+		var p struct {
+			FromCommit string `json:"fromCommit"`
+			ToCommit   string `json:"toCommit"`
+			File       string `json:"file"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		go s.handleGetFileDiff(c, p.FromCommit, p.ToCommit, p.File)
 	}
 }
 
@@ -766,9 +791,80 @@ func (s *Server) performAction(action ActionRequest) error {
 		// Write revert directive to the active condoc file so the handler sees it.
 		return appendToFile(activeFile, "\n"+directive+"\n")
 
+	case "resubmit":
+		// Stage and commit any outstanding working-tree changes so that the
+		// agent coordinator's git pull --rebase can succeed after it picks up
+		// the !HANDOFF! directive written below.
+		exec.Command("git", "-C", s.root, "add", "-A").Run()
+		if exec.Command("git", "-C", s.root, "diff", "--cached", "--quiet").Run() != nil {
+			exec.Command("git", "-C", s.root, "commit", "-m", "condoc: recovery commit before resubmit").Run()
+		}
+		resubmitFile := absPath
+		if info.StepFile != "" {
+			resubmitFile = filepath.Join(s.root, info.StepFile)
+		}
+		if info.SubstepFile != "" {
+			resubmitFile = filepath.Join(s.root, info.SubstepFile)
+		}
+		return appendToFile(resubmitFile, "\n!HANDOFF!\n")
+
 	default:
 		return fmt.Errorf("unknown action: %s", action.Action)
 	}
+}
+
+func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
+	if !commitHashRe.MatchString(fromCommit) || !commitHashRe.MatchString(toCommit) {
+		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
+		return
+	}
+	out, err := exec.Command("git", "-C", s.root, "diff", "--name-only", fromCommit+".."+toCommit).Output()
+	if err != nil {
+		s.sendToClient(c, "error", map[string]string{"message": "git diff failed: " + err.Error()})
+		return
+	}
+	var files []string
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if l != "" {
+			files = append(files, l)
+		}
+	}
+	s.sendToClient(c, "diff-list", map[string]interface{}{
+		"fromCommit": fromCommit,
+		"toCommit":   toCommit,
+		"files":      files,
+	})
+}
+
+func (s *Server) handleGetFileDiff(c *wsClient, fromCommit, toCommit, file string) {
+	if !commitHashRe.MatchString(fromCommit) || !commitHashRe.MatchString(toCommit) {
+		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
+		return
+	}
+	if strings.Contains(file, "..") {
+		s.sendToClient(c, "error", map[string]string{"message": "invalid file path"})
+		return
+	}
+	out, err := exec.Command("git", "-C", s.root, "diff", fromCommit+".."+toCommit, "--", file).Output()
+	if err != nil {
+		s.sendToClient(c, "error", map[string]string{"message": "git diff failed: " + err.Error()})
+		return
+	}
+	content := string(out)
+	lines := strings.Split(content, "\n")
+	var hunks []DiffHunk
+	for i, line := range lines {
+		if strings.HasPrefix(line, "@@") {
+			hunks = append(hunks, DiffHunk{Header: line, LineIdx: i})
+		}
+	}
+	s.sendToClient(c, "file-diff", map[string]interface{}{
+		"fromCommit": fromCommit,
+		"toCommit":   toCommit,
+		"file":       file,
+		"content":    content,
+		"hunks":      hunks,
+	})
 }
 
 func appendToFile(path, content string) error {

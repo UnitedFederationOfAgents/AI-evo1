@@ -21,14 +21,25 @@ func TestGetSession(t *testing.T) {
 		}
 	})
 
-	// Test without environment variable (should use date format)
+	// Test without environment variable (should use YYYY-MM-DD-default format)
 	t.Run("without AGENT_SESSION", func(t *testing.T) {
 		os.Unsetenv(EnvAgentSession)
 
 		session := getSession()
-		// Should match YYYY-MM-DD format
-		if len(session) != 10 || session[4] != '-' || session[7] != '-' {
-			t.Errorf("expected date format YYYY-MM-DD, got '%s'", session)
+		// Should match YYYY-MM-DD-default
+		if !strings.HasSuffix(session, "-default") || len(session) != 18 || session[4] != '-' || session[7] != '-' {
+			t.Errorf("expected YYYY-MM-DD-default format, got '%s'", session)
+		}
+	})
+
+	// Test with AGENT_SESSION=default (should also map to today's default)
+	t.Run("with AGENT_SESSION=default", func(t *testing.T) {
+		os.Setenv(EnvAgentSession, "default")
+		defer os.Unsetenv(EnvAgentSession)
+
+		session := getSession()
+		if !strings.HasSuffix(session, "-default") {
+			t.Errorf("expected '-default' suffix for AGENT_SESSION=default, got '%s'", session)
 		}
 	})
 }
@@ -357,6 +368,83 @@ func TestWriteRecord(t *testing.T) {
 	}
 	if !strings.Contains(rawStr, records.ResponseSeparator) {
 		t.Error("raw file should contain response separator")
+	}
+}
+
+func TestSlugify(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Hello World", "hello-world"},
+		{"My New Feature", "my-new-feature"},
+		{"  spaces  ", "spaces"},
+		{"special!@#chars", "special-chars"},
+		{"already-slug", "already-slug"},
+		{"  multiple   spaces  ", "multiple-spaces"},
+		{"123numbers456", "123numbers456"},
+		{"", ""},
+		{"!!!only-special!!!", "only-special"},
+	}
+	for _, tt := range tests {
+		got := slugify(tt.input)
+		if got != tt.want {
+			t.Errorf("slugify(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestGenerateSessionID(t *testing.T) {
+	id := generateSessionID("My Test Session")
+	if !strings.Contains(id, "my-test-session") {
+		t.Errorf("generateSessionID should contain slugified name, got %q", id)
+	}
+	// Should have date prefix
+	if len(id) < 20 || id[4] != '-' || id[7] != '-' {
+		t.Errorf("generateSessionID should start with YYYY-MM-DD, got %q", id)
+	}
+	// Should not end in -default
+	if strings.HasSuffix(id, "-default") {
+		t.Errorf("generateSessionID should not produce -default suffix, got %q", id)
+	}
+}
+
+func TestEnsureSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionID := "2026-01-15-test"
+	name := "Test Session"
+
+	if err := ensureSession(tmpDir, sessionID, name); err != nil {
+		t.Fatalf("ensureSession failed: %v", err)
+	}
+
+	// Directory should exist
+	sessionDir := filepath.Join(tmpDir, sessionID)
+	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
+		t.Error("session directory should exist")
+	}
+
+	// session.yaml should exist with correct content
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatalf("session.yaml should exist: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "id: "+sessionID) {
+		t.Errorf("session.yaml should contain id, got: %s", content)
+	}
+	if !strings.Contains(content, "name: "+name) {
+		t.Errorf("session.yaml should contain name, got: %s", content)
+	}
+
+	// Calling again should not overwrite
+	if err := ensureSession(tmpDir, sessionID, "Different Name"); err != nil {
+		t.Fatalf("second ensureSession failed: %v", err)
+	}
+	data2, _ := os.ReadFile(yamlPath)
+	if string(data2) != content {
+		t.Error("ensureSession should not overwrite existing session.yaml")
 	}
 }
 

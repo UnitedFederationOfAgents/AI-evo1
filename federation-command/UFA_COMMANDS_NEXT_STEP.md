@@ -11,6 +11,7 @@ ufa
 ├── help                        (= current default)
 ├── session
 │   ├── help
+│   ├── new [name]              (implemented in Step 1 Rev A — via clauditable)
 │   ├── archive                 (implemented in Step 1)
 │   ├── list                    (= list-sessions)
 │   ├── set <id>                (= set-session <id>)
@@ -36,3 +37,5 @@ ufa
   the existing `set-agent`/`set-model`/`clear-model` handlers.
 - The old command names (`list-sessions`, `set-agent`, etc.) should remain
   functional as aliases so existing ridealong scripts don't break.
+- `ufa session set` must reject IDs ending in `-default` (reserved for daily defaults).
+- Sessions now have a `session.yaml` (id, name, created) created on initial setup.

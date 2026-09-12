@@ -87,6 +87,16 @@ func main() {
 		os.Exit(runArchive())
 	}
 
+	// get-default-session: ensure today's default session exists, print its ID
+	if os.Args[1] == "get-default-session" {
+		os.Exit(runGetDefaultSession())
+	}
+
+	// new-session <name>: create a new named session, print its ID
+	if os.Args[1] == "new-session" {
+		os.Exit(runNewSession(os.Args[2:]))
+	}
+
 	// If a parent clauditable already set the guard, pass through without recording.
 	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmdName := os.Args[1]
@@ -385,17 +395,18 @@ func expectedRawRecordPath(recordsPath, session string, timestamp int64) string 
 	return filepath.Join(recordsPath, session, fmt.Sprintf("%d-raw.txt", timestamp))
 }
 
-// getSession returns the session identifier
-// Uses AGENT_SESSION if set, otherwise uses current date (auto-updates daily)
-// Note: Uses local time with proper timezone handling to avoid "tomorrow" date bugs
+// getSession returns the session identifier.
+// If AGENT_SESSION is unset or "default", uses today's default session (YYYY-MM-DD-default).
 func getSession() string {
-	if session := os.Getenv(EnvAgentSession); session != "" {
+	if session := os.Getenv(EnvAgentSession); session != "" && session != "default" {
 		return session
 	}
-	// Use local time but truncate to start of day to ensure consistency
-	now := time.Now()
-	localDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	return localDate.Format("2006-01-02")
+	return defaultSessionID()
+}
+
+// defaultSessionID returns today's default session identifier.
+func defaultSessionID() string {
+	return time.Now().Format("2006-01-02") + "-default"
 }
 
 // getConsolidateRecords returns whether record consolidation is enabled
@@ -455,6 +466,8 @@ func writeRecord(recordsPath, session string, timestamp int64, record *records.R
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create session directory: %w", err)
 	}
+	// Lazily create session.yaml on first use of this session directory.
+	_ = writeSessionYAMLIfAbsent(sessionDir, session, session)
 
 	tsStr := fmt.Sprintf("%d", timestamp)
 	recordFile := filepath.Join(sessionDir, tsStr)
@@ -568,6 +581,92 @@ func isUnixTimestamp(s string) bool {
 		}
 	}
 	return true
+}
+
+// runGetDefaultSession ensures today's default session exists and prints its ID.
+func runGetDefaultSession() int {
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	sessionID := defaultSessionID()
+	name := time.Now().Format("2006-01-02") + " Default"
+	if err := ensureSession(recordsPath, sessionID, name); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable get-default-session: %v\n", err)
+		return 1
+	}
+	fmt.Println(sessionID)
+	return 0
+}
+
+// runNewSession creates a new named session and prints its ID.
+// Expects args = [name words...].
+func runNewSession(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: clauditable new-session <name>")
+		return 1
+	}
+	name := strings.Join(args, " ")
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	sessionID := generateSessionID(name)
+	if strings.HasSuffix(sessionID, "-default") {
+		fmt.Fprintf(os.Stderr, "clauditable new-session: session IDs ending in '-default' are reserved\n")
+		return 1
+	}
+	if err := ensureSession(recordsPath, sessionID, name); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable new-session: %v\n", err)
+		return 1
+	}
+	fmt.Println(sessionID)
+	return 0
+}
+
+// generateSessionID produces a filesystem-safe ID from a human-readable name.
+func generateSessionID(name string) string {
+	slug := slugify(name)
+	if slug == "" {
+		slug = "session"
+	}
+	return fmt.Sprintf("%s_%s", time.Now().Format("2006-01-02_15-04-05"), slug)
+}
+
+// slugify converts a human-readable name to a lowercase, hyphen-separated slug
+// suitable for filesystem use (max 40 chars).
+func slugify(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	prevDash := true
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteRune('-')
+			prevDash = true
+		}
+	}
+	result := strings.TrimRight(b.String(), "-")
+	if len(result) > 40 {
+		result = strings.TrimRight(result[:40], "-")
+	}
+	return result
+}
+
+// ensureSession creates the session directory and session.yaml if they don't exist.
+func ensureSession(recordsPath, sessionID, name string) error {
+	sessionDir := filepath.Join(recordsPath, sessionID)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("failed to create session directory: %w", err)
+	}
+	return writeSessionYAMLIfAbsent(sessionDir, sessionID, name)
+}
+
+// writeSessionYAMLIfAbsent writes session.yaml only when it doesn't already exist.
+func writeSessionYAMLIfAbsent(sessionDir, sessionID, name string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	if _, err := os.Stat(yamlPath); err == nil {
+		return nil
+	}
+	content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
+		sessionID, name, time.Now().Format(time.RFC3339))
+	return os.WriteFile(yamlPath, []byte(content), 0644)
 }
 
 // runArchive moves all session directories from AGENT_RECORDS_PATH to

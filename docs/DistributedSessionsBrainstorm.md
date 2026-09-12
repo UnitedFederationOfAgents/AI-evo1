@@ -143,3 +143,13 @@ Brainstorm some aspects of session behaviour to support distributed sessions. Th
 ----------------------------------------------------------------
 
 ## Working Section -- concise extra documentation about decisions taken during implementation
+
+### Step 1 Rev A — Default session and session identity
+
+- **Default session**: When `AGENT_SESSION` is unset or `"default"`, the session is `YYYY-MM-DD-default` (e.g. `2026-09-12-default`). FC calls `clauditable get-default-session` on startup to create it if absent.
+- **`-default` suffix reserved**: `set-session` (FC built-in) rejects IDs ending in `-default`. `clauditable new-session` also rejects names that would produce such an ID via slugification.
+- **Session identity**: Every session folder now contains `session.yaml` with `id`, `name`, and `created` fields. The folder name is the ID; `name` is the human-readable label.
+- **`clauditable new-session <name>`**: Creates a session with ID `YYYY-MM-DD_HH-MM-SS_<slug>` and writes `session.yaml`. Prints the ID to stdout.
+- **`clauditable get-default-session`**: Idempotently creates today's default session (`YYYY-MM-DD-default`, name `YYYY-MM-DD Default`) and prints the ID.
+- **FC `new-session [name]` / `ufa session new [name]`**: With name argument calls clauditable synchronously and switches. Without argument launches an interactive bash prompt (via `tea.ExecProcess`) then switches on completion via `sessionNewDoneMsg`.
+- **Startup log append**: FC now opens `session.jsonl` with `O_APPEND` instead of truncating, so default sessions accumulate records across FC restarts on the same day.

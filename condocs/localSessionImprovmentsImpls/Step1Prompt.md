@@ -59,6 +59,11 @@ The implementation is complete. Here's a summary of what was changed:
 [Step 1 Substep B](Step1SubstepBPrompt.md)
 
 
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep B is now active. Interact with the substep file (Step1SubstepBPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

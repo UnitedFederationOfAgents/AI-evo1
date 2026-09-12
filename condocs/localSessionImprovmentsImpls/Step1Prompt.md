@@ -54,11 +54,11 @@ The implementation is complete. Here's a summary of what was changed:
 **federation-command/UFA_COMMANDS_NEXT_STEP.md**: Updated to mark `session new` as implemented and note the `-default` reservation and `session.yaml` convention. **docs/DistributedSessionsBrainstorm.md**: Added Working Section with decisions documented for this step.
 
 
-## <REPLACE-Revision|Retry> B
+## Substep B - Let's take a short detour to add git diff views to condoccer.
 
-<REPLACE-PROMPT>
+[Step 1 Substep B](Step1SubstepBPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep B is now active. Interact with the substep file (Step1SubstepBPrompt.md).

@@ -813,6 +813,17 @@ func (s *Server) performAction(action ActionRequest) error {
 	}
 }
 
+// isCondocFile reports whether a repo-relative file path is a condoc file
+// (lives under a directory segment named "condocs").
+func isCondocFile(path string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(path), "/") {
+		if seg == "condocs" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
 	if !commitHashRe.MatchString(fromCommit) || !commitHashRe.MatchString(toCommit) {
 		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
@@ -825,7 +836,7 @@ func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
 	}
 	var files []string
 	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if l != "" {
+		if l != "" && !isCondocFile(l) {
 			files = append(files, l)
 		}
 	}

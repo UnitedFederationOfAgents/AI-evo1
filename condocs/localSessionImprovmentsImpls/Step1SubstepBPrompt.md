@@ -49,3 +49,32 @@ Let's fix this functionality -
 - We cannot see the files in the project that changed in each prompt/revision in the current state, we can only see the condoc files. We want to see the project files changes (that's the point).
 - When we click a file we should ENTER that file, like we enter a substep - the list pane should change to list changes in that file (just line numbers), and when we click them it should warp us to there in the main pane view.
 - The icon for entering the file diff view is too faint, too hard to see.
+
+
+prompt: [`e29d5d5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e29d5d5377a5a6220d92ba1aca216bfe09efc114) → reply: [`b96001c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b96001c55f6d5f36068a47fce485db7adff9faa0)
+
+## Reply A
+
+All four revision items are implemented. Here is a summary of the changes made:
+
+**`condoccer/main.go`**: Added `isCondocFile` helper that checks whether a repo-relative path has `condocs` as a directory segment. `handleGetDiff` now filters out matching files before returning the `diff-list`, so only project files appear — not the condoc `.md` documents themselves.
+
+**`condoccer/frontend/src/App.tsx`**:
+- Added `diffFilesLoaded` state to `useCondocWS` (set `false` when `getDiff` fires, `true` when `diff-list` arrives) so the UI can distinguish "loading" from "genuinely empty."
+- `FilesChangedView` now shows a `diff-file-tree` file list in the main pane instead of a diff preview; the selected file gets a highlighted row (`diff-file-selected`). Loading and empty states are shown correctly.
+- `handleSelectDiffFile` now also calls `setNavLevel('file-diff')` immediately — clicking a file in the sidebar enters it directly (like entering a substep), no intermediate preview step.
+- Removed `onEnterFileDiff` from `SidebarProps`/`Sidebar`; the `→` button in the files-changed sidebar is gone; file click is the enter action.
+- In the `file-diff` sidebar, hunk rows now show `line N` (parsed from the `@@ -old +new @@` header) instead of the raw hunk header string.
+- `parseHunkLineNumber` helper extracts the new-file start line number from a hunk header.
+
+**`condoccer/frontend/src/index.css`**: `nav-enter-btn` default color raised from `#555` to `#999` (the `⊞` button and other enter icons are now visibly brighter). Added `.diff-file-tree` / `.diff-file-tree-item` / `.diff-file-selected` styles for the new tree view in the main pane. Requires a frontend rebuild (`make build -C condoccer`) to take effect.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

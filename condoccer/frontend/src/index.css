@@ -137,7 +137,7 @@ body {
 .nav-enter-btn {
   background: none;
   border: none;
-  color: #555;
+  color: #999;
   font-size: 11px;
   cursor: pointer;
   padding: 1px 4px;
@@ -696,4 +696,31 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- File tree (files-changed main pane) ---- */
+
+.diff-file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.diff-file-tree-item {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  color: #ccc;
+  padding: 5px 12px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-file-tree-item.diff-file-selected {
+  background: rgba(158, 85, 204, 0.15);
+  border-left-color: #9d55cc;
+  color: #d4b4f0;
 }

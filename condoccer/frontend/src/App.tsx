@@ -22,6 +22,7 @@ function useCondocWS() {
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
   const [diffFiles, setDiffFiles] = useState<string[]>([])
+  const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
   const [fileDiffContent, setFileDiffContent] = useState<string | null>(null)
   const [fileDiffHunks, setFileDiffHunks] = useState<DiffHunk[]>([])
   const wsRef = useRef<WebSocket | null>(null)
@@ -59,6 +60,7 @@ function useCondocWS() {
 
   const getDiff = useCallback(
     (fromCommit: string, toCommit: string) => {
+      setDiffFilesLoaded(false)
       send('get-diff', { fromCommit, toCommit })
     },
     [send],
@@ -121,6 +123,7 @@ function useCondocWS() {
           } else if (msg.type === 'diff-list') {
             const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
             setDiffFiles(p.files ?? [])
+            setDiffFilesLoaded(true)
           } else if (msg.type === 'file-diff') {
             const p = msg.payload as { fromCommit: string; toCommit: string; file: string; content: string; hunks: DiffHunk[] }
             setFileDiffContent(p.content)
@@ -153,6 +156,8 @@ function useCondocWS() {
     getFileDiff,
     diffFiles,
     setDiffFiles,
+    diffFilesLoaded,
+    setDiffFilesLoaded,
     fileDiffContent,
     setFileDiffContent,
     fileDiffHunks,
@@ -428,32 +433,38 @@ function DiffDisplay({ content, selectedHunkIdx, hunkRefs }: DiffDisplayProps) {
 // ---- Files-changed view ----
 
 interface FilesChangedViewProps {
+  files: string[]
+  filesLoaded: boolean
   selectedFile: string | null
-  fileDiffContent: string | null
 }
 
-function FilesChangedView({ selectedFile, fileDiffContent }: FilesChangedViewProps) {
-  if (!selectedFile) {
-    return (
-      <div className="detail-view">
-        <div className="empty-state"><div>Select a file to preview its diff.</div></div>
-      </div>
-    )
-  }
-
-  const shortName = selectedFile.split('/').pop() ?? selectedFile
-
+function FilesChangedView({ files, filesLoaded, selectedFile }: FilesChangedViewProps) {
   return (
     <div className="detail-view">
       <div className="detail-header">
-        <h2>{shortName}</h2>
-        <span className="detail-step-title">{selectedFile}</span>
+        <h2>Files Changed</h2>
+        {filesLoaded && (
+          <span className="detail-step-title">
+            {files.length === 0 ? 'no project files' : `${files.length} file${files.length !== 1 ? 's' : ''}`}
+          </span>
+        )}
       </div>
       <div className="detail-body">
-        {!fileDiffContent ? (
-          <div className="action-status"><span className="spinner" /> Loading diff…</div>
+        {!filesLoaded ? (
+          <div className="action-status"><span className="spinner" /> Loading…</div>
+        ) : files.length === 0 ? (
+          <div className="empty-state"><div>No project files changed in this commit range.</div></div>
         ) : (
-          <DiffDisplay content={fileDiffContent} selectedHunkIdx={null} hunkRefs={null} />
+          <div className="diff-file-tree">
+            {files.map((file) => (
+              <div
+                key={file}
+                className={`diff-file-tree-item${selectedFile === file ? ' diff-file-selected' : ''}`}
+              >
+                {file}
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>
@@ -504,6 +515,13 @@ function FileDiffView({ file, content, selectedHunkIdx }: FileDiffViewProps) {
   )
 }
 
+// ---- Hunk line number parser ----
+
+function parseHunkLineNumber(header: string): number | null {
+  const m = /@@\s+-\d+(?:,\d+)?\s+\+(\d+)/.exec(header)
+  return m ? parseInt(m[1], 10) : null
+}
+
 // ---- Sidebar ----
 
 interface SidebarProps {
@@ -515,6 +533,7 @@ interface SidebarProps {
   selectedIterId: string | null
   selectedSubstepIterId: string | null
   diffFiles: string[]
+  diffFilesLoaded: boolean
   selectedDiffFile: string | null
   fileDiffHunks: DiffHunk[]
   selectedDiffHunkIdx: number | null
@@ -526,7 +545,6 @@ interface SidebarProps {
   onSelectSubstepIter: (id: string) => void
   onEnterFilesChanged: (fromCommit: string, toCommit: string) => void
   onSelectDiffFile: (file: string) => void
-  onEnterFileDiff: () => void
   onSelectDiffHunk: (idx: number) => void
   onNavUp: () => void
   reprStatus: ReprStatus
@@ -545,6 +563,7 @@ function Sidebar({
   selectedIterId,
   selectedSubstepIterId,
   diffFiles,
+  diffFilesLoaded,
   selectedDiffFile,
   fileDiffHunks,
   selectedDiffHunkIdx,
@@ -556,7 +575,6 @@ function Sidebar({
   onSelectSubstepIter,
   onEnterFilesChanged,
   onSelectDiffFile,
-  onEnterFileDiff,
   onSelectDiffHunk,
   onNavUp,
   reprStatus,
@@ -748,8 +766,11 @@ function Sidebar({
           <div className="sidebar-title">Files Changed</div>
         </div>
         <div className="nav-list">
-          {diffFiles.length === 0 && (
+          {!diffFilesLoaded && (
             <div className="nav-empty">Loading…</div>
+          )}
+          {diffFilesLoaded && diffFiles.length === 0 && (
+            <div className="nav-empty">No project files changed.</div>
           )}
           {diffFiles.map((file) => (
             <div
@@ -757,16 +778,7 @@ function Sidebar({
               className={`nav-item${selectedDiffFile === file ? ' selected' : ''}`}
               onClick={() => onSelectDiffFile(file)}
             >
-              <span className="nav-item-name nav-item-file">{file}</span>
-              {selectedDiffFile === file && (
-                <button
-                  className="nav-enter-btn"
-                  title="View full diff"
-                  onClick={(e) => { e.stopPropagation(); onEnterFileDiff() }}
-                >
-                  →
-                </button>
-              )}
+              <span className="nav-item-name nav-item-file">{file.split('/').pop() ?? file}</span>
             </div>
           ))}
         </div>
@@ -786,17 +798,22 @@ function Sidebar({
         </div>
         <div className="nav-list">
           {fileDiffHunks.length === 0 && (
-            <div className="nav-empty">No hunks.</div>
+            <div className="nav-empty">No changes.</div>
           )}
-          {fileDiffHunks.map((hunk, i) => (
-            <div
-              key={i}
-              className={`nav-item${selectedDiffHunkIdx === i ? ' selected' : ''}`}
-              onClick={() => onSelectDiffHunk(i)}
-            >
-              <span className="nav-item-name nav-item-hunk">{hunk.header}</span>
-            </div>
-          ))}
+          {fileDiffHunks.map((hunk, i) => {
+            const lineNum = parseHunkLineNumber(hunk.header)
+            return (
+              <div
+                key={i}
+                className={`nav-item${selectedDiffHunkIdx === i ? ' selected' : ''}`}
+                onClick={() => onSelectDiffHunk(i)}
+              >
+                <span className="nav-item-name nav-item-hunk">
+                  {lineNum !== null ? `line ${lineNum}` : hunk.header}
+                </span>
+              </div>
+            )
+          })}
         </div>
         {reprFooter}
       </div>
@@ -1483,6 +1500,8 @@ export default function App() {
     getFileDiff,
     diffFiles,
     setDiffFiles,
+    diffFilesLoaded,
+    setDiffFilesLoaded,
     fileDiffContent,
     setFileDiffContent,
     fileDiffHunks,
@@ -1535,6 +1554,7 @@ export default function App() {
     setDiffFromCommit(fromCommit)
     setDiffToCommit(toCommit)
     setDiffFiles([])
+    setDiffFilesLoaded(false)
     setSelectedDiffFile(null)
     setFileDiffContent(null)
     setFileDiffHunks([])
@@ -1551,11 +1571,7 @@ export default function App() {
     if (diffFromCommit && diffToCommit) {
       getFileDiff(diffFromCommit, diffToCommit, file)
     }
-  }
-
-  const handleEnterFileDiff = () => {
     setNavLevel('file-diff')
-    setSelectedDiffHunkIdx(null)
   }
 
   const handleSelectDiffHunk = (idx: number) => {
@@ -1571,6 +1587,7 @@ export default function App() {
       setDiffFromCommit(null)
       setDiffToCommit(null)
       setDiffFiles([])
+      setDiffFilesLoaded(false)
       setSelectedDiffFile(null)
       setFileDiffContent(null)
       setFileDiffHunks([])
@@ -1630,6 +1647,7 @@ export default function App() {
         selectedIterId={selectedIterId}
         selectedSubstepIterId={selectedSubstepIterId}
         diffFiles={diffFiles}
+        diffFilesLoaded={diffFilesLoaded}
         selectedDiffFile={selectedDiffFile}
         fileDiffHunks={fileDiffHunks}
         selectedDiffHunkIdx={selectedDiffHunkIdx}
@@ -1641,7 +1659,6 @@ export default function App() {
         onSelectSubstepIter={handleSelectSubstepIter}
         onEnterFilesChanged={handleEnterFilesChanged}
         onSelectDiffFile={handleSelectDiffFile}
-        onEnterFileDiff={handleEnterFileDiff}
         onSelectDiffHunk={handleSelectDiffHunk}
         onNavUp={handleNavUp}
         reprStatus={reprStatus}
@@ -1702,8 +1719,9 @@ export default function App() {
 
         {navLevel === 'files-changed' && (
           <FilesChangedView
+            files={diffFiles}
+            filesLoaded={diffFilesLoaded}
             selectedFile={selectedDiffFile}
-            fileDiffContent={fileDiffContent}
           />
         )}
 

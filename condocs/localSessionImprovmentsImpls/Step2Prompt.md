@@ -70,11 +70,6 @@ Everything looks correct. Here's a summary of what was implemented for Revision 
 **`federation-command/main.go`**: Added `math/rand` import; added `EnvUFAHead` constant; added package-level `var fcHeadID string` initialized at FC startup as `"fc-" + fcRandomAlphanumeric(4)` (a new private helper); and added `EnvUFAHead+"="+fcHeadID` to the environment in all four clauditable command builders (`buildRunCmd`, `buildAgentCmd`, `buildAgentPromptCmd`, `buildListModelsCmd`). **`clauditable/RECORD_SCHEMAS.md`**: Added `head` to the Event Schema table and `UFA_HEAD` to the Environment Variables table, and updated the example JSON line.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's quickly throw in an argument to the 'ufa session set' command - if we supply -n "<name>" then we will look the session up by name and set it to the corresponding ID.

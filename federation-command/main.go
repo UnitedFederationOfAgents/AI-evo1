@@ -3466,7 +3466,7 @@ printf "  Asking agent to suggest a name...\n\n"
 AGENT_RECORDS_PATH=%s AGENT_SESSION=%s %s -r -a %s%s \
     "Based on the session records here, suggest a short name (3-7 words) for this session. Output ONLY the name, nothing else." \
     2>&1 | tee "$TMP_OUT"
-SUGGESTED=$(grep -v '^[[:space:]]*$' "$TMP_OUT" | tail -1)
+SUGGESTED=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$TMP_OUT" | grep -v '^[[:space:]]*$' | grep -Ev '^(invoking |● session:|agent completed|agent exited)' | tail -1)
 rm -f "$TMP_OUT"
 printf "\n"
 if [ -z "$SUGGESTED" ]; then

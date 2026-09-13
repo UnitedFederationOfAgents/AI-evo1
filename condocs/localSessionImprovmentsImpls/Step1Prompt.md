@@ -160,3 +160,22 @@ agent completed successfully
 We can see that the name "Local Session Improvements Branch Work" was supposed to be the suggested string, but the mechanism accidentally caught "agent completed successfully" instead.
 
 Let's fix this now.
+
+
+prompt: [`27854f8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/27854f82b2ea3d581d02812b2aa10c3f9bbf270b) → reply: [`66d5f8b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/66d5f8bbb4bb61aa4542a9bd9e0c54bb30416494)
+
+## Reply C
+
+The change is a single-line fix in the `buildRenameAgentScript` bash template. The root cause was that `SUGGESTED` was extracted by taking the last non-empty line of all agent output, but `ambiguous-agent` appends a styled "agent completed successfully" line after the actual response — making it always the last line.
+
+The fix pipes the captured output through `sed` to strip ANSI escape codes first, then `grep -Ev` to exclude known `ambiguous-agent` wrapper lines (`invoking ...`, `● session:`, `agent completed`, `agent exited`), before finally taking `tail -1` — which now lands on the actual suggested name.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

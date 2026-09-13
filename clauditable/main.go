@@ -97,6 +97,11 @@ func main() {
 		os.Exit(runNewSession(os.Args[2:]))
 	}
 
+	// rename-session <new-name>: update the name field in the current session's session.yaml
+	if os.Args[1] == "rename-session" {
+		os.Exit(runRenameSession(os.Args[2:]))
+	}
+
 	// If a parent clauditable already set the guard, pass through without recording.
 	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmdName := os.Args[1]
@@ -404,9 +409,10 @@ func getSession() string {
 	return defaultSessionID()
 }
 
-// defaultSessionID returns today's default session identifier.
+// defaultSessionID returns a unique default session identifier for this moment.
+// Includes a timestamp so concurrent distributed instances don't collide.
 func defaultSessionID() string {
-	return time.Now().Format("2006-01-02") + "-default"
+	return time.Now().Format("2006-01-02_15-04-05") + "-default"
 }
 
 // getConsolidateRecords returns whether record consolidation is enabled
@@ -583,11 +589,11 @@ func isUnixTimestamp(s string) bool {
 	return true
 }
 
-// runGetDefaultSession ensures today's default session exists and prints its ID.
+// runGetDefaultSession ensures a default session for this moment exists and prints its ID.
 func runGetDefaultSession() int {
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	sessionID := defaultSessionID()
-	name := time.Now().Format("2006-01-02") + " Default"
+	name := time.Now().Format("2006-01-02 15:04:05") + " Default"
 	if err := ensureSession(recordsPath, sessionID, name); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable get-default-session: %v\n", err)
 		return 1
@@ -667,6 +673,60 @@ func writeSessionYAMLIfAbsent(sessionDir, sessionID, name string) error {
 	content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
 		sessionID, name, time.Now().Format(time.RFC3339))
 	return os.WriteFile(yamlPath, []byte(content), 0644)
+}
+
+// runRenameSession updates the name field in the current session's session.yaml.
+func runRenameSession(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: clauditable rename-session <new-name>")
+		return 1
+	}
+	newName := strings.Join(args, " ")
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	sessionID := getSession()
+	sessionDir := filepath.Join(recordsPath, sessionID)
+	if err := updateSessionYAMLName(sessionDir, sessionID, newName); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable rename-session: %v\n", err)
+		return 1
+	}
+	fmt.Printf("session renamed to: %s\n", newName)
+	return 0
+}
+
+// updateSessionYAMLName writes the new name into session.yaml, creating the file if needed.
+func updateSessionYAMLName(sessionDir, sessionID, newName string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
+			sessionID, newName, time.Now().Format(time.RFC3339))
+		return os.WriteFile(yamlPath, []byte(content), 0644)
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "name: ") {
+			lines[i] = "name: " + newName
+			found = true
+			break
+		}
+	}
+	if !found {
+		newLines := make([]string, 0, len(lines)+1)
+		idInserted := false
+		for _, line := range lines {
+			newLines = append(newLines, line)
+			if !idInserted && strings.HasPrefix(line, "id: ") {
+				newLines = append(newLines, "name: "+newName)
+				idInserted = true
+			}
+		}
+		if !idInserted {
+			newLines = append(newLines, "name: "+newName)
+		}
+		lines = newLines
+	}
+	return os.WriteFile(yamlPath, []byte(strings.Join(lines, "\n")), 0644)
 }
 
 // runArchive moves all session directories from AGENT_RECORDS_PATH to

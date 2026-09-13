@@ -44,11 +44,14 @@ All changes are in place. Here's a summary of what was implemented for Revision 
 **`federation-command/main.go`**: Added `ufahostid "ufa-hostid"` import; added `case "host", "host help"` and `case "host get"` to `handleUFACommand()`; added `renderHostInfo()` that displays host ID and first-configured timestamp with contextual notifications (green "host.yaml created" on first run, yellow warning if inaccessible); added `ufaHostHelpText()`; updated `ufaHelpText()` and the `default:` error fallthrough to handle `host` subcommands.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Next we will add the identifier of the 'ufa head' -- this is the user agent entity instance that is triggering the session entry.
 
+(For example, whenever federation-command starts up that instance gets an ID 'fc-<4-char-random-alphanumeric>')
 
-## Human-Prompt
+Unlike ufa-host, this identifier object is persistent on application lifecycle rather than host provisioning lifecycle.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This identifier is optional for calling things like clauditable and for now we will only populate the path where FC calls CLBL.
+
+This identifier is an attribute in the session.jsonl record as well.

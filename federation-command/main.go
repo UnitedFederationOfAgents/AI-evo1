@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"representable"
 	ufaconfig "ufa-configurable"
+	ufahostid "ufa-hostid"
 )
 
 // Version information
@@ -3122,6 +3123,14 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(ufaHelpText())
 
+	case "host", "host help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHostHelpText())
+
+	case "host get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHostInfo(ufahostid.GetHostDetails()))
+
 	case "session", "session help":
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(ufaSessionHelpText())
@@ -3203,6 +3212,10 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			unknown := strings.TrimPrefix(sub, "session ")
 			return m, tea.Println(errorStyle.Render("ufa session: unknown subcommand '"+unknown+"'")+"\n"+ufaSessionHelpText())
 		}
+		if strings.HasPrefix(sub, "host ") {
+			unknown := strings.TrimPrefix(sub, "host ")
+			return m, tea.Println(errorStyle.Render("ufa host: unknown subcommand '"+unknown+"'")+"\n"+ufaHostHelpText())
+		}
 		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
 	}
 }
@@ -3212,9 +3225,22 @@ func ufaHelpText() string {
 		sessionStyle.Render("ufa — unified federation actions"),
 		"",
 		"  ufa help               show this help",
+		"  ufa host <sub>         host identification commands",
 		"  ufa session <sub>      session management commands",
 		"",
-		sessionStyle.Render("run 'ufa session help' for session subcommands"),
+		sessionStyle.Render("run 'ufa host help' or 'ufa session help' for subcommands"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaHostHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa host — host identification"),
+		"",
+		"  ufa host help    show this help",
+		"  ufa host get     show host ID and first-configured timestamp",
+		"",
+		sessionStyle.Render("host ID is read from ~/.ufa/host.yaml (created on first use)"),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -3338,7 +3364,23 @@ func updateSessionName(sessionDir, newName string) error {
 	return os.WriteFile(yamlPath, []byte(strings.Join(lines, "\n")), 0644)
 }
 
-// renderSessionInfo returns a formatted string with the current session's ID, name, and location.
+func renderHostInfo(d ufahostid.HostDetails) string {
+	lines := []string{
+		sessionStyle.Render("current host"),
+		"  ID:               " + d.ID,
+	}
+	if d.FirstConfigured != "" {
+		lines = append(lines, "  First configured: "+d.FirstConfigured)
+	}
+	if d.Created {
+		lines = append(lines, successStyle.Render("  host.yaml created"))
+	}
+	if d.AccessError {
+		lines = append(lines, devWarningStyle.Render("  host.yaml inaccessible — using hostname"))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderSessionInfo(sessionID, sessionDir string) string {
 	name := readSessionName(sessionDir)
 	if name == "" {

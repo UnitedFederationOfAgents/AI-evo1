@@ -19,6 +19,52 @@ import (
 
 const hostYAMLName = "host.yaml"
 
+// HostDetails holds the resolved host identity and metadata.
+type HostDetails struct {
+	ID              string
+	FirstConfigured string // empty if unavailable
+	Created         bool   // true if host.yaml was just created by this call
+	AccessError     bool   // true if host.yaml exists but is inaccessible
+}
+
+// GetHostDetails resolves the host identity with full status information.
+// It idempotently creates ~/.ufa/host.yaml when absent and sets Created=true.
+// It sets AccessError=true when the file exists but cannot be read.
+func GetHostDetails() HostDetails {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return HostDetails{ID: rawHostname(), AccessError: true}
+	}
+
+	hostFile := filepath.Join(home, ".ufa", hostYAMLName)
+
+	data, err := os.ReadFile(hostFile)
+	if err == nil {
+		id := parseID(string(data))
+		if id == "" {
+			return HostDetails{ID: rawHostname()}
+		}
+		return HostDetails{
+			ID:              id,
+			FirstConfigured: parseFirstConfigured(string(data)),
+		}
+	}
+
+	if !os.IsNotExist(err) {
+		return HostDetails{ID: rawHostname(), AccessError: true}
+	}
+
+	// File absent – generate a new ID and attempt to persist it.
+	hostname := rawHostname()
+	id := hostname + "-" + randomAlphanumeric(4)
+	created := writeHostYAML(hostFile, id) == nil
+	return HostDetails{
+		ID:              id,
+		FirstConfigured: time.Now().Format(time.RFC3339),
+		Created:         created,
+	}
+}
+
 // GetHostID returns the stable host identifier for this machine.
 func GetHostID() string {
 	home, err := os.UserHomeDir()
@@ -68,6 +114,18 @@ func parseID(content string) string {
 		if val != "" {
 			return val
 		}
+	}
+	return ""
+}
+
+func parseFirstConfigured(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "first_configured:") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "first_configured:"))
+		return strings.Trim(val, `"'`)
 	}
 	return ""
 }

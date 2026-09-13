@@ -18,7 +18,7 @@ Each entry in the session log consists of:
 3. **Output preview** - Command output with `OUT>> ` prefix for stdout, `ERR>> ` prefix for stderr (up to 20 lines each)
 
 ```
-{"timestamp":"2026-04-24T10:30:00Z","event_type":"command_execution","host":"myhost-a3b9","agent":"claude","model":"opus-4","duration_ms":50,"exit_code":0,"record_path":"/path/to/1234567890"}
+{"timestamp":"2026-04-24T10:30:00Z","event_type":"command_execution","host":"myhost-a3b9","head":"fc-x7q2","agent":"claude","model":"opus-4","duration_ms":50,"exit_code":0,"record_path":"/path/to/1234567890"}
 IN>> echo hello
 OUT>> hello
 
@@ -61,6 +61,7 @@ The `Event` structure contains metadata about a command execution. The command i
 | `timestamp` | string | RFC3339 formatted timestamp of when the command started |
 | `event_type` | string | Type of event, typically `"command_execution"` |
 | `host` | string | Host identifier from `UFA_HOST` or `~/.ufa/host.yaml` (optional) |
+| `head` | string | Head identifier from `UFA_HEAD` — the application instance that triggered the session entry (optional) |
 | `agent` | string | Agent identifier from `UFA_AGENT` (optional) |
 | `model` | string | Model identifier from `UFA_MODEL` (optional) |
 | `duration_ms` | int64 | How long the command took in milliseconds |
@@ -88,6 +89,7 @@ When `AGENT_CONSOLIDATE_RECORDS=true` (default), temporary `<timestamp>` files a
 | `AGENT_RECORDS_PATH` | `/host-agent-files/agent-records` | Root directory for all records |
 | `AGENT_SESSION` | Current date (YYYY-MM-DD) | Session identifier, auto-updates daily |
 | `AGENT_CONSOLIDATE_RECORDS` | `true` | Whether to consolidate temporary files into session.jsonl |
+| `UFA_HEAD` | (none) | Head identifier (application instance) to include in events |
 | `UFA_AGENT` | (none) | Agent identifier to include in events |
 | `UFA_MODEL` | (none) | Model identifier to include in events |
 | `UFA_METADATA` | (none) | Key-value metadata, format: `key1=value1,key2=value2` |

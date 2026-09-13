@@ -66,6 +66,7 @@ const (
 	EnvAgentSession            = "AGENT_SESSION"
 	EnvAgentConsolidateRecords = "AGENT_CONSOLIDATE_RECORDS"
 	EnvUFAHost                 = "UFA_HOST"
+	EnvUFAHead                 = "UFA_HEAD"
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
@@ -127,6 +128,7 @@ func main() {
 	if host == "" {
 		host = ufahostid.GetHostID()
 	}
+	head := os.Getenv(EnvUFAHead)
 	agent := os.Getenv(EnvUFAAgent)
 	model := os.Getenv(EnvUFAModel)
 	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
@@ -251,6 +253,7 @@ func main() {
 			Timestamp:  startTime.Format(time.RFC3339),
 			EventType:  "command_execution",
 			Host:       host,
+			Head:       head,
 			Agent:      agent,
 			Model:      model,
 			DurationMs: duration.Milliseconds(),

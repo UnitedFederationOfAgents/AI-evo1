@@ -26,6 +26,7 @@ type Event struct {
 	Timestamp  string            `json:"timestamp"`             // RFC3339 formatted timestamp
 	EventType  string            `json:"event_type"`            // Type of event (e.g., "command_execution")
 	Host       string            `json:"host,omitempty"`        // Host identifier (from UFA_HOST or ~/.ufa/host.yaml)
+	Head       string            `json:"head,omitempty"`        // Head identifier (from UFA_HEAD)
 	Agent      string            `json:"agent,omitempty"`       // Agent identifier (from UFA_AGENT)
 	Model      string            `json:"model,omitempty"`       // Model identifier (from UFA_MODEL)
 	DurationMs int64             `json:"duration_ms"`           // Execution duration in milliseconds

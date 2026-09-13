@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,9 +66,14 @@ const (
 	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
 	EnvAgentName               = "AGENT_NAME"
 	EnvAgentModel              = "AGENT_MODEL"
-	EnvAgentSession            = "AGENT_SESSION"
+	EnvAgentSession             = "AGENT_SESSION"
+	EnvUFAHead                  = "UFA_HEAD"
 	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 )
+
+// fcHeadID identifies this FC instance for the duration of its lifecycle.
+// Initialized once in main() as "fc-<4-char-random-alphanumeric>".
+var fcHeadID string
 
 // Available agents (must match ambiguous-agent configurations)
 var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
@@ -3564,6 +3570,7 @@ func buildRunCmd(cmdLine, sessionDir, logPath, reprOutPath string) *exec.Cmd {
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	cmd.Env = env
 	return cmd
@@ -3667,6 +3674,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+selectedAgent,
+		EnvUFAHead+"="+fcHeadID,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -3705,6 +3713,7 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+agent,
+		EnvUFAHead+"="+fcHeadID,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -3768,6 +3777,7 @@ func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, stri
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	cmd.Env = env
 	return cmd, ""
@@ -4173,6 +4183,16 @@ func findBinary(name string) (string, error) {
 	return "", fmt.Errorf("%s not found on PATH or in %s", name, filepath.Dir(self))
 }
 
+func fcRandomAlphanumeric(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[r.Intn(len(chars))]
+	}
+	return string(b)
+}
+
 // devBinaries returns the names of binaries running from /AI-evo1-dev/bin
 func devBinaries() []string {
 	const devBinDir = "/AI-evo1-dev/bin"
@@ -4509,6 +4529,8 @@ func parseLRPort(s string) (int, error) {
 }
 
 func main() {
+	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
+
 	cfg, handled, err := parseCLIArgs(os.Args[1:])
 	if handled {
 		return

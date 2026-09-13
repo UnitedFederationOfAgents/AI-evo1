@@ -55,3 +55,26 @@ Unlike ufa-host, this identifier object is persistent on application lifecycle r
 This identifier is optional for calling things like clauditable and for now we will only populate the path where FC calls CLBL.
 
 This identifier is an attribute in the session.jsonl record as well.
+
+
+prompt: [`335879a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/335879a0b4304aad4599f68f59e5afa671cfb2c3) → reply: [`f23376b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f23376b29a17a919e9388ca3bd7f741baf9cd7f5)
+
+## Reply B
+
+Everything looks correct. Here's a summary of what was implemented for Revision B:
+
+**`clauditable/pkg/records/records.go`**: Added `Head string \`json:"head,omitempty"\`` to the `Event` struct, positioned after `Host`, representing the head identifier from `UFA_HEAD`.
+
+**`clauditable/main.go`**: Added `EnvUFAHead = "UFA_HEAD"` constant; reads `UFA_HEAD` env var into `head` and sets `Head: head` in the record's `Event` struct (no fallback — the field is optional and simply omitted when empty).
+
+**`federation-command/main.go`**: Added `math/rand` import; added `EnvUFAHead` constant; added package-level `var fcHeadID string` initialized at FC startup as `"fc-" + fcRandomAlphanumeric(4)` (a new private helper); and added `EnvUFAHead+"="+fcHeadID` to the environment in all four clauditable command builders (`buildRunCmd`, `buildAgentCmd`, `buildAgentPromptCmd`, `buildListModelsCmd`). **`clauditable/RECORD_SCHEMAS.md`**: Added `head` to the Event Schema table and `UFA_HEAD` to the Environment Variables table, and updated the example JSON line.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

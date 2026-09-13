@@ -143,6 +143,19 @@ Flat `key: value` YAML. Precedence (highest first): CLI flag → app-specific fi
 
 ---
 
+## `~/.ufa/host.yaml`
+
+**Owner:** ufa-hostid (used by clauditable, local-representative, and any future sub-app that imports it)
+
+```yaml
+id: myhostname-a3b9
+first_configured: 2026-09-13T14:00:00Z
+```
+
+Stable per-host identifier in the form `<hostname>-<4-char-random-alphanumeric>`. Created automatically on first use by `ufahostid.GetHostID()`. The `id` field is used as the `host` attribute in `session.jsonl` events and as the default `--name` for local-representative. If the file is absent it is created; if it is inaccessible, `hostname` is used as a fallback.
+
+---
+
 ## `~/.claude/`
 
 **Owner:** Claude Code (used by developers working in this repo)

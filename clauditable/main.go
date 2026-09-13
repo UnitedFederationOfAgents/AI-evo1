@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"clauditable/pkg/records"
+	ufahostid "ufa-hostid"
 )
 
 // openPTY opens a PTY master/slave pair. Returns (master, slave, error).
@@ -64,6 +65,7 @@ const (
 	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
 	EnvAgentSession            = "AGENT_SESSION"
 	EnvAgentConsolidateRecords = "AGENT_CONSOLIDATE_RECORDS"
+	EnvUFAHost                 = "UFA_HOST"
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
@@ -121,6 +123,10 @@ func main() {
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	session := getSession()
 	consolidate := getConsolidateRecords()
+	host := os.Getenv(EnvUFAHost)
+	if host == "" {
+		host = ufahostid.GetHostID()
+	}
 	agent := os.Getenv(EnvUFAAgent)
 	model := os.Getenv(EnvUFAModel)
 	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
@@ -244,6 +250,7 @@ func main() {
 		Event: records.Event{
 			Timestamp:  startTime.Format(time.RFC3339),
 			EventType:  "command_execution",
+			Host:       host,
 			Agent:      agent,
 			Model:      model,
 			DurationMs: duration.Milliseconds(),

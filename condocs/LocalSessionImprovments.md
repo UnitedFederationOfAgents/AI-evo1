@@ -34,13 +34,21 @@ When this increment is complete we will be able to rebuild FC (federation-comman
 ```
 
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Update local behaviour with identifiers.
+
+[Step 2 Prompt](localSessionImprovmentsImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+We will begin this step by adding host identification.
+
+Many sub-applications need awareness of the "ufa host". Currently all applications with host awareness go straight to "hostname" as a means to self-identify. This implementation will make it so that when a ~/.ufa/host.yaml is not present it will fall through to "hostname" and add the identifier to the host.yaml with the form "<hostname>-<4-char-random-alphanumeric>". If that file is not accessible for whatever reason the "hostname" can still be the fallthrough.
+
+The host.yaml will include a "first configured" timestamp.
+
+We will add the "host" as an attribute to the "session.jsonl" schema for ufa-sessions.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

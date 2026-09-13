@@ -174,3 +174,20 @@ The fix pipes the captured output through `sed` to strip ANSI escape codes first
 ## Revision D
 
 Let's also add a guard to the session -- we are not allowed to rename default sessions.
+
+
+prompt: [`0371a8e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0371a8e176067a322968311f17fb36d351dc771f) → reply: [`a250036`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a2500365383598ec3a028d7f4026dbc7fa6a1916)
+
+## Reply D
+
+Both guards are in place. Added a `strings.HasSuffix(m.sessionID, "-default")` check at the top of `handleRenameSession` (the normal and `ufa session rename` path, line 3405) and at the top of the ridealong `rename-session` handler (line 2058). Both return exit code 1 with the message `rename-session: cannot rename a default session` — consistent with the existing error style used throughout the file.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

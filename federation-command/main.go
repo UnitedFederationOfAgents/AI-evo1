@@ -2055,6 +2055,9 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	// rename-session [name|-a] — -a not supported in ridealong
 	if line == "rename-session" || strings.HasPrefix(line, "rename-session ") {
 		args := strings.TrimSpace(strings.TrimPrefix(line, "rename-session"))
+		if strings.HasSuffix(m.sessionID, "-default") {
+			return true, m, seqPrint(errorStyle.Render("rename-session: cannot rename a default session"), 1)
+		}
 		if args == "" {
 			return true, m, seqPrint(errorStyle.Render("rename-session: provide a name or use -a"), 1)
 		}
@@ -3399,6 +3402,11 @@ func (m appModel) handleDescribeSession(args, line string, cmdTime time.Time, de
 // With -a, uses an agent to suggest a name interactively.
 // Otherwise renames directly.
 func (m appModel) handleRenameSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	if strings.HasSuffix(m.sessionID, "-default") {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: cannot rename a default session"))
+	}
+
 	if args == "" {
 		m.logRecord(line, cmdTime, deltaMs, 1)
 		return m, tea.Println(errorStyle.Render("rename-session: provide a name or use -a for agent suggestion"))

@@ -302,12 +302,25 @@ function parseCommitRanges(content: string): Map<string, CommitRange> {
     replies.push({ pos: m.index, id: letter ? `reply-${letter}` : 'reply-initial' })
   }
 
-  const result = new Map<string, CommitRange>()
+  // Associate each preamble range with the reply heading that follows it.
+  const pairs: Array<{ reply: (typeof replies)[0]; range: (typeof ranges)[0] }> = []
   for (const range of ranges) {
     const nextReply = replies.find((r) => r.pos > range.pos)
-    if (nextReply && !result.has(nextReply.id)) {
-      result.set(nextReply.id, { from: range.from, to: range.to })
+    if (nextReply && !pairs.some((p) => p.reply.id === nextReply.id)) {
+      pairs.push({ reply: nextReply, range })
     }
+  }
+  pairs.sort((a, b) => a.reply.pos - b.reply.pos)
+
+  // Implementation commits land IN the reply commit (bundled by git add .) rather than
+  // between the preamble hashes. range.to is the "prompt" commit; the implementation is
+  // in the very next commit after that, which becomes range.from for the next iteration.
+  // So the correct diff range for iteration i is (range.to_i .. range.from_{i+1}).
+  // An empty string for `to` tells the backend to use HEAD (last iteration).
+  const result = new Map<string, CommitRange>()
+  for (let i = 0; i < pairs.length; i++) {
+    const nextFrom = pairs[i + 1]?.range.from ?? ''
+    result.set(pairs[i].reply.id, { from: pairs[i].range.to, to: nextFrom })
   }
   return result
 }
@@ -1568,8 +1581,8 @@ export default function App() {
     setFileDiffContent(null)
     setFileDiffHunks([])
     setSelectedDiffHunkIdx(null)
-    if (diffFromCommit && diffToCommit) {
-      getFileDiff(diffFromCommit, diffToCommit, file)
+    if (diffFromCommit !== null) {
+      getFileDiff(diffFromCommit, diffToCommit ?? '', file)
     }
     setNavLevel('file-diff')
   }

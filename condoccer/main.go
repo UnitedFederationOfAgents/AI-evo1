@@ -836,15 +836,19 @@ func logLineIsCommitHeader(line string) bool {
 }
 
 func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
-	if !commitHashRe.MatchString(fromCommit) || !commitHashRe.MatchString(toCommit) {
+	if !commitHashRe.MatchString(fromCommit) {
 		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
 		return
 	}
-	// Use git log --name-only to collect files from commits starting after fromCommit
-	// up to HEAD (greedy: at most 10 commits). Implementation commits often land just
-	// after the condoc-recorded toCommit, so we search forward from fromCommit rather
-	// than restricting to fromCommit..toCommit.
-	out, err := exec.Command("git", "-C", s.root, "log", "--name-only", "--oneline", "-10", fromCommit+"..HEAD").Output()
+	if toCommit != "" && !commitHashRe.MatchString(toCommit) {
+		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
+		return
+	}
+	rangeSpec := fromCommit + "..HEAD"
+	if toCommit != "" {
+		rangeSpec = fromCommit + ".." + toCommit
+	}
+	out, err := exec.Command("git", "-C", s.root, "log", "--name-only", "--oneline", rangeSpec).Output()
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": "git log failed: " + err.Error()})
 		return
@@ -871,7 +875,11 @@ func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
 }
 
 func (s *Server) handleGetFileDiff(c *wsClient, fromCommit, toCommit, file string) {
-	if !commitHashRe.MatchString(fromCommit) || !commitHashRe.MatchString(toCommit) {
+	if !commitHashRe.MatchString(fromCommit) {
+		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
+		return
+	}
+	if toCommit != "" && !commitHashRe.MatchString(toCommit) {
 		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
 		return
 	}
@@ -879,7 +887,11 @@ func (s *Server) handleGetFileDiff(c *wsClient, fromCommit, toCommit, file strin
 		s.sendToClient(c, "error", map[string]string{"message": "invalid file path"})
 		return
 	}
-	out, err := exec.Command("git", "-C", s.root, "diff", fromCommit+"..HEAD", "--", file).Output()
+	rangeSpec := fromCommit + "..HEAD"
+	if toCommit != "" {
+		rangeSpec = fromCommit + ".." + toCommit
+	}
+	out, err := exec.Command("git", "-C", s.root, "diff", rangeSpec, "--", file).Output()
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": "git diff failed: " + err.Error()})
 		return

@@ -59,11 +59,33 @@ The implementation is complete. Here's a summary of what was changed:
 [Step 1 Substep B](Step1SubstepBPrompt.md)
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's implement more session command functionality for federation-command next.
 
+list-sessions:
+- We'll add the 'ufa session list' alias
+- We'll make it so that the list view also shows the session name
 
-## Human-Prompt
+new-session:
+- We'll fix the name parameter so that it is optional -- not selecting it creates a name 'Unnamed - <date> - <time>'
 
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+set-session:
+- We'll add the 'ufa session set' alias
+
+get-session/ufa session get:
+- This new command prints the ID, name, and filesystem location of your current session
+
+describe-session/ufa session describe:
+- This new command prints the same information as get, plus the additional information that is (and more that will be later) available through session.yaml
+- We may provide the -a argument, in this case federation-command will call the agent in read mode in the session directory and have it provide a small number of sentences describing what has been going on in the current session
+
+rename-session/ufa session rename:
+- This new command takes one optional parameter (the new name)
+- The user may provide the -a flag instead
+  -- if the user provides the -a flag then the agent is called in read mode in the session directory and asked to suggest a short name
+  -- the user is prompted to accept or reject the suggested name in this case
+- The caller must provide one of: The optional name parameter, or -a
+
+Default session behaviour:
+- The ID of default files should still have specific timestamping even though it now has the 'default' suffix. This is important for disambiguation when multiple defaults may be created in distributed locations.

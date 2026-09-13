@@ -130,11 +130,33 @@ To add this yourself, create `.claude/settings.json`:
 If you **approve** the write when I try again, I can create it for you now. Would you like me to retry?
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's fix the rename process -- here is what an attempted rename looked like:
 
+------
 
-## Human-Prompt
+[claude] /workspaces/research/AI-evo1 > ufa session rename -a
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+  ╔═══════════════════════════════╗
+  ║  ✦  Rename Session (AI Assist) ║
+  ╚═══════════════════════════════╝
+
+  Asking agent to suggest a name...
+
+invoking claude in read (files read-only) mode...
+● session: /host-agent-files/agent-records/2026-09-13_13-58-23-default
+Local Session Improvements Branch Work
+agent completed successfully
+
+  Suggested name: agent completed successfully
+
+  [enter/y] accept, [n] cancel, or type a new name: n
+
+  Rename cancelled.
+
+------
+
+We can see that the name "Local Session Improvements Branch Work" was supposed to be the suggested string, but the mechanism accidentally caught "agent completed successfully" instead.
+
+Let's fix this now.

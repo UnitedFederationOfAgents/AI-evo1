@@ -1905,7 +1905,21 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		var newSessionID string
+		if strings.HasPrefix(args, "-n ") {
+			name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+			if name == "" {
+				return true, m, seqPrint(errorStyle.Render("usage: set-session -n <name>"), 1)
+			}
+			foundID, findErr := findSessionByName(m.recordsPath, name)
+			if findErr != nil {
+				return true, m, seqPrint(errorStyle.Render("set-session: "+findErr.Error()), 1)
+			}
+			newSessionID = foundID
+		} else {
+			newSessionID = args
+		}
 		if strings.HasSuffix(newSessionID, "-default") {
 			return true, m, seqPrint(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"), 1)
 		}
@@ -2857,7 +2871,23 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		var newSessionID string
+		if strings.HasPrefix(args, "-n ") {
+			name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+			if name == "" {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("usage: set-session -n <name>"))
+			}
+			foundID, findErr := findSessionByName(m.recordsPath, name)
+			if findErr != nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("set-session: " + findErr.Error()))
+			}
+			newSessionID = foundID
+		} else {
+			newSessionID = args
+		}
 		if strings.HasSuffix(newSessionID, "-default") {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"))

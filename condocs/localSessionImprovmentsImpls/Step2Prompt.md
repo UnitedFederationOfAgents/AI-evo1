@@ -86,11 +86,6 @@ The code looks correct. Here's a summary of what was changed for Revision C:
 **`federation-command/main.go` — `findSessionByName` helper** (new function after `readSessionName`): Reads all subdirectories of `recordsPath`, calls `readSessionName` on each, and returns the first directory name whose `session.yaml` `name:` field matches. Returns a clear error if none is found.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's quickly add the command 'get-head/ufa head get'.

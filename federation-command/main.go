@@ -3167,6 +3167,14 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderHostInfo(ufahostid.GetHostDetails()))
 
+	case "head", "head help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHeadHelpText())
+
+	case "head get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHeadInfo(fcHeadID))
+
 	case "session", "session help":
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(ufaSessionHelpText())
@@ -3268,6 +3276,10 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			unknown := strings.TrimPrefix(sub, "host ")
 			return m, tea.Println(errorStyle.Render("ufa host: unknown subcommand '"+unknown+"'")+"\n"+ufaHostHelpText())
 		}
+		if strings.HasPrefix(sub, "head ") {
+			unknown := strings.TrimPrefix(sub, "head ")
+			return m, tea.Println(errorStyle.Render("ufa head: unknown subcommand '"+unknown+"'")+"\n"+ufaHeadHelpText())
+		}
 		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
 	}
 }
@@ -3278,9 +3290,10 @@ func ufaHelpText() string {
 		"",
 		"  ufa help               show this help",
 		"  ufa host <sub>         host identification commands",
+		"  ufa head <sub>         head (instance) identification commands",
 		"  ufa session <sub>      session management commands",
 		"",
-		sessionStyle.Render("run 'ufa host help' or 'ufa session help' for subcommands"),
+		sessionStyle.Render("run 'ufa host help', 'ufa head help', or 'ufa session help' for subcommands"),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -3293,6 +3306,18 @@ func ufaHostHelpText() string {
 		"  ufa host get     show host ID and first-configured timestamp",
 		"",
 		sessionStyle.Render("host ID is read from ~/.ufa/host.yaml (created on first use)"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaHeadHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa head — head (instance) identification"),
+		"",
+		"  ufa head help    show this help",
+		"  ufa head get     show this FC instance's head ID",
+		"",
+		sessionStyle.Render("head ID is generated at FC startup and lasts for this process lifetime"),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -3446,6 +3471,15 @@ func renderHostInfo(d ufahostid.HostDetails) string {
 	}
 	if d.AccessError {
 		lines = append(lines, devWarningStyle.Render("  host.yaml inaccessible — using hostname"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderHeadInfo(headID string) string {
+	lines := []string{
+		sessionStyle.Render("current head"),
+		"  ID:    " + headID,
+		sessionStyle.Render("head ID is ephemeral — regenerated each time FC starts"),
 	}
 	return strings.Join(lines, "\n")
 }

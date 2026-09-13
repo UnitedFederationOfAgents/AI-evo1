@@ -3177,10 +3177,26 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			return m.handleNewSession(name, line, cmdTime, deltaMs)
 		}
 		if sub == "session set" || strings.HasPrefix(sub, "session set ") {
-			id := strings.TrimSpace(strings.TrimPrefix(sub, "session set"))
+			args := strings.TrimSpace(strings.TrimPrefix(sub, "session set"))
+			var id string
+			if strings.HasPrefix(args, "-n ") {
+				name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+				if name == "" {
+					m.logRecord(line, cmdTime, deltaMs, 1)
+					return m, tea.Println(errorStyle.Render("usage: ufa session set -n <name>"))
+				}
+				foundID, findErr := findSessionByName(m.recordsPath, name)
+				if findErr != nil {
+					m.logRecord(line, cmdTime, deltaMs, 1)
+					return m, tea.Println(errorStyle.Render("set-session: " + findErr.Error()))
+				}
+				id = foundID
+			} else {
+				id = args
+			}
 			if id == "" {
 				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("usage: ufa session set <id>"))
+				return m, tea.Println(errorStyle.Render("usage: ufa session set <id> | ufa session set -n <name>"))
 			}
 			if strings.HasSuffix(id, "-default") {
 				m.logRecord(line, cmdTime, deltaMs, 1)
@@ -3312,6 +3328,23 @@ func readSessionName(sessionDir string) string {
 		}
 	}
 	return ""
+}
+
+// findSessionByName scans recordsPath for the first session directory whose session.yaml name matches.
+func findSessionByName(recordsPath, name string) (string, error) {
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read records directory: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if readSessionName(filepath.Join(recordsPath, entry.Name())) == name {
+			return entry.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no session found with name %q", name)
 }
 
 // readSessionYAMLFields returns all key-value pairs from session.yaml in order.

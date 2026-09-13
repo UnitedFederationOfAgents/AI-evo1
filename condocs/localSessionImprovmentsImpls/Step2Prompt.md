@@ -73,3 +73,24 @@ Everything looks correct. Here's a summary of what was implemented for Revision 
 ## Revision C
 
 Let's quickly throw in an argument to the 'ufa session set' command - if we supply -n "<name>" then we will look the session up by name and set it to the corresponding ID.
+
+
+prompt: [`ed4de76`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ed4de76ab2342c59394f174328bbd8c56bd4763d) → reply: [`ee09eab`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ee09eab457d3050043b1faf8e51458968605101e)
+
+## Reply C
+
+The code looks correct. Here's a summary of what was changed for Revision C:
+
+**`federation-command/main.go` — `session set` handler**: Replaced the single `id := args` extraction with a branch that detects the `-n <name>` flag. When present, it delegates to the new `findSessionByName` helper to resolve the name to an ID; otherwise it falls through to the original direct-ID path. The empty-arg error message was updated to show both usages.
+
+**`federation-command/main.go` — `findSessionByName` helper** (new function after `readSessionName`): Reads all subdirectories of `recordsPath`, calls `readSessionName` on each, and returns the first directory name whose `session.yaml` `name:` field matches. Returns a clear error if none is found.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

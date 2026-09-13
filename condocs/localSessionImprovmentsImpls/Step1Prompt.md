@@ -171,11 +171,6 @@ The change is a single-line fix in the `buildRenameAgentScript` bash template. T
 The fix pipes the captured output through `sed` to strip ANSI escape codes first, then `grep -Ev` to exclude known `ambiguous-agent` wrapper lines (`invoking ...`, `● session:`, `agent completed`, `agent exited`), before finally taking `tail -1` — which now lands on the actual suggested name.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also add a guard to the session -- we are not allowed to rename default sessions.

@@ -24,11 +24,8 @@ All changes are correct. Here's a summary of what was implemented:
 **Updated `local-representative`** to use `ufahostid.GetHostID()` as the default `--name` for host identification to agent-coordinator, replacing the previous `os.Hostname()` call. Documentation in `RECORD_SCHEMAS.md` and `docs/CurrentPersistentFiles.md` was also updated to reflect the new field and file.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's add a command to federation-command: 'get-host/ufa host get'
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This will get the host basics (similar to 'ufa session get') via host.yaml, falling through to hostname and notifying if file access fails, idempotently creating the host.yaml (and notifying if creation occurs).

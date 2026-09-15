@@ -75,6 +75,9 @@ const (
 // Initialized once in main() as "fc-<4-char-random-alphanumeric>".
 var fcHeadID string
 
+// fcHostID is the stable per-host identifier, resolved once in main() via ufahostid.
+var fcHostID string
+
 // Available agents (must match ambiguous-agent configurations)
 var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
 
@@ -292,6 +295,8 @@ type CommandRecord struct {
 	Timestamp string `json:"ts"`
 	DeltaMs   int64  `json:"delta_ms"`
 	ExitCode  int    `json:"exit"`
+	Host      string `json:"host,omitempty"`
+	Head      string `json:"head,omitempty"`
 }
 
 // ===== BUBBLETEA MODEL =====
@@ -2064,6 +2069,11 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, seqPrint(renderSessionInfo(m.sessionID, m.sessionDir), 0)
 	}
 
+	// get-head
+	if line == "get-head" {
+		return true, m, seqPrint(renderHeadInfo(fcHeadID), 0)
+	}
+
 	// describe-session [-a] — -a not supported in ridealong
 	if line == "describe-session" || strings.HasPrefix(line, "describe-session ") {
 		args := strings.TrimSpace(strings.TrimPrefix(line, "describe-session"))
@@ -2606,6 +2616,8 @@ func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitC
 		Timestamp: cmdTime.Format(time.RFC3339),
 		DeltaMs:   deltaMs,
 		ExitCode:  exitCode,
+		Host:      fcHostID,
+		Head:      fcHeadID,
 	}
 	m.encoder.Encode(record)
 }
@@ -3020,6 +3032,12 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	if line == "get-session" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
+	}
+
+	// get-head
+	if line == "get-head" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHeadInfo(fcHeadID))
 	}
 
 	// describe-session [-a]
@@ -4627,6 +4645,7 @@ func parseLRPort(s string) (int, error) {
 
 func main() {
 	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
+	fcHostID = ufahostid.GetHostID()
 
 	cfg, handled, err := parseCLIArgs(os.Args[1:])
 	if handled {

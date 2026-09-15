@@ -49,6 +49,13 @@ We will add the "host" as an attribute to the "session.jsonl" schema for ufa-ses
 ```
 
 
+### Step 3 - <REPLACE-TITLE>
+
+```prompt
+<REPLACE-PROMPT>
+```
+
+
 ## Human-Prompt
 
-The flow of the condoc is now within the second step.
+Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the third step, or submit the '!COMPLETED!' directive to complete this condoc.

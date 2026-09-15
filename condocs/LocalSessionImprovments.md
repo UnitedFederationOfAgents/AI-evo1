@@ -49,13 +49,37 @@ We will add the "host" as an attribute to the "session.jsonl" schema for ufa-ses
 ```
 
 
-### Step 3 - <REPLACE-TITLE>
+### Step 3 - Add initial session leader behaviour.
+
+[Step 3 Prompt](localSessionImprovmentsImpls/Step3Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+We can see our point-form decisions for our first session leader brainstorm in <repo-root>/condocs/localSessionImprovmentsImpls/SessionLeaderBrainstorm.md.
+
+We want to respect these and to implement our first increment of functionality - we will make the shift from our current clauditable (CLBL) behaviour to our "writing file"/"written file" type behaviour.
+
+In this increment we will implement strictly that functionality, making the most minimal changes possible to complete the feature's initial functionality.
+
+We will make it so that:
+- When a call starts (whether it be agent or standard CLI) clauditable checks for any "writing files" and decides if it is primary based on presence of another primary writing file.
+- When a call starts (whether it be agent or standard CLI) CLBL emits the "writing file" (format: 1789497089-writing.txt or 1789497089-s-writing.txt)
+  - CLBL waits 200ms to check if there was a concurrent command that happened
+    - The timestamp on the concurrent command tells us whether there was a collision
+    - We switch to secondary if there was a collision
+- When a call finishes CLBL creates the "written file" (starting with raw - like: 1789497089-raw.txt or 1789497089-s-raw.txt) and removes the "writing file". The "written file" is similar to what we have today.
+  - A written file for a secondary will also include a "-s-", a primary will later clean this up and add it to the session.jsonl.
+- We should be able to keep it in one CLBL invocation, with the file writes happening at dispatch time and completion time.
+- When a primary completes it cleans up any secondary written files and adds them to the jsonl as well as adding its own written file
+
+- We won't consider any auto-maintenance in this increment, we will implement that later. Written files stay raw for now.
+- We won't directly consider any distributed behaviour (across different hosts) yet.
+
+When this increment is complete the session behaviour will feel similar, but the mechanism to deconflict multiple writers will be clean and the foundations will be set for further concurrent operation management.
+
+Let's make these changes now.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the third step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the third step.

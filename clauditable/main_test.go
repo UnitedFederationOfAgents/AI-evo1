@@ -44,34 +44,42 @@ func TestGetSession(t *testing.T) {
 	})
 }
 
-func TestGetConsolidateRecords(t *testing.T) {
-	tests := []struct {
-		name     string
-		envValue string
-		expected bool
-	}{
-		{"default (unset)", "", true},
-		{"explicit true", "true", true},
-		{"explicit false", "false", false},
-		{"1 as true", "1", true},
-		{"0 as false", "0", false},
-		{"invalid defaults to true", "invalid", true},
+func TestCheckIsPrimary(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "clauditable-primary-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Empty dir: we are primary
+	if !checkIsPrimary(tmpDir, 1000) {
+		t.Error("should be primary with no other writing files")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.envValue == "" {
-				os.Unsetenv(EnvAgentConsolidateRecords)
-			} else {
-				os.Setenv(EnvAgentConsolidateRecords, tt.envValue)
-			}
-			defer os.Unsetenv(EnvAgentConsolidateRecords)
+	// Only our own writing file: still primary
+	os.WriteFile(filepath.Join(tmpDir, "1000-writing.txt"), []byte("1000\n"), 0644)
+	if !checkIsPrimary(tmpDir, 1000) {
+		t.Error("should be primary with only our own writing file")
+	}
 
-			result := getConsolidateRecords()
-			if result != tt.expected {
-				t.Errorf("expected %v, got %v", tt.expected, result)
-			}
-		})
+	// Another primary writing file with lower timestamp: we are secondary
+	os.WriteFile(filepath.Join(tmpDir, "900-writing.txt"), []byte("900\n"), 0644)
+	if checkIsPrimary(tmpDir, 1000) {
+		t.Error("should be secondary when a lower-timestamp primary writing file exists")
+	}
+
+	// Remove the lower-ts primary; add one with higher timestamp: we stay primary
+	os.Remove(filepath.Join(tmpDir, "900-writing.txt"))
+	os.WriteFile(filepath.Join(tmpDir, "1100-writing.txt"), []byte("1100\n"), 0644)
+	if !checkIsPrimary(tmpDir, 1000) {
+		t.Error("should be primary when only a higher-timestamp writing file exists")
+	}
+
+	// Replace primary with secondary writing file at lower timestamp: we stay primary
+	os.Remove(filepath.Join(tmpDir, "1100-writing.txt"))
+	os.WriteFile(filepath.Join(tmpDir, "900-s-writing.txt"), []byte("900\n"), 0644)
+	if !checkIsPrimary(tmpDir, 1000) {
+		t.Error("secondary writing files should not affect primary detection")
 	}
 }
 
@@ -297,13 +305,17 @@ func TestExpectedRawRecordPath(t *testing.T) {
 	}
 }
 
-func TestWriteRecord(t *testing.T) {
-	// Create a temporary directory
+func TestWriteWrittenFile(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
+
+	sessionDir := filepath.Join(tmpDir, "test-session")
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
 
 	record := &records.Record{
 		Event: records.Event{
@@ -316,58 +328,58 @@ func TestWriteRecord(t *testing.T) {
 		},
 		Command: "echo hello",
 		Stdout:  "hello\n",
-		Stderr:  "",
 	}
 
-	recordPath, err := writeRecord(tmpDir, "test-session", 1705312200, record)
+	// Test primary: creates {ts}-raw.txt
+	path, err := writeWrittenFile(sessionDir, 1705312200, true, record)
 	if err != nil {
-		t.Fatalf("writeRecord failed: %v", err)
+		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
 	}
-
-	// Verify the record file was created
-	expectedRecordPath := filepath.Join(tmpDir, "test-session", "1705312200")
-	if recordPath != expectedRecordPath {
-		t.Errorf("expected record path %s, got %s", expectedRecordPath, recordPath)
+	expectedPath := filepath.Join(sessionDir, "1705312200-raw.txt")
+	if path != expectedPath {
+		t.Errorf("primary written file path: got %s, want %s", path, expectedPath)
 	}
-
-	// Verify the raw file was also created
-	expectedRawPath := filepath.Join(tmpDir, "test-session", "1705312200-raw.txt")
-	if _, err := os.Stat(expectedRawPath); os.IsNotExist(err) {
-		t.Error("expected raw file to be created")
-	}
-
-	// Verify record file contents (should have JSON + prefixed lines)
-	recordData, err := os.ReadFile(recordPath)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("failed to read record file: %v", err)
+		t.Fatalf("failed to read primary written file: %v", err)
 	}
-	recordStr := string(recordData)
+	content := string(data)
+	if !strings.HasPrefix(content, "{") {
+		t.Error("written file should start with JSON (session log)")
+	}
+	if !strings.Contains(content, "IN>> echo hello") {
+		t.Error("written file should contain IN>> prefixed command")
+	}
+	if !strings.Contains(content, `"agent":"claude"`) {
+		t.Error("written file should contain agent in JSON")
+	}
+	if !strings.Contains(content, records.WrittenFileSeparator) {
+		t.Error("written file should contain WrittenFileSeparator")
+	}
+	if !strings.Contains(content, records.ResponseSeparator) {
+		t.Error("written file should contain ResponseSeparator in raw section")
+	}
+	// RecordPath should be set in the JSON to the written file path
+	if !strings.Contains(content, "1705312200-raw.txt") {
+		t.Error("written file JSON should reference the written file path")
+	}
 
-	if !strings.HasPrefix(recordStr, "{") {
-		t.Error("record file should start with JSON")
+	// Test secondary: creates {ts}-s-raw.txt
+	record2 := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:31:00Z",
+			EventType: "command_execution",
+		},
+		Command: "echo secondary",
+		Stdout:  "secondary\n",
 	}
-	if !strings.Contains(recordStr, "IN>> echo hello") {
-		t.Error("record file should contain IN>> prefixed command")
-	}
-	if !strings.Contains(recordStr, "OUT>> hello") {
-		t.Error("record file should contain OUT>> prefixed output")
-	}
-	if !strings.Contains(recordStr, `"agent":"claude"`) {
-		t.Error("record file should contain agent in JSON")
-	}
-
-	// Verify raw file contents
-	rawData, err := os.ReadFile(expectedRawPath)
+	path2, err := writeWrittenFile(sessionDir, 1705312260, false, record2)
 	if err != nil {
-		t.Fatalf("failed to read raw file: %v", err)
+		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
 	}
-	rawStr := string(rawData)
-
-	if !strings.HasPrefix(rawStr, "echo hello") {
-		t.Error("raw file should start with command")
-	}
-	if !strings.Contains(rawStr, records.ResponseSeparator) {
-		t.Error("raw file should contain response separator")
+	expectedPath2 := filepath.Join(sessionDir, "1705312260-s-raw.txt")
+	if path2 != expectedPath2 {
+		t.Errorf("secondary written file path: got %s, want %s", path2, expectedPath2)
 	}
 }
 
@@ -448,8 +460,7 @@ func TestEnsureSession(t *testing.T) {
 	}
 }
 
-func TestConsolidateRecords(t *testing.T) {
-	// Create a temporary directory
+func TestConsolidatePrimaryToJSONL(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
@@ -462,67 +473,63 @@ func TestConsolidateRecords(t *testing.T) {
 		t.Fatalf("failed to create session dir: %v", err)
 	}
 
-	// Create two timestamp files using the new format
-	record1 := &records.Record{
+	secondary := &records.Record{
 		Event: records.Event{
 			Timestamp: "2026-01-15T10:00:00Z",
 			EventType: "command_execution",
 			Agent:     "claude",
 		},
-		Command: "echo first",
-		Stdout:  "first\n",
+		Command: "echo secondary",
+		Stdout:  "secondary\n",
 	}
-	record2 := &records.Record{
+	primary := &records.Record{
 		Event: records.Event{
 			Timestamp: "2026-01-15T10:01:00Z",
 			EventType: "command_execution",
 			Agent:     "claude",
 		},
-		Command: "echo second",
-		Stdout:  "second\n",
+		Command: "echo primary",
+		Stdout:  "primary\n",
 	}
 
-	os.WriteFile(filepath.Join(sessionDir, "1705312800"), []byte(record1.FormatSessionLog()), 0644)
-	os.WriteFile(filepath.Join(sessionDir, "1705312860"), []byte(record2.FormatSessionLog()), 0644)
+	// Write secondary's written file and primary's written file
+	os.WriteFile(filepath.Join(sessionDir, "1705312800-s-raw.txt"), []byte(secondary.FormatWrittenFile()), 0644)
+	os.WriteFile(filepath.Join(sessionDir, "1705312860-raw.txt"), []byte(primary.FormatWrittenFile()), 0644)
 
-	// Also create -raw.txt files (these should NOT be consolidated)
-	os.WriteFile(filepath.Join(sessionDir, "1705312800-raw.txt"), []byte("raw content 1"), 0644)
-	os.WriteFile(filepath.Join(sessionDir, "1705312860-raw.txt"), []byte("raw content 2"), 0644)
-
-	// Run consolidation
-	if err := consolidateRecords(tmpDir, session); err != nil {
-		t.Fatalf("consolidateRecords failed: %v", err)
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
-	// Verify session.jsonl was created
-	sessionLog := filepath.Join(sessionDir, "session.jsonl")
-	logData, err := os.ReadFile(sessionLog)
+	// session.jsonl should contain both commands
+	logData, err := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
 	if err != nil {
 		t.Fatalf("failed to read session.jsonl: %v", err)
 	}
-
-	// Verify the log contains both records
 	logStr := string(logData)
-	if !strings.Contains(logStr, "echo first") {
-		t.Error("session.jsonl should contain 'echo first'")
+	if !strings.Contains(logStr, "echo secondary") {
+		t.Error("session.jsonl should contain secondary command")
 	}
-	if !strings.Contains(logStr, "echo second") {
-		t.Error("session.jsonl should contain 'echo second'")
+	if !strings.Contains(logStr, "echo primary") {
+		t.Error("session.jsonl should contain primary command")
+	}
+	// Secondary entry must appear before primary (sorted by timestamp)
+	secIdx := strings.Index(logStr, "echo secondary")
+	priIdx := strings.Index(logStr, "echo primary")
+	if secIdx > priIdx {
+		t.Error("secondary entry should appear before primary entry in session.jsonl")
+	}
+	// session.jsonl should not contain raw content (only session log portion)
+	if strings.Contains(logStr, records.WrittenFileSeparator) {
+		t.Error("session.jsonl should not contain WrittenFileSeparator")
 	}
 
-	// Verify original timestamp files were deleted
-	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800")); !os.IsNotExist(err) {
-		t.Error("timestamp file should have been deleted after consolidation")
-	}
-	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860")); !os.IsNotExist(err) {
-		t.Error("timestamp file should have been deleted after consolidation")
+	// Secondary written file should be deleted
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-s-raw.txt")); !os.IsNotExist(err) {
+		t.Error("secondary written file should be deleted after consolidation")
 	}
 
-	// Verify -raw.txt files were NOT deleted
-	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-raw.txt")); os.IsNotExist(err) {
-		t.Error("-raw.txt file should NOT have been deleted")
-	}
+	// Primary written file should NOT be deleted
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-raw.txt")); os.IsNotExist(err) {
-		t.Error("-raw.txt file should NOT have been deleted")
+		t.Error("primary written file should NOT be deleted")
 	}
 }

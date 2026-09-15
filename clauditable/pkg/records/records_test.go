@@ -286,3 +286,72 @@ func TestNewEvent(t *testing.T) {
 		t.Error("expected non-empty timestamp")
 	}
 }
+
+func TestFormatWrittenFile(t *testing.T) {
+	record := Record{
+		Event: Event{
+			Timestamp:  "2026-04-24T10:30:00Z",
+			EventType:  "command_execution",
+			Agent:      "claude",
+			DurationMs: 100,
+			ExitCode:   0,
+		},
+		Command: "echo hello",
+		Stdout:  "hello\n",
+	}
+
+	result := record.FormatWrittenFile()
+
+	// Should start with JSON (session log portion)
+	if !strings.HasPrefix(result, "{") {
+		t.Error("written file should start with JSON")
+	}
+	// Should contain the written file separator
+	if !strings.Contains(result, WrittenFileSeparator) {
+		t.Error("written file should contain WrittenFileSeparator")
+	}
+	// Should contain session log preview
+	if !strings.Contains(result, "IN>> echo hello") {
+		t.Error("written file should contain IN>> prefixed command")
+	}
+	// Should contain raw response separator after the written file separator
+	if !strings.Contains(result, ResponseSeparator) {
+		t.Error("written file should contain ResponseSeparator in raw section")
+	}
+	// Session log portion should come before the raw portion
+	sepIdx := strings.Index(result, WrittenFileSeparator)
+	rawIdx := strings.Index(result, ResponseSeparator)
+	if sepIdx >= rawIdx {
+		t.Error("written file separator should appear before raw response separator")
+	}
+}
+
+func TestExtractSessionLogFromWrittenFile(t *testing.T) {
+	record := Record{
+		Event: Event{
+			Timestamp: "2026-04-24T10:30:00Z",
+			EventType: "command_execution",
+		},
+		Command: "echo test",
+		Stdout:  "test\n",
+	}
+	content := record.FormatWrittenFile()
+
+	extracted := ExtractSessionLogFromWrittenFile(content)
+
+	// Should match FormatSessionLog output
+	expected := record.FormatSessionLog()
+	if extracted != expected {
+		t.Errorf("extracted session log does not match FormatSessionLog output\ngot:  %q\nwant: %q", extracted, expected)
+	}
+	// Should not contain the raw portion
+	if strings.Contains(extracted, ResponseSeparator) {
+		t.Error("extracted session log should not contain ResponseSeparator")
+	}
+
+	// Fallback: content without separator returns as-is
+	plain := "some plain content"
+	if ExtractSessionLogFromWrittenFile(plain) != plain {
+		t.Error("content without separator should be returned unchanged")
+	}
+}

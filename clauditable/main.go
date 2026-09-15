@@ -64,7 +64,6 @@ const (
 	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
 	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
 	EnvAgentSession            = "AGENT_SESSION"
-	EnvAgentConsolidateRecords = "AGENT_CONSOLIDATE_RECORDS"
 	EnvUFAHost                 = "UFA_HOST"
 	EnvUFAHead                 = "UFA_HEAD"
 	EnvUFAAgent                = "UFA_AGENT"
@@ -123,7 +122,6 @@ func main() {
 	// Get configuration from environment
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	session := getSession()
-	consolidate := getConsolidateRecords()
 	host := os.Getenv(EnvUFAHost)
 	if host == "" {
 		host = ufahostid.GetHostID()
@@ -134,17 +132,46 @@ func main() {
 	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
 	verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
 
+	// Ensure session directory exists at dispatch time
+	sessionDir := filepath.Join(recordsPath, session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to create session directory: %v\n", err)
+	}
+	_ = writeSessionYAMLIfAbsent(sessionDir, session, session)
+
+	// Write the writing file at dispatch time — signals that a writer is starting
+	startTime := time.Now()
+	unixTimestamp := startTime.Unix()
+	writingFilePath := filepath.Join(sessionDir, fmt.Sprintf("%d-writing.txt", unixTimestamp))
+	if err := os.WriteFile(writingFilePath, []byte(fmt.Sprintf("%d\n", unixTimestamp)), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write writing file: %v\n", err)
+	}
+
+	// Wait 200ms to detect concurrent starters, then determine primary/secondary role
+	time.Sleep(200 * time.Millisecond)
+	isPrimary := checkIsPrimary(sessionDir, unixTimestamp)
+	if !isPrimary {
+		secondaryPath := filepath.Join(sessionDir, fmt.Sprintf("%d-s-writing.txt", unixTimestamp))
+		if err := os.Rename(writingFilePath, secondaryPath); err == nil {
+			writingFilePath = secondaryPath
+		}
+	}
+
+	if verbosity.enabled {
+		writtenPath := filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", unixTimestamp))
+		if !isPrimary {
+			writtenPath = filepath.Join(sessionDir, fmt.Sprintf("%d-s-raw.txt", unixTimestamp))
+		}
+		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", writtenPath)
+	}
+
 	// Prepare the command
 	cmd := exec.Command(cmdName, cmdArgs...)
 
 	// Capture buffers
 	var stdoutBuf, stderrBuf strings.Builder
 
-	startTime := time.Now()
-	rawRecordPath := expectedRawRecordPath(recordsPath, session, startTime.Unix())
-	if verbosity.enabled {
-		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", rawRecordPath)
-	}
+	cmdStartTime := time.Now()
 	var err error
 
 	// When our stdout is a terminal, use a PTY for the child's stdout so that
@@ -229,7 +256,7 @@ func main() {
 	}
 
 	err = cmd.Wait()
-	duration := time.Since(startTime)
+	duration := time.Since(cmdStartTime)
 
 	exitCode := 0
 	if err != nil {
@@ -247,7 +274,6 @@ func main() {
 	}
 
 	// Create record using the pkg/records package
-	unixTimestamp := startTime.Unix()
 	record := records.Record{
 		Event: records.Event{
 			Timestamp:  startTime.Format(time.RFC3339),
@@ -265,16 +291,14 @@ func main() {
 		Stderr:  stderrBuf.String(),
 	}
 
-	// Write the records
-	recordPath, err := writeRecord(recordsPath, session, unixTimestamp, &record)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write record: %v\n", err)
+	// Write the written file (completion marker) and remove the writing file
+	if _, err := writeWrittenFile(sessionDir, unixTimestamp, isPrimary, &record); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write written file: %v\n", err)
 	} else {
-		record.Event.RecordPath = recordPath
-
-		// Consolidate if enabled
-		if consolidate {
-			if err := consolidateRecords(recordsPath, session); err != nil {
+		os.Remove(writingFilePath)
+		// Primary collects all secondary written files and adds everything to session.jsonl
+		if isPrimary {
+			if err := consolidatePrimaryToJSONL(recordsPath, session, unixTimestamp); err != nil {
 				fmt.Fprintf(os.Stderr, "clauditable: warning: failed to consolidate records: %v\n", err)
 			}
 		}
@@ -425,21 +449,6 @@ func defaultSessionID() string {
 	return time.Now().Format("2006-01-02_15-04-05") + "-default"
 }
 
-// getConsolidateRecords returns whether record consolidation is enabled
-// Defaults to true
-func getConsolidateRecords() bool {
-	value := os.Getenv(EnvAgentConsolidateRecords)
-	if value == "" {
-		return true
-	}
-	// Parse as boolean, defaulting to true on error
-	b, err := strconv.ParseBool(value)
-	if err != nil {
-		return true
-	}
-	return b
-}
-
 // parseMetadata parses the UFA_METADATA environment variable
 // Format: "key1=value1,key2=value2" or "key1=value1;key2=value2"
 // Returns nil if empty or unparseable
@@ -475,112 +484,123 @@ func parseMetadata(s string) map[string]string {
 	return result
 }
 
-// writeRecord writes both the session log entry and the raw file
-// Returns the record path (used for both the consolidated entry and raw file reference)
-func writeRecord(recordsPath, session string, timestamp int64, record *records.Record) (string, error) {
-	sessionDir := filepath.Join(recordsPath, session)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create session directory: %w", err)
+// checkIsPrimary returns true if no other primary writing file with a lower timestamp
+// exists in sessionDir. The first writer (lowest timestamp) becomes primary;
+// later concurrent starters become secondary.
+func checkIsPrimary(sessionDir string, ourTimestamp int64) bool {
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return true
 	}
-	// Lazily create session.yaml on first use of this session directory.
-	_ = writeSessionYAMLIfAbsent(sessionDir, session, session)
-
-	tsStr := fmt.Sprintf("%d", timestamp)
-	recordFile := filepath.Join(sessionDir, tsStr)
-	rawFile := filepath.Join(sessionDir, tsStr+"-raw.txt")
-
-	// Set record path in the event for reference (used for both purposes)
-	record.Event.RecordPath = recordFile
-
-	// Write the session log entry (will be consolidated later)
-	sessionLogContent := record.FormatSessionLog()
-	if err := os.WriteFile(recordFile, []byte(sessionLogContent), 0644); err != nil {
-		return "", fmt.Errorf("failed to write record file: %w", err)
+	for _, entry := range entries {
+		name := entry.Name()
+		// Look for primary writing files: end with -writing.txt but NOT -s-writing.txt
+		if !strings.HasSuffix(name, "-writing.txt") || strings.HasSuffix(name, "-s-writing.txt") {
+			continue
+		}
+		tsStr := strings.TrimSuffix(name, "-writing.txt")
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil || ts == ourTimestamp {
+			continue
+		}
+		if ts < ourTimestamp {
+			return false // older primary exists → we are secondary
+		}
 	}
-
-	// Write the raw file (not consolidated, kept as permanent record)
-	rawContent := record.FormatRawFile()
-	if err := os.WriteFile(rawFile, []byte(rawContent), 0644); err != nil {
-		// Record file was written, log warning but don't fail
-		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write raw file: %v\n", err)
-	}
-
-	return recordFile, nil
+	return true
 }
 
-// consolidateRecords collects all unix-timestamp format logs and appends them to session.jsonl
-func consolidateRecords(recordsPath, session string) error {
-	sessionDir := filepath.Join(recordsPath, session)
-	sessionLog := filepath.Join(sessionDir, "session.jsonl")
+// writeWrittenFile writes the completed record as the "written file" at completion time.
+// Primaries produce {timestamp}-raw.txt; secondaries produce {timestamp}-s-raw.txt.
+// The record's RecordPath is set to the written file path before formatting.
+func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record *records.Record) (string, error) {
+	suffix := "-raw.txt"
+	if !isPrimary {
+		suffix = "-s-raw.txt"
+	}
+	filePath := filepath.Join(sessionDir, fmt.Sprintf("%d%s", timestamp, suffix))
+	record.Event.RecordPath = filePath
+	content := record.FormatWrittenFile()
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("failed to write written file: %w", err)
+	}
+	return filePath, nil
+}
 
-	// Read directory entries
-	entries, err := os.ReadDir(sessionDir)
+// consolidatePrimaryToJSONL is called by the primary on completion. It collects all
+// secondary written files ({ts}-s-raw.txt) and its own written file ({primaryTs}-raw.txt),
+// appends their session log portions to session.jsonl in timestamp order, and deletes
+// the secondary files (the primary's raw file is kept as a permanent record).
+func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int64) error {
+	sessionDir := filepath.Join(recordsPath, session)
+	sessionLogPath := filepath.Join(sessionDir, "session.jsonl")
+
+	dirEntries, err := os.ReadDir(sessionDir)
 	if err != nil {
 		return fmt.Errorf("failed to read session directory: %w", err)
 	}
 
-	// Find all unix-timestamp files (numeric filenames, not -raw.txt files)
-	var timestampFiles []string
-	for _, entry := range entries {
+	type writtenEntry struct {
+		ts     int64
+		path   string
+		delete bool
+	}
+	var toProcess []writtenEntry
+
+	for _, entry := range dirEntries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if name == "session.jsonl" {
-			continue
-		}
-		// Skip -raw.txt files (they are not consolidated)
-		if strings.HasSuffix(name, "-raw.txt") {
-			continue
-		}
-		// Check if filename is a valid unix timestamp (all digits)
-		if isUnixTimestamp(name) {
-			timestampFiles = append(timestampFiles, name)
+		if strings.HasSuffix(name, "-s-raw.txt") {
+			tsStr := strings.TrimSuffix(name, "-s-raw.txt")
+			ts, err := strconv.ParseInt(tsStr, 10, 64)
+			if err != nil {
+				continue
+			}
+			toProcess = append(toProcess, writtenEntry{ts, filepath.Join(sessionDir, name), true})
+		} else if strings.HasSuffix(name, "-raw.txt") {
+			tsStr := strings.TrimSuffix(name, "-raw.txt")
+			ts, err := strconv.ParseInt(tsStr, 10, 64)
+			if err != nil || ts != primaryTimestamp {
+				continue
+			}
+			toProcess = append(toProcess, writtenEntry{ts, filepath.Join(sessionDir, name), false})
 		}
 	}
 
-	if len(timestampFiles) == 0 {
+	if len(toProcess) == 0 {
 		return nil
 	}
 
-	// Sort by timestamp (numeric order)
-	sort.Slice(timestampFiles, func(i, j int) bool {
-		ti, _ := strconv.ParseInt(timestampFiles[i], 10, 64)
-		tj, _ := strconv.ParseInt(timestampFiles[j], 10, 64)
-		return ti < tj
+	sort.Slice(toProcess, func(i, j int) bool {
+		return toProcess[i].ts < toProcess[j].ts
 	})
 
-	// Open session.jsonl for appending
-	f, err := os.OpenFile(sessionLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(sessionLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open session.jsonl: %w", err)
 	}
 	defer f.Close()
 
-	// Process each timestamp file
-	for _, tsFile := range timestampFiles {
-		filePath := filepath.Join(sessionDir, tsFile)
-		data, err := os.ReadFile(filePath)
+	for _, entry := range toProcess {
+		data, err := os.ReadFile(entry.path)
 		if err != nil {
-			continue // Skip files we can't read
+			continue
 		}
-
-		// Write the content directly to session.jsonl
-		// The content is already in the correct format (JSON line + plaintext)
-		if _, err := f.Write(data); err != nil {
-			return fmt.Errorf("failed to write to session.jsonl: %w", err)
+		sessionLogContent := records.ExtractSessionLogFromWrittenFile(string(data))
+		if _, err := f.WriteString(sessionLogContent); err != nil {
+			continue
 		}
-
-		// Ensure there's a blank line between entries for readability
-		if !strings.HasSuffix(string(data), "\n\n") {
-			if !strings.HasSuffix(string(data), "\n") {
-				f.Write([]byte("\n"))
+		if !strings.HasSuffix(sessionLogContent, "\n\n") {
+			if !strings.HasSuffix(sessionLogContent, "\n") {
+				f.WriteString("\n")
 			}
-			f.Write([]byte("\n"))
+			f.WriteString("\n")
 		}
-
-		// Delete the original file
-		os.Remove(filePath)
+		if entry.delete {
+			os.Remove(entry.path)
+		}
 	}
 
 	return nil

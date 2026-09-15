@@ -11,12 +11,13 @@ import (
 
 // Constants for record formatting
 const (
-	MaxPreviewLines   = 20
-	TruncationMarker  = "..."
-	InputPrefix       = "IN>> "
-	OutputPrefix      = "OUT>> "
-	ErrorPrefix       = "ERR>> "
-	ResponseSeparator = "\n\n----------RESPONSE----------\n\n"
+	MaxPreviewLines      = 20
+	TruncationMarker     = "..."
+	InputPrefix          = "IN>> "
+	OutputPrefix         = "OUT>> "
+	ErrorPrefix          = "ERR>> "
+	ResponseSeparator    = "\n\n----------RESPONSE----------\n\n"
+	WrittenFileSeparator = "\n----------WRITTEN_RAW----------\n"
 )
 
 // Event represents metadata about a command execution.
@@ -141,6 +142,22 @@ func formatWithPrefix(text, prefix string, maxLines int) string {
 	}
 
 	return sb.String()
+}
+
+// FormatWrittenFile creates the full written file content, combining the session log
+// entry and the raw content with a separator. This is the "written file" format used
+// at completion time to replace the in-progress writing file marker.
+func (r *Record) FormatWrittenFile() string {
+	return r.FormatSessionLog() + WrittenFileSeparator + r.FormatRawFile()
+}
+
+// ExtractSessionLogFromWrittenFile extracts the session log portion (everything before
+// WrittenFileSeparator) from a written file's content, for appending to session.jsonl.
+func ExtractSessionLogFromWrittenFile(content string) string {
+	if idx := strings.Index(content, WrittenFileSeparator); idx >= 0 {
+		return content[:idx]
+	}
+	return content
 }
 
 // ParseSessionLogEntry parses a session log entry back into an Event.

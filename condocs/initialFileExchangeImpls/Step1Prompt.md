@@ -27,11 +27,12 @@ Implemented Step 1 of `InitialFileExchange`: a `files` tab (beside `system`) on 
 One limitation to flag: this sandbox blocks `go build`/`go vet`/`npm`/`gofmt` outright (confirmed via a separate subagent too), so none of this could be compiled or run — I relied on careful manual review (brace-balance checks, full re-reads of every diff) instead of a real build/test pass. Worth compiling and running `make test` before merging.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Now let's improve this functionality by adding a viewer page as well as a 'download' widget.
 
+We'll be able to go into this viewer either through a double-click or an 'enter' widget, reminiscent of what we see from entering through condocs.
 
-## Human-Prompt
+Let's add a 'download' button to the file details dialog which does the obvious. (Downloads the file)
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+On the file system where we store the files locally (/host-agent-files/exchange/host-cache/) we should also add files we hide from the 'files' window where we keep details (for a file 'd992a7a9_debug.txt' we might have '.manifest_d992a7a9_debug.txt.yaml'). We will refuse the upload of files starting with .manifest_. This will help us understand when cache entries will be deleted if our application was interrupted, as well as letting us store other details.

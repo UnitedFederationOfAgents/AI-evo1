@@ -135,11 +135,15 @@ All the wiring is complete. The implementation covers:
 The `select-session` / `ufa session select` command opens an in-process overlay that shows all sessions (reverse-chronologically, matching the `list-sessions` output), supports incremental text filtering that resets the cursor, arrow-key navigation, Enter to switch sessions, and Esc/Ctrl-C to cancel — all without spawning any subprocess.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's improve the 'writing' files so that they include the command being run (it is expected that they will not yet contain the result)
 
+Let's also improve the recomposition process so that when a file '1789572255-s-raw.txt' is added to the jsonl by the primary, the primary also renames this file to '1789572255-raw.txt' (effectively bringing it to primary).
 
-## Human-Prompt
+Let's also add the first auto-maintenance functionality. We'll start with some basic cases -
+ - proactively redact secrets that match common patterns and replace with <REDACTED-N>
+ - detect large quantities of things like # that are used for loading bars and replace those sections with '<STRIPPED>'
+ - replace any long-running responses (greater than 1000 lines) with a split in the middle and '...<CONTINUES>...'
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The auto-maintenance will happen when a primary is composing the session.jsonl with the written files. A file '1789571564-raw.txt' is supplemented with '1789571564-processed.txt'. It is identical to the raw file but with all of the results of processing.Another json snippet will be added to the header (inserted after the initial snippet) for each processing step that was actually performed. If no processing was necessary then a single 'no-op' processing header will be inserted so we understand the timestamp. We will only see this 'no-op' on the first processing occurrence.

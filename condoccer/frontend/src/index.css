@@ -699,6 +699,91 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* ---- Mobile nav (hamburger + off-canvas drawer) ----
+ *
+ * Desktop keeps the always-visible two-pane layout above. Below the
+ * breakpoint the sidebar becomes a slide-in drawer, opened via a fixed
+ * hamburger button and closed by picking a nav item or tapping the
+ * backdrop. `.sidebar-wrap` is `display: contents` outside the media
+ * query so it has zero effect on the desktop flex layout.
+ */
+
+.sidebar-wrap {
+  display: contents;
+}
+
+.mobile-nav-toggle,
+.mobile-nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-nav-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 101;
+    width: 38px;
+    height: 38px;
+    background: #2d2d2d;
+    color: #ccc;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+  }
+
+  .sidebar-wrap {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-wrap.mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .main-content {
+    padding-top: 48px;
+  }
+
+  /* Roomier touch targets. */
+  .nav-item {
+    padding: 10px 12px;
+  }
+
+  button {
+    min-height: 34px;
+    padding: 7px 14px;
+  }
+
+  .detail-header {
+    flex-wrap: wrap;
+  }
+}
+
 /* ---- File tree (files-changed main pane) ---- */
 
 .diff-file-tree {

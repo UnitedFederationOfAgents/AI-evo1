@@ -105,11 +105,8 @@ No change to the session-consumer interface: `session.jsonl` still receives one 
 The revision replaces the permission-request reply with a concrete description of every change made in the implementation: the new written-file format in `records.go`, and the dispatch/collision/completion/consolidation flow in `main.go`.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's add a new federation-command feature to make session operation easier, to help us manually test our implementation.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add a 'select-session/ufa session select' command which uses the output of list-sessions to give the user an interactive menu where they can select a session. During this interaction, they can start typing to auto-filter and continue their arrow-key based selection, or they may cancel.

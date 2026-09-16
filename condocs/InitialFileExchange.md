@@ -31,13 +31,19 @@ When we click on the files in the main pane we will have a side-pane on the righ
 ```
 
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Take a brief detour to improve the mobile UI.
+
+[Step 2 Prompt](initialFileExchangeImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Currently our UIs are all either very ugly or completely inoperable through a mobile interface.
+
+In as decoupled of a way as possible, let's properly serve a mobile web browser with an appropriate presentation. Let's start with condoccer and not yet worry about local-representative or agent-coordinator.
+
+Let's keep things concise at first and start with something straightforward and simple. We'll pivot from there as-needed.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

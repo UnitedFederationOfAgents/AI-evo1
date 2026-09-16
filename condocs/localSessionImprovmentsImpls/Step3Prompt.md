@@ -162,11 +162,6 @@ The implementation is complete. Here's a summary of what changed across Revision
 **`clauditable/main_test.go`** and **`records_test.go`** — Updated `TestConsolidatePrimaryToJSONL` to check rename+processed-file creation instead of deletion; added `TestApplyAutoMaintenance` and `TestFormatProcessedFile` covering no-op, loading-bar stripping, secret redaction, truncation, and header insertion.
 
 
-## <REPLACE-Revision|Retry> D
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1789583519 (Wed Sep 16 06:31:59 PM UTC 2026).

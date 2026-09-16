@@ -1,23 +1,7 @@
-# InitialFileExchange
+# Prompt
 
-<!--
-```condoc-yaml
-condoc:
-  startTime: 1789584310
-  controlScheme: same-repo
-  branch: condoc/InitialFileExchange-1789584310/main
-  callerPath: ..
-```
--->
+[InitialFileExchange](../InitialFileExchange.md)
 
-Add baseline file exchange features in preparation for distributed session support.
-
-
-### Step 1 - Begin with the host-exchange basics for file handling.
-
-[Step 1 Prompt](initialFileExchangeImpls/Step1Prompt.md)
-
-```prompt
 We will start with the functional stack to support the 'files' tab through local-representative.
 
 This tab will appear beside 'system' and will display an area for simple wireframe file icons. (Just basic types, text, image - a very small set to start)
@@ -28,9 +12,3 @@ When we drag a file from our system's finder (or equivalent) onto this window it
 These files in the host-cache will be deleted after one hour.
 
 When we click on the files in the main pane we will have a side-pane on the right hand side that displays file details.
-```
-
-
-## Human-Prompt
-
-The flow of the condoc is now within the first step.

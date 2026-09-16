@@ -18,11 +18,10 @@ Implemented the file-details dialog's delete/hold/persist controls end-to-end: l
 One caveat: this session's permission mode rejected every build/compile/typecheck command I attempted (`go build`, `go vet`, `gofmt`, `npx tsc`, `npm run build`), so I could not run automated verification — I instead did a careful manual read-through of the full diff for compile-correctness and logical consistency, but the code has not been build- or test-verified in this session.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+This functionality for hold/persist is a good start but has some issues:
+- When we hold the timer shows a large number of minutes remaining, but it should now show hours and minutes.
+- When we 'hold' the button does not change to 'persist' and the icon does not change to yellow *in the agent-coordinator UI specifically* - it works in local-representative
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix these items.

@@ -47,6 +47,26 @@ agent-records-archive/
 
 ---
 
+## `/host-agent-files/exchange/host-cache/`
+
+**Owner:** local-representative  
+**Flag:** `-file-cache-dir` (default: `/host-agent-files/exchange/host-cache`)
+
+Files dropped on LR's "files" tab (direct client only — see
+[`docs/DistributedExchange.md`](DistributedExchange.md)). Flat directory, no
+subfolders or metadata sidecar files:
+
+```
+host-cache/
+└── <8-hex>_<original-filename>   # e.g. 3f9a2b1c_report.pdf
+```
+
+The 8-hex prefix makes concurrent uploads collision-free; LR strips it back
+off to show the original filename. Entries are swept once they are more than
+one hour old (checked every minute) — nothing here is meant to persist.
+
+---
+
 ## `/host-agent-files/slopspaces/`
 
 **Owner:** dungeon-keeper  

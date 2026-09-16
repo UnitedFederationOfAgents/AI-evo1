@@ -47,6 +47,7 @@ Local-representative connects to AC using `representable.Client`. Messages:
 | LR → AC | `data` / `"system-state"` | `SystemStateMsg` — LR's system tab (self + managed apps) |
 | LR → AC | `data` / `"condoccer-state"` | `CondoccerStateMsg` — condoc summary + condoccer's HTTP port, relayed from a managed condoccer |
 | LR → AC | `data` / `"lr-http"` | `LRHTTPMsg` — LR's dashboard HTTP port, so AC can reverse-proxy `/host/<id>/…` back to it |
+| LR → AC | `data` / `"files-state"` | `FilesStateMsg` — host-cache listing for the files tab (read-only on AC; see [DistributedExchange.md](../../docs/DistributedExchange.md)) |
 | LR → AC | `log` (cmd/output) | FC command echo / output forwarded upstream |
 | AC → LR | `command` | plain cmd or `__ridealong:action` → forwarded to FC; `__system:launch <app>` / `__system:terminate <id>` → LR's process manager |
 
@@ -68,6 +69,22 @@ Tailscale + oauth2-proxy web-exposure path — therefore drives condoccer on any
 connected box over a single origin. `AC → LR` `__condoccer:action <json>` /
 `__condoccer:refresh` commands are relayed to condoccer for out-of-band control.
 
+### files tab
+
+Each LR exposes a `/api/files` REST surface (`GET` lists, `POST` uploads a
+multipart `file` into `local-representative`'s host-cache directory —
+`/host-agent-files/exchange/host-cache` by default; entries are swept an hour
+after upload). LR pushes the listing up as `data` / `"files-state"`, which AC
+relays to browsers as `lr-files-state` for a read-only view of the tab.
+
+Upload stays a **direct-LR-client-only** operation this increment: AC's
+`proxyToHost` reverse proxy stamps every request it forwards with
+`X-UFA-Proxied-By: agent-coordinator`, and LR's upload handler rejects any
+request carrying that header — so even a POST issued straight at
+`/host/<id>/api/files` through AC is refused server-side, not merely hidden
+from AC's UI. See [`docs/DistributedExchange.md`](../../docs/DistributedExchange.md)
+for how this might extend to chained input.
+
 ## WebSocket Protocol (AC ↔ Browser)
 
 ### Server → Client
@@ -82,6 +99,7 @@ connected box over a single origin. `AC → LR` `__condoccer:action <json>` /
 | `lr-condoc-state` | `{ host_id, active, ...fields }` | Condoc state for a host |
 | `lr-system-state` | `{ host_id, active, self, managed[] }` | Host's system tab (LR process + managed apps) |
 | `lr-condoccer-state` | `{ host_id, available, root?, condocs[]? }` | Host's condoc summary; `available` gates the forwarded `/host/<id>/condoccer/` iframe |
+| `lr-files-state` | `{ host_id, active, files[]? }` | Host's files tab listing (read-only; AC has no upload affordance) |
 
 ### Client → Server
 

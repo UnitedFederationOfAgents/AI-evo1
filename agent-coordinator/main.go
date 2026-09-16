@@ -112,6 +112,22 @@ type LRHTTPMsg struct {
 	Port string `json:"port"`
 }
 
+// FileInfo mirrors one row of local-representative's files tab: a file sitting
+// in that host's host-cache directory.
+type FileInfo struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	Kind       string `json:"kind"`
+	UploadedAt int64  `json:"uploaded_at"`
+	ExpiresAt  int64  `json:"expires_at"`
+}
+
+// FilesStateMsg matches the files-state payload sent from LR over representable.
+type FilesStateMsg struct {
+	Files []FileInfo `json:"files"`
+}
+
 // LRCondoccerMsg is the host-scoped "lr-condoccer-state" message sent to browser
 // clients: a per-host condoc summary plus whether the forwarded UI is available.
 type LRCondoccerMsg struct {
@@ -188,6 +204,16 @@ type LRSystemStateMsg struct {
 	Managed []ProcInfo `json:"managed"`
 }
 
+// LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
+// clients: local-representative's files tab for one host, read-only here — file
+// upload stays a direct-LR-client-only operation this increment (see
+// docs/DistributedExchange.md). Active is false when that LR is not connected.
+type LRFilesMsg struct {
+	HostID string     `json:"host_id"`
+	Active bool       `json:"active"`
+	Files  []FileInfo `json:"files,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -210,6 +236,7 @@ type hostState struct {
 	condoc     *CondocStateMsg
 	system     *SystemStateMsg
 	condoccer  *CondoccerStateMsg
+	files      *FilesStateMsg
 	lrHTTPPort string
 }
 
@@ -304,6 +331,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	condoc := hs.condoc
 	system := hs.system
 	condoccer := hs.condoccer
+	files := hs.files
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -326,6 +354,11 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 	}
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
+	if files != nil {
+		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
+	} else {
+		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: false})
+	}
 }
 
 // condoccerMsg builds a host-scoped lr-condoccer-state payload; a nil state means
@@ -530,6 +563,10 @@ func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
 		base(req)
 		req.URL.Path = "/" + strings.TrimPrefix(strings.TrimPrefix(req.URL.Path, prefix), "/")
 		req.Host = target.Host
+		// Mark the request as having arrived through this proxy so LR can refuse
+		// input it only accepts from a direct client (e.g. file uploads — see
+		// docs/DistributedExchange.md).
+		req.Header.Set("X-UFA-Proxied-By", "agent-coordinator")
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)
@@ -600,6 +637,7 @@ func main() {
 			hs.condoc = nil
 			hs.system = nil
 			hs.condoccer = nil
+			hs.files = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
@@ -609,6 +647,7 @@ func main() {
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
+			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 		}
 	})
 
@@ -696,6 +735,14 @@ func main() {
 				hs.mu.Lock()
 				hs.lrHTTPPort = payload.Port
 				hs.mu.Unlock()
+			}
+		case "files-state":
+			var payload FilesStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.files = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: true, Files: payload.Files})
 			}
 		}
 	})

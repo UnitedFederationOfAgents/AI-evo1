@@ -28,6 +28,7 @@ make build      # build frontend + Go binary
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
 | `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
+| `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept |
 
 ## Configuration files
 
@@ -156,6 +157,25 @@ and bringing it up fully remote-controlled.
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 `$PATH`; `--fc-bin` / `fc-bin` overrides that.
+
+## Files tab
+
+The **files** tab shows a wireframe-icon view (text / image / other — a small
+set for this increment) of whatever sits in this LR's host-cache directory
+(`--file-cache-dir`, default `/host-agent-files/exchange/host-cache`). Drag a
+file from your system's file manager onto the tab to upload it; clicking a
+file opens a right-hand detail pane with its name, size, type and upload/expiry
+times. Every file is swept an hour after upload — nothing here is meant to
+persist.
+
+Upload is **direct-client-only**: a browser connected straight to this LR can
+upload, but a request arriving through `agent-coordinator`'s `/host/<id>/*`
+reverse proxy is refused (`agent-coordinator` stamps proxied requests with an
+`X-UFA-Proxied-By` header LR's upload handler checks for). The coordinator's
+own **files** tab is read-only for this reason — it shows the same listing
+(mirrored up as a `files-state` data message, same mechanism as the system
+tab) without a dropzone. See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md)
+for how this might extend to coordinator-mediated or cross-host transfer.
 
 ### Auto-launch chains
 

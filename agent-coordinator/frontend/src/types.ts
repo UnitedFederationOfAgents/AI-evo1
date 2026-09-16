@@ -89,3 +89,18 @@ export interface LRCondoccerMsg {
   root?: string
   condocs?: CondocInfo[]
 }
+
+export interface FileInfo {
+  id: string
+  name: string
+  size: number
+  kind: string // "text" | "image" | "other" -- selects the wireframe icon
+  uploaded_at: number // unix seconds
+  expires_at: number  // unix seconds
+}
+
+export interface LRFilesMsg {
+  host_id: string
+  active: boolean
+  files?: FileInfo[]
+}

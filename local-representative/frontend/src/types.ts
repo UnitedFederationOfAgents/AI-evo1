@@ -61,3 +61,16 @@ export interface SystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
 }
+
+export interface FileInfo {
+  id: string
+  name: string
+  size: number
+  kind: string // "text" | "image" | "other" -- selects the wireframe icon
+  uploaded_at: number // unix seconds
+  expires_at: number  // unix seconds
+}
+
+export interface FilesStateMsg {
+  files: FileInfo[]
+}

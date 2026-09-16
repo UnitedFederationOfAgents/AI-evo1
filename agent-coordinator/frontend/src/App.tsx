@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
 } from './types'
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -24,6 +24,7 @@ interface HostClientState {
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
   condoccer?: LRCondoccerMsg
+  files?: LRFilesMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -162,6 +163,14 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-files-state': {
+            const p = msg.payload as LRFilesMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), files: p.active ? p : undefined },
+            }))
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -216,9 +225,12 @@ function HostSidebar({
 }
 
 const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
-// "system" sits to the right of the service tabs, mirroring local-representative's
-// own dashboard: it drives that LR's process management from the coordinator.
-const LR_TABS = [...LR_SERVICES, 'system'] as const
+// "system" and "files" sit to the right of the service tabs, mirroring
+// local-representative's own dashboard: they drive/view that LR's process
+// management and host-cache from the coordinator. Unlike LR's own files tab,
+// this one is read-only — upload stays a direct-LR-client-only operation this
+// increment (see docs/DistributedExchange.md).
+const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
 function FCCommandPanel({
@@ -543,6 +555,120 @@ function SystemPanel({
   )
 }
 
+/* ---- Files panel (read-only: upload stays direct-LR-client-only) ---- */
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+function formatAgo(tsSec: number, nowSec: number): string {
+  const secs = Math.max(0, nowSec - tsSec)
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+}
+
+function formatCountdown(expiresAtSec: number, nowSec: number): string {
+  const secs = expiresAtSec - nowSec
+  if (secs <= 0) return 'expiring…'
+  if (secs < 60) return `${secs}s left`
+  return `${Math.floor(secs / 60)}m left`
+}
+
+// FILE_ICON is the very small wireframe icon set this increment supports:
+// text, image, and a catch-all for everything else.
+const FILE_ICON: Record<string, string> = {
+  text: '📄',
+  image: '🖼️',
+  other: '📦',
+}
+
+function FileIcon({ kind }: { kind: string }) {
+  return <span className={`file-icon file-icon-${kind}`}>{FILE_ICON[kind] ?? FILE_ICON.other}</span>
+}
+
+function FilesPanel({
+  files, active, selectedId, onSelect,
+}: {
+  files: FileInfo[]
+  active: boolean
+  selectedId: string | null
+  onSelect: (id: string) => void
+}) {
+  if (!active) {
+    return <div className="service-empty">local-representative on this host is not connected</div>
+  }
+  return (
+    <div className="files-panel">
+      <div className="files-hint">
+        read-only here — connect a browser directly to this host's local-representative to upload
+      </div>
+      {files.length === 0 ? (
+        <div className="files-empty">no files in the host-cache</div>
+      ) : (
+        <div className="files-grid">
+          {files.map(f => (
+            <button
+              key={f.id}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
+              onClick={() => onSelect(f.id)}
+              title={f.name}
+            >
+              <FileIcon kind={f.kind} />
+              <span className="files-item-name">{f.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FileDetailPane({ file, onClose }: { file: FileInfo; onClose: () => void }) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  return (
+    <div className="file-detail-pane">
+      <div className="file-detail-header">
+        <span className="file-detail-title">file details</span>
+        <button className="file-detail-close" onClick={onClose}>×</button>
+      </div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} /></div>
+      <div className="file-detail-rows">
+        <div className="file-detail-row">
+          <span className="file-detail-label">name</span>
+          <span className="file-detail-value" title={file.name}>{file.name}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">type</span>
+          <span className="file-detail-value">{file.kind}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">size</span>
+          <span className="file-detail-value">{formatBytes(file.size)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">uploaded</span>
+          <span className="file-detail-value">{formatAgo(file.uploaded_at, nowSec)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">expires</span>
+          <span className="file-detail-value">{formatCountdown(file.expires_at, nowSec)}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
 }: {
@@ -554,6 +680,7 @@ function LRView({
   sendLRTerminateApp: (hostId: string, id: string) => void
 }) {
   const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
 
@@ -561,6 +688,9 @@ function LRView({
     if (!active) return 'unknown'
     return lrState?.services?.find((s: ServiceStatus) => s.name === name)?.status ?? 'unknown'
   }
+
+  const files = data.files?.files ?? []
+  const selectedFile = activeTab === 'files' ? files.find(f => f.id === selectedFileId) ?? null : null
 
   return (
     <div className="lr-view">
@@ -576,7 +706,7 @@ function LRView({
             <button
               key={svc}
               className={`tab${activeTab === svc ? ' tab-active' : ''}`}
-              onClick={() => setActiveTab(svc)}
+              onClick={() => { setActiveTab(svc); setSelectedFileId(null) }}
             >
               {svc}
             </button>
@@ -584,60 +714,73 @@ function LRView({
         </div>
       </div>
       <div className="main-pane">
-        <div className="service-view">
-          <div className="service-name">{activeTab}</div>
-          {activeTab !== 'system' && (
-            <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
-              <span className="health-dot" />
-              <span className="health-label">{getServiceStatus(activeTab)}</span>
-            </div>
-          )}
-          {activeTab === 'system' && (
-            <SystemPanel
-              hostId={host.id}
-              state={data.system}
-              active={active}
-              fcState={data.fcState}
-              onLaunch={sendLRLaunchApp}
-              onTerminate={sendLRTerminateApp}
-            />
-          )}
-          {activeTab === 'federation-command' && (
-            <>
-              {data.ridealong && (
-                <RidealongPanel
-                  hostId={host.id}
-                  state={data.ridealong}
-                  fcState={data.fcState}
-                  sendLRRidealongCommand={sendLRRidealongCommand}
-                />
-              )}
-              {data.condoc && !data.ridealong && (
-                <CondocPanel state={data.condoc} fcState={data.fcState} />
-              )}
-              <FCCommandPanel
-                hostId={host.id}
-                fcState={data.fcState}
-                fcLog={data.fcLog}
-                sendLRCommand={sendLRCommand}
-              />
-            </>
-          )}
-          {activeTab === 'condoccer' && active && (
-            data.condoccer ? (
-              <iframe
-                className="condoccer-frame"
-                src={`/host/${host.id}/condoccer/`}
-                title={`condoccer on ${host.label}`}
-              />
-            ) : (
-              <div className="service-empty">
-                condoccer is not running on this host — launch it from the system tab
+        <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+          <div className="service-view">
+            <div className="service-name">{activeTab}</div>
+            {activeTab !== 'system' && activeTab !== 'files' && (
+              <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
+                <span className="health-dot" />
+                <span className="health-label">{getServiceStatus(activeTab)}</span>
               </div>
-            )
-          )}
-          {activeTab !== 'federation-command' && activeTab !== 'system' && !active && (
-            <div className="service-empty">local-representative on this host is not connected</div>
+            )}
+            {activeTab === 'system' && (
+              <SystemPanel
+                hostId={host.id}
+                state={data.system}
+                active={active}
+                fcState={data.fcState}
+                onLaunch={sendLRLaunchApp}
+                onTerminate={sendLRTerminateApp}
+              />
+            )}
+            {activeTab === 'files' && (
+              <FilesPanel
+                files={files}
+                active={active}
+                selectedId={selectedFileId}
+                onSelect={setSelectedFileId}
+              />
+            )}
+            {activeTab === 'federation-command' && (
+              <>
+                {data.ridealong && (
+                  <RidealongPanel
+                    hostId={host.id}
+                    state={data.ridealong}
+                    fcState={data.fcState}
+                    sendLRRidealongCommand={sendLRRidealongCommand}
+                  />
+                )}
+                {data.condoc && !data.ridealong && (
+                  <CondocPanel state={data.condoc} fcState={data.fcState} />
+                )}
+                <FCCommandPanel
+                  hostId={host.id}
+                  fcState={data.fcState}
+                  fcLog={data.fcLog}
+                  sendLRCommand={sendLRCommand}
+                />
+              </>
+            )}
+            {activeTab === 'condoccer' && active && (
+              data.condoccer ? (
+                <iframe
+                  className="condoccer-frame"
+                  src={`/host/${host.id}/condoccer/`}
+                  title={`condoccer on ${host.label}`}
+                />
+              ) : (
+                <div className="service-empty">
+                  condoccer is not running on this host — launch it from the system tab
+                </div>
+              )
+            )}
+            {activeTab !== 'federation-command' && activeTab !== 'system' && activeTab !== 'files' && !active && (
+              <div className="service-empty">local-representative on this host is not connected</div>
+            )}
+          </div>
+          {selectedFile && (
+            <FileDetailPane file={selectedFile} onClose={() => setSelectedFileId(null)} />
           )}
         </div>
       </div>

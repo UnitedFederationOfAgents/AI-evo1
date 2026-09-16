@@ -776,3 +776,185 @@ body {
 }
 
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* ---- Main pane with optional right-hand detail pane (files tab) ---- */
+
+.main-pane-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.main-pane-inner .service-view {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Files panel ---- */
+
+.files-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.files-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px dashed #3c3c3c;
+  border-radius: 6px;
+  padding: 24px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.files-dropzone:hover {
+  border-color: #555;
+  background: #1e1e1e;
+}
+
+.files-dropzone-active {
+  border-color: #007acc;
+  background: #14283a;
+}
+
+.files-dropzone-text {
+  font-size: 13px;
+  color: #aaa;
+}
+
+.files-dropzone-hint {
+  font-size: 11px;
+  color: #666;
+}
+
+.files-dropzone-input {
+  display: none;
+}
+
+.files-empty {
+  color: #888;
+  font-style: italic;
+  font-size: 13px;
+}
+
+.files-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 12px;
+}
+
+.files-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 6px;
+  cursor: pointer;
+  font-family: inherit;
+  color: #d4d4d4;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.files-item:hover {
+  background: #2a2a2a;
+  border-color: #555;
+}
+
+.files-item-active {
+  border-color: #007acc;
+  background: #14283a;
+}
+
+.file-icon {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.files-item-name {
+  font-size: 11px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- File detail pane ---- */
+
+.file-detail-pane {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.file-detail-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.file-detail-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.file-detail-close:hover { color: #d4d4d4; }
+
+.file-detail-icon {
+  display: flex;
+  justify-content: center;
+  font-size: 40px;
+}
+
+.file-detail-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-detail-label {
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.file-detail-value {
+  font-size: 12px;
+  color: #d4d4d4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

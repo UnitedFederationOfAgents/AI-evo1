@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,119 @@ func TestSweepExpiredFiles(t *testing.T) {
 	files := s.listFiles()
 	if len(files) != 1 || files[0].Name != "fresh.txt" {
 		t.Fatalf("sweepExpiredFiles left %+v, want only fresh.txt", files)
+	}
+}
+
+// TestUploadWritesManifestHiddenFromListing verifies an upload gets a
+// ".manifest_<id>.yaml" sidecar on disk that listFiles/GET never surfaces.
+func TestUploadWritesManifestHiddenFromListing(t *testing.T) {
+	s := newTestFileServer(t)
+
+	req := newUploadRequest(t, "hello.txt", []byte("hello world"))
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	files := s.listFiles()
+	if len(files) != 1 {
+		t.Fatalf("listFiles() = %d files, want 1 (manifest should not be listed)", len(files))
+	}
+	id := files[0].ID
+
+	manifestPath := filepath.Join(s.fileCacheDir, manifestName(id))
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest %s not written: %v", manifestPath, err)
+	}
+	if !strings.Contains(string(body), `name: "hello.txt"`) {
+		t.Errorf("manifest %s missing expected name field, got:\n%s", manifestPath, body)
+	}
+}
+
+// TestUploadRejectsManifestPrefixedName verifies a claimed filename starting
+// with manifestPrefix is refused rather than silently shadowing a real
+// manifest sidecar.
+func TestUploadRejectsManifestPrefixedName(t *testing.T) {
+	s := newTestFileServer(t)
+
+	req := newUploadRequest(t, manifestPrefix+"x.yaml", []byte("nope"))
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("manifest-prefixed upload: status = %d, want %d (no file could be saved)", rec.Code, http.StatusInternalServerError)
+	}
+	if files := s.listFiles(); len(files) != 0 {
+		t.Fatalf("manifest-prefixed upload should not have written a file, got %+v", files)
+	}
+}
+
+// TestSweepExpiredFilesRemovesManifest verifies the manifest sidecar goes with
+// its data file when the sweep removes an expired entry.
+func TestSweepExpiredFilesRemovesManifest(t *testing.T) {
+	s := newTestFileServer(t)
+
+	id := "aaaaaaaa_old.txt"
+	old := filepath.Join(s.fileCacheDir, id)
+	if err := os.WriteFile(old, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(s.fileCacheDir, manifestName(id))
+	if err := os.WriteFile(manifestPath, []byte("id: \"aaaaaaaa_old.txt\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-2 * fileCacheTTL)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	s.sweepExpiredFiles()
+
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Errorf("manifest %s should have been removed alongside its expired data file, stat err = %v", manifestPath, err)
+	}
+}
+
+// TestHandleFileRaw covers GET /api/files/<id>: inline by default, an
+// attachment Content-Disposition with ?download=1, and a 404 for a manifest
+// id (which should never be independently addressable).
+func TestHandleFileRaw(t *testing.T) {
+	s := newTestFileServer(t)
+
+	req := newUploadRequest(t, "hello.txt", []byte("hello world"))
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	id := s.listFiles()[0].ID
+
+	viewReq := httptest.NewRequest(http.MethodGet, "/api/files/"+id, nil)
+	viewRec := httptest.NewRecorder()
+	s.handleFileRaw(viewRec, viewReq)
+	if viewRec.Code != http.StatusOK {
+		t.Fatalf("raw view: status = %d, body = %s", viewRec.Code, viewRec.Body.String())
+	}
+	if viewRec.Body.String() != "hello world" {
+		t.Errorf("raw view body = %q, want %q", viewRec.Body.String(), "hello world")
+	}
+	if got := viewRec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "inline;") {
+		t.Errorf("raw view Content-Disposition = %q, want inline", got)
+	}
+
+	dlReq := httptest.NewRequest(http.MethodGet, "/api/files/"+id+"?download=1", nil)
+	dlRec := httptest.NewRecorder()
+	s.handleFileRaw(dlRec, dlReq)
+	if got := dlRec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("raw download Content-Disposition = %q, want attachment", got)
+	}
+
+	manifestReq := httptest.NewRequest(http.MethodGet, "/api/files/"+manifestName(id), nil)
+	manifestRec := httptest.NewRecorder()
+	s.handleFileRaw(manifestRec, manifestReq)
+	if manifestRec.Code != http.StatusNotFound {
+		t.Errorf("raw fetch of a manifest id: status = %d, want %d", manifestRec.Code, http.StatusNotFound)
 	}
 }
 

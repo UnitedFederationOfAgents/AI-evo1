@@ -82,8 +82,13 @@ Upload stays a **direct-LR-client-only** operation this increment: AC's
 `X-UFA-Proxied-By: agent-coordinator`, and LR's upload handler rejects any
 request carrying that header — so even a POST issued straight at
 `/host/<id>/api/files` through AC is refused server-side, not merely hidden
-from AC's UI. See [`docs/DistributedExchange.md`](../../docs/DistributedExchange.md)
-for how this might extend to chained input.
+from AC's UI. Viewing and downloading a file's bytes (`GET
+/host/<id>/api/files/<file-id>`, `?download=1` for an attachment) are **not**
+gated on that header — a read isn't the arbitrary-filesystem-write upload is
+— so AC's read-only files tab reuses LR's raw-serving route unmodified for
+its own viewer page and download button. See
+[`docs/DistributedExchange.md`](../../docs/DistributedExchange.md) for how
+upload might extend to chained input.
 
 ## WebSocket Protocol (AC ↔ Browser)
 

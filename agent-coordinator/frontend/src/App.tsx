@@ -592,13 +592,27 @@ function FileIcon({ kind }: { kind: string }) {
   return <span className={`file-icon file-icon-${kind}`}>{FILE_ICON[kind] ?? FILE_ICON.other}</span>
 }
 
+// fileRawUrl/fileDownloadUrl address a file's bytes through AC's existing
+// /host/<id>/* reverse proxy — local-representative's raw-serving route
+// (GET /api/files/<id>) isn't gated on the proxied-request header the way
+// uploads are, so viewing/downloading works the same here as connected
+// directly to that LR. See docs/DistributedExchange.md.
+function fileRawUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
+}
+
+function fileDownloadUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}?download=1`
+}
+
 function FilesPanel({
-  files, active, selectedId, onSelect,
+  files, active, selectedId, onSelect, onEnter,
 }: {
   files: FileInfo[]
   active: boolean
   selectedId: string | null
   onSelect: (id: string) => void
+  onEnter: (id: string) => void
 }) {
   if (!active) {
     return <div className="service-empty">local-representative on this host is not connected</div>
@@ -617,6 +631,7 @@ function FilesPanel({
               key={f.id}
               className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
               onClick={() => onSelect(f.id)}
+              onDoubleClick={() => onEnter(f.id)}
               title={f.name}
             >
               <FileIcon kind={f.kind} />
@@ -629,7 +644,14 @@ function FilesPanel({
   )
 }
 
-function FileDetailPane({ file, onClose }: { file: FileInfo; onClose: () => void }) {
+function FileDetailPane({
+  file, hostId, onClose, onEnter,
+}: {
+  file: FileInfo
+  hostId: string
+  onClose: () => void
+  onEnter: (id: string) => void
+}) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -665,6 +687,76 @@ function FileDetailPane({ file, onClose }: { file: FileInfo; onClose: () => void
           <span className="file-detail-value">{formatCountdown(file.expires_at, nowSec)}</span>
         </div>
       </div>
+      <div className="file-detail-actions">
+        <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
+          enter →
+        </button>
+        <a className="file-detail-download" href={fileDownloadUrl(hostId, file.id)} download={file.name}>
+          download
+        </a>
+      </div>
+    </div>
+  )
+}
+
+/* ---- File viewer ---- */
+
+// FileViewer mirrors local-representative's own files-tab viewer, reached the
+// same way (double-click a grid item, or the detail pane's "enter →"), just
+// fetching through this host's /host/<id>/* proxy instead of same-origin.
+function FileViewer({
+  hostId, fileId, file, onBack,
+}: {
+  hostId: string
+  fileId: string
+  file: FileInfo | null
+  onBack: () => void
+}) {
+  const [textContent, setTextContent] = useState<string | null>(null)
+  const [textError, setTextError] = useState<string | null>(null)
+  const rawUrl = fileRawUrl(hostId, fileId)
+
+  useEffect(() => {
+    setTextContent(null)
+    setTextError(null)
+    if (!file || file.kind !== 'text') return
+    let cancelled = false
+    fetch(rawUrl)
+      .then(resp => {
+        if (!resp.ok) throw new Error(`status ${resp.status}`)
+        return resp.text()
+      })
+      .then(text => { if (!cancelled) setTextContent(text) })
+      .catch(err => { if (!cancelled) setTextError(String(err)) })
+    return () => { cancelled = true }
+  }, [rawUrl, file?.kind])
+
+  return (
+    <div className="file-viewer">
+      <div className="file-viewer-header">
+        <button className="file-viewer-back" onClick={onBack}>← back</button>
+        <span className="file-viewer-name" title={file?.name ?? fileId}>{file?.name ?? fileId}</span>
+        {file && (
+          <a className="file-detail-download" href={fileDownloadUrl(hostId, fileId)} download={file.name}>
+            download
+          </a>
+        )}
+      </div>
+      <div className="file-viewer-body">
+        {!file ? (
+          <div className="file-viewer-empty">this file is no longer in the host-cache</div>
+        ) : file.kind === 'image' ? (
+          <img className="file-viewer-image" src={rawUrl} alt={file.name} />
+        ) : file.kind === 'text' ? (
+          textError ? (
+            <div className="file-viewer-empty">couldn't load preview: {textError}</div>
+          ) : (
+            <pre className="file-viewer-text">{textContent ?? 'loading…'}</pre>
+          )
+        ) : (
+          <div className="file-viewer-empty">no preview available for this file type — use download above</div>
+        )}
+      </div>
     </div>
   )
 }
@@ -681,6 +773,7 @@ function LRView({
 }) {
   const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
 
@@ -690,7 +783,12 @@ function LRView({
   }
 
   const files = data.files?.files ?? []
-  const selectedFile = activeTab === 'files' ? files.find(f => f.id === selectedFileId) ?? null : null
+  const selectedFile = activeTab === 'files' && !viewerFileId
+    ? files.find(f => f.id === selectedFileId) ?? null
+    : null
+  const viewerFile = activeTab === 'files' && viewerFileId
+    ? files.find(f => f.id === viewerFileId) ?? null
+    : null
 
   return (
     <div className="lr-view">
@@ -706,7 +804,7 @@ function LRView({
             <button
               key={svc}
               className={`tab${activeTab === svc ? ' tab-active' : ''}`}
-              onClick={() => { setActiveTab(svc); setSelectedFileId(null) }}
+              onClick={() => { setActiveTab(svc); setSelectedFileId(null); setViewerFileId(null) }}
             >
               {svc}
             </button>
@@ -733,12 +831,20 @@ function LRView({
                 onTerminate={sendLRTerminateApp}
               />
             )}
-            {activeTab === 'files' && (
+            {activeTab === 'files' && viewerFileId ? (
+              <FileViewer
+                hostId={host.id}
+                fileId={viewerFileId}
+                file={viewerFile}
+                onBack={() => setViewerFileId(null)}
+              />
+            ) : activeTab === 'files' && (
               <FilesPanel
                 files={files}
                 active={active}
                 selectedId={selectedFileId}
                 onSelect={setSelectedFileId}
+                onEnter={setViewerFileId}
               />
             )}
             {activeTab === 'federation-command' && (
@@ -780,7 +886,12 @@ function LRView({
             )}
           </div>
           {selectedFile && (
-            <FileDetailPane file={selectedFile} onClose={() => setSelectedFileId(null)} />
+            <FileDetailPane
+              file={selectedFile}
+              hostId={host.id}
+              onClose={() => setSelectedFileId(null)}
+              onEnter={setViewerFileId}
+            />
           )}
         </div>
       </div>

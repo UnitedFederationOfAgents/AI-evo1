@@ -674,6 +674,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
+	mux.HandleFunc("/api/files/", s.handleFileRaw)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

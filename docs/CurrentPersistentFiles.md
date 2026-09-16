@@ -53,17 +53,28 @@ agent-records-archive/
 **Flag:** `-file-cache-dir` (default: `/host-agent-files/exchange/host-cache`)
 
 Files dropped on LR's "files" tab (direct client only — see
-[`docs/DistributedExchange.md`](DistributedExchange.md)). Flat directory, no
-subfolders or metadata sidecar files:
+[`docs/DistributedExchange.md`](DistributedExchange.md)). Flat directory:
 
 ```
 host-cache/
-└── <8-hex>_<original-filename>   # e.g. 3f9a2b1c_report.pdf
+├── <8-hex>_<original-filename>              # e.g. 3f9a2b1c_report.pdf
+└── .manifest_<8-hex>_<original-filename>.yaml   # hidden sidecar, e.g.
+                                                  # .manifest_3f9a2b1c_report.pdf.yaml
 ```
 
 The 8-hex prefix makes concurrent uploads collision-free; LR strips it back
 off to show the original filename. Entries are swept once they are more than
 one hour old (checked every minute) — nothing here is meant to persist.
+
+Every upload also gets a `.manifest_<id>.yaml` sidecar (flat `key: value`
+YAML — id, name, kind, size, uploaded_at, expires_at) written alongside it.
+It's hidden from the "files" tab and never read back by LR — the listing is
+still recomputed from the data file's own mtime — it exists so an operator
+poking around the host-cache after an interrupted run can see when an entry
+was due to expire without guessing. Uploads whose claimed filename starts
+with `.manifest_` are refused; the sweep removes a manifest alongside its
+data file (and cleans up an orphaned manifest whose data file is already
+gone).
 
 ---
 

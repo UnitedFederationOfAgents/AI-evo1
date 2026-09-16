@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -33,6 +35,24 @@ const defaultFileCacheDir = "/host-agent-files/exchange/host-cache"
 // intentionally keeps file upload a direct-client-only operation — see
 // docs/DistributedExchange.md for how this might extend to chained input.
 const proxiedHeader = "X-UFA-Proxied-By"
+
+// manifestPrefix marks a host-cache entry as a hidden sidecar rather than a
+// file the "files" tab should list: alongside an uploaded "<id>" this
+// increment also writes "<manifestPrefix><id>.yaml" recording the same
+// details (name, kind, size, upload/expiry times) in a small flat-YAML file.
+// It exists so an operator poking around the host-cache after an interrupted
+// run can see when an entry is due to be swept without waiting on LR's
+// in-memory state (which is trivially recomputed from mtime anyway, but the
+// manifest also leaves room for other details later). Uploads whose claimed
+// filename starts with this prefix are refused, and the sweep/listing both
+// treat it as invisible to the files tab.
+const manifestPrefix = ".manifest_"
+
+// manifestName returns the sidecar filename for a host-cache entry "id",
+// e.g. "d992a7a9_debug.txt" -> ".manifest_d992a7a9_debug.txt.yaml".
+func manifestName(id string) string {
+	return manifestPrefix + id + ".yaml"
+}
 
 // FileInfo describes one file sitting in local-representative's host-cache.
 type FileInfo struct {
@@ -123,7 +143,7 @@ func (s *Server) listFiles() []FileInfo {
 	}
 	files := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || strings.HasPrefix(e.Name(), manifestPrefix) {
 			continue
 		}
 		info, err := e.Info()
@@ -164,17 +184,34 @@ func (s *Server) cleanupFilesLoop() {
 	}
 }
 
-// sweepExpiredFiles removes host-cache files past fileCacheTTL and, if any
-// were removed, broadcasts the updated listing.
+// sweepExpiredFiles removes host-cache files past fileCacheTTL (and their
+// manifest sidecars), plus any manifest left orphaned by its data file having
+// been removed some other way. If anything visible to the files tab was
+// removed, it broadcasts the updated listing.
 func (s *Server) sweepExpiredFiles() {
 	entries, err := os.ReadDir(s.fileCacheDir)
 	if err != nil {
 		return
 	}
+	present := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		present[e.Name()] = true
+	}
+
 	cutoff := time.Now().Add(-fileCacheTTL)
 	removed := false
 	for _, e := range entries {
 		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, manifestPrefix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(name, manifestPrefix), ".yaml")
+			if !present[id] {
+				if err := os.Remove(filepath.Join(s.fileCacheDir, name)); err != nil {
+					log.Printf("files: failed to remove orphaned manifest %s: %v", name, err)
+				}
+			}
 			continue
 		}
 		info, err := e.Info()
@@ -182,13 +219,14 @@ func (s *Server) sweepExpiredFiles() {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			path := filepath.Join(s.fileCacheDir, e.Name())
+			path := filepath.Join(s.fileCacheDir, name)
 			if err := os.Remove(path); err != nil {
-				log.Printf("files: failed to remove expired %s: %v", e.Name(), err)
+				log.Printf("files: failed to remove expired %s: %v", name, err)
 				continue
 			}
+			s.removeManifest(name)
 			log.Printf("files: removed expired host-cache file %s (uploaded %s ago)",
-				e.Name(), time.Since(info.ModTime()).Round(time.Second))
+				name, time.Since(info.ModTime()).Round(time.Second))
 			removed = true
 		}
 	}
@@ -198,7 +236,9 @@ func (s *Server) sweepExpiredFiles() {
 }
 
 // handleFilesAPI serves the files tab's REST surface: GET lists the
-// host-cache, POST uploads a new file into it.
+// host-cache, POST uploads a new file into it. A single file's bytes (for
+// the viewer / download button) are served by the sibling handleFileRaw,
+// registered at the "/api/files/" subtree.
 func (s *Server) handleFilesAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -256,7 +296,9 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 // saveUploadedFile writes one multipart file into the host-cache under a
-// collision-free "<8-hex>_<original-name>" filename.
+// collision-free "<8-hex>_<original-name>" filename, plus a hidden
+// ".manifest_<id>.yaml" sidecar recording the same details (see
+// manifestPrefix).
 func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 	src, err := fh.Open()
 	if err != nil {
@@ -265,6 +307,9 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 	defer src.Close()
 
 	name := sanitizeFilename(fh.Filename)
+	if strings.HasPrefix(name, manifestPrefix) {
+		return FileInfo{}, fmt.Errorf("upload rejected: filenames starting with %q are reserved for host-cache manifests", manifestPrefix)
+	}
 	id := randomID() + "_" + name
 	dst, err := os.OpenFile(filepath.Join(s.fileCacheDir, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -280,12 +325,101 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 
 	now := time.Now()
 	log.Printf("files: uploaded %s (%d bytes) -> host-cache/%s", name, n, id)
-	return FileInfo{
+	info := FileInfo{
 		ID:         id,
 		Name:       name,
 		Size:       n,
 		Kind:       classifyKind(name),
 		UploadedAt: now.Unix(),
 		ExpiresAt:  now.Add(fileCacheTTL).Unix(),
-	}, nil
+	}
+	s.writeManifest(info)
+	return info, nil
+}
+
+// writeManifest writes the hidden ".manifest_<id>.yaml" sidecar for a
+// freshly-saved host-cache entry (see manifestPrefix). It's a flat "key:
+// value" mapping, the same small YAML subset ufa-configurable reads
+// elsewhere in this repo — nothing parses it back today, it's for an
+// operator to read by hand. A write failure is logged and otherwise
+// swallowed: the upload itself already succeeded and shouldn't fail over a
+// sidecar note.
+func (s *Server) writeManifest(info FileInfo) {
+	var b strings.Builder
+	b.WriteString("# host-cache manifest -- hidden from the files tab, not read by local-representative\n")
+	fmt.Fprintf(&b, "id: %q\n", info.ID)
+	fmt.Fprintf(&b, "name: %q\n", info.Name)
+	fmt.Fprintf(&b, "kind: %s\n", info.Kind)
+	fmt.Fprintf(&b, "size: %d\n", info.Size)
+	fmt.Fprintf(&b, "uploaded_at: %s\n", time.Unix(info.UploadedAt, 0).UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "expires_at: %s\n", time.Unix(info.ExpiresAt, 0).UTC().Format(time.RFC3339))
+	path := filepath.Join(s.fileCacheDir, manifestName(info.ID))
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		log.Printf("files: failed to write manifest for %s: %v", info.ID, err)
+	}
+}
+
+// removeManifest deletes the manifest sidecar for a host-cache entry "id",
+// ignoring a missing file.
+func (s *Server) removeManifest(id string) {
+	path := filepath.Join(s.fileCacheDir, manifestName(id))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("files: failed to remove manifest for %s: %v", id, err)
+	}
+}
+
+// dispositionFilename makes an uploaded (attacker-influenced) display name
+// safe to embed inside a Content-Disposition header value.
+func dispositionFilename(name string) string {
+	name = strings.ReplaceAll(name, "\r", "")
+	name = strings.ReplaceAll(name, "\n", "")
+	name = strings.ReplaceAll(name, `"`, "'")
+	return name
+}
+
+// handleFileRaw serves one host-cache file's raw bytes: GET /api/files/<id>.
+// Without ?download=1 the response is "inline" (the files tab's viewer
+// embeds/fetches it directly); with ?download=1 it's an "attachment" so the
+// browser saves it (the file details pane's download button links here).
+// Unlike upload, this is not gated on proxiedHeader — a GET reaching this
+// through agent-coordinator's /host/<id>/* proxy (e.g. from AC's read-only
+// files tab) is served the same as a direct request; see
+// docs/DistributedExchange.md. Manifest sidecars are not addressable here:
+// any id starting with "." (which includes manifestPrefix) 404s, as does
+// anything that isn't a single path segment.
+func (s *Server) handleFileRaw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/files/")
+	if id == "" || strings.Contains(id, "/") || strings.HasPrefix(id, ".") {
+		http.NotFound(w, r)
+		return
+	}
+
+	f, err := os.Open(filepath.Join(s.fileCacheDir, id))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+
+	name := displayName(id)
+	disposition := "inline"
+	if r.URL.Query().Get("download") != "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", disposition+`; filename="`+dispositionFilename(name)+`"`)
+	ctype := mime.TypeByExtension(filepath.Ext(name))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ctype)
+	http.ServeContent(w, r, name, info.ModTime(), f)
 }

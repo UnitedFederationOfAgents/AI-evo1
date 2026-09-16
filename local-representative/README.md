@@ -165,8 +165,25 @@ set for this increment) of whatever sits in this LR's host-cache directory
 (`--file-cache-dir`, default `/host-agent-files/exchange/host-cache`). Drag a
 file from your system's file manager onto the tab to upload it; clicking a
 file opens a right-hand detail pane with its name, size, type and upload/expiry
-times. Every file is swept an hour after upload — nothing here is meant to
-persist.
+times, plus **enter →** and **download** buttons. Every file is swept an hour
+after upload — nothing here is meant to persist.
+
+Double-clicking a file (or the detail pane's **enter →** button) opens a
+full-page **viewer**, reminiscent of drilling into a step through condoccer:
+images render inline, text files are fetched and shown as plain text, and
+anything else falls back to a "use download" notice — a **← back** button
+returns to the grid. **download** (in the detail pane or the viewer) saves
+the file's bytes as-is, from `GET /api/files/<id>` (add `?download=1` for an
+attachment `Content-Disposition`; without it the response is `inline`, which
+is what the viewer embeds/fetches).
+
+Alongside every uploaded file, LR also writes a hidden
+`.manifest_<id>.yaml` sidecar into the host-cache (flat `key: value` YAML —
+name, kind, size, upload/expiry times). It's invisible to the files tab and
+not read back by LR itself; it exists so an operator can tell when a cache
+entry is due to be swept just by looking at the directory, even after an
+interrupted run. Uploads whose claimed filename starts with `.manifest_` are
+refused, and the sweep removes a manifest alongside its data file.
 
 Upload is **direct-client-only**: a browser connected straight to this LR can
 upload, but a request arriving through `agent-coordinator`'s `/host/<id>/*`
@@ -174,8 +191,12 @@ reverse proxy is refused (`agent-coordinator` stamps proxied requests with an
 `X-UFA-Proxied-By` header LR's upload handler checks for). The coordinator's
 own **files** tab is read-only for this reason — it shows the same listing
 (mirrored up as a `files-state` data message, same mechanism as the system
-tab) without a dropzone. See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md)
-for how this might extend to coordinator-mediated or cross-host transfer.
+tab) without a dropzone. Viewing and downloading are **not** gated on that
+header, though — a GET reaching `/api/files/<id>` through AC's proxy is
+served the same as a direct request, so the coordinator's files tab gets the
+same viewer/enter/download widgets, just proxied at `/host/<id>/api/files/<id>`.
+See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md) for how
+upload might also extend to coordinator-mediated or cross-host transfer.
 
 ### Auto-launch chains
 

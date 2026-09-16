@@ -958,3 +958,112 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.file-detail-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.file-detail-enter {
+  flex: 1;
+  background: #14283a;
+  border: 1px solid #245a7a;
+  border-radius: 3px;
+  color: #5bb8ff;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-enter:hover { background: #1e3a52; border-color: #4e8cca; }
+
+.file-detail-download {
+  flex: 1;
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  border-radius: 3px;
+  color: #6ec96e;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+}
+
+.file-detail-download:hover { background: #2e5a2e; }
+
+/* ---- File viewer ---- */
+
+.file-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 900px;
+}
+
+.file-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-viewer-back {
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #aaa;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.file-viewer-back:hover { background: #2a2a2a; border-color: #555; color: #d4d4d4; }
+
+.file-viewer-name {
+  font-size: 13px;
+  color: #d4d4d4;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-viewer-body {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 20px;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-viewer-image {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 4px;
+}
+
+.file-viewer-text {
+  align-self: stretch;
+  max-height: 70vh;
+  overflow: auto;
+  font-size: 12px;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.file-viewer-empty {
+  color: #888;
+  font-style: italic;
+  font-size: 13px;
+}

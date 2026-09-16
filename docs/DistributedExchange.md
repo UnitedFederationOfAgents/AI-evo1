@@ -19,13 +19,21 @@ reachable only by a browser connected directly to that LR — into
   LR's upload handler refuses any request carrying that header. This is
   enforced server-side on LR, not just by AC's UI omitting a dropzone — a
   `POST` aimed straight at `/host/<id>/api/files` through AC is refused too.
-- There is no cross-host transfer primitive at all yet: an LR only ever reads
-  and writes its own host-cache. There's also no "download bytes" endpoint —
-  the files tab only ever needed id/name/size/kind/timestamps, not content.
+- **Revision A added a content endpoint**: `GET /api/files/<id>` streams a
+  host-cache file's raw bytes (`?download=1` for an attachment
+  Content-Disposition), backing the files tab's viewer page and download
+  button. It is deliberately **not** gated on `proxiedHeader` — a read isn't
+  the write-to-an-arbitrary-filesystem operation upload is — so it already
+  works unmodified through AC's `/host/<id>/*` proxy, and AC's own (read-only)
+  files tab reuses it directly for its viewer/download widgets rather than
+  needing a proxy-owned route of its own.
+- There is still no cross-host transfer primitive: an LR only ever reads and
+  writes its own host-cache. Path 2 below now has less to add, since the
+  content endpoint it originally proposed already exists.
 
-The rest of this doc sketches what closing those two gaps — AC-mediated
-upload to a single LR, and LR-to-LR transfer brokered through AC — would look
-like, without committing to either yet.
+The rest of this doc sketches what closing that remaining gap — LR-to-LR
+transfer brokered through AC — would look like, without committing to it yet.
+(Path 1, AC-mediated *upload* to a single LR, is the other still-open gap.)
 
 ## Why direct-client-only was the right Step 1 boundary
 
@@ -81,19 +89,18 @@ protocol; it should keep describing *intent* ("host B, fetch id X from host
 A"), not carry the bytes. The transfer itself can reuse the HTTP surface that
 already exists:
 
-1. Add a content endpoint to LR: `GET /api/files/<id>/content` (streams the
-   raw bytes; not present in Step 1 since only metadata was needed). Subject
-   to the same `proxiedHeader` question as Path 1 — for a *read*, refusing
-   AC-proxied requests is far less obviously correct than for a write, so
-   this one plausibly stays open by default (an operator viewing a thumbnail
-   through AC is a normal case; downloading arbitrary bytes cross-host and
-   writing them to another box's filesystem is the operation that needs the
-   guard).
+1. **Already have this.** `GET /api/files/<id>` (added in Revision A for the
+   files tab's own viewer/download widgets) streams the raw bytes and is
+   already open through AC's proxy by default — exactly the "reads are far
+   less obviously in need of the guard than writes" shape this section
+   originally predicted. Nothing left to add here; Path 2 can reuse it as-is.
+   The guard that *does* still matter is on the write side: writing the
+   pulled bytes into host B's host-cache.
 2. AC gains a command, e.g. `__files:pull <src-host> <file-id>`, sent to host
    B over the existing representable command channel (mirrors `__system:` /
    `__ridealong:`).
 3. Host B's LR, on receiving that command, issues a plain HTTP `GET` against
-   `http://<ac-host>:<ac-http-port>/host/<src-host>/api/files/<id>/content`
+   `http://<ac-host>:<ac-http-port>/host/<src-host>/api/files/<id>`
    — i.e. it uses AC's own reverse proxy as the relay, the same path a
    browser would use to preview the file. AC never needs to buffer or
    understand the file; it's just the reachability bridge, same role it
@@ -107,13 +114,13 @@ already exists:
 ```
 LR (host A)              agent-coordinator              LR (host B)
   host-cache                                               host-cache
-  <id>_report.pdf ──HTTP GET──> /host/A/api/files/.../content
+  <id>_report.pdf ──HTTP GET──> /host/A/api/files/<id>
                                         │
                                         └──relayed to──> __files:pull command
                                                           issued to host B
                                                                 │
                                                                 ▼
-                                                    GET /host/A/api/files/.../content
+                                                    GET /host/A/api/files/<id>
                                                     (host B calling back through AC)
                                                                 │
                                                                 ▼

@@ -36,3 +36,24 @@ We'll be able to go into this viewer either through a double-click or an 'enter'
 Let's add a 'download' button to the file details dialog which does the obvious. (Downloads the file)
 
 On the file system where we store the files locally (/host-agent-files/exchange/host-cache/) we should also add files we hide from the 'files' window where we keep details (for a file 'd992a7a9_debug.txt' we might have '.manifest_d992a7a9_debug.txt.yaml'). We will refuse the upload of files starting with .manifest_. This will help us understand when cache entries will be deleted if our application was interrupted, as well as letting us store other details.
+
+
+prompt: [`01dfc63`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/01dfc63219b81e81c430d29eb3baf7166d00cf21) → reply: [`2cf82e0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2cf82e00002efd406e2e010ae595c7e0c5e45e92)
+
+## Reply A
+
+## Summary
+
+Implemented Revision A of Step 1: local-representative's `files` tab now has a full-page **viewer** (reached by double-clicking a grid item or an "enter →" button in the file details pane, mirroring condoccer's drill-down pattern) that renders images inline, fetches and shows text content, and falls back to a download prompt for other types; a **download** button/link was added to both the detail pane and the viewer, hitting a new `GET /api/files/<id>` route (`?download=1` for an attachment `Content-Disposition`, otherwise inline). Uploaded files now get a hidden `.manifest_<id>.yaml` sidecar in the host-cache (flat `key: value` YAML with name/kind/size/upload/expiry times) that's invisible to the files tab and cleaned up alongside its data file; uploads whose name starts with `.manifest_` are refused. Since the new raw-file route isn't gated on the AC-proxy header the way uploads are, agent-coordinator's read-only files tab picked up the same viewer/download widgets for free through its existing `/host/<id>/*` reverse proxy. Updated `docs/DistributedExchange.md`, `docs/CurrentPersistentFiles.md`, `local-representative/README.md`, and `agent-coordinator/docs/architecture.md` to match, and extended `files_test.go` with coverage for the manifest sidecar, the upload refusal, and the raw-serving endpoint.
+
+As before, `go build`/`npm`/`gofmt` are blocked in this sandbox, so this couldn't be compiled or run — I verified brace/paren balance across every changed file and did full re-reads instead. Worth a real build/test pass before merging.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

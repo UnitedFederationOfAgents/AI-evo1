@@ -619,15 +619,30 @@ function FileIcon({ kind }: { kind: string }) {
   return <span className={`file-icon file-icon-${kind}`}>{FILE_ICON[kind] ?? FILE_ICON.other}</span>
 }
 
+// fileRawUrl/fileDownloadUrl address a host-cache file's bytes directly
+// (GET /api/files/<id>, added alongside the viewer/download widgets — see
+// local-representative/files.go's handleFileRaw). Inline is what the viewer
+// embeds/fetches; ?download=1 gets an attachment Content-Disposition so the
+// browser saves it instead of navigating to it.
+function fileRawUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`
+}
+
+function fileDownloadUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}?download=1`
+}
+
 function FilesPanel({
   state,
   selectedId,
   onSelect,
+  onEnter,
   onUpload,
 }: {
   state: FilesStateMsg | null
   selectedId: string | null
   onSelect: (id: string) => void
+  onEnter: (id: string) => void
   onUpload?: (files: FileList) => void
 }) {
   const [dragging, setDragging] = useState(false)
@@ -671,6 +686,7 @@ function FilesPanel({
               key={f.id}
               className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
               onClick={() => onSelect(f.id)}
+              onDoubleClick={() => onEnter(f.id)}
               title={f.name}
             >
               <FileIcon kind={f.kind} />
@@ -683,7 +699,15 @@ function FilesPanel({
   )
 }
 
-function FileDetailPane({ file, onClose }: { file: FileInfo; onClose: () => void }) {
+function FileDetailPane({
+  file,
+  onClose,
+  onEnter,
+}: {
+  file: FileInfo
+  onClose: () => void
+  onEnter: (id: string) => void
+}) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -719,6 +743,84 @@ function FileDetailPane({ file, onClose }: { file: FileInfo; onClose: () => void
           <span className="file-detail-value">{formatCountdown(file.expires_at, nowSec)}</span>
         </div>
       </div>
+      <div className="file-detail-actions">
+        <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
+          enter →
+        </button>
+        <a
+          className="file-detail-download"
+          href={fileDownloadUrl(file.id)}
+          download={file.name}
+        >
+          download
+        </a>
+      </div>
+    </div>
+  )
+}
+
+/* ---- File viewer ---- */
+
+// FileViewer is the files tab's "drill-down" page, reached by double-clicking
+// a grid item or the detail pane's "enter →" widget (reminiscent of
+// condoccer's substep entry). Images render inline; text is fetched and shown
+// as plain text; anything else falls back to a "use download" notice — this
+// increment's wireframe icon set is deliberately small (text/image/other),
+// and so is its preview set.
+function FileViewer({
+  fileId,
+  file,
+  onBack,
+}: {
+  fileId: string
+  file: FileInfo | null
+  onBack: () => void
+}) {
+  const [textContent, setTextContent] = useState<string | null>(null)
+  const [textError, setTextError] = useState<string | null>(null)
+  const rawUrl = fileRawUrl(fileId)
+
+  useEffect(() => {
+    setTextContent(null)
+    setTextError(null)
+    if (!file || file.kind !== 'text') return
+    let cancelled = false
+    fetch(rawUrl)
+      .then(resp => {
+        if (!resp.ok) throw new Error(`status ${resp.status}`)
+        return resp.text()
+      })
+      .then(text => { if (!cancelled) setTextContent(text) })
+      .catch(err => { if (!cancelled) setTextError(String(err)) })
+    return () => { cancelled = true }
+  }, [rawUrl, file?.kind])
+
+  return (
+    <div className="file-viewer">
+      <div className="file-viewer-header">
+        <button className="file-viewer-back" onClick={onBack}>← back</button>
+        <span className="file-viewer-name" title={file?.name ?? fileId}>{file?.name ?? fileId}</span>
+        {file && (
+          <a className="file-detail-download" href={fileDownloadUrl(fileId)} download={file.name}>
+            download
+          </a>
+        )}
+      </div>
+      <div className="file-viewer-body">
+        {!file ? (
+          <div className="file-viewer-empty">this file is no longer in the host-cache</div>
+        ) : file.kind === 'image' ? (
+          <img className="file-viewer-image" src={rawUrl} alt={file.name} />
+        ) : file.kind === 'text' ? (
+          textError ? (
+            <div className="file-viewer-empty">couldn't load preview: {textError}</div>
+          ) : (
+            <pre className="file-viewer-text">{textContent ?? 'loading…'}</pre>
+          )
+        ) : (
+          <div className="file-viewer-empty">no preview available for this file type — use download above</div>
+        )}
+      </div>
     </div>
   )
 }
@@ -726,6 +828,7 @@ function FileDetailPane({ file, onClose }: { file: FileInfo; onClose: () => void
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('federation-command')
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const {
     connected, services, fcState, fcLog,
     ridealongState, condocState, acState, systemState, filesState,
@@ -737,8 +840,11 @@ export default function App() {
     return services.find(s => s.name === name)?.status ?? 'healthy'
   }
 
-  const selectedFile = activeTab === 'files'
+  const selectedFile = activeTab === 'files' && !viewerFileId
     ? filesState?.files.find(f => f.id === selectedFileId) ?? null
+    : null
+  const viewerFile = activeTab === 'files' && viewerFileId
+    ? filesState?.files.find(f => f.id === viewerFileId) ?? null
     : null
 
   return (
@@ -755,7 +861,7 @@ export default function App() {
             <button
               key={tab}
               className={`tab${activeTab === tab ? ' tab-active' : ''}`}
-              onClick={() => { setActiveTab(tab); setSelectedFileId(null) }}
+              onClick={() => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
             >
               {tab}
             </button>
@@ -777,11 +883,18 @@ export default function App() {
                 onLaunch={launchApp}
                 onTerminate={terminateApp}
               />
+            ) : activeTab === 'files' && viewerFileId ? (
+              <FileViewer
+                fileId={viewerFileId}
+                file={viewerFile}
+                onBack={() => setViewerFileId(null)}
+              />
             ) : activeTab === 'files' ? (
               <FilesPanel
                 state={filesState}
                 selectedId={selectedFileId}
                 onSelect={setSelectedFileId}
+                onEnter={setViewerFileId}
                 onUpload={uploadFiles}
               />
             ) : (
@@ -829,7 +942,11 @@ export default function App() {
             )}
           </div>
           {selectedFile && (
-            <FileDetailPane file={selectedFile} onClose={() => setSelectedFileId(null)} />
+            <FileDetailPane
+              file={selectedFile}
+              onClose={() => setSelectedFileId(null)}
+              onEnter={setViewerFileId}
+            />
           )}
         </div>
       </div>

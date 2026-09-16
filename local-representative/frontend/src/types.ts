@@ -67,8 +67,9 @@ export interface FileInfo {
   name: string
   size: number
   kind: string // "text" | "image" | "other" -- selects the wireframe icon
+  state: string // "cached" | "held" | "persisted" -- selects the icon's color
   uploaded_at: number // unix seconds
-  expires_at: number  // unix seconds
+  expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
 }
 
 export interface FilesStateMsg {

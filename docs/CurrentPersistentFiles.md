@@ -65,17 +65,33 @@ host-cache/
 
 The 8-hex prefix makes concurrent uploads collision-free; LR strips it back
 off to show the original filename. Entries are swept once they are more than
-one hour old (checked every minute) — nothing here is meant to persist.
+one hour old (checked every minute) — nothing here is meant to persist,
+unless the file details dialog's "hold" button has extended that to 72 hours
+(see below) or its "persist" button has moved the entry to the host-store.
 
 Every upload also gets a `.manifest_<id>.yaml` sidecar (flat `key: value`
-YAML — id, name, kind, size, uploaded_at, expires_at) written alongside it.
-It's hidden from the "files" tab and never read back by LR — the listing is
-still recomputed from the data file's own mtime — it exists so an operator
-poking around the host-cache after an interrupted run can see when an entry
-was due to expire without guessing. Uploads whose claimed filename starts
-with `.manifest_` are refused; the sweep removes a manifest alongside its
-data file (and cleans up an orphaned manifest whose data file is already
-gone).
+YAML — id, name, kind, size, uploaded_at, held, expires_at) written alongside
+it. It's hidden from the "files" tab; name/kind/size/uploaded_at are for an
+operator to read by hand, but `held`/`expires_at` ARE read back by LR — the
+files tab's "hold" button rewrites them (`held: true`, `expires_at` pushed
+out to 72 hours from the press) so the extended TTL survives an LR restart,
+since the data file's own mtime only ever reflects its original upload time.
+Uploads whose claimed filename starts with `.manifest_` are refused; the
+sweep removes a manifest alongside its data file (and cleans up an orphaned
+manifest whose data file is already gone).
+
+---
+
+## `/host-agent-files/exchange/host-store/`
+
+**Owner:** local-representative  
+**Flag:** `-host-store-dir` (default: `/host-agent-files/exchange/host-store`)
+
+Where the files tab's "persist" button (file details dialog, shown in place
+of "hold" once a file is already held) moves a host-cache entry to. Flat
+directory, same `<8-hex>_<original-filename>` naming as the host-cache —
+nothing here is ever swept, and there's no manifest sidecar (a persisted
+entry has no expiry left to track).
 
 ---
 

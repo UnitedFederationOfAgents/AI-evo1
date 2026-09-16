@@ -168,9 +168,11 @@ type Server struct {
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
 
-	// Files tab: where uploaded files land (see files.go). listFiles() scans it
-	// directly, so no further mutex-guarded state is needed here.
+	// Files tab: where uploaded files land, and where "persist" moves them to
+	// (see files.go). listFiles() scans these directly, so no further
+	// mutex-guarded state is needed here.
 	fileCacheDir string
+	hostStoreDir string
 }
 
 func newServer(lrName string) *Server {
@@ -674,7 +676,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
-	mux.HandleFunc("/api/files/", s.handleFileRaw)
+	mux.HandleFunc("/api/files/", s.handleFileItem)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -725,6 +727,7 @@ type appConfig struct {
 	condoccerPort string   // HTTP port a managed condoccer serves on / is reverse-proxied from
 	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
 	fileCacheDir  string   // directory uploaded files land in for the files tab
+	hostStoreDir  string   // directory a "persist" press moves a file into
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -770,6 +773,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		condoccerPort: pick("condoccer-port", defaults.condoccerPort),
 		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
 		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
+		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -798,6 +802,7 @@ func main() {
 	condoccerPort := flag.String("condoccer-port", "8080", "HTTP port a managed condoccer serves on; its UI is reverse-proxied at /condoccer/")
 	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
+	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -822,6 +827,7 @@ func main() {
 		condoccerPort: *condoccerPort,
 		condoccerRoot: *condoccerRoot,
 		fileCacheDir:  *fileCacheDir,
+		hostStoreDir:  *hostStoreDir,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -834,11 +840,15 @@ func main() {
 	s.condoccerRoot = cfg.condoccerRoot
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
+	s.hostStoreDir = cfg.hostStoreDir
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}
 	if err := ensureFileCacheDir(s.fileCacheDir); err != nil {
 		log.Fatal("file cache dir: ", err)
+	}
+	if err := ensureFileCacheDir(s.hostStoreDir); err != nil {
+		log.Fatal("host store dir: ", err)
 	}
 	go s.cleanupFilesLoop()
 

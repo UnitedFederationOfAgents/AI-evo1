@@ -28,7 +28,8 @@ make build      # build frontend + Go binary
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
 | `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
-| `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept |
+| `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
+| `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
 
 ## Configuration files
 
@@ -162,11 +163,12 @@ executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 
 The **files** tab shows a wireframe-icon view (text / image / other — a small
 set for this increment) of whatever sits in this LR's host-cache directory
-(`--file-cache-dir`, default `/host-agent-files/exchange/host-cache`). Drag a
-file from your system's file manager onto the tab to upload it; clicking a
-file opens a right-hand detail pane with its name, size, type and upload/expiry
-times, plus **enter →** and **download** buttons. Every file is swept an hour
-after upload — nothing here is meant to persist.
+(`--file-cache-dir`, default `/host-agent-files/exchange/host-cache`) plus its
+host-store directory (`--host-store-dir`). Drag a file from your system's file
+manager onto the tab to upload it; clicking a file opens a right-hand detail
+pane with its name, size, type and upload/expiry times, plus **enter →** and
+**download** buttons. A freshly-uploaded file is swept an hour after upload —
+its icon renders orange — unless held or persisted (see below).
 
 Double-clicking a file (or the detail pane's **enter →** button) opens a
 full-page **viewer**, reminiscent of drilling into a step through condoccer:
@@ -176,6 +178,17 @@ returns to the grid. **download** (in the detail pane or the viewer) saves
 the file's bytes as-is, from `GET /api/files/<id>` (add `?download=1` for an
 attachment `Content-Disposition`; without it the response is `inline`, which
 is what the viewer embeds/fetches).
+
+The detail pane also has **hold**/**persist** and **delete** buttons:
+
+- **hold** (`POST /api/files/<id>/hold`) extends a file's sweep-eligibility
+  from 1 hour to 72 hours from the press, and turns its icon yellow. The
+  button then reads **persist** in its place.
+- **persist** (`POST /api/files/<id>/persist`) moves a held file out of the
+  host-cache into the host-store, where it is never swept; its icon turns
+  green.
+- **delete** (`DELETE /api/files/<id>`, behind a confirm dialog) removes the
+  file — cached, held, or persisted — immediately.
 
 Alongside every uploaded file, LR also writes a hidden
 `.manifest_<id>.yaml` sidecar into the host-cache (flat `key: value` YAML —

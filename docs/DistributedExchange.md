@@ -35,6 +35,16 @@ reachable only by a browser connected directly to that LR — into
 - There is still no cross-host transfer primitive: an LR only ever reads and
   writes its own host-cache. Path 2 below now has less to add, since the
   content endpoint it originally proposed already exists.
+- **Revision C added the file-details dialog's state-changing actions**:
+  `DELETE /api/files/<id>`, `POST /api/files/<id>/hold`, and
+  `POST /api/files/<id>/persist`. Like the content endpoint above (and unlike
+  upload), none of these are gated on `proxiedHeader` — they act on a file
+  already listed in a host's files tab, which AC only shows once an operator
+  has explicitly selected that host, so the "ambiguity of target" concern
+  that justifies upload's blunt refusal doesn't apply. They pass through AC's
+  transparent `/host/<id>/*` proxy unmodified, same as a direct LR client —
+  no dedicated AC-owned relay route was needed for them, unlike Path 1's
+  upload relay.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

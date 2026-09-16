@@ -607,16 +607,49 @@ function formatCountdown(expiresAtSec: number, nowSec: number): string {
   return `${Math.floor(secs / 60)}m left`
 }
 
-// FILE_ICON is the very small wireframe icon set this increment supports:
-// text, image, and a catch-all for everything else.
-const FILE_ICON: Record<string, string> = {
-  text: '📄',
-  image: '🖼️',
-  other: '📦',
+// FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
+// this increment supports: text, image, and a catch-all for everything else.
+// Each renders in `currentColor`, so FileIcon's state-driven CSS class is
+// what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
+const FILE_ICON_PATH: Record<string, JSX.Element> = {
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h9l5 5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M14 2v6h6" strokeLinecap="round" />
+      <path d="M8 13h8M8 17h8M8 9h3" strokeLinecap="round" />
+    </svg>
+  ),
+  image: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <circle cx="8.5" cy="9.5" r="1.5" />
+      <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  other: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M12 2 3 7v10l9 5 9-5V7z" />
+      <path d="M3 7l9 5 9-5M12 12v10" strokeLinecap="round" />
+    </svg>
+  ),
 }
 
-function FileIcon({ kind }: { kind: string }) {
-  return <span className={`file-icon file-icon-${kind}`}>{FILE_ICON[kind] ?? FILE_ICON.other}</span>
+// FILE_STATE_CLASS drives the icon color the file-details dialog's
+// hold/persist actions describe: orange while short-term cached, yellow once
+// held, green once persisted to the host-store.
+const FILE_STATE_CLASS: Record<string, string> = {
+  cached: 'file-state-cached',
+  held: 'file-state-held',
+  persisted: 'file-state-persisted',
+}
+
+function FileIcon({ kind, state }: { kind: string; state?: string }) {
+  const stateClass = FILE_STATE_CLASS[state ?? ''] ?? FILE_STATE_CLASS.cached
+  return (
+    <span className={`file-icon file-icon-${kind} ${stateClass}`}>
+      {FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
+    </span>
+  )
 }
 
 // fileRawUrl/fileDownloadUrl address a host-cache file's bytes directly
@@ -630,6 +663,22 @@ function fileRawUrl(id: string): string {
 
 function fileDownloadUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}?download=1`
+}
+
+// fileHoldUrl/filePersistUrl back the file-details dialog's "hold"/"persist"
+// buttons (POST, no body -- see local-representative/files.go's
+// handleFileHold/handleFilePersist). fileDeleteUrl backs its "delete" button
+// (DELETE, same address as fileRawUrl's GET).
+function fileHoldUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/hold`
+}
+
+function filePersistUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/persist`
+}
+
+function fileDeleteUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`
 }
 
 function FilesPanel({
@@ -689,7 +738,7 @@ function FilesPanel({
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
             >
-              <FileIcon kind={f.kind} />
+              <FileIcon kind={f.kind} state={f.state} />
               <span className="files-item-name">{f.name}</span>
             </button>
           ))}
@@ -709,10 +758,42 @@ function FileDetailPane({
   onEnter: (id: string) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const [busy, setBusy] = useState(false)
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
     return () => clearInterval(id)
   }, [])
+
+  // runAction hits one of the state-changing routes (hold/persist/delete):
+  // the files-tab listing itself refreshes via the next "files-state"
+  // broadcast, not from this response -- this just reports whether the
+  // request was accepted.
+  const runAction = useCallback(async (url: string, method: string): Promise<boolean> => {
+    setBusy(true)
+    try {
+      const resp = await fetch(url, { method })
+      if (!resp.ok) {
+        console.error('file action failed:', method, url, resp.status, await resp.text())
+        return false
+      }
+      return true
+    } catch (err) {
+      console.error('file action failed:', method, url, err)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const handleHoldOrPersist = () => {
+    const url = file.state === 'held' ? filePersistUrl(file.id) : fileHoldUrl(file.id)
+    void runAction(url, 'POST')
+  }
+
+  const handleDelete = () => {
+    if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
+    void runAction(fileDeleteUrl(file.id), 'DELETE').then(ok => { if (ok) onClose() })
+  }
 
   return (
     <div className="file-detail-pane">
@@ -720,7 +801,7 @@ function FileDetailPane({
         <span className="file-detail-title">file details</span>
         <button className="file-detail-close" onClick={onClose}>×</button>
       </div>
-      <div className="file-detail-icon"><FileIcon kind={file.kind} /></div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} /></div>
       <div className="file-detail-rows">
         <div className="file-detail-row">
           <span className="file-detail-label">name</span>
@@ -739,8 +820,10 @@ function FileDetailPane({
           <span className="file-detail-value">{formatAgo(file.uploaded_at, nowSec)}</span>
         </div>
         <div className="file-detail-row">
-          <span className="file-detail-label">expires</span>
-          <span className="file-detail-value">{formatCountdown(file.expires_at, nowSec)}</span>
+          <span className="file-detail-label">{file.state === 'persisted' ? 'status' : 'expires'}</span>
+          <span className="file-detail-value">
+            {file.state === 'persisted' ? 'persisted — never expires' : formatCountdown(file.expires_at, nowSec)}
+          </span>
         </div>
       </div>
       <div className="file-detail-actions">
@@ -754,6 +837,16 @@ function FileDetailPane({
         >
           download
         </a>
+      </div>
+      <div className="file-detail-actions">
+        {file.state !== 'persisted' && (
+          <button className="file-detail-hold" onClick={handleHoldOrPersist} disabled={busy}>
+            {file.state === 'held' ? 'persist' : 'hold'}
+          </button>
+        )}
+        <button className="file-detail-delete" onClick={handleDelete} disabled={busy}>
+          delete
+        </button>
       </div>
     </div>
   )

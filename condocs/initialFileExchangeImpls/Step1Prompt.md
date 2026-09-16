@@ -49,11 +49,10 @@ Implemented Revision A of Step 1: local-representative's `files` tab now has a f
 As before, `go build`/`npm`/`gofmt` are blocked in this sandbox, so this couldn't be compiled or run — I verified brace/paren balance across every changed file and did full re-reads instead. Worth a real build/test pass before merging.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Now let's add the capability to agent-coordinator to manage file transfers.
 
+AC acts as a relay only for now - it does not use local filesystem persistence in its own location or look at LR's.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We see the 'files' dialog through AC and we can perform the same controls, but in this case the web client is talking to AC which is in-turn using the direct channel it maintains with an LR instance to relay the file.

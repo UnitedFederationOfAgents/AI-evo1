@@ -12,6 +12,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"github.com/google/uuid"
 	"representable"
 	ufaconfig "ufa-configurable"
+	ufahostid "ufa-hostid"
 )
 
 // Version information
@@ -60,12 +62,21 @@ const (
 
 // Environment variables
 const (
-	EnvAgentRecordsPath = "AGENT_RECORDS_PATH"
-	EnvAgentName        = "AGENT_NAME"
-	EnvAgentModel       = "AGENT_MODEL"
-	EnvAgentSession     = "AGENT_SESSION"
+	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
+	EnvAgentName               = "AGENT_NAME"
+	EnvAgentModel              = "AGENT_MODEL"
+	EnvAgentSession             = "AGENT_SESSION"
+	EnvUFAHead                  = "UFA_HEAD"
 	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 )
+
+// fcHeadID identifies this FC instance for the duration of its lifecycle.
+// Initialized once in main() as "fc-<4-char-random-alphanumeric>".
+var fcHeadID string
+
+// fcHostID is the stable per-host identifier, resolved once in main() via ufahostid.
+var fcHostID string
 
 // Available agents (must match ambiguous-agent configurations)
 var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
@@ -170,6 +181,38 @@ var (
 		ModeWrite:   lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true), // orange
 		ModeExecute: lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true), // red
 	}
+)
+
+var (
+	pickerBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("39"))
+
+	pickerTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39")).
+				Bold(true)
+
+	pickerFilterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220"))
+
+	pickerSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("82")).
+				Bold(true)
+
+	pickerEntryStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252"))
+
+	pickerCurrentStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
+
+	pickerHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("238")).
+				Italic(true)
+
+	pickerEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
 )
 
 // completeFilepath returns filepath completion candidates for the given prefix
@@ -284,6 +327,8 @@ type CommandRecord struct {
 	Timestamp string `json:"ts"`
 	DeltaMs   int64  `json:"delta_ms"`
 	ExitCode  int    `json:"exit"`
+	Host      string `json:"host,omitempty"`
+	Head      string `json:"head,omitempty"`
 }
 
 // ===== BUBBLETEA MODEL =====
@@ -341,6 +386,9 @@ type appModel struct {
 	// Condoc state
 	condoc         *CondocSession
 	condocDynapane CondocDynapane
+
+	// Session picker state
+	sessionPicker *SessionPicker
 
 	// Visual log state (scrollback-log)
 	visualLogFile *os.File
@@ -410,6 +458,53 @@ type ridealongFixDoneMsg struct {
 
 type ridealongCustomCmdDoneMsg struct {
 	exitCode int
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
+type sessionNewDoneMsg struct {
+	exitCode     int
+	newSessionID string
+	line         string
+	cmdTime      time.Time
+	deltaMs      int64
+}
+
+type sessionPickerEntry struct {
+	id        string
+	name      string
+	fileCount int
+}
+
+// SessionPicker holds state for the interactive session-selection overlay.
+type SessionPicker struct {
+	entries []sessionPickerEntry
+	filter  string
+	cursor  int
+	line    string
+	cmdTime time.Time
+	deltaMs int64
+}
+
+func (sp *SessionPicker) filteredEntries() []sessionPickerEntry {
+	if sp.filter == "" {
+		return sp.entries
+	}
+	lower := strings.ToLower(sp.filter)
+	var out []sessionPickerEntry
+	for _, e := range sp.entries {
+		if strings.Contains(strings.ToLower(e.id), lower) ||
+			strings.Contains(strings.ToLower(e.name), lower) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+type sessionRenameDoneMsg struct {
+	exitCode int
+	newName  string
 	line     string
 	cmdTime  time.Time
 	deltaMs  int64
@@ -747,7 +842,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"),
 		sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"),
 		sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"),
-		sessionStyle.Render("  records: 'list-sessions' | add '-provide-records <id>' to agent command"),
+		sessionStyle.Render("  records: 'list-sessions' | 'select-session' to switch interactively | add '-provide-records <id>' to agent command"),
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
@@ -779,6 +874,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle condoc mode: route through menu key handler.
 		if m.condoc != nil && m.condoc.active {
 			return m.handleCondocKey(msg)
+		}
+		// Handle interactive session picker.
+		if m.sessionPicker != nil {
+			return m.handleSessionPickerKey(msg)
 		}
 
 		switch msg.Type {
@@ -870,6 +969,53 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
 		}
 		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		m.prevInputLen = 0
+		return m, m.blinker.ResetTick()
+
+	case sessionNewDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		if msg.exitCode == 0 && msg.newSessionID != "" {
+			newM, switchErr := m.switchToSession(msg.newSessionID)
+			if switchErr == nil {
+				newM.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 0)
+				if !newM.blinker.IsRemoteControlActive() {
+					newM.blinker.SetState(BlinkerIdle)
+				}
+				newM.prevInputLen = 0
+				return newM, tea.Batch(tea.Println(successStyle.Render("new session: "+newM.sessionDir)), newM.blinker.ResetTick())
+			}
+		}
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		m.prevInputLen = 0
+		return m, m.blinker.ResetTick()
+
+	case sessionRenameDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		if msg.exitCode == 0 && msg.newName != "" {
+			if err := updateSessionName(m.sessionDir, msg.newName); err != nil {
+				m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 1)
+				if !m.blinker.IsRemoteControlActive() {
+					m.blinker.SetState(BlinkerIdle)
+				}
+				m.prevInputLen = 0
+				return m, tea.Batch(tea.Println(errorStyle.Render("rename-session: "+err.Error())), m.blinker.ResetTick())
+			}
+			m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 0)
+			if !m.blinker.IsRemoteControlActive() {
+				m.blinker.SetState(BlinkerIdle)
+			}
+			m.prevInputLen = 0
+			return m, tea.Batch(tea.Println(successStyle.Render("session renamed to: "+msg.newName)), m.blinker.ResetTick())
+		}
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		if !m.blinker.IsRemoteControlActive() {
 			m.blinker.SetState(BlinkerIdle)
 		}
@@ -1264,7 +1410,9 @@ func (m appModel) View() string {
 	}
 	// Show the highest-priority dynapane that is active.
 	var pane string
-	if m.ridealongDynapane.IsActive() {
+	if m.sessionPicker != nil {
+		pane = m.sessionPickerView(m.windowWidth)
+	} else if m.ridealongDynapane.IsActive() {
 		pane = m.ridealongDynapane.View(m.windowWidth)
 	} else if m.condocDynapane.IsActive() {
 		pane = m.condocDynapane.View(m.windowWidth)
@@ -1832,9 +1980,31 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
 	}
 
+	// select-session — interactive picker not available inside ridealong
+	if line == "select-session" {
+		return true, m, seqPrint(errorStyle.Render("select-session: interactive picker not available in ridealong context — use set-session <id>"), 1)
+	}
+
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		var newSessionID string
+		if strings.HasPrefix(args, "-n ") {
+			name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+			if name == "" {
+				return true, m, seqPrint(errorStyle.Render("usage: set-session -n <name>"), 1)
+			}
+			foundID, findErr := findSessionByName(m.recordsPath, name)
+			if findErr != nil {
+				return true, m, seqPrint(errorStyle.Render("set-session: "+findErr.Error()), 1)
+			}
+			newSessionID = foundID
+		} else {
+			newSessionID = args
+		}
+		if strings.HasSuffix(newSessionID, "-default") {
+			return true, m, seqPrint(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"), 1)
+		}
 		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
 		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
 			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
@@ -1874,6 +2044,33 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		m.sessionDir = newSessionDir
 		os.Setenv(EnvAgentSession, newSessionID)
 		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
+	}
+
+	// new-session [name] — creates a new named session via clauditable
+	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
+		name := strings.TrimSpace(strings.TrimPrefix(line, "new-session"))
+		if name == "" {
+			name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
+		}
+		clauditablePath, findErr := findBinary("clauditable")
+		if findErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: clauditable not found — "+findErr.Error()), 1)
+		}
+		cmd := exec.Command(clauditablePath, "new-session", name)
+		cmd.Env = append(environWithoutClauditableGuard(), EnvAgentRecordsPath+"="+m.recordsPath)
+		out, runErr := cmd.Output()
+		if runErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+runErr.Error()), 1)
+		}
+		newID := strings.TrimSpace(string(out))
+		if newID == "" {
+			return true, m, seqPrint(errorStyle.Render("new-session: clauditable returned empty session ID"), 1)
+		}
+		newM, switchErr := m.switchToSession(newID)
+		if switchErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+switchErr.Error()), 1)
+		}
+		return true, newM, seqPrint(successStyle.Render("new session: "+newM.sessionDir), 0)
 	}
 
 	// agent <args> — runs subprocess but advances ridealong when done
@@ -1944,6 +2141,43 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, tea.Sequence(cmd, mkDone(0, ""))
 	}
 
+	// get-session
+	if line == "get-session" {
+		return true, m, seqPrint(renderSessionInfo(m.sessionID, m.sessionDir), 0)
+	}
+
+	// get-head
+	if line == "get-head" {
+		return true, m, seqPrint(renderHeadInfo(fcHeadID), 0)
+	}
+
+	// describe-session [-a] — -a not supported in ridealong
+	if line == "describe-session" || strings.HasPrefix(line, "describe-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "describe-session"))
+		if args == "-a" {
+			return true, m, seqPrint(errorStyle.Render("describe-session: -a flag not supported in ridealong context"), 1)
+		}
+		return true, m, seqPrint(renderSessionDescribe(m.sessionID, m.sessionDir), 0)
+	}
+
+	// rename-session [name|-a] — -a not supported in ridealong
+	if line == "rename-session" || strings.HasPrefix(line, "rename-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "rename-session"))
+		if strings.HasSuffix(m.sessionID, "-default") {
+			return true, m, seqPrint(errorStyle.Render("rename-session: cannot rename a default session"), 1)
+		}
+		if args == "" {
+			return true, m, seqPrint(errorStyle.Render("rename-session: provide a name or use -a"), 1)
+		}
+		if args == "-a" {
+			return true, m, seqPrint(errorStyle.Render("rename-session: -a flag not supported in ridealong context"), 1)
+		}
+		if err := updateSessionName(m.sessionDir, args); err != nil {
+			return true, m, seqPrint(errorStyle.Render("rename-session: "+err.Error()), 1)
+		}
+		return true, m, seqPrint(successStyle.Render("session renamed to: "+args), 0)
+	}
+
 	return false, m, nil
 }
 
@@ -1969,6 +2203,170 @@ func (m appModel) handleCondocKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 		return m.exitCondoc()
 	default:
 		return m, m.blinker.StartFlash()
+	}
+}
+
+// handleSessionPickerKey handles key presses while the interactive session picker is active.
+func (m appModel) handleSessionPickerKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	sp := m.sessionPicker
+	switch msg.Type {
+	case tea.KeyUp:
+		if sp.cursor > 0 {
+			sp.cursor--
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		filtered := sp.filteredEntries()
+		if sp.cursor < len(filtered)-1 {
+			sp.cursor++
+		}
+		return m, nil
+
+	case tea.KeyEnter:
+		filtered := sp.filteredEntries()
+		if len(filtered) == 0 {
+			return m, nil
+		}
+		selected := filtered[sp.cursor]
+		cmdLine := sp.line
+		cmdTime := sp.cmdTime
+		deltaMs := sp.deltaMs
+		m.sessionPicker = nil
+		if selected.id == m.sessionID {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 0)
+			return m, tea.Println(sessionStyle.Render("already on session: " + selected.id))
+		}
+		newM, switchErr := m.switchToSession(selected.id)
+		if switchErr != nil {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-session: " + switchErr.Error()))
+		}
+		newM.logRecord(cmdLine, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("session set to: " + newM.sessionDir))
+
+	case tea.KeyEsc, tea.KeyCtrlC:
+		cmdLine := sp.line
+		cmdTime := sp.cmdTime
+		deltaMs := sp.deltaMs
+		m.sessionPicker = nil
+		m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+		return m, tea.Println(sessionStyle.Render("select-session: cancelled"))
+
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if len(sp.filter) > 0 {
+			runes := []rune(sp.filter)
+			sp.filter = string(runes[:len(runes)-1])
+			sp.cursor = 0
+		}
+		return m, nil
+
+	case tea.KeyRunes:
+		sp.filter += string(msg.Runes)
+		sp.cursor = 0
+		return m, nil
+
+	case tea.KeySpace:
+		sp.filter += " "
+		sp.cursor = 0
+		return m, nil
+
+	default:
+		return m, nil
+	}
+}
+
+// sessionPickerView renders the interactive session-selection overlay.
+func (m appModel) sessionPickerView(windowWidth int) string {
+	sp := m.sessionPicker
+	filtered := sp.filteredEntries()
+	cursor := sp.cursor
+	if len(filtered) > 0 && cursor >= len(filtered) {
+		cursor = len(filtered) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+
+	if windowWidth <= 0 {
+		windowWidth = 100
+	}
+	innerWidth := windowWidth - 4
+	if innerWidth < 40 {
+		innerWidth = 40
+	}
+
+	divider := sessionStyle.Render(strings.Repeat("─", innerWidth))
+
+	var rows []string
+	filterDisplay := sp.filter + "█"
+	rows = append(rows,
+		pickerTitleStyle.Render("select session"),
+		pickerFilterStyle.Render("filter: "+filterDisplay),
+		divider,
+	)
+
+	if len(filtered) == 0 {
+		rows = append(rows, pickerEmptyStyle.Render("  (no sessions match)"))
+	} else {
+		for i, entry := range filtered {
+			nameStr := ""
+			if entry.name != "" {
+				nameStr = " — " + entry.name
+			}
+			currentSuffix := ""
+			if entry.id == m.sessionID {
+				currentSuffix = pickerCurrentStyle.Render(" (current)")
+			}
+			row := fmt.Sprintf("%s (%d files)%s%s", entry.id, entry.fileCount, nameStr, currentSuffix)
+			if i == cursor {
+				rows = append(rows, pickerSelectedStyle.Render("▸ "+row))
+			} else {
+				rows = append(rows, pickerEntryStyle.Render("  "+row))
+			}
+		}
+	}
+
+	rows = append(rows, divider,
+		pickerHintStyle.Render("  ↑↓ navigate  enter to select  esc to cancel  type to filter  backspace to clear"),
+	)
+
+	content := strings.Join(rows, "\n")
+	pane := pickerBorderStyle.Width(innerWidth).Render(content)
+	return pane + "\n"
+}
+
+// buildSessionPicker reads the sessions directory and returns an initialised SessionPicker,
+// or nil if the directory cannot be read.
+func buildSessionPicker(recordsPath string, line string, cmdTime time.Time, deltaMs int64) *SessionPicker {
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, e := range entries {
+		if e.IsDir() {
+			ids = append(ids, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+
+	pickerEntries := make([]sessionPickerEntry, 0, len(ids))
+	for _, id := range ids {
+		sessionPath := filepath.Join(recordsPath, id)
+		files, _ := os.ReadDir(sessionPath)
+		name := readSessionName(sessionPath)
+		pickerEntries = append(pickerEntries, sessionPickerEntry{
+			id:        id,
+			name:      name,
+			fileCount: len(files),
+		})
+	}
+	return &SessionPicker{
+		entries: pickerEntries,
+		line:    line,
+		cmdTime: cmdTime,
+		deltaMs: deltaMs,
 	}
 }
 
@@ -2459,6 +2857,8 @@ func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitC
 		Timestamp: cmdTime.Format(time.RFC3339),
 		DeltaMs:   deltaMs,
 		ExitCode:  exitCode,
+		Host:      fcHostID,
+		Head:      fcHeadID,
 	}
 	m.encoder.Encode(record)
 }
@@ -2722,9 +3122,39 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
 	}
 
+	if line == "select-session" {
+		sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
+		if sp == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-session: failed to read sessions directory"))
+		}
+		m.sessionPicker = sp
+		return m, nil
+	}
+
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		var newSessionID string
+		if strings.HasPrefix(args, "-n ") {
+			name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+			if name == "" {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("usage: set-session -n <name>"))
+			}
+			foundID, findErr := findSessionByName(m.recordsPath, name)
+			if findErr != nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("set-session: " + findErr.Error()))
+			}
+			newSessionID = foundID
+		} else {
+			newSessionID = args
+		}
+		if strings.HasSuffix(newSessionID, "-default") {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"))
+		}
 		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
 		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
@@ -2771,6 +3201,12 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		os.Setenv(EnvAgentSession, newSessionID)
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render("session reset to: " + newSessionDir))
+	}
+
+	// new-session [name] — creates a new named session via clauditable
+	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
+		name := strings.TrimSpace(strings.TrimPrefix(line, "new-session"))
+		return m.handleNewSession(name, line, cmdTime, deltaMs)
 	}
 
 	// agent <args>
@@ -2843,6 +3279,35 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(successStyle.Render("scrollback log cleared: " + path))
 	}
 
+	// get-session
+	if line == "get-session" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
+	}
+
+	// get-head
+	if line == "get-head" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHeadInfo(fcHeadID))
+	}
+
+	// describe-session [-a]
+	if line == "describe-session" || strings.HasPrefix(line, "describe-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "describe-session"))
+		return m.handleDescribeSession(args, line, cmdTime, deltaMs)
+	}
+
+	// rename-session [name|-a]
+	if line == "rename-session" || strings.HasPrefix(line, "rename-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "rename-session"))
+		return m.handleRenameSession(args, line, cmdTime, deltaMs)
+	}
+
+	// ufa [subcommand...]
+	if line == "ufa" || strings.HasPrefix(line, "ufa ") {
+		return m.handleUFACommand(line, cmdTime, deltaMs)
+	}
+
 	// Regular command - wrap with clauditable
 	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
@@ -2853,6 +3318,601 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			deltaMs:  deltaMs,
 		}
 	})
+}
+
+// switchToSession opens a new session log file and updates all session state.
+// Does not log a command record — callers are responsible for that.
+func (m appModel) switchToSession(newID string) (appModel, error) {
+	newSessionDir := filepath.Join(m.recordsPath, newID)
+	newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return m, err
+	}
+	m.logFile.Close()
+	m.logFile = newLogFile
+	m.encoder = json.NewEncoder(newLogFile)
+	m.sessionID = newID
+	m.sessionDir = newSessionDir
+	os.Setenv(EnvAgentSession, newID)
+	return m, nil
+}
+
+// handleNewSession creates a new named session via clauditable.
+// If name is empty, it launches an interactive bash prompt; otherwise calls clauditable synchronously.
+func (m appModel) handleNewSession(name, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	clauditablePath, findErr := findBinary("clauditable")
+	if findErr != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("new-session: clauditable not found — " + findErr.Error()))
+	}
+
+	if name != "" {
+		cmd := exec.Command(clauditablePath, "new-session", name)
+		cmd.Env = append(environWithoutClauditableGuard(), EnvAgentRecordsPath+"="+m.recordsPath)
+		out, runErr := cmd.Output()
+		if runErr != nil {
+			msg := runErr.Error()
+			if ee, ok := runErr.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+				msg = strings.TrimSpace(string(ee.Stderr))
+			}
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: " + msg))
+		}
+		newID := strings.TrimSpace(string(out))
+		if newID == "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: clauditable returned empty session ID"))
+		}
+		newM, switchErr := m.switchToSession(newID)
+		if switchErr != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: " + switchErr.Error()))
+		}
+		newM.logRecord(line, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("new session: " + newM.sessionDir))
+	}
+
+	// Interactive: bash prompt writes session ID to a temp file.
+	tmpFile, tmpErr := os.CreateTemp("", "ufa-new-session-*")
+	if tmpErr != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("new-session: " + tmpErr.Error()))
+	}
+	tmpFile.Close()
+	tmpPath := tmpFile.Name()
+	script := buildNewSessionScript(clauditablePath, m.recordsPath, tmpPath)
+	execCmd := exec.Command("bash", "-c", script)
+	return m, tea.ExecProcess(execCmd, func(procErr error) tea.Msg {
+		defer os.Remove(tmpPath)
+		exitCode := extractExitCode(procErr)
+		newID := ""
+		if exitCode == 0 {
+			if data, readErr := os.ReadFile(tmpPath); readErr == nil {
+				newID = strings.TrimSpace(string(data))
+			}
+			if newID == "" {
+				exitCode = 1
+			}
+		}
+		return sessionNewDoneMsg{exitCode: exitCode, newSessionID: newID, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+	})
+}
+
+// buildNewSessionScript returns a bash script that prompts for a session name,
+// calls clauditable new-session, and writes the resulting session ID to tmpPath.
+func buildNewSessionScript(clauditablePath, recordsPath, tmpPath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; R='\033[0m'
+printf "\n"
+printf "${Y}  ╔═══════════════════════════╗${R}\n"
+printf "${Y}  ║  ✦  New Session            ║${R}\n"
+printf "${Y}  ╚═══════════════════════════╝${R}\n"
+printf "\n"
+read -p "  Enter session name (blank for unnamed): " _ufa_name
+if [ -z "$_ufa_name" ]; then
+    _ufa_name="Unnamed - $(date '+%%Y-%%m-%%d - %%H:%%M:%%S')"
+fi
+AGENT_RECORDS_PATH=%s %s new-session "$_ufa_name" > %s
+`, escape(recordsPath), escape(clauditablePath), escape(tmpPath))
+}
+
+// handleUFACommand dispatches ufa subcommands.
+func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	sub := strings.TrimSpace(strings.TrimPrefix(line, "ufa"))
+
+	switch sub {
+	case "", "help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHelpText())
+
+	case "host", "host help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHostHelpText())
+
+	case "host get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHostInfo(ufahostid.GetHostDetails()))
+
+	case "head", "head help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHeadHelpText())
+
+	case "head get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHeadInfo(fcHeadID))
+
+	case "session", "session help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaSessionHelpText())
+
+	case "session list":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID))
+
+	case "session get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
+
+	case "session archive":
+		clauditablePath, err := findBinary("clauditable")
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("ufa session archive: clauditable not found — " + err.Error()))
+		}
+		recordsPath := m.recordsPath
+		archivePath := os.Getenv(EnvAgentRecordsArchivePath)
+		if archivePath == "" {
+			archivePath = recordsPath + "-archive"
+		}
+		script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath)
+		cmd := exec.Command("bash", "-c", script)
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return cmdDoneMsg{
+				exitCode: extractExitCode(err),
+				line:     line,
+				cmdTime:  cmdTime,
+				deltaMs:  deltaMs,
+			}
+		})
+
+	default:
+		if sub == "session new" || strings.HasPrefix(sub, "session new ") {
+			name := strings.TrimSpace(strings.TrimPrefix(sub, "session new"))
+			return m.handleNewSession(name, line, cmdTime, deltaMs)
+		}
+		if sub == "session set" || strings.HasPrefix(sub, "session set ") {
+			args := strings.TrimSpace(strings.TrimPrefix(sub, "session set"))
+			var id string
+			if strings.HasPrefix(args, "-n ") {
+				name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+				if name == "" {
+					m.logRecord(line, cmdTime, deltaMs, 1)
+					return m, tea.Println(errorStyle.Render("usage: ufa session set -n <name>"))
+				}
+				foundID, findErr := findSessionByName(m.recordsPath, name)
+				if findErr != nil {
+					m.logRecord(line, cmdTime, deltaMs, 1)
+					return m, tea.Println(errorStyle.Render("set-session: " + findErr.Error()))
+				}
+				id = foundID
+			} else {
+				id = args
+			}
+			if id == "" {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("usage: ufa session set <id> | ufa session set -n <name>"))
+			}
+			if strings.HasSuffix(id, "-default") {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"))
+			}
+			newSessionDir := filepath.Join(m.recordsPath, id)
+			if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
+			}
+			newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			if err != nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
+			}
+			m.logFile.Close()
+			m.logFile = newLogFile
+			m.encoder = json.NewEncoder(newLogFile)
+			m.sessionID = id
+			m.sessionDir = newSessionDir
+			os.Setenv(EnvAgentSession, id)
+			m.logRecord(line, cmdTime, deltaMs, 0)
+			return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
+		}
+		if sub == "session describe" || strings.HasPrefix(sub, "session describe ") {
+			args := strings.TrimSpace(strings.TrimPrefix(sub, "session describe"))
+			return m.handleDescribeSession(args, line, cmdTime, deltaMs)
+		}
+		if sub == "session rename" || strings.HasPrefix(sub, "session rename ") {
+			args := strings.TrimSpace(strings.TrimPrefix(sub, "session rename"))
+			return m.handleRenameSession(args, line, cmdTime, deltaMs)
+		}
+		if sub == "session select" {
+			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
+			if sp == nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ufa session select: failed to read sessions directory"))
+			}
+			m.sessionPicker = sp
+			return m, nil
+		}
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		if strings.HasPrefix(sub, "session ") {
+			unknown := strings.TrimPrefix(sub, "session ")
+			return m, tea.Println(errorStyle.Render("ufa session: unknown subcommand '"+unknown+"'")+"\n"+ufaSessionHelpText())
+		}
+		if strings.HasPrefix(sub, "host ") {
+			unknown := strings.TrimPrefix(sub, "host ")
+			return m, tea.Println(errorStyle.Render("ufa host: unknown subcommand '"+unknown+"'")+"\n"+ufaHostHelpText())
+		}
+		if strings.HasPrefix(sub, "head ") {
+			unknown := strings.TrimPrefix(sub, "head ")
+			return m, tea.Println(errorStyle.Render("ufa head: unknown subcommand '"+unknown+"'")+"\n"+ufaHeadHelpText())
+		}
+		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
+	}
+}
+
+func ufaHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa — unified federation actions"),
+		"",
+		"  ufa help               show this help",
+		"  ufa host <sub>         host identification commands",
+		"  ufa head <sub>         head (instance) identification commands",
+		"  ufa session <sub>      session management commands",
+		"",
+		sessionStyle.Render("run 'ufa host help', 'ufa head help', or 'ufa session help' for subcommands"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaHostHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa host — host identification"),
+		"",
+		"  ufa host help    show this help",
+		"  ufa host get     show host ID and first-configured timestamp",
+		"",
+		sessionStyle.Render("host ID is read from ~/.ufa/host.yaml (created on first use)"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaHeadHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa head — head (instance) identification"),
+		"",
+		"  ufa head help    show this help",
+		"  ufa head get     show this FC instance's head ID",
+		"",
+		sessionStyle.Render("head ID is generated at FC startup and lasts for this process lifetime"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaSessionHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa session — session management"),
+		"",
+		"  ufa session help              show this help",
+		"  ufa session list              list all sessions",
+		"  ufa session select            interactively select a session",
+		"  ufa session new [name]        create a new named session",
+		"  ufa session set <id>          switch to an existing session",
+		"  ufa session get               show ID, name, and location of current session",
+		"  ufa session describe [-a]     show full session info; -a for agent description",
+		"  ufa session rename [name|-a]  rename current session",
+		"  ufa session archive           archive all current sessions",
+		"",
+		sessionStyle.Render("each session has an ID (folder name) and a name stored in session.yaml"),
+		sessionStyle.Render("session IDs ending in '-default' are reserved for daily defaults"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+// buildArchiveConfirmScript returns a bash script that shows a decorative confirmation
+// dialog before invoking 'clauditable archive'.
+func buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; R='\033[0m'
+records_path=%s
+archive_path=%s
+printf "\n"
+printf "${Y}  ╔═══════════════════════════╗${R}\n"
+printf "${Y}  ║  ⚡ Archive Sessions       ║${R}\n"
+printf "${Y}  ╚═══════════════════════════╝${R}\n"
+printf "\n"
+printf "  ${W}From:${R} $records_path\n"
+printf "  ${W}To:${R}   $archive_path/<datetime>\n"
+printf "\n"
+printf "  This will move all sessions and cannot be easily undone.\n"
+printf "\n"
+read -p "  Type 'yes' to confirm, anything else to cancel: " _ufa_confirm
+if [ "$_ufa_confirm" = "yes" ]; then
+    AGENT_RECORDS_PATH="$records_path" AGENT_RECORDS_ARCHIVE_PATH="$archive_path" %s archive
+else
+    printf "\n  Archive cancelled.\n"
+    exit 1
+fi
+`, escape(recordsPath), escape(archivePath), escape(clauditablePath))
+}
+
+// readSessionName returns the name field from session.yaml, or empty string if not found.
+func readSessionName(sessionDir string) string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "name: ") {
+			return strings.TrimPrefix(line, "name: ")
+		}
+	}
+	return ""
+}
+
+// findSessionByName scans recordsPath for the first session directory whose session.yaml name matches.
+func findSessionByName(recordsPath, name string) (string, error) {
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read records directory: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if readSessionName(filepath.Join(recordsPath, entry.Name())) == name {
+			return entry.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no session found with name %q", name)
+}
+
+// readSessionYAMLFields returns all key-value pairs from session.yaml in order.
+func readSessionYAMLFields(sessionDir string) [][2]string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return nil
+	}
+	var fields [][2]string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 && parts[0] != "" {
+			fields = append(fields, [2]string{parts[0], parts[1]})
+		}
+	}
+	return fields
+}
+
+// updateSessionName writes the new name into session.yaml, creating the file if needed.
+func updateSessionName(sessionDir, newName string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		sessionID := filepath.Base(sessionDir)
+		content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
+			sessionID, newName, time.Now().Format(time.RFC3339))
+		return os.WriteFile(yamlPath, []byte(content), 0644)
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, l := range lines {
+		if strings.HasPrefix(l, "name: ") {
+			lines[i] = "name: " + newName
+			found = true
+			break
+		}
+	}
+	if !found {
+		newLines := make([]string, 0, len(lines)+1)
+		idInserted := false
+		for _, l := range lines {
+			newLines = append(newLines, l)
+			if !idInserted && strings.HasPrefix(l, "id: ") {
+				newLines = append(newLines, "name: "+newName)
+				idInserted = true
+			}
+		}
+		if !idInserted {
+			newLines = append(newLines, "name: "+newName)
+		}
+		lines = newLines
+	}
+	return os.WriteFile(yamlPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func renderHostInfo(d ufahostid.HostDetails) string {
+	lines := []string{
+		sessionStyle.Render("current host"),
+		"  ID:               " + d.ID,
+	}
+	if d.FirstConfigured != "" {
+		lines = append(lines, "  First configured: "+d.FirstConfigured)
+	}
+	if d.Created {
+		lines = append(lines, successStyle.Render("  host.yaml created"))
+	}
+	if d.AccessError {
+		lines = append(lines, devWarningStyle.Render("  host.yaml inaccessible — using hostname"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderHeadInfo(headID string) string {
+	lines := []string{
+		sessionStyle.Render("current head"),
+		"  ID:    " + headID,
+		sessionStyle.Render("head ID is ephemeral — regenerated each time FC starts"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderSessionInfo(sessionID, sessionDir string) string {
+	name := readSessionName(sessionDir)
+	if name == "" {
+		name = "(no name)"
+	}
+	return strings.Join([]string{
+		sessionStyle.Render("current session"),
+		"  ID:       " + sessionID,
+		"  Name:     " + name,
+		"  Location: " + sessionDir,
+	}, "\n")
+}
+
+// renderSessionDescribe returns session info plus all fields from session.yaml.
+func renderSessionDescribe(sessionID, sessionDir string) string {
+	fields := readSessionYAMLFields(sessionDir)
+	lines := []string{
+		sessionStyle.Render("current session"),
+		"  ID:       " + sessionID,
+		"  Location: " + sessionDir,
+	}
+	shown := map[string]bool{"id": true}
+	for _, f := range fields {
+		if f[0] == "id" {
+			continue
+		}
+		label := strings.ToUpper(f[0][:1]) + f[0][1:]
+		lines = append(lines, fmt.Sprintf("  %-9s %s", label+":", f[1]))
+		shown[f[0]] = true
+	}
+	if len(fields) == 0 {
+		lines = append(lines, "  (no session.yaml)")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// handleDescribeSession handles the describe-session command.
+// With -a it also runs the agent in read mode for a brief description.
+func (m appModel) handleDescribeSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	info := renderSessionDescribe(m.sessionID, m.sessionDir)
+	if args != "-a" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(info)
+	}
+	prompt := "Briefly describe in 2-3 sentences what has been going on in this session, based on the session records."
+	agentCmd, errMsg := buildAgentPromptCmd(ModeRead, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	if agentCmd == nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("describe-session: " + errMsg))
+	}
+	return m, tea.Sequence(
+		tea.Println(info),
+		tea.ExecProcess(agentCmd, func(err error) tea.Msg {
+			return cmdDoneMsg{exitCode: extractExitCode(err), line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		}),
+	)
+}
+
+// handleRenameSession handles the rename-session command.
+// With no args or insufficient info, returns an error.
+// With -a, uses an agent to suggest a name interactively.
+// Otherwise renames directly.
+func (m appModel) handleRenameSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	if strings.HasSuffix(m.sessionID, "-default") {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: cannot rename a default session"))
+	}
+
+	if args == "" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: provide a name or use -a for agent suggestion"))
+	}
+
+	if args == "-a" {
+		ambiguousPath, err := findBinary("ambiguous-agent")
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("rename-session: ambiguous-agent not found — " + err.Error()))
+		}
+		tmpFile, tmpErr := os.CreateTemp("", "ufa-rename-*")
+		if tmpErr != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("rename-session: " + tmpErr.Error()))
+		}
+		tmpFile.Close()
+		tmpPath := tmpFile.Name()
+		script := buildRenameAgentScript(ambiguousPath, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID, tmpPath)
+		execCmd := exec.Command("bash", "-c", script)
+		return m, tea.ExecProcess(execCmd, func(procErr error) tea.Msg {
+			defer os.Remove(tmpPath)
+			exitCode := extractExitCode(procErr)
+			newName := ""
+			if exitCode == 0 {
+				if data, readErr := os.ReadFile(tmpPath); readErr == nil {
+					newName = strings.TrimSpace(string(data))
+				}
+				if newName == "" {
+					exitCode = 1
+				}
+			}
+			return sessionRenameDoneMsg{exitCode: exitCode, newName: newName, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		})
+	}
+
+	// Direct rename
+	if err := updateSessionName(m.sessionDir, args); err != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: " + err.Error()))
+	}
+	m.logRecord(line, cmdTime, deltaMs, 0)
+	return m, tea.Println(successStyle.Render("session renamed to: " + args))
+}
+
+// buildRenameAgentScript returns a bash script that asks the agent to suggest a session name,
+// prompts the user to accept/modify/cancel, and writes the final name to resultPath.
+func buildRenameAgentScript(ambiguousPath, agent, model, recordsPath, sessionID, resultPath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	modelFlag := ""
+	if model != "" {
+		modelFlag = " -m " + escape(model)
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; G='\033[1;32m'; R='\033[0m'
+TMP_OUT=$(mktemp)
+printf "\n"
+printf "${Y}  ╔═══════════════════════════════╗${R}\n"
+printf "${Y}  ║  ✦  Rename Session (AI Assist) ║${R}\n"
+printf "${Y}  ╚═══════════════════════════════╝${R}\n"
+printf "\n"
+printf "  Asking agent to suggest a name...\n\n"
+AGENT_RECORDS_PATH=%s AGENT_SESSION=%s %s -r -a %s%s \
+    "Based on the session records here, suggest a short name (3-7 words) for this session. Output ONLY the name, nothing else." \
+    2>&1 | tee "$TMP_OUT"
+SUGGESTED=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$TMP_OUT" | grep -v '^[[:space:]]*$' | grep -Ev '^(invoking |● session:|agent completed|agent exited)' | tail -1)
+rm -f "$TMP_OUT"
+printf "\n"
+if [ -z "$SUGGESTED" ]; then
+    printf "  ${W}No suggestion returned from agent.${R}\n"
+    exit 1
+fi
+printf "  ${W}Suggested name:${R} ${G}${SUGGESTED}${R}\n\n"
+read -p "  [enter/y] accept, [n] cancel, or type a new name: " _choice
+case "$_choice" in
+    ""|y|Y) printf '%%s' "$SUGGESTED" > %s ;;
+    n|N) printf "\n  Rename cancelled.\n"; exit 1 ;;
+    *) printf '%%s' "$_choice" > %s ;;
+esac
+`, escape(recordsPath), escape(sessionID), escape(ambiguousPath), escape(agent), modelFlag, escape(resultPath), escape(resultPath))
 }
 
 // buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
@@ -2886,6 +3946,7 @@ func buildRunCmd(cmdLine, sessionDir, logPath, reprOutPath string) *exec.Cmd {
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	cmd.Env = env
 	return cmd
@@ -2989,6 +4050,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+selectedAgent,
+		EnvUFAHead+"="+fcHeadID,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -3027,6 +4089,7 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT="+agent,
+		EnvUFAHead+"="+fcHeadID,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -3090,6 +4153,7 @@ func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, stri
 		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
 		EnvAgentSession+"="+filepath.Base(sessionDir),
 		"UFA_AGENT=none",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	cmd.Env = env
 	return cmd, ""
@@ -3495,6 +4559,16 @@ func findBinary(name string) (string, error) {
 	return "", fmt.Errorf("%s not found on PATH or in %s", name, filepath.Dir(self))
 }
 
+func fcRandomAlphanumeric(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[r.Intn(len(chars))]
+	}
+	return string(b)
+}
+
 // devBinaries returns the names of binaries running from /AI-evo1-dev/bin
 func devBinaries() []string {
 	const devBinDir = "/AI-evo1-dev/bin"
@@ -3669,7 +4743,12 @@ func renderSessions(recordsPath string, currentSession string) string {
 		sessionPath := filepath.Join(recordsPath, session)
 		files, _ := os.ReadDir(sessionPath)
 		fileCount := len(files)
-		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)", prefix, session, suffix, fileCount)))
+		name := readSessionName(sessionPath)
+		nameStr := ""
+		if name != "" {
+			nameStr = " — " + name
+		}
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)%s", prefix, session, suffix, fileCount, nameStr)))
 		b.WriteString("\n")
 	}
 
@@ -3826,6 +4905,9 @@ func parseLRPort(s string) (int, error) {
 }
 
 func main() {
+	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
+	fcHostID = ufahostid.GetHostID()
+
 	cfg, handled, err := parseCLIArgs(os.Args[1:])
 	if handled {
 		return
@@ -3840,11 +4922,23 @@ func main() {
 		recordsPath = DefaultRecordsPath
 	}
 
-	// Create session directory
+	// Resolve session: use today's default when AGENT_SESSION is unset or "default"
 	now := time.Now()
 	sessionID := os.Getenv(EnvAgentSession)
-	if sessionID == "" {
-		sessionID = fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+	if sessionID == "" || sessionID == "default" {
+		if clauditablePath, findErr := findBinary("clauditable"); findErr == nil {
+			getCmd := exec.Command(clauditablePath, "get-default-session")
+			getCmd.Env = append(environWithoutClauditableGuard(), EnvAgentRecordsPath+"="+recordsPath)
+			if out, runErr := getCmd.Output(); runErr == nil {
+				if id := strings.TrimSpace(string(out)); id != "" {
+					sessionID = id
+				}
+			}
+		}
+		if sessionID == "" || sessionID == "default" {
+			// Fallback when clauditable is unavailable
+			sessionID = now.Format("2006-01-02") + "-default"
+		}
 	}
 	sessionDir := filepath.Join(recordsPath, sessionID)
 
@@ -3857,7 +4951,7 @@ func main() {
 	os.Setenv(EnvAgentSession, sessionID)
 
 	logPath := filepath.Join(sessionDir, "session.jsonl")
-	logFile, err := os.Create(logPath)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating session log: %v\n", err)
 		os.Exit(1)

@@ -135,18 +135,19 @@ body {
 }
 
 .nav-enter-btn {
-  background: none;
-  border: none;
-  color: #555;
-  font-size: 11px;
+  background: #2a2a2e;
+  border: 1px solid #555;
+  color: #c0c0c0;
+  font-size: 13px;
   cursor: pointer;
-  padding: 1px 4px;
+  padding: 1px 5px;
   margin-left: auto;
   border-radius: 3px;
   font-family: inherit;
   flex-shrink: 0;
+  line-height: 1.2;
 }
-.nav-enter-btn:hover { color: #9d55cc; background: #2a2a2e; }
+.nav-enter-btn:hover { color: #fff; border-color: #9d55cc; background: #3a2a4a; }
 
 .iter-reply   { background: #4da6ff; }
 .iter-revision { background: #d9a800; }
@@ -639,4 +640,88 @@ button:disabled {
   flex-shrink: 0;
   padding: 3px 8px;
   font-size: 11px;
+}
+
+/* ---- Diff views ---- */
+
+.diff-content {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.diff-line {
+  padding: 0 8px;
+  min-height: 1.5em;
+}
+
+.diff-add {
+  background-color: rgba(40, 167, 69, 0.18);
+  color: #4ec94e;
+}
+
+.diff-remove {
+  background-color: rgba(220, 53, 69, 0.18);
+  color: #e06c75;
+}
+
+.diff-hunk-header {
+  background-color: rgba(0, 122, 204, 0.12);
+  color: #7ec8e3;
+  font-weight: 600;
+}
+
+.diff-meta {
+  color: #555;
+}
+
+.diff-selected {
+  outline: 1px solid #007acc;
+  outline-offset: -1px;
+}
+
+.nav-item-file {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-item-hunk {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 10px;
+  color: #7ec8e3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- File tree (files-changed main pane) ---- */
+
+.diff-file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.diff-file-tree-item {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  color: #ccc;
+  padding: 5px 12px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-file-tree-item.diff-file-selected {
+  background: rgba(158, 85, 204, 0.15);
+  border-left-color: #9d55cc;
+  color: #d4b4f0;
 }

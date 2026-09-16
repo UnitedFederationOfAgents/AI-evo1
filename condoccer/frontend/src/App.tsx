@@ -3,6 +3,16 @@ import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, Pha
 
 // ---- WebSocket hook ----
 
+interface DiffHunk {
+  header: string
+  lineIdx: number
+}
+
+interface CommitRange {
+  from: string
+  to: string
+}
+
 function useCondocWS() {
   const [connected, setConnected] = useState(false)
   const [condocs, setCondocs] = useState<CondocInfo[]>([])
@@ -11,6 +21,10 @@ function useCondocWS() {
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
+  const [diffFiles, setDiffFiles] = useState<string[]>([])
+  const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
+  const [fileDiffContent, setFileDiffContent] = useState<string | null>(null)
+  const [fileDiffHunks, setFileDiffHunks] = useState<DiffHunk[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const subscribedRef = useRef<string>('')
 
@@ -43,6 +57,21 @@ function useCondocWS() {
   const disconnectRepr = useCallback(() => {
     send('disconnect', {})
   }, [send])
+
+  const getDiff = useCallback(
+    (fromCommit: string, toCommit: string) => {
+      setDiffFilesLoaded(false)
+      send('get-diff', { fromCommit, toCommit })
+    },
+    [send],
+  )
+
+  const getFileDiff = useCallback(
+    (fromCommit: string, toCommit: string, file: string) => {
+      send('get-file-diff', { fromCommit, toCommit, file })
+    },
+    [send],
+  )
 
   useEffect(() => {
     // Derive the WebSocket URL from the path this document was served under, so
@@ -91,6 +120,14 @@ function useCondocWS() {
             setReprStatus(p.status)
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
+          } else if (msg.type === 'diff-list') {
+            const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
+            setDiffFiles(p.files ?? [])
+            setDiffFilesLoaded(true)
+          } else if (msg.type === 'file-diff') {
+            const p = msg.payload as { fromCommit: string; toCommit: string; file: string; content: string; hunks: DiffHunk[] }
+            setFileDiffContent(p.content)
+            setFileDiffHunks(p.hunks ?? [])
           }
         } catch {
           // ignore malformed messages
@@ -115,12 +152,22 @@ function useCondocWS() {
     reprPort,
     connectRepr,
     disconnectRepr,
+    getDiff,
+    getFileDiff,
+    diffFiles,
+    setDiffFiles,
+    diffFilesLoaded,
+    setDiffFilesLoaded,
+    fileDiffContent,
+    setFileDiffContent,
+    fileDiffHunks,
+    setFileDiffHunks,
   }
 }
 
 // ---- Navigation ----
 
-type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep'
+type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' | 'file-diff'
 
 // ---- Phase helpers ----
 
@@ -239,6 +286,45 @@ function sectionsToIterations(sections: StepSection[]): Iteration[] {
     .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
 }
 
+function parseCommitRanges(content: string): Map<string, CommitRange> {
+  const rangeRe = /prompt:\s*\[`([a-f0-9]+)`\][^\n]*→\s*reply:\s*\[`([a-f0-9]+)`\]/gm
+  const replyRe = /^## Reply(?: ([A-Z]))?(?:\s|$)/gm
+
+  const ranges: Array<{ pos: number; from: string; to: string }> = []
+  const replies: Array<{ pos: number; id: string }> = []
+
+  let m: RegExpExecArray | null
+  while ((m = rangeRe.exec(content)) !== null) {
+    ranges.push({ pos: m.index, from: m[1], to: m[2] })
+  }
+  while ((m = replyRe.exec(content)) !== null) {
+    const letter = m[1] ?? ''
+    replies.push({ pos: m.index, id: letter ? `reply-${letter}` : 'reply-initial' })
+  }
+
+  // Associate each preamble range with the reply heading that follows it.
+  const pairs: Array<{ reply: (typeof replies)[0]; range: (typeof ranges)[0] }> = []
+  for (const range of ranges) {
+    const nextReply = replies.find((r) => r.pos > range.pos)
+    if (nextReply && !pairs.some((p) => p.reply.id === nextReply.id)) {
+      pairs.push({ reply: nextReply, range })
+    }
+  }
+  pairs.sort((a, b) => a.reply.pos - b.reply.pos)
+
+  // Implementation commits land IN the reply commit (bundled by git add .) rather than
+  // between the preamble hashes. range.to is the "prompt" commit; the implementation is
+  // in the very next commit after that, which becomes range.from for the next iteration.
+  // So the correct diff range for iteration i is (range.to_i .. range.from_{i+1}).
+  // An empty string for `to` tells the backend to use HEAD (last iteration).
+  const result = new Map<string, CommitRange>()
+  for (let i = 0; i < pairs.length; i++) {
+    const nextFrom = pairs[i + 1]?.range.from ?? ''
+    result.set(pairs[i].reply.id, { from: pairs[i].range.to, to: nextFrom })
+  }
+  return result
+}
+
 // ---- Representable connect/disconnect widget ----
 //
 // condoccer's link to local-representative can come up on its own via
@@ -308,6 +394,147 @@ function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterP
   )
 }
 
+// ---- Diff display ----
+
+interface DiffDisplayProps {
+  content: string
+  selectedHunkIdx: number | null
+  hunkRefs: { current: Record<number, HTMLDivElement | null> } | null
+}
+
+function DiffDisplay({ content, selectedHunkIdx, hunkRefs }: DiffDisplayProps) {
+  interface ProcessedLine {
+    line: string
+    cls: string
+    hunkIdx: number
+  }
+
+  const processed: ProcessedLine[] = []
+  let hunkCount = 0
+  for (const line of content.split('\n')) {
+    let cls = 'diff-line'
+    let hunkIdx = -1
+    if (line.startsWith('@@')) {
+      hunkIdx = hunkCount++
+      cls += ' diff-hunk-header'
+      if (selectedHunkIdx === hunkIdx) cls += ' diff-selected'
+    } else if (line.startsWith('+') && !line.startsWith('+++')) {
+      cls += ' diff-add'
+    } else if (line.startsWith('-') && !line.startsWith('---')) {
+      cls += ' diff-remove'
+    } else if (/^(diff |index |--- |\+\+\+ )/.test(line)) {
+      cls += ' diff-meta'
+    }
+    processed.push({ line, cls, hunkIdx })
+  }
+
+  return (
+    <div className="diff-content">
+      {processed.map(({ line, cls, hunkIdx }, i) => (
+        <div
+          key={i}
+          className={cls}
+          ref={hunkIdx >= 0 && hunkRefs ? (el) => { hunkRefs.current[hunkIdx] = el } : undefined}
+        >
+          {line || ' '}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ---- Files-changed view ----
+
+interface FilesChangedViewProps {
+  files: string[]
+  filesLoaded: boolean
+  selectedFile: string | null
+}
+
+function FilesChangedView({ files, filesLoaded, selectedFile }: FilesChangedViewProps) {
+  return (
+    <div className="detail-view">
+      <div className="detail-header">
+        <h2>Files Changed</h2>
+        {filesLoaded && (
+          <span className="detail-step-title">
+            {files.length === 0 ? 'no project files' : `${files.length} file${files.length !== 1 ? 's' : ''}`}
+          </span>
+        )}
+      </div>
+      <div className="detail-body">
+        {!filesLoaded ? (
+          <div className="action-status"><span className="spinner" /> Loading…</div>
+        ) : files.length === 0 ? (
+          <div className="empty-state"><div>No project files changed in this commit range.</div></div>
+        ) : (
+          <div className="diff-file-tree">
+            {files.map((file) => (
+              <div
+                key={file}
+                className={`diff-file-tree-item${selectedFile === file ? ' diff-file-selected' : ''}`}
+              >
+                {file}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---- File diff view ----
+
+interface FileDiffViewProps {
+  file: string | null
+  content: string | null
+  selectedHunkIdx: number | null
+}
+
+function FileDiffView({ file, content, selectedHunkIdx }: FileDiffViewProps) {
+  const hunkRefs = useRef<Record<number, HTMLDivElement | null>>({})
+
+  useEffect(() => {
+    if (selectedHunkIdx !== null && hunkRefs.current[selectedHunkIdx]) {
+      hunkRefs.current[selectedHunkIdx]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [selectedHunkIdx])
+
+  if (!file) {
+    return (
+      <div className="detail-view">
+        <div className="empty-state"><div>No file selected.</div></div>
+      </div>
+    )
+  }
+
+  const shortName = file.split('/').pop() ?? file
+
+  return (
+    <div className="detail-view">
+      <div className="detail-header">
+        <h2>{shortName}</h2>
+        <span className="detail-step-title">{file}</span>
+      </div>
+      <div className="detail-body">
+        {!content ? (
+          <div className="action-status"><span className="spinner" /> Loading diff…</div>
+        ) : (
+          <DiffDisplay content={content} selectedHunkIdx={selectedHunkIdx} hunkRefs={hunkRefs} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---- Hunk line number parser ----
+
+function parseHunkLineNumber(header: string): number | null {
+  const m = /@@\s+-\d+(?:,\d+)?\s+\+(\d+)/.exec(header)
+  return m ? parseInt(m[1], 10) : null
+}
+
 // ---- Sidebar ----
 
 interface SidebarProps {
@@ -318,11 +545,20 @@ interface SidebarProps {
   selectedStepNum: number | null
   selectedIterId: string | null
   selectedSubstepIterId: string | null
+  diffFiles: string[]
+  diffFilesLoaded: boolean
+  selectedDiffFile: string | null
+  fileDiffHunks: DiffHunk[]
+  selectedDiffHunkIdx: number | null
+  diffReturnLevel: 'step' | 'substep'
   onSelectCondoc: (path: string) => void
   onSelectStep: (num: number) => void
   onSelectIter: (id: string) => void
   onEnterSubstep: (substepLetter: string) => void
   onSelectSubstepIter: (id: string) => void
+  onEnterFilesChanged: (fromCommit: string, toCommit: string) => void
+  onSelectDiffFile: (file: string) => void
+  onSelectDiffHunk: (idx: number) => void
   onNavUp: () => void
   reprStatus: ReprStatus
   reprHost: string
@@ -339,11 +575,20 @@ function Sidebar({
   selectedStepNum,
   selectedIterId,
   selectedSubstepIterId,
+  diffFiles,
+  diffFilesLoaded,
+  selectedDiffFile,
+  fileDiffHunks,
+  selectedDiffHunkIdx,
+  diffReturnLevel,
   onSelectCondoc,
   onSelectStep,
   onSelectIter,
   onEnterSubstep,
   onSelectSubstepIter,
+  onEnterFilesChanged,
+  onSelectDiffFile,
+  onSelectDiffHunk,
   onNavUp,
   reprStatus,
   reprHost,
@@ -427,6 +672,11 @@ function Sidebar({
       return content ? sectionsToIterations(parseStepSections(content)) : []
     })()
 
+    const stepContent = selectedStepNum === activeState.info.stepNum
+      ? (activeState.stepContent ?? '')
+      : (activeState.completedStepContents?.[selectedStepNum ?? 0] ?? '')
+    const commitRanges = parseCommitRanges(stepContent)
+
     return (
       <div className="sidebar">
         <div className="sidebar-header">
@@ -437,25 +687,37 @@ function Sidebar({
           {iterations.length === 0 && (
             <div className="nav-empty">No iterations yet.</div>
           )}
-          {iterations.map((iter) => (
-            <div
-              key={iter.id}
-              className={`nav-item nav-item-iter${selectedIterId === iter.id ? ' selected' : ''}`}
-              onClick={() => onSelectIter(iter.id)}
-            >
-              <span className={`nav-iter-dot iter-${iter.type}`} />
-              <span className="nav-item-name">{iter.label}</span>
-              {iter.type === 'substep' && (
-                <button
-                  className="nav-enter-btn"
-                  title="Enter substep"
-                  onClick={(e) => { e.stopPropagation(); onEnterSubstep(iter.id.replace('substep-', '')) }}
-                >
-                  →
-                </button>
-              )}
-            </div>
-          ))}
+          {iterations.map((iter) => {
+            const range = commitRanges.get(iter.id)
+            return (
+              <div
+                key={iter.id}
+                className={`nav-item nav-item-iter${selectedIterId === iter.id ? ' selected' : ''}`}
+                onClick={() => onSelectIter(iter.id)}
+              >
+                <span className={`nav-iter-dot iter-${iter.type}`} />
+                <span className="nav-item-name">{iter.label}</span>
+                {iter.type === 'substep' && (
+                  <button
+                    className="nav-enter-btn"
+                    title="Enter substep"
+                    onClick={(e) => { e.stopPropagation(); onEnterSubstep(iter.id.replace('substep-', '')) }}
+                  >
+                    →
+                  </button>
+                )}
+                {iter.type === 'reply' && range && (
+                  <button
+                    className="nav-enter-btn"
+                    title="View files changed"
+                    onClick={(e) => { e.stopPropagation(); onEnterFilesChanged(range.from, range.to) }}
+                  >
+                    ⊞
+                  </button>
+                )}
+              </div>
+            )
+          })}
         </div>
         {reprFooter}
       </div>
@@ -465,6 +727,7 @@ function Sidebar({
   if (navLevel === 'substep' && activeState) {
     const substepIterations: Iteration[] = activeState.substepIterations ?? []
     const substepLetter = activeState.info.substepLetter ?? ''
+    const substepCommitRanges = parseCommitRanges(activeState.substepContent ?? '')
 
     return (
       <div className="sidebar">
@@ -476,16 +739,94 @@ function Sidebar({
           {substepIterations.length === 0 && (
             <div className="nav-empty">No iterations yet.</div>
           )}
-          {substepIterations.map((iter) => (
+          {substepIterations.map((iter) => {
+            const range = substepCommitRanges.get(iter.id)
+            return (
+              <div
+                key={iter.id}
+                className={`nav-item nav-item-iter${selectedSubstepIterId === iter.id ? ' selected' : ''}`}
+                onClick={() => onSelectSubstepIter(iter.id)}
+              >
+                <span className={`nav-iter-dot iter-${iter.type}`} />
+                <span className="nav-item-name">{iter.label}</span>
+                {iter.type === 'reply' && range && (
+                  <button
+                    className="nav-enter-btn"
+                    title="View files changed"
+                    onClick={(e) => { e.stopPropagation(); onEnterFilesChanged(range.from, range.to) }}
+                  >
+                    ⊞
+                  </button>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        {reprFooter}
+      </div>
+    )
+  }
+
+  if (navLevel === 'files-changed') {
+    const upLabel = diffReturnLevel === 'substep'
+      ? `↑ Substep ${activeState?.info.substepLetter ?? ''}`
+      : `↑ Step ${selectedStepNum ?? ''}`
+
+    return (
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <button className="nav-up-btn" onClick={onNavUp}>{upLabel}</button>
+          <div className="sidebar-title">Files Changed</div>
+        </div>
+        <div className="nav-list">
+          {!diffFilesLoaded && (
+            <div className="nav-empty">Loading…</div>
+          )}
+          {diffFilesLoaded && diffFiles.length === 0 && (
+            <div className="nav-empty">No project files changed.</div>
+          )}
+          {diffFiles.map((file) => (
             <div
-              key={iter.id}
-              className={`nav-item nav-item-iter${selectedSubstepIterId === iter.id ? ' selected' : ''}`}
-              onClick={() => onSelectSubstepIter(iter.id)}
+              key={file}
+              className={`nav-item${selectedDiffFile === file ? ' selected' : ''}`}
+              onClick={() => onSelectDiffFile(file)}
             >
-              <span className={`nav-iter-dot iter-${iter.type}`} />
-              <span className="nav-item-name">{iter.label}</span>
+              <span className="nav-item-name nav-item-file">{file.split('/').pop() ?? file}</span>
             </div>
           ))}
+        </div>
+        {reprFooter}
+      </div>
+    )
+  }
+
+  if (navLevel === 'file-diff') {
+    const shortName = selectedDiffFile?.split('/').pop() ?? ''
+
+    return (
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <button className="nav-up-btn" onClick={onNavUp}>↑ Files Changed</button>
+          <div className="sidebar-title" title={selectedDiffFile ?? ''}>{shortName}</div>
+        </div>
+        <div className="nav-list">
+          {fileDiffHunks.length === 0 && (
+            <div className="nav-empty">No changes.</div>
+          )}
+          {fileDiffHunks.map((hunk, i) => {
+            const lineNum = parseHunkLineNumber(hunk.header)
+            return (
+              <div
+                key={i}
+                className={`nav-item${selectedDiffHunkIdx === i ? ' selected' : ''}`}
+                onClick={() => onSelectDiffHunk(i)}
+              >
+                <span className="nav-item-name nav-item-hunk">
+                  {lineNum !== null ? `line ${lineNum}` : hunk.header}
+                </span>
+              </div>
+            )
+          })}
         </div>
         {reprFooter}
       </div>
@@ -1004,6 +1345,16 @@ function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDe
       <div className="detail-header">
         <h2>Substep {substepLetter}</h2>
         <PhaseBadge phase={state.info.phase} />
+        {state.info.phase === 'agent_running' && (
+          <button
+            className="btn-secondary"
+            style={{ marginLeft: 'auto', fontSize: 11, padding: '3px 8px' }}
+            title="Re-invoke the agent (use when agent has crashed mid-run)"
+            onClick={() => onAction({ action: 'resubmit', path: state.info.path })}
+          >
+            ↺ Resubmit
+          </button>
+        )}
       </div>
       <div className="detail-body">
         {sections.map((sec) => (
@@ -1102,6 +1453,16 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
         <h2>Step {stepNum}</h2>
         {stepSummary && <span className="detail-step-title">{stepSummary.title}</span>}
         <PhaseBadge phase={state.info.phase} />
+        {state.info.phase === 'agent_running' && (
+          <button
+            className="btn-secondary"
+            style={{ marginLeft: 'auto', fontSize: 11, padding: '3px 8px' }}
+            title="Re-invoke the agent (use when agent has crashed mid-run)"
+            onClick={() => onAction({ action: 'resubmit', path: state.info.path })}
+          >
+            ↺ Resubmit
+          </button>
+        )}
       </div>
       <div className="detail-body">
         {sections.map((sec) => (
@@ -1148,6 +1509,16 @@ export default function App() {
     reprPort,
     connectRepr,
     disconnectRepr,
+    getDiff,
+    getFileDiff,
+    diffFiles,
+    setDiffFiles,
+    diffFilesLoaded,
+    setDiffFilesLoaded,
+    fileDiffContent,
+    setFileDiffContent,
+    fileDiffHunks,
+    setFileDiffHunks,
   } = useCondocWS()
 
   const [navLevel, setNavLevel] = useState<NavLevel>('condoc-list')
@@ -1155,6 +1526,11 @@ export default function App() {
   const [selectedStepNum, setSelectedStepNum] = useState<number | null>(null)
   const [selectedIterId, setSelectedIterId] = useState<string | null>(null)
   const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(null)
+  const [diffFromCommit, setDiffFromCommit] = useState<string | null>(null)
+  const [diffToCommit, setDiffToCommit] = useState<string | null>(null)
+  const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(null)
+  const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(null)
+  const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>('step')
 
   const handleSelectCondoc = (path: string) => {
     setSelectedCondocPath(path)
@@ -1186,8 +1562,50 @@ export default function App() {
     setSelectedSubstepIterId(id)
   }
 
+  const handleEnterFilesChanged = (fromCommit: string, toCommit: string) => {
+    setDiffReturnLevel(navLevel as 'step' | 'substep')
+    setDiffFromCommit(fromCommit)
+    setDiffToCommit(toCommit)
+    setDiffFiles([])
+    setDiffFilesLoaded(false)
+    setSelectedDiffFile(null)
+    setFileDiffContent(null)
+    setFileDiffHunks([])
+    setSelectedDiffHunkIdx(null)
+    setNavLevel('files-changed')
+    getDiff(fromCommit, toCommit)
+  }
+
+  const handleSelectDiffFile = (file: string) => {
+    setSelectedDiffFile(file)
+    setFileDiffContent(null)
+    setFileDiffHunks([])
+    setSelectedDiffHunkIdx(null)
+    if (diffFromCommit !== null) {
+      getFileDiff(diffFromCommit, diffToCommit ?? '', file)
+    }
+    setNavLevel('file-diff')
+  }
+
+  const handleSelectDiffHunk = (idx: number) => {
+    setSelectedDiffHunkIdx(idx)
+  }
+
   const handleNavUp = () => {
-    if (navLevel === 'substep') {
+    if (navLevel === 'file-diff') {
+      setNavLevel('files-changed')
+      setSelectedDiffHunkIdx(null)
+    } else if (navLevel === 'files-changed') {
+      setNavLevel(diffReturnLevel)
+      setDiffFromCommit(null)
+      setDiffToCommit(null)
+      setDiffFiles([])
+      setDiffFilesLoaded(false)
+      setSelectedDiffFile(null)
+      setFileDiffContent(null)
+      setFileDiffHunks([])
+      setSelectedDiffHunkIdx(null)
+    } else if (navLevel === 'substep') {
       setNavLevel('step')
       setSelectedSubstepIterId(null)
     } else if (navLevel === 'step') {
@@ -1241,11 +1659,20 @@ export default function App() {
         selectedStepNum={selectedStepNum}
         selectedIterId={selectedIterId}
         selectedSubstepIterId={selectedSubstepIterId}
+        diffFiles={diffFiles}
+        diffFilesLoaded={diffFilesLoaded}
+        selectedDiffFile={selectedDiffFile}
+        fileDiffHunks={fileDiffHunks}
+        selectedDiffHunkIdx={selectedDiffHunkIdx}
+        diffReturnLevel={diffReturnLevel}
         onSelectCondoc={handleSelectCondoc}
         onSelectStep={handleSelectStep}
         onSelectIter={handleSelectIter}
         onEnterSubstep={handleEnterSubstep}
         onSelectSubstepIter={handleSelectSubstepIter}
+        onEnterFilesChanged={handleEnterFilesChanged}
+        onSelectDiffFile={handleSelectDiffFile}
+        onSelectDiffHunk={handleSelectDiffHunk}
         onNavUp={handleNavUp}
         reprStatus={reprStatus}
         reprHost={reprHost}
@@ -1300,6 +1727,22 @@ export default function App() {
             state={activeState}
             selectedSubstepIterId={selectedSubstepIterId}
             onAction={handleAction}
+          />
+        )}
+
+        {navLevel === 'files-changed' && (
+          <FilesChangedView
+            files={diffFiles}
+            filesLoaded={diffFilesLoaded}
+            selectedFile={selectedDiffFile}
+          />
+        )}
+
+        {navLevel === 'file-diff' && (
+          <FileDiffView
+            file={selectedDiffFile}
+            content={fileDiffContent}
+            selectedHunkIdx={selectedDiffHunkIdx}
           />
         )}
       </div>

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"representable"
 	ufaconfig "ufa-configurable"
+	ufahostid "ufa-hostid"
 )
 
 //go:embed frontend/dist
@@ -772,10 +772,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 }
 
 func main() {
-	defaultName, _ := os.Hostname()
-	if defaultName == "" {
-		defaultName = "local"
-	}
+	defaultName := ufahostid.GetHostID()
 
 	configDir := flag.String("config", "", "directory holding ufa-configurable YAML files (default ~/.ufa/config)")
 	port := flag.String("port", "8081", "HTTP port to listen on")

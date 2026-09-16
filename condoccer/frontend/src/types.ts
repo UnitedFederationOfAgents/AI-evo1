@@ -66,7 +66,7 @@ export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
 
 export interface ActionRequest {
-  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert'
+  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit'
   path: string
   content?: string
   letter?: string

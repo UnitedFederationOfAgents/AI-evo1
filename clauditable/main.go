@@ -142,8 +142,12 @@ func main() {
 	// Write the writing file at dispatch time — signals that a writer is starting
 	startTime := time.Now()
 	unixTimestamp := startTime.Unix()
+	dispatchCommand := cmdName
+	if len(cmdArgs) > 0 {
+		dispatchCommand = cmdName + " " + strings.Join(cmdArgs, " ")
+	}
 	writingFilePath := filepath.Join(sessionDir, fmt.Sprintf("%d-writing.txt", unixTimestamp))
-	if err := os.WriteFile(writingFilePath, []byte(fmt.Sprintf("%d\n", unixTimestamp)), 0644); err != nil {
+	if err := os.WriteFile(writingFilePath, []byte(fmt.Sprintf("%d\n%s\n", unixTimestamp, dispatchCommand)), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write writing file: %v\n", err)
 	}
 
@@ -529,8 +533,9 @@ func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record
 
 // consolidatePrimaryToJSONL is called by the primary on completion. It collects all
 // secondary written files ({ts}-s-raw.txt) and its own written file ({primaryTs}-raw.txt),
-// appends their session log portions to session.jsonl in timestamp order, and deletes
-// the secondary files (the primary's raw file is kept as a permanent record).
+// applies auto-maintenance processing (secret redaction, loading-bar stripping, truncation),
+// writes {ts}-processed.txt for each, appends their processed session log portions to
+// session.jsonl in timestamp order, and renames secondaries to {ts}-raw.txt (promoting them).
 func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int64) error {
 	sessionDir := filepath.Join(recordsPath, session)
 	sessionLogPath := filepath.Join(sessionDir, "session.jsonl")
@@ -541,9 +546,9 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 	}
 
 	type writtenEntry struct {
-		ts     int64
-		path   string
-		delete bool
+		ts          int64
+		path        string
+		isSecondary bool
 	}
 	var toProcess []writtenEntry
 
@@ -583,12 +588,21 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 	}
 	defer f.Close()
 
+	noOpEligible := true
 	for _, entry := range toProcess {
 		data, err := os.ReadFile(entry.path)
 		if err != nil {
 			continue
 		}
-		sessionLogContent := records.ExtractSessionLogFromWrittenFile(string(data))
+
+		processedContent, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
+		noOpEligible = false
+		processedFileContent := records.FormatProcessedFile(processedContent, headers)
+
+		processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", entry.ts))
+		os.WriteFile(processedPath, []byte(processedFileContent), 0644)
+
+		sessionLogContent := records.ExtractSessionLogFromWrittenFile(processedFileContent)
 		if _, err := f.WriteString(sessionLogContent); err != nil {
 			continue
 		}
@@ -598,8 +612,10 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 			}
 			f.WriteString("\n")
 		}
-		if entry.delete {
-			os.Remove(entry.path)
+
+		if entry.isSecondary {
+			renamedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", entry.ts))
+			os.Rename(entry.path, renamedPath)
 		}
 	}
 

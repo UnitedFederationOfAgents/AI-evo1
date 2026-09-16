@@ -147,3 +147,26 @@ Let's also add the first auto-maintenance functionality. We'll start with some b
  - replace any long-running responses (greater than 1000 lines) with a split in the middle and '...<CONTINUES>...'
 
 The auto-maintenance will happen when a primary is composing the session.jsonl with the written files. A file '1789571564-raw.txt' is supplemented with '1789571564-processed.txt'. It is identical to the raw file but with all of the results of processing.Another json snippet will be added to the header (inserted after the initial snippet) for each processing step that was actually performed. If no processing was necessary then a single 'no-op' processing header will be inserted so we understand the timestamp. We will only see this 'no-op' on the first processing occurrence.
+
+
+prompt: [`7aecba2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7aecba21e3704b0066b3818213b7de02b0116268) → reply: [`a42f80a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a42f80a6e1052365f05f756170e8d48b2737c9f3)
+
+## Reply C
+
+The implementation is complete. Here's a summary of what changed across Revision C:
+
+**`clauditable/pkg/records/records.go`** — Added `ProcessingHeader` struct, `secretPatterns` and `loadingBarPattern` compiled regexes, `ApplyAutoMaintenance` (redacts secrets via 6 common patterns with `<REDACTED-N>` counters, strips runs of 10+ `#` chars with `<STRIPPED>`, truncates raw sections >1000 lines by splitting at the midpoint with `...<CONTINUES>...`, and emits a `no_op` header on the first no-processing file in a batch), and `FormatProcessedFile` (inserts processing headers after the first JSON line of the session log).
+
+**`clauditable/main.go`** — Writing files now include the dispatch command as a second line (`{timestamp}\n{command}\n`). `consolidatePrimaryToJSONL` now: runs `ApplyAutoMaintenance` + `FormatProcessedFile` per file, writes `{ts}-processed.txt`, extracts the processed session log (with headers) for `session.jsonl`, and renames `{ts}-s-raw.txt` → `{ts}-raw.txt` (secondary-to-primary promotion) instead of deleting.
+
+**`clauditable/main_test.go`** and **`records_test.go`** — Updated `TestConsolidatePrimaryToJSONL` to check rename+processed-file creation instead of deletion; added `TestApplyAutoMaintenance` and `TestFormatProcessedFile` covering no-op, loading-bar stripping, secret redaction, truncation, and header insertion.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

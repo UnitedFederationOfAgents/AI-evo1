@@ -523,13 +523,24 @@ func TestConsolidatePrimaryToJSONL(t *testing.T) {
 		t.Error("session.jsonl should not contain WrittenFileSeparator")
 	}
 
-	// Secondary written file should be deleted
+	// Secondary written file should be renamed (promoted to primary)
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-s-raw.txt")); !os.IsNotExist(err) {
-		t.Error("secondary written file should be deleted after consolidation")
+		t.Error("secondary written file should be renamed after consolidation")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-raw.txt")); os.IsNotExist(err) {
+		t.Error("secondary written file should be renamed to 1705312800-raw.txt")
 	}
 
 	// Primary written file should NOT be deleted
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-raw.txt")); os.IsNotExist(err) {
 		t.Error("primary written file should NOT be deleted")
+	}
+
+	// Processed files should be created for all consolidated records
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-processed.txt")); os.IsNotExist(err) {
+		t.Error("processed file should be created for secondary record")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-processed.txt")); os.IsNotExist(err) {
+		t.Error("processed file should be created for primary record")
 	}
 }

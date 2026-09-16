@@ -25,3 +25,26 @@ This functionality for hold/persist is a good start but has some issues:
 - When we 'hold' the button does not change to 'persist' and the icon does not change to yellow *in the agent-coordinator UI specifically* - it works in local-representative
 
 Let's fix these items.
+
+
+prompt: [`25b8c58`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/25b8c58184488250fdbb68311b3cd1714fe747e4) → reply: [`f78fa89`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f78fa89cca09006b292040d01bd0f70bf834269f)
+
+## Reply A
+
+Fixed both revision items:
+
+1. **Countdown display**: updated `formatCountdown` in both `local-representative/frontend/src/App.tsx` and `agent-coordinator/frontend/src/App.tsx` to show `Xh Ym left` once the remaining time reaches an hour, instead of a raw minute count (e.g. "71h 58m left" instead of "4318m left").
+
+2. **Hold/persist not reflecting in agent-coordinator specifically**: found the actual root cause — `agent-coordinator/main.go`'s own `FileInfo` struct (a separate copy from local-representative's, since they're distinct binaries relaying JSON over the `representable` protocol) was missing the `State` field entirely. That silently dropped each file's state during the LR→AC relay/re-broadcast, so agent-coordinator's browser always saw `state: undefined` and defaulted to "cached"/orange with the "hold" label, no matter what LR reported. Added the missing `State string \`json:"state"\`` field to match LR's struct, which fixes both the button label and icon color in the AC UI.
+
+Note: as in the prior session, build/test commands (`go build`, etc.) were rejected by this session's permission mode, so these changes are verified by careful manual read-through (including tracing the exact JSON relay path that caused the bug) rather than an actual compile/run.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

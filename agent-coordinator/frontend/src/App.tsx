@@ -596,7 +596,8 @@ function formatCountdown(expiresAtSec: number, nowSec: number): string {
   const secs = expiresAtSec - nowSec
   if (secs <= 0) return 'expiring…'
   if (secs < 60) return `${secs}s left`
-  return `${Math.floor(secs / 60)}m left`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m left`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`
 }
 
 // FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set

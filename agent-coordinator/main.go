@@ -140,6 +140,7 @@ type FileInfo struct {
 	Name       string `json:"name"`
 	Size       int64  `json:"size"`
 	Kind       string `json:"kind"`
+	State      string `json:"state"`
 	UploadedAt int64  `json:"uploaded_at"`
 	ExpiresAt  int64  `json:"expires_at"`
 }

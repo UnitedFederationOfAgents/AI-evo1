@@ -185,18 +185,23 @@ entry is due to be swept just by looking at the directory, even after an
 interrupted run. Uploads whose claimed filename starts with `.manifest_` are
 refused, and the sweep removes a manifest alongside its data file.
 
-Upload is **direct-client-only**: a browser connected straight to this LR can
-upload, but a request arriving through `agent-coordinator`'s `/host/<id>/*`
-reverse proxy is refused (`agent-coordinator` stamps proxied requests with an
-`X-UFA-Proxied-By` header LR's upload handler checks for). The coordinator's
-own **files** tab is read-only for this reason — it shows the same listing
-(mirrored up as a `files-state` data message, same mechanism as the system
-tab) without a dropzone. Viewing and downloading are **not** gated on that
-header, though — a GET reaching `/api/files/<id>` through AC's proxy is
-served the same as a direct request, so the coordinator's files tab gets the
-same viewer/enter/download widgets, just proxied at `/host/<id>/api/files/<id>`.
+Upload from a browser connected straight to this LR always works. A request
+arriving through `agent-coordinator`'s `/host/<id>/*` transparent reverse
+proxy is refused (`agent-coordinator` stamps proxied requests with an
+`X-UFA-Proxied-By` header LR's upload handler checks for) — *unless* it also
+carries `X-UFA-Relayed-Upload-By: agent-coordinator`, which only
+agent-coordinator's own dedicated upload-relay route can set (it builds a
+fresh outbound request rather than forwarding the browser's request
+verbatim, so a client can't spoof the header through the transparent proxy
+path instead). That's how the coordinator's own **files** tab gets a dropzone
+too: it POSTs to `/host/<id>/api/files`, which agent-coordinator relays down
+to this LR rather than proxying transparently or keeping its own copy of the
+file. Viewing and downloading are **not** gated on either header — a GET
+reaching `/api/files/<id>` through AC's proxy is served the same as a direct
+request, so the coordinator's files tab gets the same viewer/enter/download
+widgets, just proxied at `/host/<id>/api/files/<id>`.
 See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md) for how
-upload might also extend to coordinator-mediated or cross-host transfer.
+this and cross-host (LR↔AC↔LR) transfer fit together.
 
 ### Auto-launch chains
 

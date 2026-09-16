@@ -30,11 +30,27 @@ const fileCacheSweepInterval = time.Minute
 const defaultFileCacheDir = "/host-agent-files/exchange/host-cache"
 
 // proxiedHeader marks a request that arrived via agent-coordinator's
-// /host/<id>/ reverse proxy rather than directly from a browser connected to
-// this LR (agent-coordinator's proxyToHost sets it). This increment
-// intentionally keeps file upload a direct-client-only operation — see
-// docs/DistributedExchange.md for how this might extend to chained input.
+// /host/<id>/ transparent reverse proxy rather than directly from a browser
+// connected to this LR (agent-coordinator's proxyToHost sets it). Upload
+// refuses any request carrying it, with one deliberate exception — see
+// relayedUploadHeader — since a write into an arbitrary host's filesystem
+// should stay refused by default. See docs/DistributedExchange.md.
 const proxiedHeader = "X-UFA-Proxied-By"
+
+// relayedUploadHeader marks a request that arrived via agent-coordinator's
+// dedicated upload-relay route (Path 1 of docs/DistributedExchange.md) rather
+// than its transparent /host/<id>/* passthrough. It's the one exception
+// handleFileUpload's proxiedHeader refusal carves out: an operator using AC's
+// per-host files tab can still upload, same as connecting to this LR
+// directly, while an upload arriving through AC's transparent passthrough
+// (which strips any client-supplied copy of this header before forwarding)
+// stays refused. Both headers must carry acRelayStamp for the exception to
+// apply.
+const relayedUploadHeader = "X-UFA-Relayed-Upload-By"
+
+// acRelayStamp is the value agent-coordinator's dedicated upload-relay route
+// sets on both proxiedHeader and relayedUploadHeader.
+const acRelayStamp = "agent-coordinator"
 
 // manifestPrefix marks a host-cache entry as a hidden sidecar rather than a
 // file the "files" tab should list: alongside an uploaded "<id>" this
@@ -66,7 +82,9 @@ type FileInfo struct {
 
 // FilesStateMsg is the payload of "files-state" messages: the current
 // host-cache listing, broadcast to browser clients and mirrored up to
-// agent-coordinator (read-only there — see proxiedHeader).
+// agent-coordinator, which can now also relay uploads back down to this LR
+// through its dedicated upload-relay route (see proxiedHeader,
+// relayedUploadHeader).
 type FilesStateMsg struct {
 	Files []FileInfo `json:"files"`
 }
@@ -252,14 +270,17 @@ func (s *Server) handleFilesAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFileUpload accepts a multipart "file" upload into the host-cache. It
-// is rejected when the request arrived through agent-coordinator's reverse
-// proxy: this increment only allows the direct local-representative client to
-// write into the host-cache (see docs/DistributedExchange.md).
+// is rejected when the request arrived through agent-coordinator's
+// transparent reverse proxy: this LR only accepts uploads from a direct
+// local-representative client, or from agent-coordinator's dedicated
+// upload-relay route (marked by relayedUploadHeader — see
+// docs/DistributedExchange.md, Path 1).
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get(proxiedHeader) != "" {
+	if r.Header.Get(proxiedHeader) != "" && r.Header.Get(relayedUploadHeader) != acRelayStamp {
 		http.Error(w,
 			"file upload is only permitted from a direct local-representative client, "+
-				"not through agent-coordinator (see docs/DistributedExchange.md)",
+				"or relayed through agent-coordinator's own upload-relay route "+
+				"(see docs/DistributedExchange.md)",
 			http.StatusForbidden)
 		return
 	}

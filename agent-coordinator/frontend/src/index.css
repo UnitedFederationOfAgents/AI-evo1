@@ -432,10 +432,19 @@ body {
 .main-pane-inner { display: flex; align-items: flex-start; gap: 24px; }
 .main-pane-inner .service-view { flex: 1; min-width: 0; }
 
-/* ---- Files panel (read-only here -- see docs/DistributedExchange.md) ---- */
+/* ---- Files panel (upload relayed through AC -- see docs/DistributedExchange.md) ---- */
 
 .files-panel { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
-.files-hint { font-size: 11px; color: #666; font-style: italic; }
+.files-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 1px dashed #3c3c3c; border-radius: 6px; padding: 24px; cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.files-dropzone:hover { border-color: #555; background: #1e1e1e; }
+.files-dropzone-active { border-color: #007acc; background: #14283a; }
+.files-dropzone-text { font-size: 13px; color: #aaa; }
+.files-dropzone-hint { font-size: 11px; color: #666; }
+.files-dropzone-input { display: none; }
 .files-empty { color: #888; font-style: italic; font-size: 13px; }
 .files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 12px; }
 .files-item {

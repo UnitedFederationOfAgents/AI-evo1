@@ -106,6 +106,45 @@ func TestFileUploadRejectedWhenProxied(t *testing.T) {
 	}
 }
 
+// TestFileUploadAllowedWhenRelayedByAC verifies the one exception to
+// TestFileUploadRejectedWhenProxied: a request carrying both proxiedHeader
+// and a correctly-stamped relayedUploadHeader -- agent-coordinator's
+// dedicated upload-relay route, not its transparent passthrough -- is
+// accepted (see docs/DistributedExchange.md, Path 1).
+func TestFileUploadAllowedWhenRelayedByAC(t *testing.T) {
+	s := newTestFileServer(t)
+
+	req := newUploadRequest(t, "hello.txt", []byte("hello"))
+	req.Header.Set(proxiedHeader, acRelayStamp)
+	req.Header.Set(relayedUploadHeader, acRelayStamp)
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relayed upload: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if files := s.listFiles(); len(files) != 1 {
+		t.Fatalf("relayed upload should have written a file, got %+v", files)
+	}
+}
+
+// TestFileUploadRejectedWithWrongRelayStamp verifies the exception requires
+// the exact expected stamp, not merely the header's presence.
+func TestFileUploadRejectedWithWrongRelayStamp(t *testing.T) {
+	s := newTestFileServer(t)
+
+	req := newUploadRequest(t, "hello.txt", []byte("hello"))
+	req.Header.Set(proxiedHeader, acRelayStamp)
+	req.Header.Set(relayedUploadHeader, "someone-else")
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("wrong relay stamp: status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if files := s.listFiles(); len(files) != 0 {
+		t.Fatalf("wrongly-stamped upload should not have written a file, got %+v", files)
+	}
+}
+
 // TestSweepExpiredFiles verifies files older than fileCacheTTL are removed and
 // fresh ones are left alone.
 func TestSweepExpiredFiles(t *testing.T) {

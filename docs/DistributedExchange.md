@@ -1,10 +1,13 @@
 # Distributed Exchange
 
 How file exchange (see [`condocs/InitialFileExchange.md`](../condocs/InitialFileExchange.md))
-might extend past its Step 1 shape — a single local-representative's host-cache,
+extends past its Step 1 shape — a single local-representative's host-cache,
 reachable only by a browser connected directly to that LR — into
 `local-representative <--> agent-coordinator <--> local-representative` and
 `agent-coordinator <--> local-representative` chains.
+
+**Revision B landed Path 1** (AC-mediated upload to one host, below); Path 2
+(LR-to-LR transfer brokered through AC) remains a sketch, not yet built.
 
 ## Where Step 1 leaves things
 
@@ -14,26 +17,29 @@ reachable only by a browser connected directly to that LR — into
   is swept an hour after upload.
 - LR pushes the listing up to agent-coordinator (`data` / `"files-state"`) so
   the files tab is **visible** through AC too, host-scoped like `system`.
-- Upload is **not** accepted through AC. AC's `proxyToHost` reverse proxy
-  stamps every request it forwards with `X-UFA-Proxied-By: agent-coordinator`;
-  LR's upload handler refuses any request carrying that header. This is
-  enforced server-side on LR, not just by AC's UI omitting a dropzone — a
-  `POST` aimed straight at `/host/<id>/api/files` through AC is refused too.
+- Upload was **not** accepted through AC in Step 1. AC's `proxyToHost`
+  reverse proxy stamps every request it forwards with
+  `X-UFA-Proxied-By: agent-coordinator`; LR's upload handler refused any
+  request carrying that header. This was enforced server-side on LR, not just
+  by AC's UI omitting a dropzone — a `POST` aimed straight at
+  `/host/<id>/api/files` through AC was refused too. **Revision B relaxes
+  this** — see Path 1 below.
 - **Revision A added a content endpoint**: `GET /api/files/<id>` streams a
   host-cache file's raw bytes (`?download=1` for an attachment
   Content-Disposition), backing the files tab's viewer page and download
   button. It is deliberately **not** gated on `proxiedHeader` — a read isn't
   the write-to-an-arbitrary-filesystem operation upload is — so it already
-  works unmodified through AC's `/host/<id>/*` proxy, and AC's own (read-only)
-  files tab reuses it directly for its viewer/download widgets rather than
-  needing a proxy-owned route of its own.
+  works unmodified through AC's `/host/<id>/*` proxy, and AC's own files tab
+  reuses it directly for its viewer/download widgets rather than needing a
+  proxy-owned route of its own.
 - There is still no cross-host transfer primitive: an LR only ever reads and
   writes its own host-cache. Path 2 below now has less to add, since the
   content endpoint it originally proposed already exists.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.
-(Path 1, AC-mediated *upload* to a single LR, is the other still-open gap.)
+(Path 1, AC-mediated *upload* to a single LR, landed in Revision B; see
+below.)
 
 ## Why direct-client-only was the right Step 1 boundary
 
@@ -51,33 +57,50 @@ transfer brokered through AC — would look like, without committing to it yet.
   through it as-is would mean base64-inflated JSON frames with no
   backpressure or resumability — fine for a status blob, not for a file.
 
-## Path 1: `agent-coordinator <--> local-representative` — AC-mediated upload to one host
+Revision B relaxes this boundary on purpose, per Path 1 below — the ambiguity
+and consent-boundary points still applied at Step 1 time, but with a host
+always selected explicitly before its files tab is even visible, and a
+distinct header AC can only set from its own owned route, deliberately
+carving out the AC-mediated case rather than removing the guard.
+
+## Path 1: `agent-coordinator <--> local-representative` — AC-mediated upload to one host (landed, Revision B)
 
 The smallest useful extension: let an operator sitting at AC's dashboard drop
 a file onto *the selected host's* files tab, same as if they'd connected to
-that LR directly.
+that LR directly. AC acts purely as a relay for this — it never keeps its own
+copy of the file, or looks at LR's host-cache directly; it just streams the
+multipart body through.
 
-**What's needed:**
+**What's built:**
 
-1. **An explicit relaxation, not a removal, of `proxiedHeader`.** Two
-   reasonable shapes:
-   - AC's `/host/<id>/api/files` POST goes through a route AC *owns* (not the
-     transparent `proxyToHost` passthrough), which re-stamps the request with
-     a distinct header (e.g. `X-UFA-Relayed-Upload-By: agent-coordinator`)
-     that LR is willing to accept — the transparent proxy path stays blocked
-     for everything else, closing off any other AC-forwarded write.
-   - Or: an LR config flag (`-allow-ac-uploads`, off by default) that an
-     operator opts a given host into, so the server-side default stays
-     "refuse" unless the box owner has said otherwise.
-2. **UI**: AC's (currently read-only) `FilesPanel` gains the same dropzone LR
-   already has, gated on `selectedHost` and rendered only when the host is
-   `active`.
+1. **An explicit relaxation, not a removal, of `proxiedHeader`** — the first
+   of the two shapes this section originally sketched: a `POST` to
+   `/host/<id>/api/files` no longer takes AC's transparent `proxyToHost`
+   passthrough. `proxyToHost` recognizes that one path+method combination and
+   routes it to `handleFileUploadRelay` instead, a route AC *owns*. That
+   handler builds a fresh outbound request to the target LR (rather than
+   forwarding the browser's request verbatim) and stamps it with both
+   `X-UFA-Proxied-By: agent-coordinator` (it did arrive via AC) and
+   `X-UFA-Relayed-Upload-By: agent-coordinator` (the deliberate exception).
+   LR's upload handler accepts a request only when *both* are present with
+   the expected value — a request that reaches it through the transparent
+   passthrough instead can never carry the second header, since
+   `proxyToHost`'s `Director` strips any client-supplied copy before
+   forwarding, so a browser can't spoof its way past the distinction. The
+   transparent path stays blocked for every other write.
+2. **UI**: AC's `FilesPanel` gained the same dropzone LR already has, gated on
+   `selectedHost` and rendered only when the host is `active`.
 3. **Host disambiguation in the UI** — the host label is already always
    visible in `LRView`'s header, which covers most of the ambiguity concern
-   above; a confirming toast/highlight on drop is a cheap extra.
+   below.
 
-No representable protocol changes needed — the upload still goes over HTTP
-through the existing `/host/<id>/*` reverse proxy, just no longer refused.
+No representable protocol changes were needed — the upload still goes over
+HTTP, just through a route AC owns rather than the transparent
+`/host/<id>/*` reverse proxy.
+
+(The LR config-flag alternative sketched originally — `-allow-ac-uploads`,
+off by default — was not built; the header-based relaxation covers the same
+need without adding a second flag-driven trust knob.)
 
 ## Path 2: `local-representative <--> agent-coordinator <--> local-representative` — cross-host transfer
 
@@ -131,7 +154,7 @@ LR (host A)              agent-coordinator              LR (host B)
 degenerate one-hop case of this — AC talking to a single LR instead of
 brokering between two.
 
-## Open questions before either path gets built
+## Open questions before Path 2 gets built
 
 - **Consent model for Path 2**: does the pull need an operator to confirm on
   *both* ends, or does AC-level access already imply authorization? Given

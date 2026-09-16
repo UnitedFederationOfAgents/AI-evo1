@@ -52,7 +52,8 @@ agent-records-archive/
 **Owner:** local-representative  
 **Flag:** `-file-cache-dir` (default: `/host-agent-files/exchange/host-cache`)
 
-Files dropped on LR's "files" tab (direct client only — see
+Files dropped on LR's "files" tab, either directly or relayed through
+agent-coordinator's per-host files tab (see
 [`docs/DistributedExchange.md`](DistributedExchange.md)). Flat directory:
 
 ```

@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -20,6 +21,26 @@ import (
 
 //go:embed frontend/dist
 var embeddedFrontend embed.FS
+
+// proxiedHeader is the header proxyToHost's transparent passthrough stamps on
+// every request it forwards, so a host's local-representative can refuse
+// input it only accepts from a direct client (see
+// docs/DistributedExchange.md).
+const proxiedHeader = "X-UFA-Proxied-By"
+
+// relayedUploadHeader marks a file upload that handleFileUploadRelay (not the
+// transparent passthrough above) forwarded to a host on a browser's behalf --
+// Path 1 of docs/DistributedExchange.md. It can only ever originate there:
+// proxyToHost's transparent Director strips any client-supplied copy before
+// forwarding, so a request reaching LR through that passthrough can never
+// carry it, and LR's upload handler treats the two headers together as proof
+// the request came through AC's dedicated relay route rather than being
+// spoofed.
+const relayedUploadHeader = "X-UFA-Relayed-Upload-By"
+
+// acRelayStamp is the value both proxiedHeader and relayedUploadHeader carry
+// on a request handleFileUploadRelay makes.
+const acRelayStamp = "agent-coordinator"
 
 // Host represents a local-representative instance known to agent-coordinator.
 type Host struct {
@@ -205,9 +226,10 @@ type LRSystemStateMsg struct {
 }
 
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
-// clients: local-representative's files tab for one host, read-only here — file
-// upload stays a direct-LR-client-only operation this increment (see
-// docs/DistributedExchange.md). Active is false when that LR is not connected.
+// clients: local-representative's files tab for one host. Upload is relayed
+// through handleFileUploadRelay rather than AC keeping its own copy of the
+// file (see docs/DistributedExchange.md, Path 1). Active is false when that
+// LR is not connected.
 type LRFilesMsg struct {
 	HostID string     `json:"host_id"`
 	Active bool       `json:"active"`
@@ -521,32 +543,24 @@ func (s *Server) broadcastLoop() {
 	}
 }
 
-// proxyToHost reverse-proxies /host/<hostID>/* to that host's local-representative
-// dashboard, which in turn forwards /condoccer/* down to condoccer. This is the
-// "forward the UI through AC" half of the chain: a browser on the coordinator —
-// including one reaching it through the web-exposure path — drives condoccer on
-// any connected box over a single origin, with no direct link to that box.
-func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/host/")
-	hostID, _, _ := strings.Cut(rest, "/")
-	if hostID == "" {
-		http.Error(w, "missing host id", http.StatusBadRequest)
-		return
-	}
+// resolveHostTarget returns "host:port" for a connected host's
+// local-representative HTTP dashboard, or ok=false with a ready-to-use HTTP
+// status and message when it isn't reachable. Shared by proxyToHost and
+// handleFileUploadRelay, which both need to turn a host id into somewhere to
+// send an HTTP request.
+func (s *Server) resolveHostTarget(hostID string) (addr string, status int, errMsg string, ok bool) {
 	s.hostsMu.RLock()
-	hs, ok := s.hostStates[hostID]
+	hs, known := s.hostStates[hostID]
 	s.hostsMu.RUnlock()
-	if !ok {
-		http.Error(w, "unknown host: "+hostID, http.StatusNotFound)
-		return
+	if !known {
+		return "", http.StatusNotFound, "unknown host: " + hostID, false
 	}
 	hs.mu.RLock()
 	port := hs.lrHTTPPort
 	connected := hs.connected
 	hs.mu.RUnlock()
 	if !connected || port == "" {
-		http.Error(w, "local-representative on "+hostID+" is not reachable", http.StatusBadGateway)
-		return
+		return "", http.StatusBadGateway, "local-representative on " + hostID + " is not reachable", false
 	}
 	host := ""
 	if s.reprServer != nil {
@@ -555,7 +569,37 @@ func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	target := &url.URL{Scheme: "http", Host: host + ":" + port}
+	return host + ":" + port, 0, "", true
+}
+
+// proxyToHost reverse-proxies /host/<hostID>/* to that host's local-representative
+// dashboard, which in turn forwards /condoccer/* down to condoccer. This is the
+// "forward the UI through AC" half of the chain: a browser on the coordinator —
+// including one reaching it through the web-exposure path — drives condoccer on
+// any connected box over a single origin, with no direct link to that box.
+//
+// A POST to /host/<hostID>/api/files is the one path this transparent
+// passthrough doesn't carry itself: that's a file upload, a write to that
+// host's filesystem, so it's handled by the dedicated handleFileUploadRelay
+// route instead (see docs/DistributedExchange.md, Path 1).
+func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/host/")
+	hostID, subPath, _ := strings.Cut(rest, "/")
+	if hostID == "" {
+		http.Error(w, "missing host id", http.StatusBadRequest)
+		return
+	}
+	if r.Method == http.MethodPost && subPath == "api/files" {
+		s.handleFileUploadRelay(w, r, hostID)
+		return
+	}
+
+	addr, status, errMsg, ok := s.resolveHostTarget(hostID)
+	if !ok {
+		http.Error(w, errMsg, status)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: addr}
 	prefix := "/host/" + hostID
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	base := proxy.Director
@@ -563,15 +607,58 @@ func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
 		base(req)
 		req.URL.Path = "/" + strings.TrimPrefix(strings.TrimPrefix(req.URL.Path, prefix), "/")
 		req.Host = target.Host
-		// Mark the request as having arrived through this proxy so LR can refuse
-		// input it only accepts from a direct client (e.g. file uploads — see
-		// docs/DistributedExchange.md).
-		req.Header.Set("X-UFA-Proxied-By", "agent-coordinator")
+		// Mark the request as having arrived through this transparent proxy so
+		// LR can refuse input it only accepts from a direct client or from
+		// handleFileUploadRelay's dedicated route (e.g. file uploads — see
+		// docs/DistributedExchange.md). relayedUploadHeader is stripped here so
+		// a client can never spoof its way past that distinction: it can only
+		// be set by handleFileUploadRelay building its own outbound request.
+		req.Header.Del(relayedUploadHeader)
+		req.Header.Set(proxiedHeader, acRelayStamp)
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// handleFileUploadRelay implements Path 1 of docs/DistributedExchange.md: an
+// operator at AC's dashboard drops a file onto the selected host's files tab,
+// same as if they'd connected to that LR directly. AC acts purely as a
+// relay — it streams the multipart body straight through to that host's
+// `POST /api/files`, stamping the request with relayedUploadHeader (alongside
+// proxiedHeader, since it did arrive via AC) so LR's upload handler accepts
+// it as the one deliberate exception to refusing proxied uploads. AC never
+// buffers the file to its own filesystem, or looks at LR's, in the process.
+func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, hostID string) {
+	addr, status, errMsg, ok := s.resolveHostTarget(hostID)
+	if !ok {
+		http.Error(w, errMsg, status)
+		return
+	}
+
+	outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://"+addr+"/api/files", r.Body)
+	if err != nil {
+		http.Error(w, "building relay request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	outReq.ContentLength = r.ContentLength
+	outReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+	outReq.Header.Set(proxiedHeader, acRelayStamp)
+	outReq.Header.Set(relayedUploadHeader, acRelayStamp)
+
+	resp, err := http.DefaultClient.Do(outReq)
+	if err != nil {
+		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if ctype := resp.Header.Get("Content-Type"); ctype != "" {
+		w.Header().Set("Content-Type", ctype)
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body) //nolint:errcheck — best-effort once headers/status are already written
 }
 
 func (s *Server) setupRoutes(devMode bool) http.Handler {

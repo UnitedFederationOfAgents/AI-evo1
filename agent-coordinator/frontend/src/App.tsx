@@ -59,6 +59,25 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'select-host', payload: { host_id: hostId } }))
   }, [])
 
+  // File upload is a plain HTTP POST to AC's dedicated upload-relay route
+  // (not a websocket command), which streams the multipart body straight
+  // through to the selected host's local-representative -- AC never keeps its
+  // own copy. See handleFileUploadRelay / docs/DistributedExchange.md, Path 1.
+  const uploadFiles = useCallback(async (hostId: string, fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    if (files.length === 0) return
+    const form = new FormData()
+    for (const f of files) form.append('file', f)
+    try {
+      const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/files`, { method: 'POST', body: form })
+      if (!resp.ok) {
+        console.error('file upload failed:', resp.status, await resp.text())
+      }
+    } catch (err) {
+      console.error('file upload failed:', err)
+    }
+  }, [])
+
   const connect = useCallback(() => {
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
@@ -188,7 +207,7 @@ function useCoordinatorWS() {
 
   return {
     connected, hosts, hostData, selectHost,
-    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
   }
 }
 
@@ -227,9 +246,9 @@ function HostSidebar({
 const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
 // "system" and "files" sit to the right of the service tabs, mirroring
 // local-representative's own dashboard: they drive/view that LR's process
-// management and host-cache from the coordinator. Unlike LR's own files tab,
-// this one is read-only — upload stays a direct-LR-client-only operation this
-// increment (see docs/DistributedExchange.md).
+// management and host-cache from the coordinator. Upload on this files tab is
+// relayed through AC's dedicated upload-relay route rather than AC keeping
+// its own copy of the file (see docs/DistributedExchange.md, Path 1).
 const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
@@ -555,7 +574,7 @@ function SystemPanel({
   )
 }
 
-/* ---- Files panel (read-only: upload stays direct-LR-client-only) ---- */
+/* ---- Files panel (upload relayed through AC -- see docs/DistributedExchange.md) ---- */
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -593,10 +612,12 @@ function FileIcon({ kind }: { kind: string }) {
 }
 
 // fileRawUrl/fileDownloadUrl address a file's bytes through AC's existing
-// /host/<id>/* reverse proxy — local-representative's raw-serving route
-// (GET /api/files/<id>) isn't gated on the proxied-request header the way
-// uploads are, so viewing/downloading works the same here as connected
-// directly to that LR. See docs/DistributedExchange.md.
+// /host/<id>/* transparent reverse proxy — local-representative's
+// raw-serving route (GET /api/files/<id>) isn't gated on the proxied-request
+// header the way uploads are, so viewing/downloading works the same here as
+// connected directly to that LR. Upload (a POST to the same /api/files path)
+// takes a different route, AC's dedicated upload-relay handler — see
+// docs/DistributedExchange.md.
 function fileRawUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
 }
@@ -606,21 +627,46 @@ function fileDownloadUrl(hostId: string, id: string): string {
 }
 
 function FilesPanel({
-  files, active, selectedId, onSelect, onEnter,
+  files, active, selectedId, onSelect, onEnter, onUpload,
 }: {
   files: FileInfo[]
   active: boolean
   selectedId: string | null
   onSelect: (id: string) => void
   onEnter: (id: string) => void
+  onUpload: (files: FileList) => void
 }) {
+  const [dragging, setDragging] = useState(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
   if (!active) {
     return <div className="service-empty">local-representative on this host is not connected</div>
   }
   return (
     <div className="files-panel">
-      <div className="files-hint">
-        read-only here — connect a browser directly to this host's local-representative to upload
+      <div
+        className={`files-dropzone${dragging ? ' files-dropzone-active' : ''}`}
+        onDragOver={e => { e.preventDefault(); setDragging(true) }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => {
+          e.preventDefault()
+          setDragging(false)
+          if (e.dataTransfer.files.length > 0) onUpload(e.dataTransfer.files)
+        }}
+        onClick={() => inputRef.current?.click()}
+      >
+        <span className="files-dropzone-text">drag files here, or click to browse</span>
+        <span className="files-dropzone-hint">relayed through agent-coordinator — removed after 1 hour</span>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          className="files-dropzone-input"
+          onChange={e => {
+            if (e.target.files && e.target.files.length > 0) onUpload(e.target.files)
+            e.target.value = ''
+          }}
+        />
       </div>
       {files.length === 0 ? (
         <div className="files-empty">no files in the host-cache</div>
@@ -762,7 +808,7 @@ function FileViewer({
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
 }: {
   host: Host
   data: HostClientState
@@ -770,6 +816,7 @@ function LRView({
   sendLRRidealongCommand: (hostId: string, action: string) => void
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
+  uploadFiles: (hostId: string, files: FileList) => void
 }) {
   const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
@@ -845,6 +892,7 @@ function LRView({
                 selectedId={selectedFileId}
                 onSelect={setSelectedFileId}
                 onEnter={setViewerFileId}
+                onUpload={f => uploadFiles(host.id, f)}
               />
             )}
             {activeTab === 'federation-command' && (
@@ -902,7 +950,7 @@ function LRView({
 export default function App() {
   const {
     connected, hosts, hostData, selectHost,
-    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
   } = useCoordinatorWS()
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
 
@@ -937,6 +985,7 @@ export default function App() {
               sendLRRidealongCommand={sendLRRidealongCommand}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
+              uploadFiles={uploadFiles}
             />
           ) : (
             <div className="no-selection">

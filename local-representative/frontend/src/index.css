@@ -5,12 +5,16 @@ body {
   font-size: 13px;
   background: #1a1a1a;
   color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport; vh is a
+     fallback for browsers that don't support it. See condoccer/index.css. */
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 #root {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -190,6 +194,7 @@ body {
 
 .main-pane {
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   overflow: auto;
   padding: 40px;
 }
@@ -1066,4 +1071,65 @@ body {
   color: #888;
   font-style: italic;
   font-size: 13px;
+}
+
+/* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
+ *
+ * This page is already a single scrolling column (no split scroll region /
+ * fixed footer like condoccer), so no min-height:0 fix is needed here. The
+ * remaining problems are purely sizing: fixed padding built for desktop, a
+ * tab row and a process table that don't fit narrow widths, and a
+ * side-by-side files/detail layout with no room to be side-by-side.
+ */
+
+@media (max-width: 760px) {
+  .main-pane {
+    padding: 16px;
+  }
+
+  .ac-panel {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: 6px;
+  }
+
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tabs {
+    flex-shrink: 0;
+  }
+
+  .tab {
+    padding: 0 12px;
+  }
+
+  button {
+    min-height: 34px;
+  }
+
+  /* Files tab: grid + detail pane stack instead of sitting side by side. */
+  .main-pane-inner {
+    flex-direction: column;
+  }
+
+  .file-detail-pane {
+    width: 100%;
+  }
+
+  /* Process table: scroll horizontally rather than dropping/squeezing
+     columns, so every column (including the terminate button) stays reachable. */
+  .sys-table {
+    overflow-x: auto;
+  }
+
+  .sys-row {
+    min-width: 480px;
+  }
+
+  .file-viewer-header {
+    flex-wrap: wrap;
+  }
 }

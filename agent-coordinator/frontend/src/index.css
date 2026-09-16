@@ -5,12 +5,16 @@ body {
   font-size: 13px;
   background: #1a1a1a;
   color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport; vh is a
+     fallback for browsers that don't support it. See condoccer/index.css. */
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 #root {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -64,6 +68,10 @@ body {
 }
 
 /* ---- Sidebar ---- */
+
+.sidebar-wrap {
+  display: contents;
+}
 
 .sidebar {
   width: 200px;
@@ -149,6 +157,7 @@ body {
 
 .content {
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -174,6 +183,7 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   overflow: hidden;
 }
 
@@ -249,6 +259,7 @@ body {
 
 .main-pane {
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   overflow: auto;
   padding: 40px;
 }
@@ -508,3 +519,129 @@ body {
   white-space: pre-wrap; word-break: break-word;
 }
 .file-viewer-empty { color: #888; font-style: italic; font-size: 13px; }
+
+/* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
+ *
+ * Structurally this app is condoccer's sidebar+content shape (a host list
+ * standing in for condoccer's condoc/step list), so it gets the same
+ * off-canvas-drawer treatment, plus the same tab-bar/main-pane/table fixes
+ * used for local-representative's near-identical dashboard.
+ */
+
+.mobile-nav-toggle,
+.mobile-back-btn,
+.mobile-nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-nav-toggle,
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 10px;
+    z-index: 101;
+    width: 38px;
+    height: 38px;
+    background: #2d2d2d;
+    color: #ccc;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .mobile-nav-toggle {
+    right: 10px;
+  }
+
+  .mobile-back-btn {
+    left: 10px;
+    font-size: 24px;
+    font-weight: 700;
+  }
+
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+  }
+
+  .sidebar-wrap {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-wrap.mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .app-body {
+    padding-top: 48px;
+  }
+
+  .host-item {
+    padding: 10px 12px;
+  }
+
+  button {
+    min-height: 34px;
+  }
+
+  .main-pane {
+    padding: 16px;
+  }
+
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tabs {
+    flex-shrink: 0;
+  }
+
+  .tab {
+    padding: 0 12px;
+  }
+
+  .main-pane-inner {
+    flex-direction: column;
+  }
+
+  .file-detail-pane {
+    width: 100%;
+  }
+
+  .sys-table {
+    overflow-x: auto;
+  }
+
+  .sys-row {
+    min-width: 480px;
+  }
+
+  .file-viewer-header {
+    flex-wrap: wrap;
+  }
+
+  .lr-header {
+    flex-wrap: wrap;
+  }
+}

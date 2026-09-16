@@ -953,10 +953,16 @@ export default function App() {
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
   } = useCoordinatorWS()
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  // Mobile nav drawer: the host sidebar becomes an off-canvas panel below the
+  // `mobile-breakpoint` width (see index.css), same treatment as condoccer's
+  // sidebar. Desktop layout is untouched -- this state has no visible effect
+  // above the breakpoint.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   const handleSelectHost = (id: string) => {
     setSelectedHostId(id)
     selectHost(id)
+    setMobileNavOpen(false)
   }
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
@@ -971,11 +977,37 @@ export default function App() {
         />
       </div>
       <div className="app-body">
-        <HostSidebar
-          hosts={hosts}
-          selectedHostId={selectedHostId}
-          onSelect={handleSelectHost}
-        />
+        <button
+          className="mobile-nav-toggle"
+          aria-label="Open hosts"
+          onClick={() => setMobileNavOpen(true)}
+        >
+          ☰
+        </button>
+
+        {/* Direct one-tap "go up" to the host list, without opening the
+            drawer first -- mirrors condoccer's mobile-back-btn. */}
+        {selectedHost && (
+          <button
+            className="mobile-back-btn"
+            aria-label="Back to hosts"
+            onClick={() => setSelectedHostId(null)}
+          >
+            ‹
+          </button>
+        )}
+
+        {mobileNavOpen && (
+          <div className="mobile-nav-backdrop" onClick={() => setMobileNavOpen(false)} />
+        )}
+
+        <div className={`sidebar-wrap${mobileNavOpen ? ' mobile-open' : ''}`}>
+          <HostSidebar
+            hosts={hosts}
+            selectedHostId={selectedHostId}
+            onSelect={handleSelectHost}
+          />
+        </div>
         <div className="content">
           {selectedHost ? (
             <LRView

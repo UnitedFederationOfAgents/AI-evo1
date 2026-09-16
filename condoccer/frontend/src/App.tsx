@@ -1664,6 +1664,19 @@ export default function App() {
         ☰
       </button>
 
+      {/* Direct one-tap "go up" for mobile -- without it the only way back is
+          opening the full drawer and finding nav-up-btn inside it. Hidden at
+          the top level (condoc-list), same as nav-up-btn's own visibility. */}
+      {navLevel !== 'condoc-list' && (
+        <button
+          className="mobile-back-btn"
+          aria-label="Back"
+          onClick={() => { setMobileNavOpen(false); handleNavUp() }}
+        >
+          ‹
+        </button>
+      )}
+
       {mobileNavOpen && (
         <div className="mobile-nav-backdrop" onClick={() => setMobileNavOpen(false)} />
       )}

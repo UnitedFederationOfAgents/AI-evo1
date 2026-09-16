@@ -110,3 +110,36 @@ The revision replaces the permission-request reply with a concrete description o
 Let's add a new federation-command feature to make session operation easier, to help us manually test our implementation.
 
 Let's add a 'select-session/ufa session select' command which uses the output of list-sessions to give the user an interactive menu where they can select a session. During this interaction, they can start typing to auto-filter and continue their arrow-key based selection, or they may cancel.
+
+
+prompt: [`487a8ff`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/487a8ff3bda43839897b464cd7910f4712c2566a) → reply: [`41ebf67`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/41ebf670eb97bc23db0701331534bda8e6cc8eba)
+
+## Reply B
+
+All the wiring is complete. The implementation covers:
+
+1. **Styles** (lines 186–216): 8 new lipgloss styles for the picker UI
+2. **`SessionPicker` struct + `filteredEntries`** (lines 474–502): State and filtering logic
+3. **`sessionPicker *SessionPicker` field** on `appModel` (line 391)
+4. **Update routing** (line 879–880): Session picker key handler runs before normal input
+5. **View routing** (lines 1413–1414): Picker overlay renders at highest priority
+6. **Ridealong block** (lines 1983–1985): `select-session` is blocked inside ridealong with a helpful message
+7. **`handleSessionPickerKey`** (lines 2209–2278): Up/down navigation, Enter to select, Esc/Ctrl-C to cancel, Backspace to trim filter, runes/space to build filter string
+8. **`sessionPickerView`** (lines 2279–2337): Lipgloss-bordered overlay showing title, live filter cursor, session list with `▸` indicator and `(current)` marker, and hint line
+9. **`buildSessionPicker`** (lines 2339–2371): Reads `recordsPath`, builds sorted `sessionPickerEntry` slice with names and file counts
+10. **`select-session` command** (lines 3125–3132): Dispatched in `executeCommandCore`
+11. **`ufa session select`** (lines 3539–3545): Dispatched in `handleUFACommand`
+12. **Help text** (line 3609): Added to `ufaSessionHelpText`
+13. **Startup banner** (line 845): Updated to mention `select-session`
+
+The `select-session` / `ufa session select` command opens an in-process overlay that shows all sessions (reverse-chronologically, matching the `list-sessions` output), supports incremental text filtering that resets the cursor, arrow-key navigation, Enter to switch sessions, and Esc/Ctrl-C to cancel — all without spawning any subprocess.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

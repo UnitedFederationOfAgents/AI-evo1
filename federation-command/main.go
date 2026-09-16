@@ -183,6 +183,38 @@ var (
 	}
 )
 
+var (
+	pickerBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("39"))
+
+	pickerTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39")).
+				Bold(true)
+
+	pickerFilterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220"))
+
+	pickerSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("82")).
+				Bold(true)
+
+	pickerEntryStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252"))
+
+	pickerCurrentStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
+
+	pickerHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("238")).
+				Italic(true)
+
+	pickerEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
+)
+
 // completeFilepath returns filepath completion candidates for the given prefix
 func completeFilepath(prefix string, cwd string) []string {
 	if prefix == "" {
@@ -355,6 +387,9 @@ type appModel struct {
 	condoc         *CondocSession
 	condocDynapane CondocDynapane
 
+	// Session picker state
+	sessionPicker *SessionPicker
+
 	// Visual log state (scrollback-log)
 	visualLogFile *os.File
 	visualLogPath string
@@ -434,6 +469,37 @@ type sessionNewDoneMsg struct {
 	line         string
 	cmdTime      time.Time
 	deltaMs      int64
+}
+
+type sessionPickerEntry struct {
+	id        string
+	name      string
+	fileCount int
+}
+
+// SessionPicker holds state for the interactive session-selection overlay.
+type SessionPicker struct {
+	entries []sessionPickerEntry
+	filter  string
+	cursor  int
+	line    string
+	cmdTime time.Time
+	deltaMs int64
+}
+
+func (sp *SessionPicker) filteredEntries() []sessionPickerEntry {
+	if sp.filter == "" {
+		return sp.entries
+	}
+	lower := strings.ToLower(sp.filter)
+	var out []sessionPickerEntry
+	for _, e := range sp.entries {
+		if strings.Contains(strings.ToLower(e.id), lower) ||
+			strings.Contains(strings.ToLower(e.name), lower) {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 type sessionRenameDoneMsg struct {
@@ -776,7 +842,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"),
 		sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"),
 		sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"),
-		sessionStyle.Render("  records: 'list-sessions' | add '-provide-records <id>' to agent command"),
+		sessionStyle.Render("  records: 'list-sessions' | 'select-session' to switch interactively | add '-provide-records <id>' to agent command"),
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
@@ -808,6 +874,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Handle condoc mode: route through menu key handler.
 		if m.condoc != nil && m.condoc.active {
 			return m.handleCondocKey(msg)
+		}
+		// Handle interactive session picker.
+		if m.sessionPicker != nil {
+			return m.handleSessionPickerKey(msg)
 		}
 
 		switch msg.Type {
@@ -1340,7 +1410,9 @@ func (m appModel) View() string {
 	}
 	// Show the highest-priority dynapane that is active.
 	var pane string
-	if m.ridealongDynapane.IsActive() {
+	if m.sessionPicker != nil {
+		pane = m.sessionPickerView(m.windowWidth)
+	} else if m.ridealongDynapane.IsActive() {
 		pane = m.ridealongDynapane.View(m.windowWidth)
 	} else if m.condocDynapane.IsActive() {
 		pane = m.condocDynapane.View(m.windowWidth)
@@ -1908,6 +1980,11 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
 	}
 
+	// select-session — interactive picker not available inside ridealong
+	if line == "select-session" {
+		return true, m, seqPrint(errorStyle.Render("select-session: interactive picker not available in ridealong context — use set-session <id>"), 1)
+	}
+
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
 		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
@@ -2126,6 +2203,170 @@ func (m appModel) handleCondocKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 		return m.exitCondoc()
 	default:
 		return m, m.blinker.StartFlash()
+	}
+}
+
+// handleSessionPickerKey handles key presses while the interactive session picker is active.
+func (m appModel) handleSessionPickerKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	sp := m.sessionPicker
+	switch msg.Type {
+	case tea.KeyUp:
+		if sp.cursor > 0 {
+			sp.cursor--
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		filtered := sp.filteredEntries()
+		if sp.cursor < len(filtered)-1 {
+			sp.cursor++
+		}
+		return m, nil
+
+	case tea.KeyEnter:
+		filtered := sp.filteredEntries()
+		if len(filtered) == 0 {
+			return m, nil
+		}
+		selected := filtered[sp.cursor]
+		cmdLine := sp.line
+		cmdTime := sp.cmdTime
+		deltaMs := sp.deltaMs
+		m.sessionPicker = nil
+		if selected.id == m.sessionID {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 0)
+			return m, tea.Println(sessionStyle.Render("already on session: " + selected.id))
+		}
+		newM, switchErr := m.switchToSession(selected.id)
+		if switchErr != nil {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-session: " + switchErr.Error()))
+		}
+		newM.logRecord(cmdLine, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("session set to: " + newM.sessionDir))
+
+	case tea.KeyEsc, tea.KeyCtrlC:
+		cmdLine := sp.line
+		cmdTime := sp.cmdTime
+		deltaMs := sp.deltaMs
+		m.sessionPicker = nil
+		m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+		return m, tea.Println(sessionStyle.Render("select-session: cancelled"))
+
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if len(sp.filter) > 0 {
+			runes := []rune(sp.filter)
+			sp.filter = string(runes[:len(runes)-1])
+			sp.cursor = 0
+		}
+		return m, nil
+
+	case tea.KeyRunes:
+		sp.filter += string(msg.Runes)
+		sp.cursor = 0
+		return m, nil
+
+	case tea.KeySpace:
+		sp.filter += " "
+		sp.cursor = 0
+		return m, nil
+
+	default:
+		return m, nil
+	}
+}
+
+// sessionPickerView renders the interactive session-selection overlay.
+func (m appModel) sessionPickerView(windowWidth int) string {
+	sp := m.sessionPicker
+	filtered := sp.filteredEntries()
+	cursor := sp.cursor
+	if len(filtered) > 0 && cursor >= len(filtered) {
+		cursor = len(filtered) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+
+	if windowWidth <= 0 {
+		windowWidth = 100
+	}
+	innerWidth := windowWidth - 4
+	if innerWidth < 40 {
+		innerWidth = 40
+	}
+
+	divider := sessionStyle.Render(strings.Repeat("─", innerWidth))
+
+	var rows []string
+	filterDisplay := sp.filter + "█"
+	rows = append(rows,
+		pickerTitleStyle.Render("select session"),
+		pickerFilterStyle.Render("filter: "+filterDisplay),
+		divider,
+	)
+
+	if len(filtered) == 0 {
+		rows = append(rows, pickerEmptyStyle.Render("  (no sessions match)"))
+	} else {
+		for i, entry := range filtered {
+			nameStr := ""
+			if entry.name != "" {
+				nameStr = " — " + entry.name
+			}
+			currentSuffix := ""
+			if entry.id == m.sessionID {
+				currentSuffix = pickerCurrentStyle.Render(" (current)")
+			}
+			row := fmt.Sprintf("%s (%d files)%s%s", entry.id, entry.fileCount, nameStr, currentSuffix)
+			if i == cursor {
+				rows = append(rows, pickerSelectedStyle.Render("▸ "+row))
+			} else {
+				rows = append(rows, pickerEntryStyle.Render("  "+row))
+			}
+		}
+	}
+
+	rows = append(rows, divider,
+		pickerHintStyle.Render("  ↑↓ navigate  enter to select  esc to cancel  type to filter  backspace to clear"),
+	)
+
+	content := strings.Join(rows, "\n")
+	pane := pickerBorderStyle.Width(innerWidth).Render(content)
+	return pane + "\n"
+}
+
+// buildSessionPicker reads the sessions directory and returns an initialised SessionPicker,
+// or nil if the directory cannot be read.
+func buildSessionPicker(recordsPath string, line string, cmdTime time.Time, deltaMs int64) *SessionPicker {
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, e := range entries {
+		if e.IsDir() {
+			ids = append(ids, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+
+	pickerEntries := make([]sessionPickerEntry, 0, len(ids))
+	for _, id := range ids {
+		sessionPath := filepath.Join(recordsPath, id)
+		files, _ := os.ReadDir(sessionPath)
+		name := readSessionName(sessionPath)
+		pickerEntries = append(pickerEntries, sessionPickerEntry{
+			id:        id,
+			name:      name,
+			fileCount: len(files),
+		})
+	}
+	return &SessionPicker{
+		entries: pickerEntries,
+		line:    line,
+		cmdTime: cmdTime,
+		deltaMs: deltaMs,
 	}
 }
 
@@ -2881,6 +3122,16 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
 	}
 
+	if line == "select-session" {
+		sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
+		if sp == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-session: failed to read sessions directory"))
+		}
+		m.sessionPicker = sp
+		return m, nil
+	}
+
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
 		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
@@ -3285,6 +3536,15 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			args := strings.TrimSpace(strings.TrimPrefix(sub, "session rename"))
 			return m.handleRenameSession(args, line, cmdTime, deltaMs)
 		}
+		if sub == "session select" {
+			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
+			if sp == nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ufa session select: failed to read sessions directory"))
+			}
+			m.sessionPicker = sp
+			return m, nil
+		}
 		m.logRecord(line, cmdTime, deltaMs, 1)
 		if strings.HasPrefix(sub, "session ") {
 			unknown := strings.TrimPrefix(sub, "session ")
@@ -3346,6 +3606,7 @@ func ufaSessionHelpText() string {
 		"",
 		"  ufa session help              show this help",
 		"  ufa session list              list all sessions",
+		"  ufa session select            interactively select a session",
 		"  ufa session new [name]        create a new named session",
 		"  ufa session set <id>          switch to an existing session",
 		"  ufa session get               show ID, name, and location of current session",

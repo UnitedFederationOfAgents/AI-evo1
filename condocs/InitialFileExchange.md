@@ -44,13 +44,19 @@ Let's keep things concise at first and start with something straightforward and 
 ```
 
 
-### Step 3 - <REPLACE-TITLE>
+### Step 3 - Add persistence controls.
+
+[Step 3 Prompt](initialFileExchangeImpls/Step3Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Let's add the following controls to the file details dialog:
+- delete: has a confirm dialog, deletes the file
+- hold/persist: the button originally appears as 'hold', when pressed the file's manifest is updated to mark the file for 72 hour cache. If a file is held then the button 'persist' appears in place of hold. Pressing 'persist' moves the file to the host-store (/host-agent-files/exchange/host-store by default) where it will not be automatically deleted.
+
+The file icons should be updates to wireframe icons - when a file is cached short-term it appears as orange. When a file is held it is yellow. When a file is persisted it turns green.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the third step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the third step.

@@ -5,12 +5,16 @@ body {
   font-size: 13px;
   background: #1a1a1a;
   color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport; vh is a
+     fallback for browsers that don't support it. See condoccer/index.css. */
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 #root {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -64,6 +68,10 @@ body {
 }
 
 /* ---- Sidebar ---- */
+
+.sidebar-wrap {
+  display: contents;
+}
 
 .sidebar {
   width: 200px;
@@ -149,6 +157,7 @@ body {
 
 .content {
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -174,6 +183,7 @@ body {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   overflow: hidden;
 }
 
@@ -249,6 +259,7 @@ body {
 
 .main-pane {
   flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
   overflow: auto;
   padding: 40px;
 }
@@ -426,3 +437,230 @@ body {
 .sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
 .sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* ---- Main pane with optional right-hand detail pane (files tab) ---- */
+
+.main-pane-inner { display: flex; align-items: flex-start; gap: 24px; }
+.main-pane-inner .service-view { flex: 1; min-width: 0; }
+
+/* ---- Files panel (upload relayed through AC -- see docs/DistributedExchange.md) ---- */
+
+.files-panel { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+.files-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 1px dashed #3c3c3c; border-radius: 6px; padding: 24px; cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.files-dropzone:hover { border-color: #555; background: #1e1e1e; }
+.files-dropzone-active { border-color: #007acc; background: #14283a; }
+.files-dropzone-text { font-size: 13px; color: #aaa; }
+.files-dropzone-hint { font-size: 11px; color: #666; }
+.files-dropzone-input { display: none; }
+.files-empty { color: #888; font-style: italic; font-size: 13px; }
+.files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 12px; }
+.files-item {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 6px;
+  cursor: pointer; font-family: inherit; color: #d4d4d4; transition: background 0.1s, border-color 0.1s;
+}
+.files-item:hover { background: #2a2a2a; border-color: #555; }
+.files-item-active { border-color: #007acc; background: #14283a; }
+.file-icon { display: inline-flex; width: 28px; height: 28px; }
+.file-icon svg { width: 100%; height: 100%; }
+/* File-details-dialog cache state: orange while short-term cached, yellow
+   once held (72h), green once persisted to the host-store. */
+.file-state-cached { color: #d9822b; }
+.file-state-held { color: #d7c22b; }
+.file-state-persisted { color: #4caf6e; }
+.files-item-name { font-size: 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- File detail pane ---- */
+
+.file-detail-pane {
+  width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 14px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 6px; padding: 14px 16px;
+}
+.file-detail-header { display: flex; align-items: center; justify-content: space-between; }
+.file-detail-title { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.file-detail-close { background: none; border: none; color: #888; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.file-detail-close:hover { color: #d4d4d4; }
+.file-detail-icon { display: flex; justify-content: center; }
+.file-detail-icon .file-icon { width: 40px; height: 40px; }
+.file-detail-rows { display: flex; flex-direction: column; gap: 8px; }
+.file-detail-row { display: flex; flex-direction: column; gap: 2px; }
+.file-detail-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.file-detail-value { font-size: 12px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.file-detail-actions { display: flex; gap: 8px; }
+.file-detail-enter {
+  flex: 1; background: #14283a; border: 1px solid #245a7a; border-radius: 3px; color: #5bb8ff;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-enter:hover { background: #1e3a52; border-color: #4e8cca; }
+.file-detail-download {
+  flex: 1; background: #1a3a1a; border: 1px solid #2e7a2e; border-radius: 3px; color: #6ec96e;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center; text-decoration: none;
+}
+.file-detail-download:hover { background: #2e5a2e; }
+.file-detail-hold {
+  flex: 1; background: #3a341a; border: 1px solid #7a6a2e; border-radius: 3px; color: #d7c22b;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-hold:hover { background: #5a4e2e; border-color: #c4b04e; }
+.file-detail-hold:disabled { opacity: 0.5; cursor: default; }
+.file-detail-delete {
+  flex: 1; background: #3a1a1a; border: 1px solid #7a2e2e; border-radius: 3px; color: #e06a6a;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-delete:hover { background: #5a2e2e; border-color: #c44e4e; }
+.file-detail-delete:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- File viewer ---- */
+
+.file-viewer { display: flex; flex-direction: column; gap: 16px; max-width: 900px; }
+.file-viewer-header { display: flex; align-items: center; gap: 12px; }
+.file-viewer-back {
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #aaa;
+  font-family: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer; flex-shrink: 0;
+}
+.file-viewer-back:hover { background: #2a2a2a; border-color: #555; color: #d4d4d4; }
+.file-viewer-name {
+  font-size: 13px; color: #d4d4d4; font-weight: 600; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-viewer-body {
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 6px; padding: 20px;
+  min-height: 200px; display: flex; align-items: center; justify-content: center;
+}
+.file-viewer-image { max-width: 100%; max-height: 70vh; border-radius: 4px; }
+.file-viewer-text {
+  align-self: stretch; max-height: 70vh; overflow: auto; font-size: 12px; color: #d4d4d4;
+  white-space: pre-wrap; word-break: break-word;
+}
+.file-viewer-empty { color: #888; font-style: italic; font-size: 13px; }
+
+/* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
+ *
+ * Structurally this app is condoccer's sidebar+content shape (a host list
+ * standing in for condoccer's condoc/step list), so it gets the same
+ * off-canvas-drawer treatment, plus the same tab-bar/main-pane/table fixes
+ * used for local-representative's near-identical dashboard.
+ */
+
+.mobile-nav-toggle,
+.mobile-back-btn,
+.mobile-nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-nav-toggle,
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 10px;
+    z-index: 101;
+    width: 38px;
+    height: 38px;
+    background: #2d2d2d;
+    color: #ccc;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .mobile-nav-toggle {
+    right: 10px;
+  }
+
+  .mobile-back-btn {
+    left: 10px;
+    font-size: 24px;
+    font-weight: 700;
+  }
+
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+  }
+
+  .sidebar-wrap {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-wrap.mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .app-body {
+    padding-top: 48px;
+  }
+
+  .host-item {
+    padding: 10px 12px;
+  }
+
+  button {
+    min-height: 34px;
+  }
+
+  .main-pane {
+    padding: 16px;
+  }
+
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tabs {
+    flex-shrink: 0;
+  }
+
+  .tab {
+    padding: 0 12px;
+  }
+
+  .main-pane-inner {
+    flex-direction: column;
+  }
+
+  .file-detail-pane {
+    width: 100%;
+  }
+
+  .sys-table {
+    overflow-x: auto;
+  }
+
+  .sys-row {
+    min-width: 480px;
+  }
+
+  .file-viewer-header {
+    flex-wrap: wrap;
+  }
+
+  .lr-header {
+    flex-wrap: wrap;
+  }
+}

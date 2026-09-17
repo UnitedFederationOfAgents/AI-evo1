@@ -28,6 +28,8 @@ make build      # build frontend + Go binary
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
 | `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
+| `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
+| `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
 
 ## Configuration files
 
@@ -156,6 +158,65 @@ and bringing it up fully remote-controlled.
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 `$PATH`; `--fc-bin` / `fc-bin` overrides that.
+
+## Files tab
+
+The **files** tab shows a wireframe-icon view (text / image / other — a small
+set for this increment) of whatever sits in this LR's host-cache directory
+(`--file-cache-dir`, default `/host-agent-files/exchange/host-cache`) plus its
+host-store directory (`--host-store-dir`). Drag a file from your system's file
+manager onto the tab to upload it; clicking a file opens a right-hand detail
+pane with its name, size, type and upload/expiry times, plus **enter →** and
+**download** buttons. A freshly-uploaded file is swept an hour after upload —
+its icon renders orange — unless held or persisted (see below).
+
+Double-clicking a file (or the detail pane's **enter →** button) opens a
+full-page **viewer**, reminiscent of drilling into a step through condoccer:
+images render inline, text files are fetched and shown as plain text, and
+anything else falls back to a "use download" notice — a **← back** button
+returns to the grid. **download** (in the detail pane or the viewer) saves
+the file's bytes as-is, from `GET /api/files/<id>` (add `?download=1` for an
+attachment `Content-Disposition`; without it the response is `inline`, which
+is what the viewer embeds/fetches).
+
+The detail pane also has **hold**/**persist** and **delete** buttons:
+
+- **hold** (`POST /api/files/<id>/hold`) extends a file's sweep-eligibility
+  from 1 hour to 72 hours from the press, and turns its icon yellow. The
+  button then reads **persist** in its place.
+- **persist** (`POST /api/files/<id>/persist`) moves a held file out of the
+  host-cache into the host-store, where it is never swept; its icon turns
+  green.
+- **delete** (`DELETE /api/files/<id>`, behind a confirm dialog) removes the
+  file — cached, held, or persisted — immediately.
+
+Alongside every uploaded file, LR also writes a hidden
+`.manifest_<id>.yaml` sidecar (flat `key: value` YAML — name, kind, size,
+upload/expiry times, held, creator). It's invisible to the files tab; LR
+reads `held`/`expires_at` back to survive a restart, and records `creator`
+(this LR's own identity) for future correlation once file exchange spans
+more than one host. Uploads whose claimed filename starts with `.manifest_`
+are refused; the sweep removes a manifest alongside its expired data file,
+and a **persist** press moves the manifest into the host-store along with
+the file rather than dropping it.
+
+Upload from a browser connected straight to this LR always works. A request
+arriving through `agent-coordinator`'s `/host/<id>/*` transparent reverse
+proxy is refused (`agent-coordinator` stamps proxied requests with an
+`X-UFA-Proxied-By` header LR's upload handler checks for) — *unless* it also
+carries `X-UFA-Relayed-Upload-By: agent-coordinator`, which only
+agent-coordinator's own dedicated upload-relay route can set (it builds a
+fresh outbound request rather than forwarding the browser's request
+verbatim, so a client can't spoof the header through the transparent proxy
+path instead). That's how the coordinator's own **files** tab gets a dropzone
+too: it POSTs to `/host/<id>/api/files`, which agent-coordinator relays down
+to this LR rather than proxying transparently or keeping its own copy of the
+file. Viewing and downloading are **not** gated on either header — a GET
+reaching `/api/files/<id>` through AC's proxy is served the same as a direct
+request, so the coordinator's files tab gets the same viewer/enter/download
+widgets, just proxied at `/host/<id>/api/files/<id>`.
+See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md) for how
+this and cross-host (LR↔AC↔LR) transfer fit together.
 
 ### Auto-launch chains
 

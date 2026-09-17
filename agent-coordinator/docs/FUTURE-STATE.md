@@ -90,6 +90,20 @@ Both distributed sessions and general distributed interactions need
 file-transfer capability built into the AC interaction. LR is likely the
 application that manages this interaction directly.
 
+**Step 1 landed**: LR has a host-cache directory and a `files` tab (drag a
+file onto it, upload lands in `/host-agent-files/exchange/host-cache` by
+default, entries sweep after an hour), visible through AC's per-host view.
+**Revision B landed AC-mediated upload to one host**: AC's files tab gained
+the same dropzone, relaying the upload through a dedicated route rather than
+writing to its own filesystem or reading LR's directly. See
+[`docs/DistributedExchange.md`](../../docs/DistributedExchange.md) for how
+that path was built and how LR↔AC↔LR cross-host transfer (still open) might
+build on it in turn — confirms LR as the filesystem-owning application (the
+"why LR" question below), and lands on reusing the existing `/host/<id>/*`
+HTTP surface for transfer rather than adding representable message types
+(the "same channel" question below), leaving resumability/backpressure for
+large transfers genuinely open.
+
 Open questions:
 - Does this run over the same representable TCP connection (new message
   types) or a separate channel better suited to bulk transfer?

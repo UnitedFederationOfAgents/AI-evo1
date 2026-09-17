@@ -5,12 +5,18 @@ body {
   font-size: 13px;
   background: #1a1a1a;
   color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport (address/tab bar
+     included); vh is a fallback for browsers that don't support it. Without
+     this, mobile Safari/Chrome size the page taller than what's on-screen and
+     clip the bottom of scrolling content behind their chrome. */
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
 #root {
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -30,6 +36,7 @@ body {
   border-right: 1px solid #3c3c3c;
   display: flex;
   flex-direction: column;
+  min-height: 0; /* same shrink-to-fit fix as .detail-view, for the same reason */
   overflow: hidden;
 }
 
@@ -72,6 +79,7 @@ body {
 
 .nav-list {
   flex: 1;
+  min-height: 0; /* same shrink-to-fit fix as .detail-view, so the repr-footer below stays visible */
   overflow-y: auto;
   padding: 4px 0;
 }
@@ -198,6 +206,13 @@ body {
 
 .detail-view {
   flex: 1;
+  /* min-height: 0 overrides flexbox's default min-height: auto, which sizes a
+     column flex item to fit its content instead of letting it shrink to the
+     space actually available. Without it, this pane (and the scrollable
+     .detail-body inside it) refuses to shrink below its content height, so
+     the overflow gets clipped by the parent instead of becoming reachable
+     via scroll -- pushing .action-panel's submit widgets off-screen. */
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -226,6 +241,7 @@ body {
 
 .detail-body {
   flex: 1;
+  min-height: 0; /* see .detail-view -- same shrink-to-fit fix, one level deeper */
   overflow-y: auto;
   padding: 16px;
   display: flex;
@@ -423,6 +439,12 @@ body {
   background: #252526;
   padding: 12px 16px;
   flex-shrink: 0;
+  /* Belt-and-braces: even with .detail-body correctly shrinking, a very
+     short viewport (e.g. landscape phone with the keyboard open) could still
+     make this panel alone taller than what's left. Let it scroll internally
+     rather than lose the submit button off-screen. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 
 .action-row {
@@ -697,6 +719,105 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- Mobile nav (hamburger + off-canvas drawer) ----
+ *
+ * Desktop keeps the always-visible two-pane layout above. Below the
+ * breakpoint the sidebar becomes a slide-in drawer, opened via a fixed
+ * hamburger button and closed by picking a nav item or tapping the
+ * backdrop. `.sidebar-wrap` is `display: contents` outside the media
+ * query so it has zero effect on the desktop flex layout.
+ */
+
+.sidebar-wrap {
+  display: contents;
+}
+
+.mobile-nav-toggle,
+.mobile-back-btn,
+.mobile-nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-nav-toggle,
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 10px;
+    z-index: 101;
+    width: 38px;
+    height: 38px;
+    background: #2d2d2d;
+    color: #ccc;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  /* Hamburger opens the full drawer (top-right); back steps up one level
+     directly, without needing to open the drawer first (top-left). Both are
+     mobile-only -- the desktop layout already has nav-up-btn in the sidebar. */
+  .mobile-nav-toggle {
+    right: 10px;
+  }
+
+  .mobile-back-btn {
+    left: 10px;
+    font-size: 24px;
+    font-weight: 700;
+  }
+
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+  }
+
+  .sidebar-wrap {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-wrap.mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .main-content {
+    padding-top: 48px;
+  }
+
+  /* Roomier touch targets. */
+  .nav-item {
+    padding: 10px 12px;
+  }
+
+  button {
+    min-height: 34px;
+    padding: 7px 14px;
+  }
+
+  .detail-header {
+    flex-wrap: wrap;
+  }
 }
 
 /* ---- File tree (files-changed main pane) ---- */

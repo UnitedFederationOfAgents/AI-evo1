@@ -167,6 +167,12 @@ type Server struct {
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
+
+	// Files tab: where uploaded files land, and where "persist" moves them to
+	// (see files.go). listFiles() scans these directly, so no further
+	// mutex-guarded state is needed here.
+	fileCacheDir string
+	hostStoreDir string
 }
 
 func newServer(lrName string) *Server {
@@ -317,6 +323,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("condoc-state", s.getCondocState())
 	ac.SendData("system-state", s.systemState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
+	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
 	if cc := s.getCondoccerState(); cc != nil {
 		ac.SendData("condoccer-state", *cc)
 	}
@@ -511,6 +518,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "condoc-state", s.getCondocState())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
+		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
 		}
@@ -667,6 +675,8 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
+	mux.HandleFunc("/api/files", s.handleFilesAPI)
+	mux.HandleFunc("/api/files/", s.handleFileItem)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -716,6 +726,8 @@ type appConfig struct {
 	terminal      string   // command prefix used to host an interactive child in a terminal
 	condoccerPort string   // HTTP port a managed condoccer serves on / is reverse-proxied from
 	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
+	fileCacheDir  string   // directory uploaded files land in for the files tab
+	hostStoreDir  string   // directory a "persist" press moves a file into
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -760,6 +772,8 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		terminal:      pick("terminal", defaults.terminal),
 		condoccerPort: pick("condoccer-port", defaults.condoccerPort),
 		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
+		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
+		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -787,6 +801,8 @@ func main() {
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
 	condoccerPort := flag.String("condoccer-port", "8080", "HTTP port a managed condoccer serves on; its UI is reverse-proxied at /condoccer/")
 	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
+	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
+	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -810,6 +826,8 @@ func main() {
 		terminal:      *terminal,
 		condoccerPort: *condoccerPort,
 		condoccerRoot: *condoccerRoot,
+		fileCacheDir:  *fileCacheDir,
+		hostStoreDir:  *hostStoreDir,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -821,9 +839,18 @@ func main() {
 	s.condoccerPort = cfg.condoccerPort
 	s.condoccerRoot = cfg.condoccerRoot
 	s.terminalCmd = cfg.terminal
+	s.fileCacheDir = cfg.fileCacheDir
+	s.hostStoreDir = cfg.hostStoreDir
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}
+	if err := ensureFileCacheDir(s.fileCacheDir); err != nil {
+		log.Fatal("file cache dir: ", err)
+	}
+	if err := ensureFileCacheDir(s.hostStoreDir); err != nil {
+		log.Fatal("host store dir: ", err)
+	}
+	go s.cleanupFilesLoop()
 
 	reprSrv, err := representable.NewServer(":" + cfg.heartbeatPort)
 	if err != nil {

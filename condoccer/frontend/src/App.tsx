@@ -1532,6 +1532,11 @@ export default function App() {
   const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(null)
   const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>('step')
 
+  // Mobile nav drawer: the sidebar becomes an off-canvas panel below the
+  // `mobile-breakpoint` width (see index.css). Desktop layout is untouched —
+  // this state simply has no visible effect above the breakpoint.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
   const handleSelectCondoc = (path: string) => {
     setSelectedCondocPath(path)
     setSelectedStepNum(null)
@@ -1651,35 +1656,73 @@ export default function App() {
 
   return (
     <div className="app">
-      <Sidebar
-        navLevel={navLevel}
-        condocs={condocs}
-        activeState={activeState}
-        selectedCondocPath={selectedCondocPath}
-        selectedStepNum={selectedStepNum}
-        selectedIterId={selectedIterId}
-        selectedSubstepIterId={selectedSubstepIterId}
-        diffFiles={diffFiles}
-        diffFilesLoaded={diffFilesLoaded}
-        selectedDiffFile={selectedDiffFile}
-        fileDiffHunks={fileDiffHunks}
-        selectedDiffHunkIdx={selectedDiffHunkIdx}
-        diffReturnLevel={diffReturnLevel}
-        onSelectCondoc={handleSelectCondoc}
-        onSelectStep={handleSelectStep}
-        onSelectIter={handleSelectIter}
-        onEnterSubstep={handleEnterSubstep}
-        onSelectSubstepIter={handleSelectSubstepIter}
-        onEnterFilesChanged={handleEnterFilesChanged}
-        onSelectDiffFile={handleSelectDiffFile}
-        onSelectDiffHunk={handleSelectDiffHunk}
-        onNavUp={handleNavUp}
-        reprStatus={reprStatus}
-        reprHost={reprHost}
-        reprPort={reprPort}
-        onReprConnect={connectRepr}
-        onReprDisconnect={disconnectRepr}
-      />
+      <button
+        className="mobile-nav-toggle"
+        aria-label="Open navigation"
+        onClick={() => setMobileNavOpen(true)}
+      >
+        ☰
+      </button>
+
+      {/* Direct one-tap "go up" for mobile -- without it the only way back is
+          opening the full drawer and finding nav-up-btn inside it. Hidden at
+          the top level (condoc-list), same as nav-up-btn's own visibility. */}
+      {navLevel !== 'condoc-list' && (
+        <button
+          className="mobile-back-btn"
+          aria-label="Back"
+          onClick={() => { setMobileNavOpen(false); handleNavUp() }}
+        >
+          ‹
+        </button>
+      )}
+
+      {mobileNavOpen && (
+        <div className="mobile-nav-backdrop" onClick={() => setMobileNavOpen(false)} />
+      )}
+
+      {/* Closes the mobile drawer on nav-item selection without touching the
+          individual handlers below — a no-op on desktop widths. Ignores
+          clicks on the repr-connect form so typing a host/port doesn't
+          dismiss the drawer mid-edit. */}
+      <div
+        className={`sidebar-wrap${mobileNavOpen ? ' mobile-open' : ''}`}
+        onClickCapture={(e) => {
+          if ((e.target as HTMLElement).closest('.nav-item, .nav-up-btn')) {
+            setMobileNavOpen(false)
+          }
+        }}
+      >
+        <Sidebar
+          navLevel={navLevel}
+          condocs={condocs}
+          activeState={activeState}
+          selectedCondocPath={selectedCondocPath}
+          selectedStepNum={selectedStepNum}
+          selectedIterId={selectedIterId}
+          selectedSubstepIterId={selectedSubstepIterId}
+          diffFiles={diffFiles}
+          diffFilesLoaded={diffFilesLoaded}
+          selectedDiffFile={selectedDiffFile}
+          fileDiffHunks={fileDiffHunks}
+          selectedDiffHunkIdx={selectedDiffHunkIdx}
+          diffReturnLevel={diffReturnLevel}
+          onSelectCondoc={handleSelectCondoc}
+          onSelectStep={handleSelectStep}
+          onSelectIter={handleSelectIter}
+          onEnterSubstep={handleEnterSubstep}
+          onSelectSubstepIter={handleSelectSubstepIter}
+          onEnterFilesChanged={handleEnterFilesChanged}
+          onSelectDiffFile={handleSelectDiffFile}
+          onSelectDiffHunk={handleSelectDiffHunk}
+          onNavUp={handleNavUp}
+          reprStatus={reprStatus}
+          reprHost={reprHost}
+          reprPort={reprPort}
+          onReprConnect={connectRepr}
+          onReprDisconnect={disconnectRepr}
+        />
+      </div>
 
       <div className="main-content">
         {error && (

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg } from './types'
 
-const TABS = ['federation-command', 'condoccer', 'worker', 'system'] as const
+const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -25,6 +25,7 @@ function useStatusWS() {
   const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
+  const [filesState, setFilesState] = useState<FilesStateMsg | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -71,6 +72,23 @@ function useStatusWS() {
   const terminateApp = useCallback((id: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'terminate-app', payload: { id } }))
+    }
+  }, [])
+
+  // File upload is a plain HTTP POST (not a websocket command) so the browser
+  // can stream the multipart body directly to /api/files.
+  const uploadFiles = useCallback(async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    if (files.length === 0) return
+    const form = new FormData()
+    for (const f of files) form.append('file', f)
+    try {
+      const resp = await fetch('/api/files', { method: 'POST', body: form })
+      if (!resp.ok) {
+        console.error('file upload failed:', resp.status, await resp.text())
+      }
+    } catch (err) {
+      console.error('file upload failed:', err)
     }
   }, [])
 
@@ -137,6 +155,9 @@ function useStatusWS() {
           case 'system-state':
             setSystemState(msg.payload as SystemStateMsg)
             break
+          case 'files-state':
+            setFilesState(msg.payload as FilesStateMsg)
+            break
         }
       } catch {
         // ignore malformed messages
@@ -152,7 +173,10 @@ function useStatusWS() {
     }
   }, [connect])
 
-  return { connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp }
+  return {
+    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, filesState,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, uploadFiles,
+  }
 }
 
 function FCCommandPanel({
@@ -558,18 +582,364 @@ function SystemPanel({
   )
 }
 
+/* ---- Files panel ---- */
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+function formatAgo(tsSec: number, nowSec: number): string {
+  const secs = Math.max(0, nowSec - tsSec)
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+}
+
+function formatCountdown(expiresAtSec: number, nowSec: number): string {
+  const secs = expiresAtSec - nowSec
+  if (secs <= 0) return 'expiring…'
+  if (secs < 60) return `${secs}s left`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m left`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`
+}
+
+// FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
+// this increment supports: text, image, and a catch-all for everything else.
+// Each renders in `currentColor`, so FileIcon's state-driven CSS class is
+// what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
+const FILE_ICON_PATH: Record<string, JSX.Element> = {
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h9l5 5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M14 2v6h6" strokeLinecap="round" />
+      <path d="M8 13h8M8 17h8M8 9h3" strokeLinecap="round" />
+    </svg>
+  ),
+  image: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <circle cx="8.5" cy="9.5" r="1.5" />
+      <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  other: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M12 2 3 7v10l9 5 9-5V7z" />
+      <path d="M3 7l9 5 9-5M12 12v10" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+// FILE_STATE_CLASS drives the icon color the file-details dialog's
+// hold/persist actions describe: orange while short-term cached, yellow once
+// held, green once persisted to the host-store.
+const FILE_STATE_CLASS: Record<string, string> = {
+  cached: 'file-state-cached',
+  held: 'file-state-held',
+  persisted: 'file-state-persisted',
+}
+
+function FileIcon({ kind, state }: { kind: string; state?: string }) {
+  const stateClass = FILE_STATE_CLASS[state ?? ''] ?? FILE_STATE_CLASS.cached
+  return (
+    <span className={`file-icon file-icon-${kind} ${stateClass}`}>
+      {FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
+    </span>
+  )
+}
+
+// fileRawUrl/fileDownloadUrl address a host-cache file's bytes directly
+// (GET /api/files/<id>, added alongside the viewer/download widgets — see
+// local-representative/files.go's handleFileRaw). Inline is what the viewer
+// embeds/fetches; ?download=1 gets an attachment Content-Disposition so the
+// browser saves it instead of navigating to it.
+function fileRawUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`
+}
+
+function fileDownloadUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}?download=1`
+}
+
+// fileHoldUrl/filePersistUrl back the file-details dialog's "hold"/"persist"
+// buttons (POST, no body -- see local-representative/files.go's
+// handleFileHold/handleFilePersist). fileDeleteUrl backs its "delete" button
+// (DELETE, same address as fileRawUrl's GET).
+function fileHoldUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/hold`
+}
+
+function filePersistUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/persist`
+}
+
+function fileDeleteUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`
+}
+
+function FilesPanel({
+  state,
+  selectedId,
+  onSelect,
+  onEnter,
+  onUpload,
+}: {
+  state: FilesStateMsg | null
+  selectedId: string | null
+  onSelect: (id: string) => void
+  onEnter: (id: string) => void
+  onUpload?: (files: FileList) => void
+}) {
+  const [dragging, setDragging] = useState(false)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const files = state?.files ?? []
+
+  return (
+    <div className="files-panel">
+      {onUpload && (
+        <div
+          className={`files-dropzone${dragging ? ' files-dropzone-active' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={e => {
+            e.preventDefault()
+            setDragging(false)
+            if (e.dataTransfer.files.length > 0) onUpload(e.dataTransfer.files)
+          }}
+          onClick={() => inputRef.current?.click()}
+        >
+          <span className="files-dropzone-text">drag files here, or click to browse</span>
+          <span className="files-dropzone-hint">uploaded files are removed after 1 hour</span>
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            className="files-dropzone-input"
+            onChange={e => {
+              if (e.target.files && e.target.files.length > 0) onUpload(e.target.files)
+              e.target.value = ''
+            }}
+          />
+        </div>
+      )}
+      {files.length === 0 ? (
+        <div className="files-empty">no files in the host-cache</div>
+      ) : (
+        <div className="files-grid">
+          {files.map(f => (
+            <button
+              key={f.id}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
+              onClick={() => onSelect(f.id)}
+              onDoubleClick={() => onEnter(f.id)}
+              title={f.name}
+            >
+              <FileIcon kind={f.kind} state={f.state} />
+              <span className="files-item-name">{f.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FileDetailPane({
+  file,
+  onClose,
+  onEnter,
+}: {
+  file: FileInfo
+  onClose: () => void
+  onEnter: (id: string) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // runAction hits one of the state-changing routes (hold/persist/delete):
+  // the files-tab listing itself refreshes via the next "files-state"
+  // broadcast, not from this response -- this just reports whether the
+  // request was accepted.
+  const runAction = useCallback(async (url: string, method: string): Promise<boolean> => {
+    setBusy(true)
+    try {
+      const resp = await fetch(url, { method })
+      if (!resp.ok) {
+        console.error('file action failed:', method, url, resp.status, await resp.text())
+        return false
+      }
+      return true
+    } catch (err) {
+      console.error('file action failed:', method, url, err)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const handleHoldOrPersist = () => {
+    const url = file.state === 'held' ? filePersistUrl(file.id) : fileHoldUrl(file.id)
+    void runAction(url, 'POST')
+  }
+
+  const handleDelete = () => {
+    if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
+    void runAction(fileDeleteUrl(file.id), 'DELETE').then(ok => { if (ok) onClose() })
+  }
+
+  return (
+    <div className="file-detail-pane">
+      <div className="file-detail-header">
+        <span className="file-detail-title">file details</span>
+        <button className="file-detail-close" onClick={onClose}>×</button>
+      </div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} /></div>
+      <div className="file-detail-rows">
+        <div className="file-detail-row">
+          <span className="file-detail-label">name</span>
+          <span className="file-detail-value" title={file.name}>{file.name}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">type</span>
+          <span className="file-detail-value">{file.kind}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">size</span>
+          <span className="file-detail-value">{formatBytes(file.size)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">uploaded</span>
+          <span className="file-detail-value">{formatAgo(file.uploaded_at, nowSec)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">{file.state === 'persisted' ? 'status' : 'expires'}</span>
+          <span className="file-detail-value">
+            {file.state === 'persisted' ? 'persisted — never expires' : formatCountdown(file.expires_at, nowSec)}
+          </span>
+        </div>
+      </div>
+      <div className="file-detail-actions">
+        <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
+          enter →
+        </button>
+        <a
+          className="file-detail-download"
+          href={fileDownloadUrl(file.id)}
+          download={file.name}
+        >
+          download
+        </a>
+      </div>
+      <div className="file-detail-actions">
+        {file.state !== 'persisted' && (
+          <button className="file-detail-hold" onClick={handleHoldOrPersist} disabled={busy}>
+            {file.state === 'held' ? 'persist' : 'hold'}
+          </button>
+        )}
+        <button className="file-detail-delete" onClick={handleDelete} disabled={busy}>
+          delete
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ---- File viewer ---- */
+
+// FileViewer is the files tab's "drill-down" page, reached by double-clicking
+// a grid item or the detail pane's "enter →" widget (reminiscent of
+// condoccer's substep entry). Images render inline; text is fetched and shown
+// as plain text; anything else falls back to a "use download" notice — this
+// increment's wireframe icon set is deliberately small (text/image/other),
+// and so is its preview set.
+function FileViewer({
+  fileId,
+  file,
+  onBack,
+}: {
+  fileId: string
+  file: FileInfo | null
+  onBack: () => void
+}) {
+  const [textContent, setTextContent] = useState<string | null>(null)
+  const [textError, setTextError] = useState<string | null>(null)
+  const rawUrl = fileRawUrl(fileId)
+
+  useEffect(() => {
+    setTextContent(null)
+    setTextError(null)
+    if (!file || file.kind !== 'text') return
+    let cancelled = false
+    fetch(rawUrl)
+      .then(resp => {
+        if (!resp.ok) throw new Error(`status ${resp.status}`)
+        return resp.text()
+      })
+      .then(text => { if (!cancelled) setTextContent(text) })
+      .catch(err => { if (!cancelled) setTextError(String(err)) })
+    return () => { cancelled = true }
+  }, [rawUrl, file?.kind])
+
+  return (
+    <div className="file-viewer">
+      <div className="file-viewer-header">
+        <button className="file-viewer-back" onClick={onBack}>← back</button>
+        <span className="file-viewer-name" title={file?.name ?? fileId}>{file?.name ?? fileId}</span>
+        {file && (
+          <a className="file-detail-download" href={fileDownloadUrl(fileId)} download={file.name}>
+            download
+          </a>
+        )}
+      </div>
+      <div className="file-viewer-body">
+        {!file ? (
+          <div className="file-viewer-empty">this file is no longer in the host-cache</div>
+        ) : file.kind === 'image' ? (
+          <img className="file-viewer-image" src={rawUrl} alt={file.name} />
+        ) : file.kind === 'text' ? (
+          textError ? (
+            <div className="file-viewer-empty">couldn't load preview: {textError}</div>
+          ) : (
+            <pre className="file-viewer-text">{textContent ?? 'loading…'}</pre>
+          )
+        ) : (
+          <div className="file-viewer-empty">no preview available for this file type — use download above</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('federation-command')
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState,
+    ridealongState, condocState, acState, systemState, filesState,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
-    launchApp, terminateApp,
+    launchApp, terminateApp, uploadFiles,
   } = useStatusWS()
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
   }
+
+  const selectedFile = activeTab === 'files' && !viewerFileId
+    ? filesState?.files.find(f => f.id === selectedFileId) ?? null
+    : null
+  const viewerFile = activeTab === 'files' && viewerFileId
+    ? filesState?.files.find(f => f.id === viewerFileId) ?? null
+    : null
 
   return (
     <div className="app">
@@ -585,7 +955,7 @@ export default function App() {
             <button
               key={tab}
               className={`tab${activeTab === tab ? ' tab-active' : ''}`}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
             >
               {tab}
             </button>
@@ -597,57 +967,80 @@ export default function App() {
         />
       </div>
       <div className="main-pane">
-        <div className="service-view">
-          <div className="service-name">{activeTab}</div>
-          {activeTab === 'system' ? (
-            <SystemPanel
-              state={systemState}
-              fcState={fcState}
-              onLaunch={launchApp}
-              onTerminate={terminateApp}
+        <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+          <div className="service-view">
+            <div className="service-name">{activeTab}</div>
+            {activeTab === 'system' ? (
+              <SystemPanel
+                state={systemState}
+                fcState={fcState}
+                onLaunch={launchApp}
+                onTerminate={terminateApp}
+              />
+            ) : activeTab === 'files' && viewerFileId ? (
+              <FileViewer
+                fileId={viewerFileId}
+                file={viewerFile}
+                onBack={() => setViewerFileId(null)}
+              />
+            ) : activeTab === 'files' ? (
+              <FilesPanel
+                state={filesState}
+                selectedId={selectedFileId}
+                onSelect={setSelectedFileId}
+                onEnter={setViewerFileId}
+                onUpload={uploadFiles}
+              />
+            ) : (
+              <>
+                <div className={`health-indicator health-${getStatus(activeTab)}`}>
+                  <span className="health-dot" />
+                  <span className="health-label">{getStatus(activeTab)}</span>
+                </div>
+                {activeTab === 'federation-command' && (
+                  <>
+                    {ridealongState && (
+                      <RidealongPanel
+                        state={ridealongState}
+                        fcState={fcState}
+                        sendRidealongCommand={sendRidealongCommand}
+                      />
+                    )}
+                    {condocState && !ridealongState && (
+                      <CondocPanel
+                        state={condocState}
+                        fcState={fcState}
+                      />
+                    )}
+                    <FCCommandPanel
+                      fcState={fcState}
+                      fcLog={fcLog}
+                      sendCommand={sendCommand}
+                    />
+                  </>
+                )}
+                {activeTab === 'condoccer' && (
+                  getStatus('condoccer') === 'healthy' ? (
+                    <iframe
+                      className="condoccer-frame"
+                      src="/condoccer/"
+                      title="condoccer"
+                    />
+                  ) : (
+                    <div className="service-empty">
+                      condoccer is not running on this host — launch it from the system tab
+                    </div>
+                  )
+                )}
+              </>
+            )}
+          </div>
+          {selectedFile && (
+            <FileDetailPane
+              file={selectedFile}
+              onClose={() => setSelectedFileId(null)}
+              onEnter={setViewerFileId}
             />
-          ) : (
-            <>
-              <div className={`health-indicator health-${getStatus(activeTab)}`}>
-                <span className="health-dot" />
-                <span className="health-label">{getStatus(activeTab)}</span>
-              </div>
-              {activeTab === 'federation-command' && (
-                <>
-                  {ridealongState && (
-                    <RidealongPanel
-                      state={ridealongState}
-                      fcState={fcState}
-                      sendRidealongCommand={sendRidealongCommand}
-                    />
-                  )}
-                  {condocState && !ridealongState && (
-                    <CondocPanel
-                      state={condocState}
-                      fcState={fcState}
-                    />
-                  )}
-                  <FCCommandPanel
-                    fcState={fcState}
-                    fcLog={fcLog}
-                    sendCommand={sendCommand}
-                  />
-                </>
-              )}
-              {activeTab === 'condoccer' && (
-                getStatus('condoccer') === 'healthy' ? (
-                  <iframe
-                    className="condoccer-frame"
-                    src="/condoccer/"
-                    title="condoccer"
-                  />
-                ) : (
-                  <div className="service-empty">
-                    condoccer is not running on this host — launch it from the system tab
-                  </div>
-                )
-              )}
-            </>
           )}
         </div>
       </div>

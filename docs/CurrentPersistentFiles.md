@@ -47,6 +47,60 @@ agent-records-archive/
 
 ---
 
+## `/host-agent-files/exchange/host-cache/`
+
+**Owner:** local-representative  
+**Flag:** `-file-cache-dir` (default: `/host-agent-files/exchange/host-cache`)
+
+Files dropped on LR's "files" tab, either directly or relayed through
+agent-coordinator's per-host files tab (see
+[`docs/DistributedExchange.md`](DistributedExchange.md)). Flat directory:
+
+```
+host-cache/
+├── <8-hex>_<original-filename>              # e.g. 3f9a2b1c_report.pdf
+└── .manifest_<8-hex>_<original-filename>.yaml   # hidden sidecar, e.g.
+                                                  # .manifest_3f9a2b1c_report.pdf.yaml
+```
+
+The 8-hex prefix makes concurrent uploads collision-free; LR strips it back
+off to show the original filename. Entries are swept once they are more than
+one hour old (checked every minute) — nothing here is meant to persist,
+unless the file details dialog's "hold" button has extended that to 72 hours
+(see below) or its "persist" button has moved the entry to the host-store.
+
+Every upload also gets a `.manifest_<id>.yaml` sidecar (flat `key: value`
+YAML — id, name, kind, size, uploaded_at, held, expires_at, creator) written
+alongside it. It's hidden from the "files" tab; name/kind/size/uploaded_at
+are for an operator to read by hand, but `held`/`expires_at` ARE read back by
+LR — the files tab's "hold" button rewrites them (`held: true`, `expires_at`
+pushed out to 72 hours from the press) so the extended TTL survives an LR
+restart, since the data file's own mtime only ever reflects its original
+upload time. `creator` records the identity of the local-representative that
+uploaded the file (the same host/head id it uses to identify itself to
+agent-coordinator — see `~/.ufa/host.yaml` below), kept for future
+correlation once file exchange spans more than one host. Uploads whose
+claimed filename starts with `.manifest_` are refused; the sweep removes a
+manifest alongside its data file (and cleans up an orphaned manifest whose
+data file is already gone). A "persist" press moves the manifest into the
+host-store along with its data file rather than dropping it (see below).
+
+---
+
+## `/host-agent-files/exchange/host-store/`
+
+**Owner:** local-representative  
+**Flag:** `-host-store-dir` (default: `/host-agent-files/exchange/host-store`)
+
+Where the files tab's "persist" button (file details dialog, shown in place
+of "hold" once a file is already held) moves a host-cache entry to. Flat
+directory, same `<8-hex>_<original-filename>` naming as the host-cache —
+nothing here is ever swept. Its `.manifest_<id>.yaml` sidecar moves along
+with it (a persisted entry has no expiry left to track, but its `creator`
+field is kept for future correlation — see above).
+
+---
+
 ## `/host-agent-files/slopspaces/`
 
 **Owner:** dungeon-keeper  

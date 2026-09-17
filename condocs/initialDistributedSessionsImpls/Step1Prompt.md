@@ -32,11 +32,16 @@ Implemented the baseline for distributed sessions across three binaries, gated e
 Potential next steps, per the guidance docs: build the actual sync backend behind LR's stub — most naturally an agent-coordinator-brokered records-glob pull between participants, extending the single-file pull sketched as Path 2 in `docs/DistributedExchange.md`; make FC's "append" sync genuinely block until the glob lands (per `DistributedSessionsBrainstorm.md`'s "LR transfers the files... we'll want this to block"); and extend `ufa session list`'s remote-session indication into the telescoping/lazy-pull-on-demand model described in both brainstorm docs.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Everything build properly, and we see the owner in the session.yaml now - but when we create sessions on each FC peer we do not see the exchange of sessions happening.
 
+We expect that when we create a session on one node and then run list-sessions on the other, that we will see those remote sessions.
 
-## Human-Prompt
+Rather than the standard grey, those sessions should be shaded 'grey-blue'.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The remote sessions should be available for selection in 'ufa session select'.
+
+Let's make the updates we need to to make sure this interaction works.
+
+Remember that in the session interactions we want to only pull files from each participant node, we do not want to push files to them (They will do this before they touch the session we share!)

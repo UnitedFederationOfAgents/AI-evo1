@@ -60,11 +60,14 @@ Summary of the revision:
 - Recorded the design (including the pull-only/collision-guard reasoning) in `docs/DistributedSessionsBrainstorm.md`'s Working Section.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+One thing we want to confirm and one thing we want to fix - the 'GET /api/hosts' seems suspicious since all of the exchange between FC and LR, and all the exchange between LR and AC should be via the TCP sockets rather than the HTTP the web clients would be calling.
 
+We can fix this if there was a recent mistake, or respond with a comment if there are many occurrences/deeper considerations.
 
-## Human-Prompt
+When we are attempting to test this implementation we also find that there is no evidence of the FC instances syncing sessions to /host-agent-files/, we see that there are only sessions with session.yamls showing the local node as owner. If we need any measures to gather more data about our failure state we may include recommendations for these measures in the response.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We want to fix the behaviour and ensure communication is happening through the right sockets.
+
+While we are at it we will produce a simple document and diagram which displays the different interfaces (HTTP and TCP) and lists the interactions they all perform.

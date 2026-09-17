@@ -40,11 +40,6 @@ Fixed both revision items:
 Note: as in the prior session, build/test commands (`go build`, etc.) were rejected by this session's permission mode, so these changes are verified by careful manual read-through (including tracing the exact JSON relay path that caused the bug) rather than an actual compile/run.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We should keep the .manifest_ file as we move the file from cache to store. We should ensure that we have a creator host/head ID stored there for future correlation.

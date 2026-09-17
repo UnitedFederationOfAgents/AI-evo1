@@ -346,6 +346,31 @@ type CommandRecord struct {
 	Head      string `json:"head,omitempty"`
 }
 
+// isRemoteOwnedSession reports whether m.sessionDir belongs to another host
+// (see readSessionOwner) -- mirrors sessionPickerEntry.isRemote's ownership
+// check for the session FC is actually sitting in right now.
+func (m appModel) isRemoteOwnedSession() bool {
+	owner := readSessionOwner(m.sessionDir)
+	return owner != "" && owner != fcHostID
+}
+
+// appendSessionRecord writes record to the current session's session.jsonl,
+// unless the session is remote-owned. Only the owning host's clauditable/FC
+// may ever be primary for a session (see clauditable's isRemoteOwned/isPrimary
+// gate and docs/DistributedSessionsBrainstorm.md); before this existed, FC
+// unconditionally encoded straight into m.encoder for every command --
+// including meta-commands like list-sessions/select-session/get-session that
+// never touch clauditable at all -- so a secondary participant ended up
+// building its own diverging session.jsonl for a session it doesn't own,
+// instead of that history only ever coming back from the owner via
+// distributed session sync (see InitialDistributedSessions Step 1 Substep C).
+func (m appModel) appendSessionRecord(record CommandRecord) {
+	if m.isRemoteOwnedSession() {
+		return
+	}
+	m.encoder.Encode(record)
+}
+
 // ===== BUBBLETEA MODEL =====
 
 type mlMode int
@@ -1106,7 +1131,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			DeltaMs:   msg.deltaMs,
 			ExitCode:  msg.exitCode,
 		}
-		m.encoder.Encode(record)
+		m.appendSessionRecord(record)
 		// Forward any new output lines to LR.
 		if m.reprOutPath != "" && m.reprClient != nil {
 			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
@@ -1175,7 +1200,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			DeltaMs:   msg.deltaMs,
 			ExitCode:  msg.exitCode,
 		}
-		m.encoder.Encode(record)
+		m.appendSessionRecord(record)
 		// Forward any new output lines to LR.
 		if m.reprOutPath != "" && m.reprClient != nil {
 			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
@@ -1393,7 +1418,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			DeltaMs:   msg.deltaMs,
 			ExitCode:  msg.exitCode,
 		}
-		m.encoder.Encode(record)
+		m.appendSessionRecord(record)
 		// Forward any new output lines to LR.
 		if m.reprOutPath != "" && m.reprClient != nil {
 			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
@@ -3002,7 +3027,7 @@ func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitC
 		Host:      fcHostID,
 		Head:      fcHeadID,
 	}
-	m.encoder.Encode(record)
+	m.appendSessionRecord(record)
 }
 
 func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {

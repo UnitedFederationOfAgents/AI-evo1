@@ -307,3 +307,70 @@ participant touching its own session.
   (`Connected`/`LocalControl`/`Ridealong`/`Condoc` all share the same
   `reprClient`), so the right condition is "is FC connected to LR at all",
   not "is LR currently driving FC's keystrokes".
+
+### InitialDistributedSessions Step 1 Substep C — two real bugs behind "A sees B, B doesn't see A" and secondary FC building its own `session.jsonl`
+
+- **FC was unconditionally building its own `session.jsonl` for sessions it
+  doesn't own.** clauditable already gated session.jsonl consolidation
+  correctly (`isPrimary := !isRemoteOwned && checkIsPrimary(...)`, only the
+  primary calls `consolidatePrimaryToJSONL`), but that's not the only writer:
+  FC itself encodes a `CommandRecord` straight to `m.encoder` on every command
+  it handles — `cmdDoneMsg`/`agentDoneMsg`/`ridealongCmdDoneMsg` and the
+  `logRecord` helper used by `list-sessions`/`select-session`/`get-session`/
+  `new-session`/etc. — entirely independent of clauditable and with no owner
+  check at all. So a secondary participant sitting in a remote-owned session
+  and typing `list-sessions`/`select-session`/`get-session` (none of which
+  ever invoke clauditable) still appended its own entries to its own local
+  copy of that session's `session.jsonl`, which is exactly the divergent
+  A-side vs. B-side `session.jsonl` contents from the debug transcript.
+  **Fixed** in `federation-command/main.go`: added
+  `isRemoteOwnedSession()`/`appendSessionRecord()` (reusing the same
+  `readSessionOwner` FC's session picker already trusts for the grey-blue
+  `[remote: <host>]` badge) and routed all four direct `m.encoder.Encode`
+  call sites through it, so a secondary FC now leaves a remote-owned
+  session's `session.jsonl` alone — that history can only ever come back
+  from the owner, once the `"append"` sync backend from Step 1's initial
+  reply is actually built.
+- **The actual reason B never saw A's sessions: a stale-connection race in
+  `representable.Server`, not lazy-pull staleness.** `Server.handleConn` runs
+  one goroutine per TCP connection; on reconnect under the same client name,
+  `getOrCreate` hands the new goroutine the *same* `*connState`, which calls
+  `setConn` to install the new, live connection. But the old goroutine (for
+  the now-superseded socket) is still blocked in its own `scanner.Scan()`
+  loop, and when that stale socket is eventually noticed as dead — which can
+  lag well behind the reconnect, since nothing in this package configures TCP
+  keepalives — its cleanup ran unconditionally: `cs.disconnect()` plus an
+  `onState(name, "disconnected")` callback, even though `cs` now belongs to a
+  perfectly healthy newer connection. In agent-coordinator, that bogus
+  "disconnected" event clears `hs.lrHTTPPort` (`main.go`'s
+  `SetStateChangeHandler`), but `hs.connected` silently flips back to `true`
+  on the very next `"services"` data message from the still-live connection
+  (`SetDataHandler`, every ~5s via `broadcastLoop`) — `lrHTTPPort` is only
+  ever restored by the one-shot `lr-http` message `pushStateToAC` sends right
+  after `connectAC`, not by anything periodic. The result: `GET /api/hosts`
+  reports the affected host as `"connected"` again, so
+  `pullRemoteSessionLists`'s `h.Status != "connected"` filter stops skipping
+  it, but every actual pull still 502s at `resolveHostTarget`'s `port == ""`
+  check — permanently, until that host's LR fully drops and re-dials AC (the
+  only thing that resends `lr-http`). One participant hitting this stale-race
+  once (e.g. during AC's own auto-reconnect retries) durably blinds every
+  peer to it, while a peer that never raced looks fine — precisely the
+  one-directional "A sees B, B never sees A" pattern reported, and it does
+  *not* self-heal by re-running `list-sessions`. **Fixed** at the root, in
+  `representable/representable.go`: `connState.disconnect()` became
+  `disconnectIfCurrent(conn)`, which only clears state and fires the
+  `"disconnected"` callback when the connection tearing down is still the one
+  the `connState` considers current, so a superseded socket's belated cleanup
+  can no longer clobber a live reconnect.
+- **Coverage gap worth flagging:** `representable/` has no test file at all,
+  and `local-representative/sessions_test.go` only unit-tests
+  `ingestRemoteSession` in isolation, never `pullRemoteSessionLists`'s actual
+  HTTP path — so neither bug above would have been caught by the existing
+  suite. No build sandbox was available for this substep either, so (as in
+  Rev A/B) this was verified by manual line-by-line review and tracing the
+  goroutine/state-transition logic rather than compiling or running tests;
+  adding a `representable` test that reconnects a client under the same name
+  while its old socket is still open, and a `sessions_test.go` case that
+  drives `pullRemoteSessionLists` against a real `httptest` peer with a
+  since-cleared `lrHTTPPort`, would close that gap and are recommended as
+  next steps alongside the still-unbuilt `"append"` sync backend.

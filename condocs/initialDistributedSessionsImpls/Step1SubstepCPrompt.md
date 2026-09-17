@@ -101,3 +101,20 @@ OUT>> drwxr-xr-x 2 jedsall jedsall 4096 Sep 17 21:59 .
 {"id":"5b38f96f","cmd":"ls -latr /host-agent-files/agent-records/2026-09-17_21-43-20_distributed-test-fix-session","ts":"2026-09-17T21:59:31Z","delta_ms":396086,"exit":0}
 
 Let's fix the logic driving this interaction.
+
+
+prompt: [`f5297e0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f5297e0fe6718bba9166c4f3060d94c8ec8bbfb6) → reply: [`c2995be`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c2995bef13b0b725bda247df1d78b45daa41a873)
+
+## Reply
+
+Found and fixed two distinct root causes behind the reported symptoms. First, `federation-command/main.go` was unconditionally writing every command (including meta-commands like `list-sessions`/`select-session`/`get-session` that never touch clauditable) straight into `session.jsonl` via `m.encoder.Encode`, with no ownership check — so a secondary participant kept building its own diverging copy of a session it doesn't own; fixed by adding `isRemoteOwnedSession()`/`appendSessionRecord()` and routing all four write sites through it. Second, the "A sees B but B never sees A" asymmetry traced to a real race in `representable/representable.go`: a reconnecting client's stale, superseded TCP connection could later fire a bogus "disconnected" event that wiped out agent-coordinator's `lrHTTPPort` for the still-healthy new connection, permanently 502-ing that host's session pulls while `/api/hosts` kept reporting it "connected" — fixed via `disconnectIfCurrent`, which only tears down state when the closing connection is still the one currently considered live. Both fixes plus reasoning are recorded in `docs/DistributedSessionsBrainstorm.md`'s Working Section (no build sandbox was available, so this was verified by manual line-by-line review rather than compiling, matching the prior revisions' approach).
+
+
+## <REPLACE-Revision|Retry> A
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.

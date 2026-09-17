@@ -191,11 +191,26 @@ func (cs *connState) setConn(conn net.Conn) {
 	cs.mu.Unlock()
 }
 
-func (cs *connState) disconnect() {
+// disconnectIfCurrent marks cs disconnected, but only if conn is still the
+// connection cs considers live. A client that drops and reconnects under the
+// same name shares this connState (see Server.getOrCreate), so the old
+// connection's own handleConn goroutine is still scanning it when the new one
+// calls setConn -- without this check, the old goroutine's eventual cleanup
+// (its scanner loop only returns once the OS notices the stale socket is
+// dead, which can lag well behind the reconnect) would unconditionally wipe
+// out the new, healthy connection's state and fire a bogus "disconnected"
+// event for a client that's actually still up. Returns true when it actually
+// disconnected cs (i.e. conn was still current), false when conn had already
+// been superseded and the call is a no-op.
+func (cs *connState) disconnectIfCurrent(conn net.Conn) bool {
 	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.conn != conn {
+		return false
+	}
 	cs.connected = false
 	cs.conn = nil
-	cs.mu.Unlock()
+	return true
 }
 
 // sendCmd writes a command message to the client connection.
@@ -375,8 +390,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 		}
 	}
-	if cs != nil {
-		cs.disconnect()
+	if cs != nil && cs.disconnectIfCurrent(conn) {
 		s.mu.RLock()
 		fn := s.onState
 		s.mu.RUnlock()

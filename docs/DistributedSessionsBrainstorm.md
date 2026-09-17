@@ -268,3 +268,42 @@ participant touching its own session.
   sync (not just `session.yaml`) still has no backend, so a remote session
   selected today shows accurately in listings but its `session.jsonl`/
   processed files won't reflect the owner's latest activity until that lands.
+
+### InitialDistributedSessions Step 1 Rev B — confirmed `GET /api/hosts`, fixed the real sync bug
+
+- **`GET /api/hosts` (and the rest of LR↔AC's read/discovery surface) is
+  confirmed intentional, not a Rev A mistake.** FC↔LR traffic is, and stays,
+  100% over representable's TCP `data`/`command`/`log` channel — no HTTP ever
+  crosses that leg. LR↔AC is deliberately a *mixed* leg, and has been since
+  `docs/DistributedExchange.md`'s Path 1 (AC-mediated upload): representable
+  there carries only small control-plane pushes with no request/reply framing
+  (`services`, `fc-state`, `files-state`, `__system:`/`__ridealong:` commands,
+  and now `session-sync-request`); anything that needs a synchronous
+  query-with-a-body — `GET /api/files/<id>`, `GET /api/files`,
+  `POST /api/files` (upload, relayed by AC), `GET /api/sessions`, and now
+  `GET /api/hosts` — already lives on the HTTP surface both a browser and a
+  peer LR reach through AC's `/host/<id>/*` proxy. `GET /api/hosts` is the
+  same shape as all of those: it's how a local-representative discovers peers
+  without standing up its own WebSocket client just to read the "hosts" list
+  AC already broadcasts there. Folding it into representable would mean
+  giving that protocol request/reply semantics it doesn't have anywhere else
+  today — a bigger, separate change, not a one-line fix — so this is a
+  "comment" answer, not a code change. See the new `docs/InterfaceTopology.md`
+  for the full inventory of which leg carries what.
+- **The actual reason FC instances weren't syncing sessions to
+  `/host-agent-files/`:** `notifyDistributedSessionSync`/
+  `awaitDistributedSessionSync` gated on `blinker.IsConnected()`, which is
+  specifically `BlinkerConnected` — FC in *remote-control* mode, driven by LR.
+  But the ordinary way to exercise this (FC attached to LR, typing locally) is
+  `BlinkerLocalControl`, a different state that `IsConnected()` returns false
+  for — see `autoConnectControlState`, which lands a manually-driven FC there
+  specifically so the foreground session isn't yanked away. So every
+  `list-sessions`/`select-session`/append in the state actually used for
+  manual testing silently sent nothing, with no error or log line to explain
+  why (a good example of the "measures to gather more data" the prompt asked
+  about — a bail-early log line here would have surfaced this immediately).
+  **Fixed** by gating on `m.reprClient != nil` alone: the representable data
+  channel is live in every control state FC can be connected in
+  (`Connected`/`LocalControl`/`Ridealong`/`Condoc` all share the same
+  `reprClient`), so the right condition is "is FC connected to LR at all",
+  not "is LR currently driving FC's keystrokes".

@@ -71,3 +71,28 @@ When we are attempting to test this implementation we also find that there is no
 We want to fix the behaviour and ensure communication is happening through the right sockets.
 
 While we are at it we will produce a simple document and diagram which displays the different interfaces (HTTP and TCP) and lists the interactions they all perform.
+
+
+prompt: [`9b8351e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9b8351ea75b00988326029fd261a8cd4e02df777) → reply: [`c527260`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c5272603e34cd546e99cc50bc9922c203d223868)
+
+## Reply B
+
+This looks complete and matches the three asks in Revision B. Summary of the work:
+
+**Confirmed, didn't fix**: `GET /api/hosts` isn't a mistake — FC↔LR is 100% representable TCP as expected, but LR↔AC has intentionally mixed both transports since `docs/DistributedExchange.md`'s Path 1 (representable carries only replyless control-plane pushes/commands; anything needing a synchronous answer with a body — file reads, session lists, and now host discovery — lives on HTTP). Recorded that reasoning in the brainstorm doc rather than changing the code.
+
+**Found and fixed the real bug**: `notifyDistributedSessionSync`/`awaitDistributedSessionSync` in `federation-command/main.go` gated on `blinker.IsConnected()`, which is specifically the *remote-control* blinker state — but ordinary manual testing (FC attached to LR, typed at locally) lands in `BlinkerLocalControl`, a different state that check silently excluded, so no sync ever fired and nothing logged to explain why. Fixed by gating on `m.reprClient != nil` instead, since that connection is live across every control mode FC can be connected in.
+
+**New doc**: `docs/InterfaceTopology.md` — a diagram and full inventory of every HTTP and TCP interaction across FC, LR, and AC, including the reasoning for why `GET /api/hosts` belongs on HTTP.
+
+No build sandbox was available (same as the prior revision), so I verified this by manual line-by-line review and tracing the state-transition logic rather than compiling.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

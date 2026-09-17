@@ -597,8 +597,17 @@ type sessionSyncRequestPayload struct {
 // state. It is a no-op when FC isn't connected to LR — distributed sessions are
 // only in play while connected; a disconnected FC behaves exactly as it always
 // has, purely local.
+//
+// Gates on m.reprClient alone, not on any particular blinker.State() — the
+// data channel session-sync-request rides is live in every control mode FC
+// can be connected in (BlinkerConnected/LocalControl/Ridealong/Condoc all
+// keep the same reprClient), and gating on blinker.IsConnected() specifically
+// silently suppressed every sync while FC sat in the far more common
+// BlinkerLocalControl mode (a human typing at FC's own prompt with LR merely
+// attached) — see InitialDistributedSessions Step 1 Rev B: this was why
+// session syncing showed no effect in ordinary manual testing.
 func (m appModel) notifyDistributedSessionSync(kind, sessionID string) {
-	if m.reprClient == nil || !m.blinker.IsConnected() {
+	if m.reprClient == nil {
 		return
 	}
 	m.reprClient.SendData("session-sync-request", sessionSyncRequestPayload{
@@ -632,9 +641,10 @@ var (
 // the representable client's own reader goroutine rather than through
 // Update, so nothing here can deadlock against the very message this is
 // waiting for. A no-op when FC isn't connected to LR, same as
-// notifyDistributedSessionSync.
+// notifyDistributedSessionSync (see that function's comment on why the gate
+// is m.reprClient alone rather than any specific blinker.State()).
 func (m appModel) awaitDistributedSessionSync(kind, sessionID string) {
-	if m.reprClient == nil || !m.blinker.IsConnected() {
+	if m.reprClient == nil {
 		return
 	}
 	ch := make(chan struct{})

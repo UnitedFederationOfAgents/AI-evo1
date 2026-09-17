@@ -43,3 +43,20 @@ Note: as in the prior session, build/test commands (`go build`, etc.) were rejec
 ## Revision B
 
 We should keep the .manifest_ file as we move the file from cache to store. We should ensure that we have a creator host/head ID stored there for future correlation.
+
+
+prompt: [`36ec764`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/36ec7646844b1641c182d1de3ed0ca7d197cef6d) → reply: [`559d0be`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/559d0beeaad4649cedfeceb9bd1eedd4818504e7)
+
+## Reply B
+
+Implemented Revision B: `handleFilePersist` now moves the `.manifest_<id>.yaml` sidecar alongside the data file into the host-store instead of deleting it (with `scanStoreDir` updated to keep those sidecars hidden from the files tab, matching host-cache behavior). The manifest gained a `creator` field recording the uploading LR's identity (`s.lrName`, the same host/head id it uses with agent-coordinator), written at upload and preserved unchanged through `hold` and `persist` for future cross-host correlation. Updated Go tests (including a new one tracing creator survival across upload→hold→persist) and the relevant docs (`CurrentPersistentFiles.md`, LR's `README.md`) to match; as in prior sessions, build/test commands were rejected by this session's permission mode, so this is verified by manual read-through rather than an actual compile/run.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -73,17 +73,21 @@ const relayedUploadHeader = "X-UFA-Relayed-Upload-By"
 // sets on both proxiedHeader and relayedUploadHeader.
 const acRelayStamp = "agent-coordinator"
 
-// manifestPrefix marks a host-cache entry as a hidden sidecar rather than a
-// file the "files" tab should list: alongside an uploaded "<id>" this
-// increment also writes "<manifestPrefix><id>.yaml" recording the same
-// details (name, kind, size, upload/expiry times, hold state) in a small
-// flat-YAML file. Its "held"/"expires_at" fields are read back by
-// readManifest -- listFiles and the sweep both need them to tell a held file
-// (72-hour TTL from when hold was pressed) from a plain cached one (1 hour
-// from upload) without relying on the data file's mtime, which the hold
-// action deliberately leaves untouched. Uploads whose claimed filename starts
-// with this prefix are refused, and the sweep/listing both treat it as
-// invisible to the files tab.
+// manifestPrefix marks a host-cache (or, once persisted, host-store) entry as
+// a hidden sidecar rather than a file the "files" tab should list: alongside
+// an uploaded "<id>" this increment also writes "<manifestPrefix><id>.yaml"
+// recording the same details (name, kind, size, upload/expiry times, hold
+// state, creator) in a small flat-YAML file. Its "held"/"expires_at" fields
+// are read back by readManifest -- listFiles and the sweep both need them to
+// tell a held file (72-hour TTL from when hold was pressed) from a plain
+// cached one (1 hour from upload) without relying on the data file's mtime,
+// which the hold action deliberately leaves untouched. Its "creator" field
+// (the uploading LR's identity, see writeManifest) is carried forward rather
+// than read back by anything yet -- it exists for future cross-host
+// correlation once file exchange spans more than a single LR (see
+// docs/DistributedExchange.md). Uploads whose claimed filename starts with
+// this prefix are refused, and the sweep/listing both treat it as invisible
+// to the files tab -- in either directory.
 const manifestPrefix = ".manifest_"
 
 // manifestName returns the sidecar filename for a host-cache entry "id",
@@ -178,10 +182,12 @@ func ensureFileCacheDir(dir string) error {
 
 // manifestFields is the small subset of a manifest sidecar's flat "key:
 // value" YAML that's actually read back (see writeManifest): whether a
-// host-cache entry is held, and the expiry that implies.
+// host-cache entry is held, the expiry that implies, and the LR identity
+// that created it.
 type manifestFields struct {
 	Held      bool
 	ExpiresAt int64
+	Creator   string
 }
 
 // readManifest reads dir/.manifest_<id>.yaml, if present. ok is false when
@@ -208,6 +214,8 @@ func readManifest(dir, id string) (manifestFields, bool) {
 			if t, err := time.Parse(time.RFC3339, val); err == nil {
 				m.ExpiresAt = t.Unix()
 			}
+		case "creator":
+			m.Creator = val
 		}
 	}
 	return m, true
@@ -261,7 +269,10 @@ func (s *Server) scanCacheDir() []FileInfo {
 }
 
 // scanStoreDir lists host-store entries: files a "persist" press has moved
-// out of the sweep's reach entirely, so ExpiresAt is left at zero.
+// out of the sweep's reach entirely, so ExpiresAt is left at zero. Each
+// entry's manifest sidecar (kept, not dropped, on persist -- see
+// handleFilePersist) travels alongside it but stays hidden from the files
+// tab, same as in the host-cache.
 func (s *Server) scanStoreDir() []FileInfo {
 	entries, err := os.ReadDir(s.hostStoreDir)
 	if err != nil {
@@ -269,7 +280,7 @@ func (s *Server) scanStoreDir() []FileInfo {
 	}
 	files := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || strings.HasPrefix(e.Name(), manifestPrefix) {
 			continue
 		}
 		info, err := e.Info()
@@ -480,7 +491,7 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 		UploadedAt: now.Unix(),
 		ExpiresAt:  now.Add(fileCacheTTL).Unix(),
 	}
-	s.writeManifest(info)
+	s.writeManifest(info, s.lrName)
 	return info, nil
 }
 
@@ -490,12 +501,18 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 // name/kind/size/uploaded_at are for an operator to read by hand -- nothing
 // parses them back. held/expires_at ARE read back, by readManifest, so a
 // held file's extended TTL survives an LR restart (the data file's own mtime
-// only ever reflects its original upload time). A write failure is logged
-// and otherwise swallowed: the action that triggered it (upload/hold) already
-// succeeded and shouldn't fail over a sidecar note.
-func (s *Server) writeManifest(info FileInfo) {
+// only ever reflects its original upload time). creator records which LR
+// (see Server.lrName, the same identity used as this LR's host/head id when
+// connecting to agent-coordinator) originally uploaded the file -- callers
+// that rewrite an existing manifest (e.g. handleFileHold) should pass back
+// whatever readManifest reported rather than the current lrName, so the
+// original creator survives even if this LR were ever renamed between
+// upload and hold. A write failure is logged and otherwise swallowed: the
+// action that triggered it (upload/hold) already succeeded and shouldn't
+// fail over a sidecar note.
+func (s *Server) writeManifest(info FileInfo, creator string) {
 	var b strings.Builder
-	b.WriteString("# host-cache manifest -- hidden from the files tab; held/expires_at are read back by readManifest\n")
+	b.WriteString("# host-cache manifest -- hidden from the files tab; held/expires_at/creator are read back by readManifest\n")
 	fmt.Fprintf(&b, "id: %q\n", info.ID)
 	fmt.Fprintf(&b, "name: %q\n", info.Name)
 	fmt.Fprintf(&b, "kind: %s\n", info.Kind)
@@ -503,6 +520,7 @@ func (s *Server) writeManifest(info FileInfo) {
 	fmt.Fprintf(&b, "uploaded_at: %s\n", time.Unix(info.UploadedAt, 0).UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "held: %t\n", info.State == "held")
 	fmt.Fprintf(&b, "expires_at: %s\n", time.Unix(info.ExpiresAt, 0).UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "creator: %q\n", creator)
 	path := filepath.Join(s.fileCacheDir, manifestName(info.ID))
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		log.Printf("files: failed to write manifest for %s: %v", info.ID, err)
@@ -634,7 +652,11 @@ func (s *Server) handleFileHold(w http.ResponseWriter, r *http.Request, id strin
 		UploadedAt: fi.ModTime().Unix(),
 		ExpiresAt:  time.Now().Add(holdTTL).Unix(),
 	}
-	s.writeManifest(info)
+	creator := s.lrName
+	if m, ok := readManifest(s.fileCacheDir, id); ok && m.Creator != "" {
+		creator = m.Creator
+	}
+	s.writeManifest(info, creator)
 	log.Printf("files: held %s (72h cache)", id)
 	s.broadcastFiles()
 	w.Header().Set("Content-Type", "application/json")
@@ -644,8 +666,14 @@ func (s *Server) handleFileHold(w http.ResponseWriter, r *http.Request, id strin
 // handleFilePersist implements the file-details dialog's "persist" button
 // (shown in place of "hold" once a file is held): moves the entry out of the
 // host-cache into the host-store, where the sweep never looks, so it
-// outlives holdTTL. The host-cache manifest sidecar is dropped in the move --
-// a host-store entry needs no expiry bookkeeping, since it has none.
+// outlives holdTTL. The manifest sidecar moves along with it rather than
+// being dropped: a host-store entry needs no expiry bookkeeping, but its
+// "creator" field (see writeManifest) is still worth keeping around for
+// future cross-host correlation once file exchange spans more than one LR
+// (see docs/DistributedExchange.md). Every upload writes a manifest (see
+// saveUploadedFile), so in practice there's always one to carry forward, but
+// the move is skipped harmlessly if one's missing regardless (e.g. a
+// host-cache entry placed by hand).
 //
 // This is reachable directly (not only after a prior hold) for robustness;
 // the "hold first" flow is a UI convention, not a backend requirement.
@@ -665,7 +693,15 @@ func (s *Server) handleFilePersist(w http.ResponseWriter, r *http.Request, id st
 		http.Error(w, "persisting file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.removeManifest(id)
+	manifestSrc := filepath.Join(s.fileCacheDir, manifestName(id))
+	if _, err := os.Stat(manifestSrc); err == nil {
+		manifestDst := filepath.Join(s.hostStoreDir, manifestName(id))
+		if err := moveFile(manifestSrc, manifestDst); err != nil {
+			log.Printf("files: failed to move manifest for %s to host-store: %v", id, err)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("files: failed to stat manifest for %s before persisting: %v", id, err)
+	}
 	log.Printf("files: persisted %s -> host-store/%s", id, id)
 
 	info := FileInfo{

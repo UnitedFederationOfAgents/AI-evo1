@@ -344,8 +344,9 @@ func TestHandleFileHoldUnknownID(t *testing.T) {
 
 // TestHandleFilePersist covers the file-details dialog's "persist" button:
 // the entry moves out of the host-cache into the host-store, its state
-// flips to "persisted", and its host-cache manifest sidecar is dropped
-// (a host-store entry needs none).
+// flips to "persisted", and its manifest sidecar moves along with it rather
+// than being dropped -- preserved (still hidden from listFiles) for its
+// "creator" field's future cross-host correlation use.
 func TestHandleFilePersist(t *testing.T) {
 	s := newTestFileServer(t)
 	id := uploadOne(t, s, "hello.txt", []byte("hello world"))
@@ -364,12 +365,19 @@ func TestHandleFilePersist(t *testing.T) {
 		t.Errorf("persisted file should be in host-store: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.fileCacheDir, manifestName(id))); !os.IsNotExist(err) {
-		t.Errorf("persist should have dropped the host-cache manifest sidecar, stat err = %v", err)
+		t.Errorf("persist should have moved the manifest sidecar out of the host-cache, stat err = %v", err)
+	}
+	manifestBody, err := os.ReadFile(filepath.Join(s.hostStoreDir, manifestName(id)))
+	if err != nil {
+		t.Fatalf("persist should have moved the manifest sidecar into the host-store: %v", err)
+	}
+	if !strings.Contains(string(manifestBody), `creator: "test-lr"`) {
+		t.Errorf("persisted manifest missing expected creator field, got:\n%s", manifestBody)
 	}
 
 	files := s.listFiles()
 	if len(files) != 1 || files[0].State != "persisted" || files[0].ExpiresAt != 0 {
-		t.Fatalf("listFiles() after persist = %+v, want one file, state \"persisted\", expires_at 0", files)
+		t.Fatalf("listFiles() after persist = %+v, want one file, state \"persisted\", expires_at 0 (manifest sidecar should stay invisible to listFiles)", files)
 	}
 
 	// A persisted file's bytes are still reachable through the raw endpoint.
@@ -417,6 +425,34 @@ func TestHandleFileDeletePersisted(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.hostStoreDir, id)); !os.IsNotExist(err) {
 		t.Errorf("delete should have removed the host-store entry, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.hostStoreDir, manifestName(id))); !os.IsNotExist(err) {
+		t.Errorf("delete should have removed the host-store manifest sidecar too, stat err = %v", err)
+	}
+}
+
+// TestManifestCreatorSurvivesHoldAndPersist verifies the manifest's "creator"
+// field (the uploading LR's identity) is set at upload, preserved across a
+// hold rewrite, and carried forward into the host-store on persist.
+func TestManifestCreatorSurvivesHoldAndPersist(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "hello.txt", []byte("hello"))
+
+	m, ok := readManifest(s.fileCacheDir, id)
+	if !ok || m.Creator != "test-lr" {
+		t.Fatalf("readManifest after upload = %+v, ok=%v, want creator \"test-lr\"", m, ok)
+	}
+
+	s.handleFileItem(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/hold", nil))
+	m, ok = readManifest(s.fileCacheDir, id)
+	if !ok || m.Creator != "test-lr" {
+		t.Fatalf("readManifest after hold = %+v, ok=%v, want creator still \"test-lr\"", m, ok)
+	}
+
+	s.handleFileItem(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/persist", nil))
+	m, ok = readManifest(s.hostStoreDir, id)
+	if !ok || m.Creator != "test-lr" {
+		t.Fatalf("readManifest after persist = %+v, ok=%v, want creator still \"test-lr\"", m, ok)
 	}
 }
 

@@ -191,12 +191,14 @@ The detail pane also has **hold**/**persist** and **delete** buttons:
   file — cached, held, or persisted — immediately.
 
 Alongside every uploaded file, LR also writes a hidden
-`.manifest_<id>.yaml` sidecar into the host-cache (flat `key: value` YAML —
-name, kind, size, upload/expiry times). It's invisible to the files tab and
-not read back by LR itself; it exists so an operator can tell when a cache
-entry is due to be swept just by looking at the directory, even after an
-interrupted run. Uploads whose claimed filename starts with `.manifest_` are
-refused, and the sweep removes a manifest alongside its data file.
+`.manifest_<id>.yaml` sidecar (flat `key: value` YAML — name, kind, size,
+upload/expiry times, held, creator). It's invisible to the files tab; LR
+reads `held`/`expires_at` back to survive a restart, and records `creator`
+(this LR's own identity) for future correlation once file exchange spans
+more than one host. Uploads whose claimed filename starts with `.manifest_`
+are refused; the sweep removes a manifest alongside its expired data file,
+and a **persist** press moves the manifest into the host-store along with
+the file rather than dropping it.
 
 Upload from a browser connected straight to this LR always works. A request
 arriving through `agent-coordinator`'s `/host/<id>/*` transparent reverse

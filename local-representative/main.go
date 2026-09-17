@@ -79,6 +79,39 @@ type CondocStateMsg struct {
 	StatusMsg string `json:"status_msg,omitempty"`
 }
 
+// SessionSyncRequestMsg is the payload of a "session-sync-request" data message
+// sent by federation-command over the representable connection, asking LR to
+// sync a glob of session files from all participants before FC proceeds.
+// FC never specifies how the sync happens — only what's needed:
+//   - Kind "append": sync SessionID's processed + session files (session.yaml,
+//     session.jsonl, *-processed.txt — never *-raw.txt/-writing.txt) ahead of
+//     FC appending a new command record to it.
+//   - Kind "list": sync only session.yaml for every un-archived session across
+//     all participants (lazy-loading — full session contents are pulled later,
+//     on demand, not eagerly). SessionID is empty for this kind.
+type SessionSyncRequestMsg struct {
+	Kind      string `json:"kind"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// handleSessionSyncRequest is the entrypoint for distributed session file
+// syncing. The cross-host transfer primitive this ultimately depends on
+// (agent-coordinator brokering a records-glob pull between participants,
+// analogous to the single-file pull sketched in docs/DistributedExchange.md)
+// doesn't exist yet, so this is currently a best-effort acknowledgement — it
+// establishes the wire contract FC already speaks to, ready to be backed by
+// real multi-participant sync in a later increment.
+func handleSessionSyncRequest(req SessionSyncRequestMsg) {
+	switch req.Kind {
+	case "append":
+		log.Printf("session-sync-request: append glob for session %q (processed + session files only) — no cross-host sync backend yet", req.SessionID)
+	case "list":
+		log.Printf("session-sync-request: list glob (session.yaml, un-archived only) across participants — no cross-host sync backend yet")
+	default:
+		log.Printf("session-sync-request: unknown kind %q", req.Kind)
+	}
+}
+
 // ACStateMsg is the payload of "ac-state" WebSocket messages.
 type ACStateMsg struct {
 	Connected bool   `json:"connected"`
@@ -946,6 +979,11 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("condoc-state", payload)
 				}
+			}
+		case "session-sync-request":
+			var payload SessionSyncRequestMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				handleSessionSyncRequest(payload)
 			}
 		}
 	})

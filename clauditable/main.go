@@ -122,10 +122,7 @@ func main() {
 	// Get configuration from environment
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	session := getSession()
-	host := os.Getenv(EnvUFAHost)
-	if host == "" {
-		host = ufahostid.GetHostID()
-	}
+	host := resolveHost()
 	head := os.Getenv(EnvUFAHead)
 	agent := os.Getenv(EnvUFAAgent)
 	model := os.Getenv(EnvUFAModel)
@@ -137,7 +134,15 @@ func main() {
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to create session directory: %v\n", err)
 	}
-	_ = writeSessionYAMLIfAbsent(sessionDir, session, session)
+	_ = writeSessionYAMLIfAbsent(sessionDir, session, session, host)
+
+	// Distributed sessions: a session owned by a different host is always
+	// secondary here — only the owning host's clauditable can be primary for
+	// it. This is the full extent of what clauditable knows about distributed
+	// sessions; how the owner's files actually reach this host is handled
+	// elsewhere and never surfaces here.
+	sessionOwner := readSessionOwner(sessionDir)
+	isRemoteOwned := sessionOwner != "" && sessionOwner != host
 
 	// Write the writing file at dispatch time — signals that a writer is starting
 	startTime := time.Now()
@@ -153,7 +158,7 @@ func main() {
 
 	// Wait 200ms to detect concurrent starters, then determine primary/secondary role
 	time.Sleep(200 * time.Millisecond)
-	isPrimary := checkIsPrimary(sessionDir, unixTimestamp)
+	isPrimary := !isRemoteOwned && checkIsPrimary(sessionDir, unixTimestamp)
 	if !isPrimary {
 		secondaryPath := filepath.Join(sessionDir, fmt.Sprintf("%d-s-writing.txt", unixTimestamp))
 		if err := os.Rename(writingFilePath, secondaryPath); err == nil {
@@ -317,6 +322,33 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// resolveHost returns the stable identifier for this host: UFA_HOST if set,
+// otherwise the per-host ID from ~/.ufa/host.yaml (falling back to hostname).
+func resolveHost() string {
+	if host := os.Getenv(EnvUFAHost); host != "" {
+		return host
+	}
+	return ufahostid.GetHostID()
+}
+
+// readSessionOwner reads the "owner" field (the host that created the session)
+// from a session's session.yaml. Returns "" when absent — either the session
+// predates owner tracking, or session.yaml doesn't exist yet — in which case
+// callers treat the session as locally-owned.
+func readSessionOwner(sessionDir string) string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "owner:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "owner:"))
+		}
+	}
+	return ""
 }
 
 type verbosityRelay struct {
@@ -707,17 +739,19 @@ func ensureSession(recordsPath, sessionID, name string) error {
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return fmt.Errorf("failed to create session directory: %w", err)
 	}
-	return writeSessionYAMLIfAbsent(sessionDir, sessionID, name)
+	return writeSessionYAMLIfAbsent(sessionDir, sessionID, name, resolveHost())
 }
 
 // writeSessionYAMLIfAbsent writes session.yaml only when it doesn't already exist.
-func writeSessionYAMLIfAbsent(sessionDir, sessionID, name string) error {
+// owner records the host that created the session — the only host whose
+// clauditable may ever be primary for it.
+func writeSessionYAMLIfAbsent(sessionDir, sessionID, name, owner string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	if _, err := os.Stat(yamlPath); err == nil {
 		return nil
 	}
-	content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
-		sessionID, name, time.Now().Format(time.RFC3339))
+	content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+		sessionID, name, owner, time.Now().Format(time.RFC3339))
 	return os.WriteFile(yamlPath, []byte(content), 0644)
 }
 
@@ -744,8 +778,8 @@ func updateSessionYAMLName(sessionDir, sessionID, newName string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
-		content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
-			sessionID, newName, time.Now().Format(time.RFC3339))
+		content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+			sessionID, newName, resolveHost(), time.Now().Format(time.RFC3339))
 		return os.WriteFile(yamlPath, []byte(content), 0644)
 	}
 	lines := strings.Split(string(data), "\n")

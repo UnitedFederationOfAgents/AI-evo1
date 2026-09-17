@@ -153,3 +153,46 @@ Brainstorm some aspects of session behaviour to support distributed sessions. Th
 - **`clauditable get-default-session`**: Idempotently creates today's default session (`YYYY-MM-DD-default`, name `YYYY-MM-DD Default`) and prints the ID.
 - **FC `new-session [name]` / `ufa session new [name]`**: With name argument calls clauditable synchronously and switches. Without argument launches an interactive bash prompt (via `tea.ExecProcess`) then switches on completion via `sessionNewDoneMsg`.
 - **Startup log append**: FC now opens `session.jsonl` with `O_APPEND` instead of truncating, so default sessions accumulate records across FC restarts on the same day.
+
+### InitialDistributedSessions Step 1 — FC-connected distributed session baseline
+
+Answers "Do sessions need owners?" above: yes.
+
+- **Session ownership**: `session.yaml` now carries an `owner` field — the host
+  ID (resolved the usual way: `UFA_HOST` env, else `~/.ufa/host.yaml`, else
+  hostname) that created the session. Set once at
+  creation (`clauditable`'s dispatch path, `new-session`, `get-default-session`,
+  and the rename fallback that creates `session.yaml` if missing); never
+  rewritten afterward. Sessions that predate this field read back as `""`,
+  which every reader treats as "locally owned" for backward compatibility.
+- **Distributed writer-leader rule**: per `SessionLeaderBrainstorm.md`,
+  clauditable is now always secondary on a session it doesn't own — the
+  primary/secondary writing-file race (see `LocalSessionImprovments.md` Step 3)
+  is skipped entirely (`isRemoteOwned` short-circuits `checkIsPrimary`) whenever
+  `session.yaml`'s `owner` differs from the local host. This is the full extent
+  of what clauditable knows about distributed sessions — it never learns *how*
+  a remote owner's files reach this host.
+- **FC gates on the "connected" state**: distributed session behaviour is only
+  active while FC is connected to local-representative (`blinker.IsConnected()`
+  — the same state that gates remote-control). Disconnected FC behaves exactly
+  as it always has, purely local, no sync attempts.
+- **`session-sync-request` protocol message** (FC → LR, over the existing
+  representable `data` channel, fire-and-forget from FC's side): sent with
+  `kind: "append"` immediately before every command that appends to the current
+  session (wraps with clauditable), and `kind: "list"` before any
+  sessions-listing operation (`list-sessions`, `ufa session list`,
+  `select-session`, `ufa session select`). `"append"` describes a glob of one
+  session's processed + session files (`session.yaml`, `session.jsonl`,
+  `*-processed.txt` — never `*-raw.txt`/`*-writing.txt`, matching "only
+  transmit processed for remote sessions" above); `"list"` describes only
+  `session.yaml` across every un-archived session directory, from all
+  participants — the lazy-loading shape this doc's "How do we share files?"
+  section sketched. FC only ever states *what* glob it needs; it has no
+  opinion on how LR moves the bytes.
+- **LR's `session-sync-request` handler is a stub for now**: it logs receipt
+  and acknowledges the kind, but there's no cross-host transfer backend behind
+  it yet — building that is real, separate infrastructure work (an
+  agent-coordinator-brokered records-glob pull between participants, the
+  natural extension of the single-file pull Path 2 sketches in
+  `docs/DistributedExchange.md`). This increment lands the vocabulary FC and LR
+  speak to each other; the next increment is teaching LR to actually act on it.

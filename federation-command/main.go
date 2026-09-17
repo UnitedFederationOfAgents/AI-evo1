@@ -553,6 +553,37 @@ type condocStatePayload struct {
 	StatusMsg string `json:"status_msg,omitempty"`
 }
 
+// sessionSyncRequestPayload asks local-representative to sync a glob of
+// session-related files from all participants before FC proceeds. FC only
+// ever describes *what* it needs synced; how the files actually move
+// between hosts is entirely LR's concern.
+//
+//   - kind "append": sync the session's processed + session files (session.yaml,
+//     session.jsonl, *-processed.txt — never *-raw.txt or *-writing.txt) for
+//     SessionID, ahead of FC appending a new command record to it.
+//   - kind "list": sync only session.yaml, for every un-archived session, from
+//     every participant. SessionID is empty — this is a lazy-load pass so a
+//     full session list can render without pulling any session's full contents.
+type sessionSyncRequestPayload struct {
+	Kind      string `json:"kind"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// notifyDistributedSessionSync sends a best-effort request to local-representative
+// to sync session files ahead of an operation that reads or appends to session
+// state. It is a no-op when FC isn't connected to LR — distributed sessions are
+// only in play while connected; a disconnected FC behaves exactly as it always
+// has, purely local.
+func (m appModel) notifyDistributedSessionSync(kind, sessionID string) {
+	if m.reprClient == nil || !m.blinker.IsConnected() {
+		return
+	}
+	m.reprClient.SendData("session-sync-request", sessionSyncRequestPayload{
+		Kind:      kind,
+		SessionID: sessionID,
+	})
+}
+
 // sendRidealongState pushes the current ridealong state to local-representative.
 func (m appModel) sendRidealongState() {
 	if m.reprClient == nil {
@@ -1977,6 +2008,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// list-sessions
 	if line == "list-sessions" {
+		m.notifyDistributedSessionSync("list", "")
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
 	}
 
@@ -2556,6 +2588,7 @@ func (m appModel) executeRidealongCustomCmd(text string) (appModel, tea.Cmd) {
 		return m, tea.Sequence(echo, deferRidealongExec(agentCmd, mkDone))
 	}
 
+	m.notifyDistributedSessionSync("append", m.sessionID)
 	runCmd := buildRunCmd(text, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, mkDone))
 }
@@ -2809,6 +2842,7 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	}
 
 	// Regular command — run via subprocess
+	m.notifyDistributedSessionSync("append", m.sessionID)
 	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
@@ -3118,11 +3152,13 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	}
 
 	if line == "list-sessions" {
+		m.notifyDistributedSessionSync("list", "")
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
 	}
 
 	if line == "select-session" {
+		m.notifyDistributedSessionSync("list", "")
 		sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 		if sp == nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
@@ -3309,6 +3345,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	}
 
 	// Regular command - wrap with clauditable
+	m.notifyDistributedSessionSync("append", m.sessionID)
 	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath, m.reprOutPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return cmdDoneMsg{
@@ -3449,6 +3486,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		return m, tea.Println(ufaSessionHelpText())
 
 	case "session list":
+		m.notifyDistributedSessionSync("list", "")
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID))
 
@@ -3537,6 +3575,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			return m.handleRenameSession(args, line, cmdTime, deltaMs)
 		}
 		if sub == "session select" {
+			m.notifyDistributedSessionSync("list", "")
 			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 			if sp == nil {
 				m.logRecord(line, cmdTime, deltaMs, 1)
@@ -3659,6 +3698,22 @@ func readSessionName(sessionDir string) string {
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, "name: ") {
 			return strings.TrimPrefix(line, "name: ")
+		}
+	}
+	return ""
+}
+
+// readSessionOwner reads the "owner" field (the host that created the session)
+// from session.yaml. Returns "" for sessions that predate owner tracking, which
+// FC treats as locally-owned for display purposes.
+func readSessionOwner(sessionDir string) string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "owner: ") {
+			return strings.TrimPrefix(line, "owner: ")
 		}
 	}
 	return ""
@@ -4748,7 +4803,11 @@ func renderSessions(recordsPath string, currentSession string) string {
 		if name != "" {
 			nameStr = " — " + name
 		}
-		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)%s", prefix, session, suffix, fileCount, nameStr)))
+		ownerStr := ""
+		if owner := readSessionOwner(sessionPath); owner != "" && owner != fcHostID {
+			ownerStr = " [remote: " + owner + "]"
+		}
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)%s%s", prefix, session, suffix, fileCount, nameStr, ownerStr)))
 		b.WriteString("\n")
 	}
 

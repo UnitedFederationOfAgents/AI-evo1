@@ -88,11 +88,11 @@ This looks complete and matches the three asks in Revision B. Summary of the wor
 No build sandbox was available (same as the prior revision), so I verified this by manual line-by-line review and tracing the state-transition logic rather than compiling.
 
 
-## <REPLACE-Revision|Retry> C
+## Substep C - Let's debug our distributed session interaction.
 
-<REPLACE-PROMPT>
+[Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep C is now active. Interact with the substep file (Step1SubstepCPrompt.md).

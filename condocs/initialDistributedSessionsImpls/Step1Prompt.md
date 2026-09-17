@@ -1,23 +1,7 @@
-# InitialDistributedSessions
+# Prompt
 
-<!--
-```condoc-yaml
-condoc:
-  startTime: 1789672348
-  controlScheme: same-repo
-  branch: condoc/InitialDistributedSessions-1789672348/main
-  callerPath: ..
-```
--->
+[InitialDistributedSessions](../InitialDistributedSessions.md)
 
-Create the baseline functionality for distributed sessions.
-
-
-### Step 1 - Let's consider our tributary work and create the first increment of distributed sessions.
-
-[Step 1 Prompt](initialDistributedSessionsImpls/Step1Prompt.md)
-
-```prompt
 We have created loose planning documents moving toward distributed sessions, we'll use them as reference in our next steps:
 - docs/DistributedSessionsBrainstorm.md
 - condocs/LocalSessionImprovments.md
@@ -33,9 +17,3 @@ Whenever FC uses list-sessions or similar commands while connected it syncs the 
 Whenever sessions are used their metadata includes the host who owns the session, and the 'writing' and 'written' files are only ever primary for the owner's host. (So clauditable DOES know about distributed sessions, it is just shielded from knowing about how files move between hosts.)
 
 We will not mention any tools restrictions in our response and will instead implement to the extend possible with our allowed tools and respond with potential next steps (based on the guidance files).
-```
-
-
-## Human-Prompt
-
-The flow of the condoc is now within the first step.

@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -175,6 +176,14 @@ var (
 	continuationStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
 
+	// remoteSessionStyle marks a session owned by another host (see
+	// readSessionOwner) in renderSessions/the session picker -- grey-blue
+	// rather than sessionStyle's plain grey, so a remote entry reads as
+	// visually distinct at a glance.
+	remoteSessionStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("67")).
+				Italic(true)
+
 	modeStyles = map[string]lipgloss.Style{
 		ModePrompt:  lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Bold(true),  // green
 		ModeRead:    lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true), // yellow
@@ -201,6 +210,12 @@ var (
 
 	pickerEntryStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("252"))
+
+	// pickerRemoteEntryStyle is pickerEntryStyle's counterpart for a
+	// non-cursor row that's a remote (grey-blue, see remoteSessionStyle)
+	// session -- same grey-blue as renderSessions uses outside the picker.
+	pickerRemoteEntryStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("67"))
 
 	pickerCurrentStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243")).
@@ -475,6 +490,14 @@ type sessionPickerEntry struct {
 	id        string
 	name      string
 	fileCount int
+	owner     string // host that owns this session; "" or fcHostID means locally-owned
+}
+
+// isRemote reports whether this entry is owned by a host other than this one
+// -- e.g. pulled in via a "list" distributed session sync (see
+// awaitDistributedSessionSync) rather than created locally.
+func (e sessionPickerEntry) isRemote() bool {
+	return e.owner != "" && e.owner != fcHostID
 }
 
 // SessionPicker holds state for the interactive session-selection overlay.
@@ -581,6 +604,85 @@ func (m appModel) notifyDistributedSessionSync(kind, sessionID string) {
 	m.reprClient.SendData("session-sync-request", sessionSyncRequestPayload{
 		Kind:      kind,
 		SessionID: sessionID,
+	})
+}
+
+// distributedSessionSyncTimeout bounds how long awaitDistributedSessionSync
+// waits for local-representative to finish a "list" sync -- see
+// docs/DistributedSessionsBrainstorm.md ("LR transfers the files, we'll want
+// this to block so the list-sessions can include results"). A slow or
+// unreachable peer chain degrades to whatever was already cached locally
+// rather than hanging the TUI.
+const distributedSessionSyncTimeout = 2 * time.Second
+
+// sessionSyncWait, guarded by sessionSyncMu, is the channel
+// awaitDistributedSessionSync is currently blocked on, if any. There's only
+// ever one live session picker/list render in flight at a time (FC is a
+// single-threaded TUI), so a single slot is enough.
+var (
+	sessionSyncMu   sync.Mutex
+	sessionSyncWait chan struct{}
+)
+
+// awaitDistributedSessionSync is notifyDistributedSessionSync's blocking
+// sibling, used for kind "list": list-sessions/select-session need the pull
+// to have actually landed before they render, not merely requested it. It
+// blocks the calling goroutine only -- bubbletea's own event loop keeps
+// running, since the wake signal (see wireRemoteCommandHandler) arrives on
+// the representable client's own reader goroutine rather than through
+// Update, so nothing here can deadlock against the very message this is
+// waiting for. A no-op when FC isn't connected to LR, same as
+// notifyDistributedSessionSync.
+func (m appModel) awaitDistributedSessionSync(kind, sessionID string) {
+	if m.reprClient == nil || !m.blinker.IsConnected() {
+		return
+	}
+	ch := make(chan struct{})
+	sessionSyncMu.Lock()
+	sessionSyncWait = ch
+	sessionSyncMu.Unlock()
+
+	m.reprClient.SendData("session-sync-request", sessionSyncRequestPayload{
+		Kind:      kind,
+		SessionID: sessionID,
+	})
+
+	select {
+	case <-ch:
+	case <-time.After(distributedSessionSyncTimeout):
+	}
+}
+
+// signalSessionSyncDone wakes any awaitDistributedSessionSync call still
+// waiting. Called from wireRemoteCommandHandler when local-representative
+// reports (via a "__session-sync-done:<kind>" command) that a sync finished.
+func signalSessionSyncDone() {
+	sessionSyncMu.Lock()
+	ch := sessionSyncWait
+	sessionSyncWait = nil
+	sessionSyncMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// wireRemoteCommandHandler installs the standard command-dispatch handler on
+// a freshly (re)connected representable.Client. "__session-sync-done"
+// completion signals are handled inline, right here on the client's own
+// reader goroutine, rather than being queued onto ch for Update to see --
+// Update may itself be blocked inside awaitDistributedSessionSync waiting on
+// exactly this signal, so routing it through the same message loop it's
+// blocking would deadlock. Every other command is queued as before.
+func wireRemoteCommandHandler(client *representable.Client, ch chan string) {
+	client.SetCommandHandler(func(cmd string) {
+		if strings.HasPrefix(cmd, "__session-sync-done") {
+			signalSessionSyncDone()
+			return
+		}
+		select {
+		case ch <- cmd:
+		default: // drop if full
+		}
 	})
 }
 
@@ -1153,13 +1255,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autoConnect = false
 		m.blinker.DisableAccent()
 		m.reprClient = msg.client
-		ch := m.remoteCmdCh
-		m.reprClient.SetCommandHandler(func(cmd string) {
-			select {
-			case ch <- cmd:
-			default: // drop if full
-			}
-		})
+		wireRemoteCommandHandler(m.reprClient, m.remoteCmdCh)
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
 			m.reprOutPath = tf.Name()
@@ -1201,13 +1297,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.reprClient = msg.client
 		// Wire up remote command delivery via the channel.
-		ch := m.remoteCmdCh
-		m.reprClient.SetCommandHandler(func(cmd string) {
-			select {
-			case ch <- cmd:
-			default: // drop if full
-			}
-		})
+		wireRemoteCommandHandler(m.reprClient, m.remoteCmdCh)
 		// Create temp file for output capture.
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
@@ -2008,7 +2098,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// list-sessions
 	if line == "list-sessions" {
-		m.notifyDistributedSessionSync("list", "")
+		m.awaitDistributedSessionSync("list", "")
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
 	}
 
@@ -2350,10 +2440,17 @@ func (m appModel) sessionPickerView(windowWidth int) string {
 			if entry.id == m.sessionID {
 				currentSuffix = pickerCurrentStyle.Render(" (current)")
 			}
-			row := fmt.Sprintf("%s (%d files)%s%s", entry.id, entry.fileCount, nameStr, currentSuffix)
-			if i == cursor {
+			ownerStr := ""
+			if entry.isRemote() {
+				ownerStr = " [remote: " + entry.owner + "]"
+			}
+			row := fmt.Sprintf("%s (%d files)%s%s%s", entry.id, entry.fileCount, nameStr, ownerStr, currentSuffix)
+			switch {
+			case i == cursor:
 				rows = append(rows, pickerSelectedStyle.Render("▸ "+row))
-			} else {
+			case entry.isRemote():
+				rows = append(rows, pickerRemoteEntryStyle.Render("  "+row))
+			default:
 				rows = append(rows, pickerEntryStyle.Render("  "+row))
 			}
 		}
@@ -2392,6 +2489,7 @@ func buildSessionPicker(recordsPath string, line string, cmdTime time.Time, delt
 			id:        id,
 			name:      name,
 			fileCount: len(files),
+			owner:     readSessionOwner(sessionPath),
 		})
 	}
 	return &SessionPicker{
@@ -3152,13 +3250,13 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	}
 
 	if line == "list-sessions" {
-		m.notifyDistributedSessionSync("list", "")
+		m.awaitDistributedSessionSync("list", "")
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
 	}
 
 	if line == "select-session" {
-		m.notifyDistributedSessionSync("list", "")
+		m.awaitDistributedSessionSync("list", "")
 		sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 		if sp == nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
@@ -3486,7 +3584,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		return m, tea.Println(ufaSessionHelpText())
 
 	case "session list":
-		m.notifyDistributedSessionSync("list", "")
+		m.awaitDistributedSessionSync("list", "")
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID))
 
@@ -3575,7 +3673,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			return m.handleRenameSession(args, line, cmdTime, deltaMs)
 		}
 		if sub == "session select" {
-			m.notifyDistributedSessionSync("list", "")
+			m.awaitDistributedSessionSync("list", "")
 			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 			if sp == nil {
 				m.logRecord(line, cmdTime, deltaMs, 1)
@@ -4804,10 +4902,12 @@ func renderSessions(recordsPath string, currentSession string) string {
 			nameStr = " — " + name
 		}
 		ownerStr := ""
+		style := sessionStyle
 		if owner := readSessionOwner(sessionPath); owner != "" && owner != fcHostID {
 			ownerStr = " [remote: " + owner + "]"
+			style = remoteSessionStyle
 		}
-		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)%s%s", prefix, session, suffix, fileCount, nameStr, ownerStr)))
+		b.WriteString(style.Render(fmt.Sprintf("%s%s%s (%d files)%s%s", prefix, session, suffix, fileCount, nameStr, ownerStr)))
 		b.WriteString("\n")
 	}
 

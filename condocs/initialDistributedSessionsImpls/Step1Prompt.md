@@ -45,3 +45,26 @@ The remote sessions should be available for selection in 'ufa session select'.
 Let's make the updates we need to to make sure this interaction works.
 
 Remember that in the session interactions we want to only pull files from each participant node, we do not want to push files to them (They will do this before they touch the session we share!)
+
+
+prompt: [`478437d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/478437d6bffeac6084c8a36cb948a45d3ca517f0) → reply: [`11329a4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/11329a4cfeb287c7d6450d7a10ee01960e564668)
+
+## Reply A
+
+Implemented the missing cross-host sync backend for the `"list"` glob (the `"append"` stub is unchanged/out of scope). Since a build sandbox wasn't available to me, I did a careful manual line-by-line review of every diff instead of compiling.
+
+Summary of the revision:
+- **agent-coordinator**: new `GET /api/hosts` endpoint so a local-representative can discover connected peers over plain HTTP.
+- **local-representative**: new `sessions.go` — `GET /api/sessions` serves this host's un-archived `session.yaml` listing; on a `"list"` `session-sync-request`, it pulls every connected peer's listing (via AC's existing transparent proxy, mirroring `DistributedExchange.md`'s Path 2) and writes each one it doesn't already have as a plain `session.yaml` under its own records path — pull-only, never pushing its own. A collision guard skips ingesting anything that would clobber a locally-owned or differently-sourced remote session (e.g. two hosts' identically-named daily defaults), and it now signals FC when the pull finishes so `list-sessions`/`select-session` can actually wait for fresh data (added tests for all of this in `sessions_test.go`).
+- **federation-command**: `list-sessions`/`ufa session list`/`select-session`/`ufa session select` now block briefly on that completion signal instead of firing-and-forgetting; remote sessions render grey-blue (vs. plain grey) in both the listing and the picker, and were already selectable once present on disk, so no separate change was needed there.
+- Recorded the design (including the pull-only/collision-guard reasoning) in `docs/DistributedSessionsBrainstorm.md`'s Working Section.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

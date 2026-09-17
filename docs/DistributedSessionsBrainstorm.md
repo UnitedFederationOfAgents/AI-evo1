@@ -196,3 +196,75 @@ Answers "Do sessions need owners?" above: yes.
   natural extension of the single-file pull Path 2 sketches in
   `docs/DistributedExchange.md`). This increment lands the vocabulary FC and LR
   speak to each other; the next increment is teaching LR to actually act on it.
+
+### InitialDistributedSessions Step 1 Rev A — the `"list"` glob actually syncs
+
+Landed the "next increment" flagged above, for `kind: "list"` only (`"append"`
+is still the stub described above — full session-content sync is separate,
+larger work). Built pull-only, per this revision's explicit instruction: a
+host only ever reads another participant's `session.yaml`, never pushes its
+own — matching Path 2 of `docs/DistributedExchange.md` (LR-to-LR transfer
+brokered through agent-coordinator), rather than pushing anything ahead of a
+participant touching its own session.
+
+- **agent-coordinator gained `GET /api/hosts`**: the same `{id, label,
+  status}` rows the dashboard's `"hosts"` WebSocket broadcast carries, as a
+  plain HTTP endpoint. This is how a local-representative discovers its sync
+  peers without needing its own WebSocket client.
+- **local-representative gained `GET /api/sessions`**: this host's current
+  un-archived session listing (`id`/`name`/`owner`/`created` — session.yaml's
+  fields, never raw/processed content). Deliberately not gated on the
+  `X-UFA-Proxied-By` header, same reasoning as the files tab's content
+  endpoint (`docs/DistributedExchange.md`): a read isn't the ambiguous-target
+  write that upload is, so it already flows unmodified through
+  agent-coordinator's transparent `/host/<id>/*` proxy.
+- **local-representative's `"list"` handling**: on receiving a `"list"`
+  `session-sync-request` (run in its own goroutine, not the representable
+  read loop), it calls `GET /api/hosts` on agent-coordinator, then `GET
+  /host/<peer>/api/sessions` for every other *connected* participant, and
+  writes each remote session it doesn't already have as a plain
+  `session.yaml` under its own records path — the exact shape clauditable
+  itself writes, so clauditable's existing owner check and FC's
+  `renderSessions`/`buildSessionPicker` (both already just scan the records
+  path directly) pick it up with no further plumbing on either side.
+  - **Collision guard**: never overwrites a session this host doesn't
+    recognize as its own previously-cached copy of the *same* remote owner.
+    Two hosts' default sessions collide by id (`YYYY-MM-DD-default`) daily —
+    a locally-owned id always wins over an incoming remote copy, and an id
+    already cached from one remote owner is never clobbered by a different
+    remote owner claiming the same id. Both cases are logged, not silently
+    dropped.
+  - Needs `agent-coordinator`'s HTTP port, which local-representative didn't
+    previously track (only the representable TCP port, for its own
+    connection) — added as a new `-ac-http-port` flag (default `8083`,
+    matching agent-coordinator's own `-port` default).
+  - Needs a records path, which local-representative also didn't previously
+    have any notion of — added `AGENT_RECORDS_PATH` env support (same
+    variable and default as clauditable/federation-command; still three
+    independent copies of the constant, no shared package yet).
+- **This makes list-sessions/select-session actually block**, for the `"list"`
+  kind specifically — the brainstorm's "we'll want this to block" above.
+  Since representable's server→client leg only carries plain `command`
+  strings (no request/reply data channel), local-representative signals
+  completion by sending federation-command a `"__session-sync-done:list"`
+  command once the pull above finishes (successfully or not — an unreachable
+  agent-coordinator still signals "done" immediately, rather than making FC
+  wait out the full timeout for nothing). FC's `awaitDistributedSessionSync`
+  sends the sync request and then blocks the calling goroutine on that signal
+  (2s timeout). The wake-up is handled directly on the representable client's
+  reader goroutine rather than routed through bubbletea's `Update` — `Update`
+  is the thing blocked waiting for it, so delivering it via the same message
+  loop would deadlock.
+- **Session picker/list display**: sessions owned by another host now render
+  grey-blue (`remoteSessionStyle`/`pickerRemoteEntryStyle`, ANSI 256 color 67)
+  instead of the standard grey, in both `list-sessions`/`ufa session list` and
+  the interactive picker (`select-session`/`ufa session select`) — both
+  already showed the `[remote: <owner>]` tag from Step 1's initial reply, now
+  colored distinctly too. A remote session is selectable in the picker
+  exactly like a local one (`switchToSession` has no ownership check); once
+  selected, further writes to it flow through clauditable's existing
+  secondary-writer path (see Step 1's initial reply above).
+- **Open for a later increment**: the `"append"` kind's full session-content
+  sync (not just `session.yaml`) still has no backend, so a remote session
+  selected today shows accurately in listings but its `session.jsonl`/
+  processed files won't reflect the owner's latest activity until that lands.

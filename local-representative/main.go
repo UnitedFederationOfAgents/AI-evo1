@@ -29,8 +29,9 @@ const (
 	autoConnectInterval = 10 * time.Second
 	autoConnectWindow   = 10 * time.Minute
 
-	defaultACHost = "localhost"
-	defaultACPort = "8084"
+	defaultACHost     = "localhost"
+	defaultACPort     = "8084"
+	defaultACHTTPPort = "8083" // matches agent-coordinator's own "-port" default
 )
 
 // ServiceStatus is the health status of a monitored service.
@@ -92,24 +93,6 @@ type CondocStateMsg struct {
 type SessionSyncRequestMsg struct {
 	Kind      string `json:"kind"`
 	SessionID string `json:"session_id,omitempty"`
-}
-
-// handleSessionSyncRequest is the entrypoint for distributed session file
-// syncing. The cross-host transfer primitive this ultimately depends on
-// (agent-coordinator brokering a records-glob pull between participants,
-// analogous to the single-file pull sketched in docs/DistributedExchange.md)
-// doesn't exist yet, so this is currently a best-effort acknowledgement — it
-// establishes the wire contract FC already speaks to, ready to be backed by
-// real multi-participant sync in a later increment.
-func handleSessionSyncRequest(req SessionSyncRequestMsg) {
-	switch req.Kind {
-	case "append":
-		log.Printf("session-sync-request: append glob for session %q (processed + session files only) — no cross-host sync backend yet", req.SessionID)
-	case "list":
-		log.Printf("session-sync-request: list glob (session.yaml, un-archived only) across participants — no cross-host sync backend yet")
-	default:
-		log.Printf("session-sync-request: unknown kind %q", req.Kind)
-	}
 }
 
 // ACStateMsg is the payload of "ac-state" WebSocket messages.
@@ -182,6 +165,7 @@ type Server struct {
 	acClient            *representable.Client
 	acHost              string
 	acPort              string
+	acHTTPPort          string        // agent-coordinator's HTTP port -- needed to call back through its /host/<id>/ proxy (see sessions.go)
 	acAutoConnecting    bool          // true while the startup --auto-connect retry loop is trying
 	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
 
@@ -206,6 +190,11 @@ type Server struct {
 	// mutex-guarded state is needed here.
 	fileCacheDir string
 	hostStoreDir string
+
+	// Sessions tab: distributed session sync (see sessions.go). listLocalSessions()
+	// scans this directly, so -- like the files tab above -- no further
+	// mutex-guarded state is kept here.
+	recordsPath string
 }
 
 func newServer(lrName string) *Server {
@@ -710,6 +699,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
+	mux.HandleFunc("/api/sessions", s.handleSessionsAPI)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -754,6 +744,7 @@ type appConfig struct {
 	autoConnect   bool
 	acHost        string
 	acPort        string
+	acHTTPPort    string   // agent-coordinator's HTTP port, for calling back through its /host/<id>/ proxy
 	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
 	fcBin         string   // explicit path to the federation-command binary
 	terminal      string   // command prefix used to host an interactive child in a terminal
@@ -800,6 +791,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		name:          pick("name", defaults.name),
 		acHost:        pick("ac-host", defaults.acHost),
 		acPort:        pick("ac-port", defaults.acPort),
+		acHTTPPort:    pick("ac-http-port", defaults.acHTTPPort),
 		autoLaunch:    splitList(pick("auto-launch", strings.Join(defaults.autoLaunch, ","))),
 		fcBin:         pick("fc-bin", defaults.fcBin),
 		terminal:      pick("terminal", defaults.terminal),
@@ -829,6 +821,7 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
+	acHTTPPort := flag.String("ac-http-port", defaultACHTTPPort, "agent-coordinator HTTP port, used to call back through its /host/<id>/ proxy when pulling other participants' session.yaml files")
 	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup; each token is \"app\" or \"app:N\" (e.g. federation-command:2)")
 	fcBin := flag.String("fc-bin", "", "path to the federation-command binary (default: search next to LR, the dev bin dir, then PATH)")
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
@@ -854,6 +847,7 @@ func main() {
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
+		acHTTPPort:    *acHTTPPort,
 		autoLaunch:    splitList(*autoLaunch),
 		fcBin:         *fcBin,
 		terminal:      *terminal,
@@ -874,6 +868,8 @@ func main() {
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
 	s.hostStoreDir = cfg.hostStoreDir
+	s.acHTTPPort = cfg.acHTTPPort
+	s.recordsPath = getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}
@@ -983,7 +979,11 @@ func main() {
 		case "session-sync-request":
 			var payload SessionSyncRequestMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
-				handleSessionSyncRequest(payload)
+				// Runs in its own goroutine: a "list" sync makes outbound HTTP
+				// calls through agent-coordinator (see sessions.go), which must
+				// not block this connection's read loop (and therefore FC's
+				// heartbeats/other data messages) while they're in flight.
+				go s.handleSessionSyncRequest(payload)
 			}
 		}
 	})

@@ -662,9 +662,25 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 	io.Copy(w, resp.Body) //nolint:errcheck — best-effort once headers/status are already written
 }
 
+// handleHostsAPI serves the current participant list as plain JSON: GET
+// /api/hosts returns the same {id, label, status} rows the dashboard's
+// "hosts" WebSocket broadcast carries. This lets a local-representative
+// discover its distributed-session sync peers (see
+// docs/DistributedSessionsBrainstorm.md) with a plain HTTP call rather than
+// needing its own WebSocket client just to learn who else is connected.
+func (s *Server) handleHostsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(HostsMsg{Hosts: s.getHosts()})
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/hosts", s.handleHostsAPI)
 	mux.HandleFunc("/host/", s.proxyToHost)
 
 	if devMode {

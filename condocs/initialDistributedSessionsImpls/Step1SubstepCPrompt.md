@@ -142,11 +142,6 @@ prompt: [`116de30`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1
 Implemented Revision B: `ufa session archive` now also accepts a `-f` flag that skips the interactive `read -p "yes"` confirmation and runs `clauditable archive` directly, non-interactively. Changes are in `federation-command/main.go` (new `session archive -f` case, `buildArchiveConfirmScript` gained a `force` parameter, updated help text), plus a new `TestBuildArchiveConfirmScript` test and a Revision B write-up in `docs/DistributedSessionsBrainstorm.md`'s Working Section. As with prior revisions, no build sandbox was available, so this was verified by manual review rather than compiling.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make archive-sessions an alias for ufa session archive.

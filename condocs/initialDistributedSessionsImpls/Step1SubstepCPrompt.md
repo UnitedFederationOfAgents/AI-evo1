@@ -128,11 +128,8 @@ I've implemented Revision A. Summary of changes:
 - No build sandbox was available (attempted `go build`, denied), so this was verified by careful manual/line-by-line review rather than compiling, consistent with prior revisions.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's take a quick detour to add a '-f' flag to the 'ufa session archive/archive-sessions' command.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This will make the command non-interactive and auto-approve.

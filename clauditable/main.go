@@ -160,17 +160,15 @@ func main() {
 	time.Sleep(200 * time.Millisecond)
 	isPrimary := !isRemoteOwned && checkIsPrimary(sessionDir, unixTimestamp)
 	if !isPrimary {
-		secondaryPath := filepath.Join(sessionDir, fmt.Sprintf("%d-s-writing.txt", unixTimestamp))
-		if err := os.Rename(writingFilePath, secondaryPath); err == nil {
-			writingFilePath = secondaryPath
+		renamedPath := filepath.Join(sessionDir, fmt.Sprintf("%d%s", unixTimestamp, writerFileSuffix(isPrimary, isRemoteOwned, host, "writing.txt")))
+		if err := os.Rename(writingFilePath, renamedPath); err == nil {
+			writingFilePath = renamedPath
 		}
 	}
 
+	rawSuffix := writerFileSuffix(isPrimary, isRemoteOwned, host, "raw.txt")
 	if verbosity.enabled {
-		writtenPath := filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", unixTimestamp))
-		if !isPrimary {
-			writtenPath = filepath.Join(sessionDir, fmt.Sprintf("%d-s-raw.txt", unixTimestamp))
-		}
+		writtenPath := filepath.Join(sessionDir, fmt.Sprintf("%d%s", unixTimestamp, rawSuffix))
 		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", writtenPath)
 	}
 
@@ -301,14 +299,22 @@ func main() {
 	}
 
 	// Write the written file (completion marker) and remove the writing file
-	if _, err := writeWrittenFile(sessionDir, unixTimestamp, isPrimary, &record); err != nil {
+	if _, err := writeWrittenFile(sessionDir, unixTimestamp, rawSuffix, &record); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write written file: %v\n", err)
 	} else {
 		os.Remove(writingFilePath)
-		// Primary collects all secondary written files and adds everything to session.jsonl
-		if isPrimary {
+		switch {
+		case isPrimary:
+			// Primary collects all secondary/remote written files and adds everything to session.jsonl.
+			// Only a primary executor on the owning host ever builds session.jsonl.
 			if err := consolidatePrimaryToJSONL(recordsPath, session, unixTimestamp); err != nil {
 				fmt.Fprintf(os.Stderr, "clauditable: warning: failed to consolidate records: %v\n", err)
+			}
+		case isRemoteOwned:
+			// Non-owner hosts process their own records immediately instead of waiting
+			// on the owner's primary to get to them during consolidation.
+			if err := selfProcessRemoteRecord(sessionDir, unixTimestamp, host, &record); err != nil {
+				fmt.Fprintf(os.Stderr, "clauditable: warning: failed to self-process record: %v\n", err)
 			}
 		}
 	}
@@ -546,14 +552,27 @@ func checkIsPrimary(sessionDir string, ourTimestamp int64) bool {
 	return true
 }
 
-// writeWrittenFile writes the completed record as the "written file" at completion time.
-// Primaries produce {timestamp}-raw.txt; secondaries produce {timestamp}-s-raw.txt.
-// The record's RecordPath is set to the written file path before formatting.
-func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record *records.Record) (string, error) {
-	suffix := "-raw.txt"
-	if !isPrimary {
-		suffix = "-s-raw.txt"
+// writerFileSuffix determines the filename suffix for a role's writing/raw files
+// (kind is "writing.txt" or "raw.txt"): a primary produces "-{kind}"; a same-host
+// secondary that lost the primary race (see checkIsPrimary) produces "-s-{kind}";
+// a non-owner host writing into a session it doesn't own (isRemoteOwned) produces
+// "-{host}-{kind}", tagged by the writing host so the owner's eventual consolidation
+// (consolidatePrimaryToJSONL) can tell participants' records apart.
+func writerFileSuffix(isPrimary, isRemoteOwned bool, host, kind string) string {
+	switch {
+	case isRemoteOwned:
+		return "-" + host + "-" + kind
+	case !isPrimary:
+		return "-s-" + kind
+	default:
+		return "-" + kind
 	}
+}
+
+// writeWrittenFile writes the completed record as the "written file" at completion
+// time, using suffix (see writerFileSuffix) to name it. The record's RecordPath is
+// set to the written file path before formatting.
+func writeWrittenFile(sessionDir string, timestamp int64, suffix string, record *records.Record) (string, error) {
 	filePath := filepath.Join(sessionDir, fmt.Sprintf("%d%s", timestamp, suffix))
 	record.Event.RecordPath = filePath
 	content := record.FormatWrittenFile()
@@ -563,11 +582,35 @@ func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record
 	return filePath, nil
 }
 
+// selfProcessRemoteRecord applies auto-maintenance (secret redaction, loading-bar
+// stripping, truncation) to a non-owner host's own just-written record and writes
+// {timestamp}-{host}-processed.txt immediately, rather than waiting on the owner's
+// primary to process it during consolidation. This never touches session.jsonl —
+// only a primary executor on the owning host ever builds that (consolidatePrimaryToJSONL).
+func selfProcessRemoteRecord(sessionDir string, timestamp int64, host string, record *records.Record) error {
+	content := record.FormatWrittenFile()
+	processedContent, headers := records.ApplyAutoMaintenance(content, true)
+	processedFileContent := records.FormatProcessedFile(processedContent, headers)
+	processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-%s-processed.txt", timestamp, host))
+	return os.WriteFile(processedPath, []byte(processedFileContent), 0644)
+}
+
 // consolidatePrimaryToJSONL is called by the primary on completion. It collects all
-// secondary written files ({ts}-s-raw.txt) and its own written file ({primaryTs}-raw.txt),
-// applies auto-maintenance processing (secret redaction, loading-bar stripping, truncation),
-// writes {ts}-processed.txt for each, appends their processed session log portions to
-// session.jsonl in timestamp order, and renames secondaries to {ts}-raw.txt (promoting them).
+// same-host secondary written files ({ts}-s-raw.txt), all not-yet-consolidated
+// non-owner hosts' written files ({ts}-{host}-raw.txt), and its own written file
+// ({primaryTs}-raw.txt), appends their processed session log portions to session.jsonl
+// in timestamp order, and marks each consolidated so a later run never re-appends it:
+// secondaries are promoted (renamed to {ts}-raw.txt) and host-tagged entries are
+// renamed to {ts}-{host}-raw.txt.consolidated, keeping their host tag as permanent
+// provenance rather than being cleaned up like the "-s-" race artifact is. This is the
+// only place session.jsonl is ever built — only a primary executor on the owning host
+// runs it.
+//
+// Secondary and primary entries are processed here (auto-maintenance: secret redaction,
+// loading-bar stripping, truncation), writing {ts}-processed.txt for each. Host-tagged
+// entries were already self-processed by the writing host (selfProcessRemoteRecord); its
+// {ts}-{host}-processed.txt is reused as-is rather than reprocessed, falling back to
+// processing the raw file here only if that host hasn't produced one yet.
 func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int64) error {
 	sessionDir := filepath.Join(recordsPath, session)
 	sessionLogPath := filepath.Join(sessionDir, "session.jsonl")
@@ -581,6 +624,7 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 		ts          int64
 		path        string
 		isSecondary bool
+		host        string // non-empty for a non-owner host's tagged entry
 	}
 	var toProcess []writtenEntry
 
@@ -589,20 +633,36 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, "-s-raw.txt") {
+		switch {
+		case strings.HasSuffix(name, "-s-raw.txt"):
 			tsStr := strings.TrimSuffix(name, "-s-raw.txt")
 			ts, err := strconv.ParseInt(tsStr, 10, 64)
 			if err != nil {
 				continue
 			}
-			toProcess = append(toProcess, writtenEntry{ts, filepath.Join(sessionDir, name), true})
-		} else if strings.HasSuffix(name, "-raw.txt") {
-			tsStr := strings.TrimSuffix(name, "-raw.txt")
-			ts, err := strconv.ParseInt(tsStr, 10, 64)
-			if err != nil || ts != primaryTimestamp {
+			toProcess = append(toProcess, writtenEntry{ts: ts, path: filepath.Join(sessionDir, name), isSecondary: true})
+		case strings.HasSuffix(name, "-raw.txt"):
+			trimmed := strings.TrimSuffix(name, "-raw.txt")
+			if ts, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+				if ts != primaryTimestamp {
+					continue
+				}
+				toProcess = append(toProcess, writtenEntry{ts: ts, path: filepath.Join(sessionDir, name)})
 				continue
 			}
-			toProcess = append(toProcess, writtenEntry{ts, filepath.Join(sessionDir, name), false})
+			// Not a bare "{ts}-raw.txt" — try "{ts}-{host}-raw.txt" (a non-owner
+			// host's tagged entry; timestamps are all-digit, so the first "-" is
+			// unambiguously the ts/host separator even though host IDs themselves
+			// often contain hyphens, e.g. "hostname-a1b2").
+			parts := strings.SplitN(trimmed, "-", 2)
+			if len(parts) != 2 || parts[1] == "" {
+				continue
+			}
+			ts, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
+				continue
+			}
+			toProcess = append(toProcess, writtenEntry{ts: ts, path: filepath.Join(sessionDir, name), host: parts[1]})
 		}
 	}
 
@@ -622,17 +682,33 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 
 	noOpEligible := true
 	for _, entry := range toProcess {
-		data, err := os.ReadFile(entry.path)
-		if err != nil {
-			continue
+		var processedFileContent string
+		if entry.host != "" {
+			// Prefer the processed file the writing host already produced for itself.
+			processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-%s-processed.txt", entry.ts, entry.host))
+			if data, err := os.ReadFile(processedPath); err == nil {
+				processedFileContent = string(data)
+			} else {
+				data, err := os.ReadFile(entry.path)
+				if err != nil {
+					continue
+				}
+				processedContent, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
+				noOpEligible = false
+				processedFileContent = records.FormatProcessedFile(processedContent, headers)
+				os.WriteFile(processedPath, []byte(processedFileContent), 0644)
+			}
+		} else {
+			data, err := os.ReadFile(entry.path)
+			if err != nil {
+				continue
+			}
+			processedContent, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
+			noOpEligible = false
+			processedFileContent = records.FormatProcessedFile(processedContent, headers)
+			processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", entry.ts))
+			os.WriteFile(processedPath, []byte(processedFileContent), 0644)
 		}
-
-		processedContent, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
-		noOpEligible = false
-		processedFileContent := records.FormatProcessedFile(processedContent, headers)
-
-		processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", entry.ts))
-		os.WriteFile(processedPath, []byte(processedFileContent), 0644)
 
 		sessionLogContent := records.ExtractSessionLogFromWrittenFile(processedFileContent)
 		if _, err := f.WriteString(sessionLogContent); err != nil {
@@ -645,9 +721,17 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 			f.WriteString("\n")
 		}
 
-		if entry.isSecondary {
+		switch {
+		case entry.isSecondary:
 			renamedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", entry.ts))
 			os.Rename(entry.path, renamedPath)
+		case entry.host != "":
+			// Mark consolidated so a future consolidation run — triggered by the
+			// next command the owner's primary executes — doesn't find this same
+			// raw file again and append it to session.jsonl a second time. The
+			// ".consolidated" suffix takes it out of the "-raw.txt"/"-{host}-raw.txt"
+			// glob this loop scans, while keeping the host tag intact.
+			os.Rename(entry.path, entry.path+".consolidated")
 		}
 	}
 

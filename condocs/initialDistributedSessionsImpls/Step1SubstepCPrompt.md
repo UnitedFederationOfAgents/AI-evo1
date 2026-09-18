@@ -115,3 +115,24 @@ Found and fixed two distinct root causes behind the reported symptoms. First, `f
 Let's adjust the behaviour for non-owner hosts so that the files they write take the form '1789681959-<host-id>-raw.txt', "1789734619-<host-id>-processed.txt".
 
 Now we can have nodes process their own records more easily. Only a primary executor on an owner node will build the jsonl.
+
+
+prompt: [`2b7e4a9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2b7e4a9f8af51679b39d5f2d2e7c532ee8e97f48) → reply: [`878cc81`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/878cc81c3582674475ca943aa237b81a6d09ffc9)
+
+## Reply A
+
+I've implemented Revision A. Summary of changes:
+
+- **`clauditable/main.go`**: non-owner-host (`isRemoteOwned`) writes now use `{timestamp}-{host}-writing.txt`/`{timestamp}-{host}-raw.txt` instead of reusing the same-host secondary's `-s-` naming (new `writerFileSuffix` helper covers all three roles: primary / same-host secondary / remote-owned). Non-owner hosts now self-process their own record immediately after writing (`selfProcessRemoteRecord` → `{ts}-{host}-processed.txt`), applying the same redaction/loading-bar/truncation maintenance, without ever touching `session.jsonl`. `consolidatePrimaryToJSONL` — still the only place `session.jsonl` gets built, and still only run by a primary executor on the owning host — now also picks up host-tagged raw files (reusing the origin host's own processed file when present) and marks them consolidated via a `.consolidated` rename so they're never re-appended on a later run.
+- Updated/added `clauditable/main_test.go` coverage for the new suffix logic, self-processing, and host-tagged consolidation (including a re-run check that guards against duplicate entries), and recorded the change in `docs/DistributedSessionsBrainstorm.md`'s Working Section.
+- No build sandbox was available (attempted `go build`, denied), so this was verified by careful manual/line-by-line review rather than compiling, consistent with prior revisions.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

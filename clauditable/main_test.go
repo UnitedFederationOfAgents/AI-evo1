@@ -331,7 +331,7 @@ func TestWriteWrittenFile(t *testing.T) {
 	}
 
 	// Test primary: creates {ts}-raw.txt
-	path, err := writeWrittenFile(sessionDir, 1705312200, true, record)
+	path, err := writeWrittenFile(sessionDir, 1705312200, writerFileSuffix(true, false, "", "raw.txt"), record)
 	if err != nil {
 		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
 	}
@@ -373,13 +373,86 @@ func TestWriteWrittenFile(t *testing.T) {
 		Command: "echo secondary",
 		Stdout:  "secondary\n",
 	}
-	path2, err := writeWrittenFile(sessionDir, 1705312260, false, record2)
+	path2, err := writeWrittenFile(sessionDir, 1705312260, writerFileSuffix(false, false, "", "raw.txt"), record2)
 	if err != nil {
 		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
 	}
 	expectedPath2 := filepath.Join(sessionDir, "1705312260-s-raw.txt")
 	if path2 != expectedPath2 {
 		t.Errorf("secondary written file path: got %s, want %s", path2, expectedPath2)
+	}
+
+	// Test remote-owned (non-owner host): creates {ts}-{host}-raw.txt
+	record3 := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:32:00Z",
+			EventType: "command_execution",
+		},
+		Command: "echo remote",
+		Stdout:  "remote\n",
+	}
+	path3, err := writeWrittenFile(sessionDir, 1705312320, writerFileSuffix(false, true, "peer-host-ab12", "raw.txt"), record3)
+	if err != nil {
+		t.Fatalf("writeWrittenFile (remote-owned) failed: %v", err)
+	}
+	expectedPath3 := filepath.Join(sessionDir, "1705312320-peer-host-ab12-raw.txt")
+	if path3 != expectedPath3 {
+		t.Errorf("remote-owned written file path: got %s, want %s", path3, expectedPath3)
+	}
+}
+
+func TestWriterFileSuffix(t *testing.T) {
+	tests := []struct {
+		name          string
+		isPrimary     bool
+		isRemoteOwned bool
+		host          string
+		kind          string
+		want          string
+	}{
+		{"primary raw", true, false, "irrelevant", "raw.txt", "-raw.txt"},
+		{"secondary raw", false, false, "irrelevant", "raw.txt", "-s-raw.txt"},
+		{"remote-owned raw", false, true, "peer-host-ab12", "raw.txt", "-peer-host-ab12-raw.txt"},
+		{"remote-owned writing", false, true, "peer-host-ab12", "writing.txt", "-peer-host-ab12-writing.txt"},
+	}
+	for _, tt := range tests {
+		if got := writerFileSuffix(tt.isPrimary, tt.isRemoteOwned, tt.host, tt.kind); got != tt.want {
+			t.Errorf("%s: writerFileSuffix() = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestSelfProcessRemoteRecord(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	record := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:33:00Z",
+			EventType: "command_execution",
+		},
+		Command: "echo secret",
+		Stdout:  "api_key=abcdefghijklmnop\n",
+	}
+
+	if err := selfProcessRemoteRecord(tmpDir, 1705312380, "peer-host-ab12", record); err != nil {
+		t.Fatalf("selfProcessRemoteRecord failed: %v", err)
+	}
+
+	processedPath := filepath.Join(tmpDir, "1705312380-peer-host-ab12-processed.txt")
+	data, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("expected processed file at %s: %v", processedPath, err)
+	}
+	if !strings.Contains(string(data), "<REDACTED-") {
+		t.Error("self-processed record should have redacted the secret")
+	}
+	// session.jsonl must never be touched by a non-owner host's self-processing.
+	if _, err := os.Stat(filepath.Join(tmpDir, "session.jsonl")); !os.IsNotExist(err) {
+		t.Error("selfProcessRemoteRecord must not create/touch session.jsonl")
 	}
 }
 
@@ -542,5 +615,85 @@ func TestConsolidatePrimaryToJSONL(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-processed.txt")); os.IsNotExist(err) {
 		t.Error("processed file should be created for primary record")
+	}
+}
+
+func TestConsolidatePrimaryToJSONLHostTagged(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	session := "test-session"
+	sessionDir := filepath.Join(tmpDir, session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	remote := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:00:00Z",
+			EventType: "command_execution",
+			Agent:     "claude",
+		},
+		Command: "echo remote",
+		Stdout:  "remote\n",
+	}
+	primary := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:01:00Z",
+			EventType: "command_execution",
+			Agent:     "claude",
+		},
+		Command: "echo primary",
+		Stdout:  "primary\n",
+	}
+
+	host := "peer-host-ab12"
+	// Simulate the non-owner host having already self-processed its own record
+	// (selfProcessRemoteRecord), plus the raw file it also always writes.
+	if err := selfProcessRemoteRecord(sessionDir, 1705312800, host, remote); err != nil {
+		t.Fatalf("selfProcessRemoteRecord failed: %v", err)
+	}
+	os.WriteFile(filepath.Join(sessionDir, "1705312800-peer-host-ab12-raw.txt"), []byte(remote.FormatWrittenFile()), 0644)
+	os.WriteFile(filepath.Join(sessionDir, "1705312860-raw.txt"), []byte(primary.FormatWrittenFile()), 0644)
+
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
+	}
+
+	logData, err := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
+	if err != nil {
+		t.Fatalf("failed to read session.jsonl: %v", err)
+	}
+	logStr := string(logData)
+	if !strings.Contains(logStr, "echo remote") {
+		t.Error("session.jsonl should contain the host-tagged remote command")
+	}
+	if !strings.Contains(logStr, "echo primary") {
+		t.Error("session.jsonl should contain primary command")
+	}
+
+	// Host-tagged raw file must be marked consolidated (not left matching the
+	// {ts}-{host}-raw.txt glob) so a later consolidation run doesn't re-append it.
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-peer-host-ab12-raw.txt")); !os.IsNotExist(err) {
+		t.Error("host-tagged raw file should be renamed away after consolidation")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-peer-host-ab12-raw.txt.consolidated")); os.IsNotExist(err) {
+		t.Error("host-tagged raw file should be renamed to add a .consolidated marker")
+	}
+
+	// Running consolidation again (as a later owner command would trigger) must
+	// not duplicate the host-tagged entry in session.jsonl.
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("second consolidatePrimaryToJSONL failed: %v", err)
+	}
+	logData2, err := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
+	if err != nil {
+		t.Fatalf("failed to read session.jsonl: %v", err)
+	}
+	if n := strings.Count(string(logData2), "echo remote"); n != 1 {
+		t.Errorf("echo remote should appear exactly once in session.jsonl after re-consolidation, got %d", n)
 	}
 }

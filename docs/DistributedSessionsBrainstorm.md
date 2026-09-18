@@ -374,3 +374,44 @@ participant touching its own session.
   drives `pullRemoteSessionLists` against a real `httptest` peer with a
   since-cleared `lrHTTPPort`, would close that gap and are recommended as
   next steps alongside the still-unbuilt `"append"` sync backend.
+
+### InitialDistributedSessions Step 1 Substep C Revision A — non-owner hosts get host-tagged raw/processed files and self-process
+
+Builds on Substep C's fix (clauditable was already never primary on a
+remote-owned session) by giving a non-owner host's own written files a
+distinct, permanent identity instead of reusing the same-host `-s-` secondary
+marker for two different concepts.
+
+- **New naming for non-owner writes**: a `clauditable` invocation on a
+  session it doesn't own (`isRemoteOwned`) now writes
+  `{timestamp}-{host}-writing.txt` / `{timestamp}-{host}-raw.txt` instead of
+  the `-s-writing.txt`/`-s-raw.txt` forms — those stay reserved for the
+  same-host primary/secondary dispatch race (`checkIsPrimary`), a genuinely
+  different situation from "a different host altogether wrote this."
+  `writerFileSuffix(isPrimary, isRemoteOwned, host, kind)` now picks the
+  suffix for all three roles (primary / same-host secondary / remote-owned).
+- **Non-owner hosts self-process**: right after writing its `-raw.txt`, a
+  remote-owned invocation now also runs the same auto-maintenance (secret
+  redaction, loading-bar stripping, truncation) locally and writes
+  `{timestamp}-{host}-processed.txt` itself (`selfProcessRemoteRecord`) —
+  "nodes process their own records" per this revision's prompt — rather than
+  leaving that to whatever eventually reads the raw file. It still never
+  touches `session.jsonl`.
+- **Still only the owner's primary builds `session.jsonl`**: unchanged from
+  Substep C (`isPrimary := !isRemoteOwned && checkIsPrimary(...)`), but
+  `consolidatePrimaryToJSONL` now also picks up host-tagged
+  `{ts}-{host}-raw.txt` entries — reusing the host's own
+  `{ts}-{host}-processed.txt` when present instead of reprocessing — and
+  appends them in timestamp order alongside its own and same-host-secondary
+  entries. Host-tagged entries are marked consolidated by renaming to
+  `{ts}-{host}-raw.txt.consolidated` (keeping the host tag, unlike same-host
+  secondaries which get promoted to a plain `{ts}-raw.txt`) so a later
+  consolidation run — the next time the owner's primary executes — doesn't
+  re-append the same entry.
+- No build sandbox was available for this revision either; verified by
+  manual review plus new/updated `clauditable` unit tests
+  (`TestWriterFileSuffix`, `TestSelfProcessRemoteRecord`,
+  `TestConsolidatePrimaryToJSONLHostTagged`, and the updated
+  `TestWriteWrittenFile`/`TestConsolidatePrimaryToJSONL`) that were not run
+  against a compiler — recommended as an immediate next step once a sandbox
+  is available.

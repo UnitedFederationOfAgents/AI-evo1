@@ -110,11 +110,8 @@ prompt: [`f5297e0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f
 Found and fixed two distinct root causes behind the reported symptoms. First, `federation-command/main.go` was unconditionally writing every command (including meta-commands like `list-sessions`/`select-session`/`get-session` that never touch clauditable) straight into `session.jsonl` via `m.encoder.Encode`, with no ownership check — so a secondary participant kept building its own diverging copy of a session it doesn't own; fixed by adding `isRemoteOwnedSession()`/`appendSessionRecord()` and routing all four write sites through it. Second, the "A sees B but B never sees A" asymmetry traced to a real race in `representable/representable.go`: a reconnecting client's stale, superseded TCP connection could later fire a bogus "disconnected" event that wiped out agent-coordinator's `lrHTTPPort` for the still-healthy new connection, permanently 502-ing that host's session pulls while `/api/hosts` kept reporting it "connected" — fixed via `disconnectIfCurrent`, which only tears down state when the closing connection is still the one currently considered live. Both fixes plus reasoning are recorded in `docs/DistributedSessionsBrainstorm.md`'s Working Section (no build sandbox was available, so this was verified by manual line-by-line review rather than compiling, matching the prior revisions' approach).
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's adjust the behaviour for non-owner hosts so that the files they write take the form '1789681959-<host-id>-raw.txt', "1789734619-<host-id>-processed.txt".
 
-
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+Now we can have nodes process their own records more easily. Only a primary executor on an owner node will build the jsonl.

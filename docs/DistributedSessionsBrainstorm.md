@@ -415,3 +415,27 @@ marker for two different concepts.
   `TestWriteWrittenFile`/`TestConsolidatePrimaryToJSONL`) that were not run
   against a compiler — recommended as an immediate next step once a sandbox
   is available.
+
+### InitialDistributedSessions Step 1 Substep C Revision B — non-interactive `-f` for `ufa session archive`
+
+A short detour unrelated to the distributed-sessions bugs above: `ufa
+session archive` normally shells out to a bash confirmation dialog
+(`buildArchiveConfirmScript`) that blocks on `read -p ... "yes"` before
+calling `clauditable archive`. That's fine interactively but unusable from
+scripts/automation.
+
+- **`federation-command/main.go`**: `session archive` now also matches
+  `session archive -f`. `buildArchiveConfirmScript` grew a `force bool`
+  parameter; when true it skips the decorative confirmation box entirely and
+  emits a script that just runs `clauditable archive` directly (still with
+  the same `AGENT_RECORDS_PATH`/`AGENT_RECORDS_ARCHIVE_PATH` env). Help text
+  updated (`ufa session archive [-f]`). `clauditable archive` itself was
+  already non-interactive (the confirmation lives only in the `ufa`-side
+  bash script), so no change was needed there.
+- Added `TestBuildArchiveConfirmScript` to `federation-command/main_test.go`
+  covering both the forced (no `read -p`, direct `archive` call) and
+  non-forced (still gated on typing `yes`) script bodies.
+- No build sandbox was available for this revision either (attempted `go
+  build`/`gofmt`, denied), so this was verified by manual review of the
+  generated bash script strings rather than compiling or running the new
+  test.

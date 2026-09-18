@@ -3627,7 +3627,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
 
-	case "session archive":
+	case "session archive", "session archive -f":
 		clauditablePath, err := findBinary("clauditable")
 		if err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
@@ -3638,7 +3638,8 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		if archivePath == "" {
 			archivePath = recordsPath + "-archive"
 		}
-		script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath)
+		force := sub == "session archive -f"
+		script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath, force)
 		cmd := exec.Command("bash", "-c", script)
 		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 			return cmdDoneMsg{
@@ -3784,7 +3785,7 @@ func ufaSessionHelpText() string {
 		"  ufa session get               show ID, name, and location of current session",
 		"  ufa session describe [-a]     show full session info; -a for agent description",
 		"  ufa session rename [name|-a]  rename current session",
-		"  ufa session archive           archive all current sessions",
+		"  ufa session archive [-f]      archive all current sessions (-f skips confirmation)",
 		"",
 		sessionStyle.Render("each session has an ID (folder name) and a name stored in session.yaml"),
 		sessionStyle.Render("session IDs ending in '-default' are reserved for daily defaults"),
@@ -3793,10 +3794,16 @@ func ufaSessionHelpText() string {
 }
 
 // buildArchiveConfirmScript returns a bash script that shows a decorative confirmation
-// dialog before invoking 'clauditable archive'.
-func buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath string) string {
+// dialog before invoking 'clauditable archive'. When force is true, the confirmation
+// prompt is skipped and the archive runs immediately (non-interactive, auto-approved).
+func buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath string, force bool) string {
 	escape := func(s string) string {
 		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	if force {
+		return fmt.Sprintf(`
+AGENT_RECORDS_PATH=%s AGENT_RECORDS_ARCHIVE_PATH=%s %s archive
+`, escape(recordsPath), escape(archivePath), escape(clauditablePath))
 	}
 	return fmt.Sprintf(`
 Y='\033[1;33m'; W='\033[1;37m'; R='\033[0m'

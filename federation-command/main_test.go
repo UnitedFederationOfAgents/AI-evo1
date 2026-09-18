@@ -507,3 +507,28 @@ func TestParseCLIArgsEnvOverrides(t *testing.T) {
 		}
 	})
 }
+
+// TestBuildArchiveConfirmScript verifies that force=true produces a script that
+// invokes 'clauditable archive' directly with no interactive confirmation, while
+// force=false still gates the archive behind the 'yes' confirmation prompt.
+func TestBuildArchiveConfirmScript(t *testing.T) {
+	t.Run("force skips confirmation", func(t *testing.T) {
+		script := buildArchiveConfirmScript("/bin/clauditable", "/records", "/records-archive", true)
+		if strings.Contains(script, "read -p") {
+			t.Errorf("force=true script should not prompt for confirmation, got:\n%s", script)
+		}
+		if !strings.Contains(script, "/bin/clauditable archive") {
+			t.Errorf("force=true script should invoke clauditable archive directly, got:\n%s", script)
+		}
+	})
+
+	t.Run("non-force still confirms", func(t *testing.T) {
+		script := buildArchiveConfirmScript("/bin/clauditable", "/records", "/records-archive", false)
+		if !strings.Contains(script, "read -p") {
+			t.Errorf("force=false script should prompt for confirmation, got:\n%s", script)
+		}
+		if !strings.Contains(script, `"$_ufa_confirm" = "yes"`) {
+			t.Errorf("force=false script should gate the archive on typing 'yes', got:\n%s", script)
+		}
+	})
+}

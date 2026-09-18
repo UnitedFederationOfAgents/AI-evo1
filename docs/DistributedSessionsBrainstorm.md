@@ -439,3 +439,29 @@ scripts/automation.
   build`/`gofmt`, denied), so this was verified by manual review of the
   generated bash script strings rather than compiling or running the new
   test.
+
+### InitialDistributedSessions Step 1 Substep C Revision C — `archive-sessions` as a top-level alias for `ufa session archive`
+
+Another short detour: make `archive-sessions [-f]` work as a bare top-level
+command, aliasing `ufa session archive [-f]`, mirroring how `list-sessions`,
+`select-session`, `get-session`, etc. already exist both as top-level
+commands and under `ufa session ...`.
+
+- **`federation-command/main.go`**: pulled the body of the `"session
+  archive", "session archive -f"` case out of `handleUFACommand` into a new
+  shared `handleSessionArchive(line string, force bool, cmdTime, deltaMs)`
+  method. The `ufa session archive` case now just calls it with
+  `force = sub == "session archive -f"`. A new top-level dispatch branch
+  (alongside `get-session`/`describe-session`/`rename-session`, just before
+  the `ufa` prefix check) matches `archive-sessions`/`archive-sessions -f`
+  and calls the same helper with `force` derived the same way. `line` (the
+  text actually typed) is threaded through unchanged in both call sites, so
+  whichever form the user types is what gets recorded in `session.jsonl` —
+  the alias doesn't rewrite history into the canonical form. Also added a
+  one-line "alias: archive-sessions [-f]" note under `ufa session archive`
+  in `ufaSessionHelpText`.
+- No behavior change for the existing `ufa session archive [-f]` path;
+  `buildArchiveConfirmScript` and its Revision B test are untouched.
+- No build sandbox was available (attempted `go build`, denied), so this was
+  verified by manual/line-by-line review rather than compiling, consistent
+  with prior revisions.

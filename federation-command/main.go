@@ -3472,6 +3472,11 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m.handleRenameSession(args, line, cmdTime, deltaMs)
 	}
 
+	// archive-sessions [-f] — alias for `ufa session archive [-f]`
+	if line == "archive-sessions" || line == "archive-sessions -f" {
+		return m.handleSessionArchive(line, line == "archive-sessions -f", cmdTime, deltaMs)
+	}
+
 	// ufa [subcommand...]
 	if line == "ufa" || strings.HasPrefix(line, "ufa ") {
 		return m.handleUFACommand(line, cmdTime, deltaMs)
@@ -3589,6 +3594,33 @@ AGENT_RECORDS_PATH=%s %s new-session "$_ufa_name" > %s
 `, escape(recordsPath), escape(clauditablePath), escape(tmpPath))
 }
 
+// handleSessionArchive implements `ufa session archive [-f]`, shared with its
+// top-level `archive-sessions [-f]` alias. line is the command as actually
+// typed, preserved for logging/echo so the alias and the canonical form both
+// record faithfully in session.jsonl.
+func (m appModel) handleSessionArchive(line string, force bool, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	clauditablePath, err := findBinary("clauditable")
+	if err != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("ufa session archive: clauditable not found — " + err.Error()))
+	}
+	recordsPath := m.recordsPath
+	archivePath := os.Getenv(EnvAgentRecordsArchivePath)
+	if archivePath == "" {
+		archivePath = recordsPath + "-archive"
+	}
+	script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath, force)
+	cmd := exec.Command("bash", "-c", script)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return cmdDoneMsg{
+			exitCode: extractExitCode(err),
+			line:     line,
+			cmdTime:  cmdTime,
+			deltaMs:  deltaMs,
+		}
+	})
+}
+
 // handleUFACommand dispatches ufa subcommands.
 func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
 	sub := strings.TrimSpace(strings.TrimPrefix(line, "ufa"))
@@ -3628,27 +3660,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
 
 	case "session archive", "session archive -f":
-		clauditablePath, err := findBinary("clauditable")
-		if err != nil {
-			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("ufa session archive: clauditable not found — " + err.Error()))
-		}
-		recordsPath := m.recordsPath
-		archivePath := os.Getenv(EnvAgentRecordsArchivePath)
-		if archivePath == "" {
-			archivePath = recordsPath + "-archive"
-		}
-		force := sub == "session archive -f"
-		script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath, force)
-		cmd := exec.Command("bash", "-c", script)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return cmdDoneMsg{
-				exitCode: extractExitCode(err),
-				line:     line,
-				cmdTime:  cmdTime,
-				deltaMs:  deltaMs,
-			}
-		})
+		return m.handleSessionArchive(line, sub == "session archive -f", cmdTime, deltaMs)
 
 	default:
 		if sub == "session new" || strings.HasPrefix(sub, "session new ") {
@@ -3786,6 +3798,7 @@ func ufaSessionHelpText() string {
 		"  ufa session describe [-a]     show full session info; -a for agent description",
 		"  ufa session rename [name|-a]  rename current session",
 		"  ufa session archive [-f]      archive all current sessions (-f skips confirmation)",
+		"                                 alias: archive-sessions [-f]",
 		"",
 		sessionStyle.Render("each session has an ID (folder name) and a name stored in session.yaml"),
 		sessionStyle.Render("session IDs ending in '-default' are reserved for daily defaults"),

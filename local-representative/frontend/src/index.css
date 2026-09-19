@@ -26,13 +26,17 @@ body {
   overflow: hidden;
 }
 
-/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable but
-   subtle green border around the whole app, reusing the "healthy"/"connected"
-   green (#4ec94e) rather than introducing a new accent color. An outline
-   (not border) so it never nudges the layout. */
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable green
+   border around the whole app, reusing the "healthy"/"connected" green
+   (#4ec94e) rather than introducing a new accent color. An outline (not
+   border) so it never nudges the layout. Revision A: the original 1px/45%
+   outline was too subtle to notice at a glance, so this is now a thick,
+   fully-opaque outline plus an inner glow for extra contrast against dark
+   panel backgrounds. */
 .app-dev-mode {
-  outline: 1px solid rgba(78, 201, 78, 0.45);
-  outline-offset: -1px;
+  outline: 4px solid #4ec94e;
+  outline-offset: -4px;
+  box-shadow: inset 0 0 16px rgba(78, 201, 78, 0.5);
 }
 
 .mode-mismatch-banner {
@@ -752,9 +756,10 @@ body {
 .sys-dev-tag {
   margin-left: 8px;
   font-size: 10px;
-  font-weight: 400;
+  font-weight: 600;
   color: #4ec94e;
-  border: 1px solid #2e6e2e;
+  background: #1a3a1a;
+  border: 1px solid #4ec94e;
   border-radius: 8px;
   padding: 0 6px;
 }

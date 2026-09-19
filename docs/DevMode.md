@@ -54,14 +54,18 @@ process's name without any extra plumbing.
 ## Visual indicators
 
 - **Web UI apps** (`local-representative`, `agent-coordinator`, `condoccer`):
-  the whole app frame gets an easily recognizable but subtle green outline —
-  `outline: 1px solid rgba(78, 201, 78, 0.45)` in each frontend's
-  `index.css` — when that instance's own `dev_mode` is true. `#4ec94e` is the
-  same green already used for "healthy" / "connected" indicators across these
-  three frontends, reused here rather than introducing a new accent color. An
-  `outline` rather than a `border` was chosen so it never perturbs layout.
-  Each app also gets a small `dev` badge next to any process/host row that is
-  itself in dev mode (`.sys-dev-tag`).
+  the whole app frame gets an easily recognizable green outline —
+  `outline: 4px solid #4ec94e` plus an inset glow (`box-shadow: inset 0 0
+  16px rgba(78, 201, 78, 0.5)`) in each frontend's `index.css` — when that
+  instance's own `dev_mode` is true. `#4ec94e` is the same green already used
+  for "healthy" / "connected" indicators across these three frontends, reused
+  here rather than introducing a new accent color. An `outline` rather than a
+  `border` was chosen so it never perturbs layout. (Revision A: the original
+  `outline: 1px solid rgba(78, 201, 78, 0.45)` was too subtle to notice at a
+  glance, so the outline was thickened to full opacity and the glow added for
+  contrast against dark panel backgrounds.) Each app also gets a small `dev`
+  badge, now filled instead of outline-only, next to any process/host row that
+  is itself in dev mode (`.sys-dev-tag`).
 - **`federation-command`**: the square brackets enclosing the blinker (the
   `[` `]` either side of the `●`/`○` indicator) render in the same green
   instead of the default light blue — `blinkerBracketDevStyle` in

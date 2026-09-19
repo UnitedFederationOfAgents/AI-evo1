@@ -53,3 +53,20 @@ Documentation lives in the new `docs/DevMode.md`, which also records the future-
 The visual cues for the graphical applications with dev-mode should be more pronounced. It is too hard to recognize at a glance.
 
 Let's correct them to make them more distinct.
+
+
+prompt: [`4927592`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4927592691b9b2142f66dba34806dfe2a67038fc) → reply: [`ddddf9d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ddddf9d4849472ce52b4dde3ed9b051cc1802b52)
+
+## Reply A
+
+I strengthened the dev-mode visual cue in all three web UIs (local-representative, agent-coordinator, condoccer): the app-frame outline changed from a faint 1px/45%-opacity green to a thick, fully-opaque 4px green outline with an inset glow, and the per-process `dev` tag is now a filled badge instead of just an outlined one. Updated `docs/DevMode.md` to describe the new styling and note the Revision A rationale.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

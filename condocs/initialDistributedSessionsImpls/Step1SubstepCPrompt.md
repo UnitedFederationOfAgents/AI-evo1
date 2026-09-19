@@ -190,3 +190,22 @@ Let's add specific commands that we can run and sample expected results for them
 We can assume that the launching of the application can be in plain English, ie: "Launch LR and connect it to node 1's AC. Connect FC to LR on node 2." would be fine, but that any command inside FC would be explicit; ie: "sleep 5; echo hello; sleep 30"
 
 Also, let's respond (in the response, not the document) about why we need .txt.consolidated files - we should not expect to need these unless there is a good reason.
+
+
+prompt: [`ee1dd44`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ee1dd44eb828701bf41746d83ab2c178d48f746d) → reply: [`8f224e6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8f224e6e03ad762c8b9334850078a91618bc7db4)
+
+## Reply E
+
+Implemented Revision E: `SimpleDistributedSessionSequences.md` now explicitly marks each step as either **Launch/Connect** (plain English, operational) or **Run:** (a literal FC command like `sleep 3`, `echo "fc-2 overlap"`), fixed a pre-existing inconsistency where the overlap round was narrated as `sleep 3` but listed as `sleep 2` in the expected-entries bullet, and added a new "Sample `session.jsonl` content" section with literal example JSON lines (matching `CommandRecord`'s actual `id`/`cmd`/`ts`/`delta_ms`/`exit`/`host`/`head` fields) for both the pre-sync and post-sync states. Only that doc file changed.
+
+On the `.consolidated` question: yes, we need it, and it's not optional bookkeeping — `consolidatePrimaryToJSONL` filters bare `{ts}-raw.txt` files by `ts == primaryTimestamp`, so old primary/promoted-secondary files are naturally excluded from being re-scanned on future runs without any marker. But host-tagged `{ts}-{host}-raw.txt` files have no such equality check (any host's ts is fair game each run), so without renaming them to `.consolidated` after appending, *every* previously-synced remote-host entry would get re-appended to `session.jsonl` on every subsequent consolidation — a real duplicate-entry bug, not a hypothetical one. It also intentionally preserves the host tag (rather than deleting the file or stripping the tag the way same-host secondaries get promoted) so Node 2's raw record survives on disk as provenance of what was actually synced. So: good reason, keep it.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

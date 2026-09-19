@@ -26,6 +26,34 @@ body {
   overflow: hidden;
 }
 
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable but
+   subtle green border around the whole app, reusing the "healthy"/"connected"
+   green (#4ec94e) rather than introducing a new accent color. An outline
+   (not border) so it never nudges the layout. */
+.app-dev-mode {
+  outline: 1px solid rgba(78, 201, 78, 0.45);
+  outline-offset: -1px;
+}
+
+.mode-mismatch-banner {
+  flex-shrink: 0;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.sys-dev-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 400;
+  color: #4ec94e;
+  border: 1px solid #2e6e2e;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
 /* ---- App header ---- */
 
 .app-header {

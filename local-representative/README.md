@@ -20,6 +20,7 @@ make build      # build frontend + Go binary
 | `--repr-port` | `repr-port` | `8082` | TCP port for the `representable` heartbeat server FC dials |
 | `--name` | `name` | hostname | identifier reported to `agent-coordinator` |
 | `--dev` | `dev` | `false` | dev mode: don't serve the embedded frontend |
+| `--dev-mode` | `dev-mode` | `false` | dev mode in the SDLC sense (see [`docs/DevMode.md`](../docs/DevMode.md)): this LR — and every `federation-command`/`condoccer` it launches — is running from an in-progress branch. Unrelated to `--dev` above. |
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
 | `--ac-host` | `ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
 | `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |

@@ -64,6 +64,22 @@ export interface ProcInfo {
   started_at: number // unix seconds
   exit_code: number  // meaningful once status != "running"
   detail?: string
+  dev_mode?: boolean // launched with --dev-mode -- see docs/DevMode.md
+}
+
+// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
+// (see docs/DevMode.md) -- sent once when the WebSocket connects.
+export interface SelfInfoMsg {
+  dev_mode: boolean
+}
+
+// ModeMismatchMsg discloses that a connected local-representative's dev-mode
+// status differs from this agent-coordinator's own. mismatched: false clears
+// a prior disclosure.
+export interface ModeMismatchMsg {
+  host_id: string
+  mismatched: boolean
+  peer_mode?: string
 }
 
 export interface LRSystemStateMsg {

@@ -135,6 +135,10 @@ type Server struct {
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
 	lrName     string
+	devMode    bool // --dev-mode: cascaded to every managed instance this LR launches — see docs/DevMode.md
+
+	modeMu         sync.RWMutex
+	modeMismatches map[string]ModeMismatchMsg // peer name -> current mismatch disclosure, mismatched entries only
 
 	fcMu    sync.RWMutex
 	fcState string // "remote-control", "local-control", or "" (disconnected)
@@ -180,13 +184,52 @@ func newServer(lrName string) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:      make(map[*wsClient]bool),
-		lrName:       lrName,
-		selfStart:    time.Now(),
-		binOverrides: make(map[string]string),
-		managed:      make(map[string]*managedProc),
-		instanceSeq:  make(map[string]int),
+		clients:        make(map[*wsClient]bool),
+		lrName:         lrName,
+		selfStart:      time.Now(),
+		binOverrides:   make(map[string]string),
+		managed:        make(map[string]*managedProc),
+		instanceSeq:    make(map[string]int),
+		modeMismatches: make(map[string]ModeMismatchMsg),
 	}
+}
+
+// ModeMismatchMsg is the "mode-mismatch" WebSocket payload disclosing that a
+// connected peer's dev-mode status differs from this LR's own (see
+// docs/DevMode.md). peer is "agent-coordinator" for the uplink or a
+// representable client name ("federation-command", "condoccer", ...) for a
+// downlink. Mismatched=false clears a previously-disclosed mismatch.
+type ModeMismatchMsg struct {
+	Peer       string `json:"peer"`
+	Mismatched bool   `json:"mismatched"`
+	PeerMode   string `json:"peer_mode,omitempty"`
+}
+
+// setModeMismatch records peer's current mismatch verdict and broadcasts it
+// to every connected browser client. Called from both the reprServer handler
+// (federation-command/condoccer dialling in) and the acClient handler (this
+// LR dialling out to agent-coordinator).
+func (s *Server) setModeMismatch(peer string, mismatched bool, peerMode string) {
+	s.modeMu.Lock()
+	if mismatched {
+		s.modeMismatches[peer] = ModeMismatchMsg{Peer: peer, Mismatched: true, PeerMode: peerMode}
+	} else {
+		delete(s.modeMismatches, peer)
+	}
+	s.modeMu.Unlock()
+	s.broadcast("mode-mismatch", ModeMismatchMsg{Peer: peer, Mismatched: mismatched, PeerMode: peerMode})
+}
+
+// currentModeMismatches returns a snapshot of every peer currently disclosed
+// as mismatched, for a newly-connected browser client.
+func (s *Server) currentModeMismatches() []ModeMismatchMsg {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	out := make([]ModeMismatchMsg, 0, len(s.modeMismatches))
+	for _, m := range s.modeMismatches {
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
@@ -344,7 +387,7 @@ func (s *Server) connectAC(host, port string) {
 	addr := host + ":" + port
 	log.Printf("connecting to agent-coordinator at %s as %q", addr, s.lrName)
 
-	client, err := representable.Connect(addr, s.lrName, 5*time.Second)
+	client, err := representable.Connect(addr, s.lrName, representable.Mode(s.devMode), 5*time.Second)
 	if err != nil {
 		log.Printf("failed to connect to agent-coordinator: %v", err)
 		s.acMu.RLock()
@@ -377,6 +420,9 @@ func (s *Server) connectAC(host, port string) {
 			s.reprServer.SendCommand("federation-command", cmd)
 		}
 	})
+	client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
+		s.setModeMismatch("agent-coordinator", mismatched, peerMode)
+	})
 
 	s.pushStateToAC()
 	s.broadcast("ac-state", s.acStateMsg(true, host, port))
@@ -393,6 +439,7 @@ func (s *Server) connectAC(host, port string) {
 
 	log.Printf("disconnected from agent-coordinator at %s", addr)
 	s.broadcast("ac-state", s.acStateMsg(false, host, port))
+	s.setModeMismatch("agent-coordinator", false, "")
 }
 
 // disconnectAC closes the AC connection; the connectAC goroutine handles cleanup.
@@ -521,6 +568,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
+		}
+		for _, mm := range s.currentModeMismatches() {
+			s.sendToClient(c, "mode-mismatch", mm)
 		}
 	}()
 
@@ -718,6 +768,7 @@ type appConfig struct {
 	heartbeatPort string
 	name          string
 	dev           bool
+	devMode       bool // --dev-mode: this instance (and everything it launches) runs from an in-progress branch — see docs/DevMode.md. Distinct from dev, which just skips serving the embedded frontend.
 	autoConnect   bool
 	acHost        string
 	acPort        string
@@ -779,6 +830,9 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
 		return out, err
 	}
+	if out.devMode, err = pickBool("dev-mode", defaults.devMode); err != nil {
+		return out, err
+	}
 	if out.autoConnect, err = pickBool("auto-connect", defaults.autoConnect); err != nil {
 		return out, err
 	}
@@ -793,6 +847,7 @@ func main() {
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
 	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): launched from an in-progress branch. Cascades to every federation-command/condoccer instance this LR launches. Unrelated to --dev.")
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
@@ -818,6 +873,7 @@ func main() {
 		heartbeatPort: *reprPort,
 		name:          *name,
 		dev:           *dev,
+		devMode:       *devMode,
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
@@ -834,6 +890,7 @@ func main() {
 	}
 
 	s := newServer(cfg.name)
+	s.devMode = cfg.devMode
 	s.heartbeatPort = cfg.heartbeatPort
 	s.httpPort = cfg.httpPort
 	s.condoccerPort = cfg.condoccerPort
@@ -852,7 +909,7 @@ func main() {
 	}
 	go s.cleanupFilesLoop()
 
-	reprSrv, err := representable.NewServer(":" + cfg.heartbeatPort)
+	reprSrv, err := representable.NewServer(":"+cfg.heartbeatPort, representable.Mode(s.devMode))
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
@@ -870,6 +927,7 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("condoccer-state", empty)
 				}
+				s.setModeMismatch("condoccer", false, "")
 			}
 			return
 		}
@@ -888,8 +946,16 @@ func main() {
 					ac.SendData("ridealong-state", RidealongStateMsg{Active: false})
 					ac.SendData("condoc-state", CondocStateMsg{Active: false})
 				}
+				s.setModeMismatch("federation-command", false, "")
 			}
 		}
+	})
+
+	// Disclose a dev/ops mode mismatch with a connecting FC or condoccer — see
+	// docs/DevMode.md. Both still exchange heartbeats; representable itself
+	// refuses their state/log/data traffic while mismatched.
+	reprSrv.SetModeMismatchHandler(func(name string, mismatched bool, peerMode string) {
+		s.setModeMismatch(name, mismatched, peerMode)
 	})
 
 	reprSrv.SetLogHandler(func(name, line, kind string) {

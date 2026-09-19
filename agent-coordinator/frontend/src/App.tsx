@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  SelfInfoMsg, ModeMismatchMsg,
 } from './types'
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -35,6 +36,9 @@ function useCoordinatorWS() {
   const [connected, setConnected] = useState(false)
   const [hosts, setHosts] = useState<Host[]>([])
   const [hostData, setHostData] = useState<Record<string, HostClientState>>({})
+  const [devMode, setDevMode] = useState(false)
+  // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
+  const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRefs = useRef<Record<string, string>>({})
@@ -83,7 +87,12 @@ function useCoordinatorWS() {
     const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
     wsRef.current = ws
 
-    ws.onopen = () => setConnected(true)
+    ws.onopen = () => {
+      setConnected(true)
+      // The server resends a full mode-mismatch snapshot on connect; drop any
+      // stale entries from a mismatch that cleared while we were offline.
+      setModeMismatches({})
+    }
 
     ws.onclose = () => {
       setConnected(false)
@@ -96,6 +105,19 @@ function useCoordinatorWS() {
       try {
         const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown }
         switch (msg.type) {
+          case 'self-info':
+            setDevMode((msg.payload as SelfInfoMsg).dev_mode)
+            break
+          case 'mode-mismatch': {
+            const payload = msg.payload as ModeMismatchMsg
+            setModeMismatches(prev => {
+              const next = { ...prev }
+              if (payload.mismatched) next[payload.host_id] = payload
+              else delete next[payload.host_id]
+              return next
+            })
+            break
+          }
           case 'hosts':
             setHosts((msg.payload as HostsMsg).hosts)
             break
@@ -206,7 +228,7 @@ function useCoordinatorWS() {
   }, [connect])
 
   return {
-    connected, hosts, hostData, selectHost,
+    connected, hosts, hostData, selectHost, devMode, modeMismatches,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
   }
 }
@@ -470,6 +492,7 @@ function SystemProcRow({
       <span className="sys-col sys-col-name">
         {label}
         {!proc.managed && <span className="sys-self-tag">this LR</span>}
+        {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
@@ -1043,9 +1066,10 @@ function LRView({
 
 export default function App() {
   const {
-    connected, hosts, hostData, selectHost,
+    connected, hosts, hostData, selectHost, devMode, modeMismatches,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
   } = useCoordinatorWS()
+  const mismatches = Object.values(modeMismatches)
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   // Mobile nav drawer: the host sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css), same treatment as condoccer's
@@ -1062,7 +1086,13 @@ export default function App() {
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
 
   return (
-    <div className="app">
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {mismatches.length > 0 && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch — {mismatches.map(m => `${m.host_id} (${m.peer_mode})`).join(', ')}:
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
       <div className="app-header">
         <span className="app-title">agent-coordinator</span>
         <span

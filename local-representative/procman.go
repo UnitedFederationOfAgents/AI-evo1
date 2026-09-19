@@ -27,6 +27,7 @@ type ProcInfo struct {
 	StartedAt  int64  `json:"started_at"`       // unix seconds
 	ExitCode   int    `json:"exit_code"`        // meaningful once status != "running"
 	Detail     string `json:"detail,omitempty"` // launch/exit error text, if any
+	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode — see docs/DevMode.md
 }
 
 // SystemStateMsg is the payload of "system-state" WebSocket messages.
@@ -67,6 +68,12 @@ var managedApps = map[string]launchSpec{
 			if s.condoccerRoot != "" {
 				args = append(args, "--root", s.condoccerRoot)
 			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md. A dev/ops mismatch would otherwise leave the
+				// pair unable to do more than exchange health information.
+				args = append(args, "--dev-mode")
+			}
 			return args
 		},
 	},
@@ -81,7 +88,13 @@ var managedApps = map[string]launchSpec{
 			// separate --remote flag), and --lr-port points it at our
 			// representable server: a fully machine-driven auto-launch chain lands
 			// ready to drive from local-representative rather than in the foreground.
-			return []string{"--auto-connect", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+			args := []string{"--auto-connect", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+			if s.devMode {
+				// Cascade this LR's dev mode to every FC it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
 		},
 		buildEnv: func(s *Server) []string {
 			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
@@ -91,11 +104,17 @@ var managedApps = map[string]launchSpec{
 			// terminal to hand control to LR. Environment variables pass through
 			// every wrapper untouched, and FC honours them below CLI flags.
 			// FC_AUTO_CONNECT alone is sufficient: it also selects remote control.
-			return []string{
+			// FC_DEV_MODE mirrors it for --dev-mode, so a dropped argv still lands
+			// FC in the mode its launching LR is in (see docs/DevMode.md).
+			env := []string{
 				"FC_AUTO_CONNECT=1",
 				"FC_LR_HOST=localhost",
 				"FC_LR_PORT=" + s.heartbeatPort,
 			}
+			if s.devMode {
+				env = append(env, "FC_DEV_MODE=1")
+			}
+			return env
 		},
 	},
 }
@@ -153,7 +172,11 @@ func (s *Server) systemState() SystemStateMsg {
 	s.procMu.Lock()
 	procs := make([]ProcInfo, 0, len(s.managed))
 	for _, p := range s.managed {
-		procs = append(procs, p.info())
+		info := p.info()
+		// Every instance LR launches cascades LR's own mode (see
+		// docs/DevMode.md) — there is no per-instance override.
+		info.DevMode = s.devMode
+		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
 	sort.Slice(procs, func(i, j int) bool {
@@ -170,6 +193,7 @@ func (s *Server) systemState() SystemStateMsg {
 			Status:    "running",
 			Managed:   false,
 			StartedAt: s.selfStart.Unix(),
+			DevMode:   s.devMode,
 		},
 		Managed: procs,
 	}

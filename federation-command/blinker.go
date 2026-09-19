@@ -43,17 +43,22 @@ type Blinker struct {
 	flashCount    int  // Number of remaining flash cycles
 	gen           int  // Generation counter; invalidates stale tick timers on state changes
 	ridealongBlue bool // For ridealong mode: toggles between red (false) and blue (true)
+	devMode       bool // This FC instance was launched with --dev-mode: brackets render green.
 
 	accentEnabled bool // When true, a brief blue accent pulse is overlaid on the current mode
 	accentOn      bool // Whether the accent pulse is currently showing
 	accentGen     int  // Generation counter for the independent accent tick chain
 }
 
-// NewBlinker creates a new blinker in the default idle (blinking) state
-func NewBlinker() Blinker {
+// NewBlinker creates a new blinker in the default idle (blinking) state.
+// devMode renders the enclosing brackets green for the lifetime of the
+// instance (see docs/DevMode.md) — dev mode is launch-time only, not
+// switchable at runtime.
+func NewBlinker(devMode bool) Blinker {
 	return Blinker{
 		state:   BlinkerIdle,
 		visible: true,
+		devMode: devMode,
 	}
 }
 
@@ -149,6 +154,12 @@ var (
 	// Light blue brackets
 	blinkerBracketStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("117"))
+
+	// Green brackets shown instead of blinkerBracketStyle when this FC instance
+	// was launched with --dev-mode (see docs/DevMode.md) — the one FC-specific
+	// visual cue called for alongside the web UIs' subtle green panel borders.
+	blinkerBracketDevStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("34"))
 
 	// Grey indicator characters
 	blinkerBlockStyle = lipgloss.NewStyle().
@@ -297,8 +308,12 @@ func (b *Blinker) IsLocalControl() bool {
 
 // View renders the blinker slot
 func (b *Blinker) View() string {
-	openBracket := blinkerBracketStyle.Render("[")
-	closeBracket := blinkerBracketStyle.Render("]")
+	bracketStyle := blinkerBracketStyle
+	if b.devMode {
+		bracketStyle = blinkerBracketDevStyle
+	}
+	openBracket := bracketStyle.Render("[")
+	closeBracket := bracketStyle.Render("]")
 
 	var content string
 	switch b.state {

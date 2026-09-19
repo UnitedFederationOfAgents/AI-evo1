@@ -497,17 +497,20 @@ type Server struct {
 	root     string
 	httpPort string // HTTP port this condoccer serves on (reported to local-representative)
 	name     string // identifier reported to local-representative
+	devMode  bool   // --dev-mode: this condoccer instance -- see docs/DevMode.md
 	upgrader websocket.Upgrader
 	mu       sync.RWMutex
 	clients  map[*wsClient]bool
 
 	// representable link to local-representative (see repr.go). nil until connected.
-	reprMu     sync.Mutex
-	reprClient *representable.Client
-	reprStatus string        // "disconnected" | "connecting" | "connected"
-	reprHost   string        // host of the current/last connect attempt (widget default)
-	reprPort   string        // port of the current/last connect attempt (widget default)
-	reprStop   chan struct{} // non-nil while a connectLoop is running; closing it stops retries
+	reprMu       sync.Mutex
+	reprClient   *representable.Client
+	reprStatus   string        // "disconnected" | "connecting" | "connected"
+	reprHost     string        // host of the current/last connect attempt (widget default)
+	reprPort     string        // port of the current/last connect attempt (widget default)
+	reprStop     chan struct{} // non-nil while a connectLoop is running; closing it stops retries
+	modeMismatch bool          // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
+	modeMismatchPeer string    // the mismatched LR's disclosed mode ("dev" or "ops")
 }
 
 func newServer(root string) *Server {
@@ -602,6 +605,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial condoc list and representable connection status.
 	go s.sendList(c)
 	go s.sendReprStatus(c)
+	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode})
+	go s.sendModeMismatch(c)
 
 	// Write pump.
 	go func() {
@@ -1054,6 +1059,7 @@ func main() {
 	port := flag.String("port", "8080", "HTTP port to listen on")
 	root := flag.String("root", ".", "repository root to scan for condocs")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): this condoccer is running from an in-progress branch. Unrelated to --dev.")
 	name := flag.String("name", "condoccer", "identifier reported to local-representative")
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
@@ -1068,6 +1074,7 @@ func main() {
 	s := newServer(absRoot)
 	s.httpPort = *port
 	s.name = *name
+	s.devMode = *devMode
 	go s.watchLoop()
 
 	if *autoConnect {

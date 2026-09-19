@@ -171,6 +171,7 @@ type ProcInfo struct {
 	StartedAt  int64  `json:"started_at"`
 	ExitCode   int    `json:"exit_code"`
 	Detail     string `json:"detail,omitempty"`
+	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode -- see docs/DevMode.md
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.
@@ -269,9 +270,13 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
+	devMode    bool // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
 
 	hostsMu    sync.RWMutex
 	hostStates map[string]*hostState
+
+	modeMu         sync.RWMutex
+	modeMismatches map[string]ModeMismatchMsg // LR host id -> current mismatch disclosure, mismatched entries only
 }
 
 func newServer() *Server {
@@ -279,9 +284,52 @@ func newServer() *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:    make(map[*wsClient]bool),
-		hostStates: make(map[string]*hostState),
+		clients:        make(map[*wsClient]bool),
+		hostStates:     make(map[string]*hostState),
+		modeMismatches: make(map[string]ModeMismatchMsg),
 	}
+}
+
+// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
+// to its frontend (see docs/DevMode.md) — sent once when a browser client
+// connects, since AC has no representable server above it forwarding a "self"
+// ProcInfo the way LR forwards one for itself.
+type SelfInfoMsg struct {
+	DevMode bool `json:"dev_mode"`
+}
+
+// ModeMismatchMsg discloses that a connected local-representative's dev-mode
+// status differs from this agent-coordinator's own (see docs/DevMode.md).
+// Mismatched=false clears a previously-disclosed mismatch.
+type ModeMismatchMsg struct {
+	HostID     string `json:"host_id"`
+	Mismatched bool   `json:"mismatched"`
+	PeerMode   string `json:"peer_mode,omitempty"`
+}
+
+// setModeMismatch records hostID's current mismatch verdict and broadcasts it
+// to every connected browser client.
+func (s *Server) setModeMismatch(hostID string, mismatched bool, peerMode string) {
+	s.modeMu.Lock()
+	if mismatched {
+		s.modeMismatches[hostID] = ModeMismatchMsg{HostID: hostID, Mismatched: true, PeerMode: peerMode}
+	} else {
+		delete(s.modeMismatches, hostID)
+	}
+	s.modeMu.Unlock()
+	s.broadcast("mode-mismatch", ModeMismatchMsg{HostID: hostID, Mismatched: mismatched, PeerMode: peerMode})
+}
+
+// currentModeMismatches returns a snapshot of every host currently disclosed
+// as mismatched, for a newly-connected browser client.
+func (s *Server) currentModeMismatches() []ModeMismatchMsg {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	out := make([]ModeMismatchMsg, 0, len(s.modeMismatches))
+	for _, m := range s.modeMismatches {
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
@@ -440,6 +488,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial state.
 	go func() {
+		s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode})
 		s.sendToClient(c, "hosts", HostsMsg{Hosts: s.getHosts()})
 		s.hostsMu.RLock()
 		names := make([]string, 0, len(s.hostStates))
@@ -449,6 +498,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.hostsMu.RUnlock()
 		for _, name := range names {
 			s.sendHostSnapshot(c, name)
+		}
+		for _, mm := range s.currentModeMismatches() {
+			s.sendToClient(c, "mode-mismatch", mm)
 		}
 	}()
 
@@ -705,11 +757,13 @@ func main() {
 	port := flag.String("port", "8083", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8084", "TCP port for local-representative connections")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): this agent-coordinator is running from an in-progress branch. Unrelated to --dev.")
 	flag.Parse()
 
 	s := newServer()
+	s.devMode = *devMode
 
-	reprSrv, err := representable.NewServer(":" + *reprPort)
+	reprSrv, err := representable.NewServer(":"+*reprPort, representable.Mode(s.devMode))
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
@@ -736,7 +790,15 @@ func main() {
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
+			s.setModeMismatch(name, false, "")
 		}
+	})
+
+	// Disclose a dev/ops mode mismatch with a connecting local-representative —
+	// see docs/DevMode.md. Both still exchange heartbeats; representable itself
+	// refuses their state/log/data traffic while mismatched.
+	reprSrv.SetModeMismatchHandler(func(name string, mismatched bool, peerMode string) {
+		s.setModeMismatch(name, mismatched, peerMode)
 	})
 
 	reprSrv.SetLogHandler(func(name, line, kind string) {

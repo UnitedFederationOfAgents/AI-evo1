@@ -275,21 +275,24 @@ func TestParseCLIArgs(t *testing.T) {
 		name        string
 		args        []string
 		wantAuto    bool
+		wantDev     bool
 		wantAddr    string
 		wantHandled bool
 		wantErr     bool
 	}{
-		{"no args", nil, false, defaultAddr, false, false},
-		{"auto-connect long", []string{"--auto-connect"}, true, defaultAddr, false, false},
-		{"auto-connect short", []string{"-auto-connect"}, true, defaultAddr, false, false},
-		{"lr-port separate", []string{"--lr-port", "9001"}, false, "localhost:9001", false, false},
-		{"lr-port equals", []string{"--lr-port=9002"}, false, "localhost:9002", false, false},
-		{"auto-connect with port", []string{"--auto-connect", "--lr-port", "9003"}, true, "localhost:9003", false, false},
-		{"version handled", []string{"--version"}, false, "", true, false},
-		{"lr-port missing value", []string{"--lr-port"}, false, "", false, true},
-		{"lr-port not a number", []string{"--lr-port", "abc"}, false, "", false, true},
-		{"lr-port out of range", []string{"--lr-port", "70000"}, false, "", false, true},
-		{"unknown ignored", []string{"--frobnicate", "--auto-connect"}, true, defaultAddr, false, false},
+		{"no args", nil, false, false, defaultAddr, false, false},
+		{"auto-connect long", []string{"--auto-connect"}, true, false, defaultAddr, false, false},
+		{"auto-connect short", []string{"-auto-connect"}, true, false, defaultAddr, false, false},
+		{"lr-port separate", []string{"--lr-port", "9001"}, false, false, "localhost:9001", false, false},
+		{"lr-port equals", []string{"--lr-port=9002"}, false, false, "localhost:9002", false, false},
+		{"auto-connect with port", []string{"--auto-connect", "--lr-port", "9003"}, true, false, "localhost:9003", false, false},
+		{"dev-mode long", []string{"--dev-mode"}, false, true, defaultAddr, false, false},
+		{"dev-mode short", []string{"-dev-mode"}, false, true, defaultAddr, false, false},
+		{"version handled", []string{"--version"}, false, false, "", true, false},
+		{"lr-port missing value", []string{"--lr-port"}, false, false, "", false, true},
+		{"lr-port not a number", []string{"--lr-port", "abc"}, false, false, "", false, true},
+		{"lr-port out of range", []string{"--lr-port", "70000"}, false, false, "", false, true},
+		{"unknown ignored", []string{"--frobnicate", "--auto-connect"}, true, false, defaultAddr, false, false},
 	}
 
 	for _, tt := range tests {
@@ -312,6 +315,9 @@ func TestParseCLIArgs(t *testing.T) {
 			}
 			if cfg.autoConnect != tt.wantAuto {
 				t.Errorf("autoConnect = %v, want %v", cfg.autoConnect, tt.wantAuto)
+			}
+			if cfg.devMode != tt.wantDev {
+				t.Errorf("devMode = %v, want %v", cfg.devMode, tt.wantDev)
 			}
 			if cfg.lrAddr != tt.wantAddr {
 				t.Errorf("lrAddr = %q, want %q", cfg.lrAddr, tt.wantAddr)
@@ -393,7 +399,7 @@ func TestAutoConnectControlState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBlinker()
+			b := NewBlinker(false)
 			b.SetState(tt.state)
 			if got := autoConnectControlState(&b, tt.preferRemote); got != tt.want {
 				t.Errorf("autoConnectControlState(%v, %v) = %v, want %v", tt.state, tt.preferRemote, got, tt.want)
@@ -496,6 +502,30 @@ func TestParseCLIArgsEnvOverrides(t *testing.T) {
 		}
 		if !cfg.autoConnect || !cfg.remote {
 			t.Errorf("--auto-connect flag should win over FC_AUTO_CONNECT=0: %+v", cfg)
+		}
+	})
+
+	t.Run("FC_DEV_MODE cascades a launching LR's dev mode", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_DEV_MODE", "1")
+		cfg, _, err := parseCLIArgs(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.devMode {
+			t.Errorf("FC_DEV_MODE=1 should set devMode: %+v", cfg)
+		}
+	})
+
+	t.Run("dev-mode CLI flag beats env", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_DEV_MODE", "0")
+		cfg, _, err := parseCLIArgs([]string{"--dev-mode"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.devMode {
+			t.Errorf("--dev-mode flag should win over FC_DEV_MODE=0: %+v", cfg)
 		}
 	})
 

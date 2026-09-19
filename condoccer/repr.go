@@ -39,6 +39,47 @@ type ReprStatusMsg struct {
 	Port   string `json:"port,omitempty"`
 }
 
+// SelfInfoMsg discloses this condoccer instance's own dev-mode status to its
+// frontend (see docs/DevMode.md) -- sent once when a browser client connects.
+type SelfInfoMsg struct {
+	DevMode bool `json:"dev_mode"`
+}
+
+// ModeMismatchMsg discloses that the connected local-representative's
+// dev-mode status differs from this condoccer's own. Mismatched=false clears
+// a previously-disclosed mismatch.
+type ModeMismatchMsg struct {
+	Mismatched bool   `json:"mismatched"`
+	PeerMode   string `json:"peer_mode,omitempty"`
+}
+
+// setModeMismatch records the current mismatch verdict against
+// local-representative and broadcasts it to every connected browser client.
+func (s *Server) setModeMismatch(mismatched bool, peerMode string) {
+	s.reprMu.Lock()
+	s.modeMismatch = mismatched
+	s.modeMismatchPeer = peerMode
+	s.reprMu.Unlock()
+	msg := s.marshalMsg("mode-mismatch", ModeMismatchMsg{Mismatched: mismatched, PeerMode: peerMode})
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for c := range s.clients {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+}
+
+// sendModeMismatch sends the current mismatch verdict to a single (usually
+// newly-connected) WebSocket client.
+func (s *Server) sendModeMismatch(c *wsClient) {
+	s.reprMu.Lock()
+	mismatched, peerMode := s.modeMismatch, s.modeMismatchPeer
+	s.reprMu.Unlock()
+	s.sendToClient(c, "mode-mismatch", ModeMismatchMsg{Mismatched: mismatched, PeerMode: peerMode})
+}
+
 // startConnectLoop launches a fresh connectLoop dialling host:port, first
 // stopping any loop already running (an earlier --auto-connect or widget
 // "connect"). Used both for --auto-connect at startup and for the frontend's
@@ -73,6 +114,7 @@ func (s *Server) stopConnectLoop() {
 	}
 	if stopCh != nil || client != nil {
 		s.setReprStatus("disconnected")
+		s.setModeMismatch(false, "")
 	}
 }
 
@@ -96,7 +138,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		deadline := time.Now().Add(autoConnectWindow)
 		var client *representable.Client
 		for client == nil {
-			c, err := representable.Connect(addr, s.name, autoConnectDialTimeout)
+			c, err := representable.Connect(addr, s.name, representable.Mode(s.devMode), autoConnectDialTimeout)
 			if err == nil {
 				client = c
 				break
@@ -123,6 +165,9 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		s.setReprStatus("connected")
 
 		client.SetCommandHandler(s.handleReprCommand)
+		client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
+			s.setModeMismatch(mismatched, peerMode)
+		})
 		s.pushCondoccerState()
 
 		<-client.DisconnectCh()
@@ -132,6 +177,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 			s.reprClient = nil
 		}
 		s.reprMu.Unlock()
+		s.setModeMismatch(false, "")
 
 		select {
 		case <-stopCh:

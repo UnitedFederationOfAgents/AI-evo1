@@ -160,6 +160,46 @@ func TestFederationCommandBuildEnv(t *testing.T) {
 	if got["FC_LR_PORT"] != "8082" {
 		t.Errorf("FC_LR_PORT = %q, want 8082", got["FC_LR_PORT"])
 	}
+	if _, set := got["FC_DEV_MODE"]; set {
+		t.Errorf("FC_DEV_MODE should be unset when the LR is not in dev mode, got %v", got)
+	}
+}
+
+// TestFederationCommandDevModeCascades verifies a dev-mode LR launches FC with
+// both --dev-mode and FC_DEV_MODE=1 (belt-and-braces, mirroring --auto-connect
+// / FC_AUTO_CONNECT) — see docs/DevMode.md.
+func TestFederationCommandDevModeCascades(t *testing.T) {
+	spec := managedApps["federation-command"]
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.devMode = true
+
+	if args := strings.Join(spec.buildArgs(s), " "); !strings.Contains(args, "--dev-mode") {
+		t.Errorf("federation-command buildArgs should include --dev-mode when the LR is in dev mode: %q", args)
+	}
+	env := map[string]string{}
+	for _, kv := range spec.buildEnv(s) {
+		if k, v, found := strings.Cut(kv, "="); found {
+			env[k] = v
+		}
+	}
+	if env["FC_DEV_MODE"] != "1" {
+		t.Errorf("buildEnv should cascade dev mode, got %v", env)
+	}
+}
+
+// TestCondoccerDevModeCascades mirrors TestFederationCommandDevModeCascades
+// for the condoccer launch spec.
+func TestCondoccerDevModeCascades(t *testing.T) {
+	spec := managedApps["condoccer"]
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.condoccerPort = "8080"
+	s.devMode = true
+
+	if args := strings.Join(spec.buildArgs(s), " "); !strings.Contains(args, "--dev-mode") {
+		t.Errorf("condoccer buildArgs should include --dev-mode when the LR is in dev mode: %q", args)
+	}
 }
 
 // TestCondoccerManagedSpec verifies condoccer is registered as a one-per-box
@@ -241,8 +281,32 @@ func TestSystemStateSelf(t *testing.T) {
 	if st.Self.Status != "running" || st.Self.Managed {
 		t.Errorf("Self = %+v, want running & unmanaged", st.Self)
 	}
+	if st.Self.DevMode {
+		t.Errorf("Self.DevMode should be false by default")
+	}
 	if len(st.Managed) != 0 {
 		t.Errorf("fresh server should manage nothing, got %v", st.Managed)
+	}
+}
+
+// TestSystemStateDevModeCascadesToManaged verifies systemState() stamps every
+// managed instance with LR's own dev mode (see docs/DevMode.md) — cascading
+// is unconditional, not a per-instance choice.
+func TestSystemStateDevModeCascadesToManaged(t *testing.T) {
+	s := newServer("test-lr")
+	s.devMode = true
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+
+	st := s.systemState()
+	if !st.Self.DevMode {
+		t.Errorf("Self.DevMode should be true when the LR is in dev mode")
+	}
+	if len(st.Managed) != 1 || !st.Managed[0].DevMode {
+		t.Errorf("managed instance should inherit dev mode, got %+v", st.Managed)
 	}
 }
 

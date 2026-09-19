@@ -59,11 +59,27 @@ export interface ReprStatusMsg {
   port?: string
 }
 
+// SelfInfoMsg discloses this condoccer instance's own dev-mode status (see
+// docs/DevMode.md) -- sent once when the WebSocket connects.
+export interface SelfInfoMsg {
+  dev_mode: boolean
+}
+
+// ModeMismatchMsg discloses that the connected local-representative's
+// dev-mode status differs from this condoccer's own. mismatched: false
+// clears a prior disclosure.
+export interface ModeMismatchMsg {
+  mismatched: boolean
+  peer_mode?: string
+}
+
 export type ServerMsg =
   | { type: 'list'; payload: { condocs: CondocInfo[] } }
   | { type: 'condoc'; payload: CondocState }
   | { type: 'error'; payload: { message: string } }
   | { type: 'repr-status'; payload: ReprStatusMsg }
+  | { type: 'self-info'; payload: SelfInfoMsg }
+  | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
 
 export interface ActionRequest {
   action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit'

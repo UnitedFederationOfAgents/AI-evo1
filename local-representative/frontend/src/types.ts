@@ -55,11 +55,22 @@ export interface ProcInfo {
   started_at: number // unix seconds
   exit_code: number  // meaningful once status != "running"
   detail?: string
+  dev_mode?: boolean // launched with --dev-mode -- see docs/DevMode.md
 }
 
 export interface SystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
+}
+
+// ModeMismatchMsg discloses that a connected peer's dev-mode status differs
+// from this LR's own (see docs/DevMode.md). peer is "agent-coordinator" for
+// the uplink or a representable client name ("federation-command",
+// "condoccer") for a downlink; mismatched: false clears a prior disclosure.
+export interface ModeMismatchMsg {
+  peer: string
+  mismatched: boolean
+  peer_mode?: string
 }
 
 export interface FileInfo {

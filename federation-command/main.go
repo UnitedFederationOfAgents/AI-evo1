@@ -172,6 +172,13 @@ var (
 				Foreground(lipgloss.Color("220")).
 				Bold(true)
 
+	// devModeStyle matches blinkerBracketDevStyle's green — used for the startup
+	// banner and any --dev-mode notices (distinct from devWarningStyle's yellow,
+	// which flags dev *dependencies*, an unrelated concept). See docs/DevMode.md.
+	devModeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("34")).
+			Bold(true)
+
 	continuationStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
 
@@ -407,6 +414,12 @@ type appModel struct {
 	autoConnectDeadline time.Time // stop retrying once this instant has passed
 	remoteDefault       bool      // auto-connect implies this: adopt remote control (not local) when the background connection is established
 
+	// Dev mode: launch-time only (no runtime switch — see docs/DevMode.md).
+	devMode          bool
+	modeMismatchCh   chan modeMismatchInfo // receives mode-mismatch verdicts from reprClient's handler
+	modeMismatch     bool                  // true once the connected LR's mode is known to differ from ours
+	modeMismatchPeer string                // the mismatched peer's disclosed mode ("dev" or "ops")
+
 	quitting    bool
 	windowWidth int
 }
@@ -529,6 +542,33 @@ type reprConnectFailedMsg struct{}
 // reprRemoteCmdMsg is sent when LR delivers a command for FC to execute.
 type reprRemoteCmdMsg struct{ cmd string }
 
+// modeMismatchInfo carries one mode-mismatch verdict from reprClient's
+// SetModeMismatchHandler callback (which runs on the client's read-loop
+// goroutine) into a reprModeMismatchMsg the Update loop can safely act on.
+type modeMismatchInfo struct {
+	mismatched bool
+	peerMode   string
+}
+
+// reprModeMismatchMsg is sent whenever the connected local-representative's
+// disclosed dev-mode verdict changes — see docs/DevMode.md. A mismatched LR
+// already refuses everything past the representable protocol's health/hello
+// exchange; this just surfaces that disclosure in the FC UI.
+type reprModeMismatchMsg modeMismatchInfo
+
+// listenForModeMismatchCmd blocks until reprClient's mode-mismatch handler
+// reports a verdict or the stop channel closes (mirrors listenForRemoteCmdCmd).
+func listenForModeMismatchCmd(ch <-chan modeMismatchInfo, stop <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case info := <-ch:
+			return reprModeMismatchMsg(info)
+		case <-stop:
+			return nil
+		}
+	}
+}
+
 // ridealongStatePayload is sent over the representable data channel to broadcast ridealong state.
 type ridealongStatePayload struct {
 	Active       bool     `json:"active"`
@@ -599,9 +639,9 @@ func (m appModel) sendCondocState() {
 }
 
 // attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
-func attemptConnectCmd(addr string) tea.Cmd {
+func attemptConnectCmd(addr string, devMode bool) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(addr, "federation-command", 3*time.Second)
+		client, err := representable.Connect(addr, "federation-command", representable.Mode(devMode), 3*time.Second)
 		if err != nil {
 			return reprConnectFailedMsg{}
 		}
@@ -618,9 +658,9 @@ type autoConnectResultMsg struct{ client *representable.Client }
 
 // autoConnectDialCmd performs one background connection attempt to local-representative.
 // It never blocks the UI: the dial runs inside the returned tea.Cmd goroutine.
-func autoConnectDialCmd(addr string) tea.Cmd {
+func autoConnectDialCmd(addr string, devMode bool) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(addr, "federation-command", autoConnectDialTimeout)
+		client, err := representable.Connect(addr, "federation-command", representable.Mode(devMode), autoConnectDialTimeout)
 		if err != nil {
 			return autoConnectResultMsg{}
 		}
@@ -696,6 +736,25 @@ func (m *appModel) disconnectRepr() {
 		m.reprOutPath = ""
 		m.reprOutOffset = 0
 	}
+	// A fresh connection starts with a clean mismatch verdict; the next
+	// "hello" (or lack of one) re-establishes it via wireModeMismatchHandler.
+	m.modeMismatch = false
+	m.modeMismatchPeer = ""
+}
+
+// wireModeMismatchHandler registers reprClient's mode-mismatch callback so a
+// verdict lands on modeMismatchCh for listenForModeMismatchCmd to pick up.
+// The callback runs on the client's read-loop goroutine, so it must not touch
+// appModel directly — see docs/DevMode.md for the representable-level protocol
+// this discloses.
+func (m *appModel) wireModeMismatchHandler() {
+	ch := m.modeMismatchCh
+	m.reprClient.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
+		select {
+		case ch <- modeMismatchInfo{mismatched: mismatched, peerMode: peerMode}:
+		default: // drop if full; the next heartbeat's verdict will follow
+		}
+	})
 }
 
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder, cfg cliConfig) appModel {
@@ -723,12 +782,14 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		recordsPath:   recordsPath,
 		logFile:       logFile,
 		encoder:       encoder,
-		blinker:       NewBlinker(),
-		remoteCmdCh:   make(chan string, 8),
-		listenerStop:  make(chan struct{}),
-		lrAddr:        cfg.lrAddr,
-		autoConnect:   cfg.autoConnect,
-		remoteDefault: cfg.remote,
+		blinker:        NewBlinker(cfg.devMode),
+		remoteCmdCh:    make(chan string, 8),
+		listenerStop:   make(chan struct{}),
+		lrAddr:         cfg.lrAddr,
+		autoConnect:    cfg.autoConnect,
+		remoteDefault:  cfg.remote,
+		devMode:        cfg.devMode,
+		modeMismatchCh: make(chan modeMismatchInfo, 4),
 	}
 
 	if cfg.autoConnect {
@@ -847,6 +908,10 @@ func (m appModel) Init() tea.Cmd {
 		"",
 	}, "\n")
 	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd()}
+	if m.devMode {
+		cmds = append(cmds, tea.Println(devModeStyle.Render(
+			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] render green for the life of this session")))
+	}
 	if devBins := devBinaries(); len(devBins) > 0 {
 		devNotice := devWarningStyle.Render("⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): " + strings.Join(devBins, ", "))
 		cmds = append(cmds, tea.Println(devNotice))
@@ -859,7 +924,7 @@ func (m appModel) Init() tea.Cmd {
 		acNotice := successStyle.Render(fmt.Sprintf(
 			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background; adopts %s)",
 			m.lrAddr, autoConnectInterval, autoConnectWindow, adopts))
-		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr), m.blinker.accentTickCmd())
+		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr, m.devMode), m.blinker.accentTickCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -1097,7 +1162,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.autoConnectGaveUp()
 			return m, cmd
 		}
-		return m, autoConnectDialCmd(m.lrAddr)
+		return m, autoConnectDialCmd(m.lrAddr, m.devMode)
 
 	case autoConnectResultMsg:
 		if !m.autoConnect || m.reprClient != nil {
@@ -1129,6 +1194,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default: // drop if full
 			}
 		})
+		m.wireModeMismatchHandler()
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
 			m.reprOutPath = tf.Name()
@@ -1150,6 +1216,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Println(successStyle.Render(controlNotice)),
 			resetTick,
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
 		}
 		if !wantsRemote {
 			cmds = append(cmds, textinput.Blink)
@@ -1177,6 +1244,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default: // drop if full
 			}
 		})
+		m.wireModeMismatchHandler()
 		// Create temp file for output capture.
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
@@ -1186,7 +1254,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Announce initial control mode so LR shows the entry field immediately.
 		m.reprClient.SendState("remote-control")
 		m.blinker.SetState(BlinkerConnected)
-		return m, tea.Batch(m.blinker.ResetTick(), listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop))
+		return m, tea.Batch(
+			m.blinker.ResetTick(),
+			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+		)
 
 	case reprConnectFailedMsg:
 		if m.blinker.IsConnecting() {
@@ -1195,6 +1267,26 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.blinker.ResetTick()
 		}
 		return m, nil
+
+	case reprModeMismatchMsg:
+		listenCmd := listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop)
+		if m.reprClient == nil {
+			return m, listenCmd // stale verdict from a connection we've since dropped
+		}
+		wasMismatched := m.modeMismatch
+		m.modeMismatch = msg.mismatched
+		m.modeMismatchPeer = msg.peerMode
+		if !msg.mismatched {
+			if wasMismatched {
+				return m, tea.Batch(tea.Println(devModeStyle.Render("✓ dev-mode mismatch with local-representative cleared")), listenCmd)
+			}
+			return m, listenCmd
+		}
+		ourMode := representable.Mode(m.devMode)
+		notice := devWarningStyle.Render(fmt.Sprintf(
+			"⚠ dev-mode mismatch: this FC is %q but local-representative at %s is %q — remote control and log/data exchange are refused until the mismatch is resolved (health checks still work)",
+			ourMode, m.lrAddr, msg.peerMode))
+		return m, tea.Batch(tea.Println(notice), listenCmd)
 
 	case reprRemoteCmdMsg:
 		if msg.cmd == "" {
@@ -1597,7 +1689,7 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 	if m.blinker.IsSelectMode() {
 		// Up in select mode: initiate LR connection attempt.
 		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr))
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr, m.devMode))
 	}
 	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
@@ -1629,7 +1721,7 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 	if m.blinker.IsSelectMode() {
 		// Down in select mode: initiate LR connection attempt.
 		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr))
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr, m.devMode))
 	}
 	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
@@ -4766,6 +4858,7 @@ type cliConfig struct {
 	autoConnect bool   // --auto-connect / auto-connect / FC_AUTO_CONNECT: dial local-representative in the background on startup
 	remote      bool   // derived: true whenever autoConnect is set — a machine-driven auto-launch/auto-connect chain always adopts remote control (no separate --remote flag)
 	lrAddr      string // local-representative representable address (--lr-host / --lr-port / FC_LR_HOST / FC_LR_PORT override host / port)
+	devMode     bool   // --dev-mode / dev-mode / FC_DEV_MODE: launched from an in-progress dev branch — see docs/DevMode.md. Unrelated to the ambiguous-agent-style "--dev" flag other sub-apps use for frontend development.
 }
 
 // Config-file keys recognised for federation-command (see README.md).
@@ -4773,6 +4866,7 @@ const (
 	cfgKeyAutoConnect = "auto-connect"
 	cfgKeyLRHost      = "lr-host"
 	cfgKeyLRPort      = "lr-port"
+	cfgKeyDevMode     = "dev-mode"
 )
 
 // Environment variables recognised for the local-representative connection.
@@ -4784,6 +4878,10 @@ const (
 	envAutoConnect = "FC_AUTO_CONNECT"
 	envLRHost      = "FC_LR_HOST"
 	envLRPort      = "FC_LR_PORT"
+	// envDevMode is set by a dev-mode local-representative when it auto-launches
+	// FC, so a managed instance always cascades its launcher's mode (see
+	// docs/DevMode.md) even if the terminal wrapper mangles trailing argv.
+	envDevMode = "FC_DEV_MODE"
 )
 
 // envTruthy interprets a boolean-ish environment variable. Unset, "", "0",
@@ -4824,6 +4922,9 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	if cfg.autoConnect, err = conf.Bool(cfgKeyAutoConnect, false); err != nil {
 		return cfg, false, err
 	}
+	if cfg.devMode, err = conf.Bool(cfgKeyDevMode, false); err != nil {
+		return cfg, false, err
+	}
 	port, err := conf.Int(cfgKeyLRPort, DefaultLRPort)
 	if err != nil {
 		return cfg, false, err
@@ -4838,6 +4939,9 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	// even when a terminal wrapper mangles trailing argv.
 	if v, set := envTruthy(envAutoConnect); set {
 		cfg.autoConnect = v
+	}
+	if v, set := envTruthy(envDevMode); set {
+		cfg.devMode = v
 	}
 	if v := strings.TrimSpace(os.Getenv(envLRHost)); v != "" {
 		host = v
@@ -4856,6 +4960,8 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 			return cfg, true, nil
 		case arg == "--auto-connect" || arg == "-auto-connect":
 			cfg.autoConnect = true
+		case arg == "--dev-mode" || arg == "-dev-mode":
+			cfg.devMode = true
 		case arg == "--lr-host" || arg == "-lr-host":
 			if i+1 >= len(args) {
 				return cfg, false, fmt.Errorf("--lr-host requires a value")

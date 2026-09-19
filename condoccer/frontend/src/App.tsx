@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, Phase, ReprStatus, ReprStatusMsg, StepSummary } from './types'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary } from './types'
 
 // ---- WebSocket hook ----
 
@@ -21,6 +21,8 @@ function useCondocWS() {
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
+  const [devMode, setDevMode] = useState(false)
+  const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
   const [diffFiles, setDiffFiles] = useState<string[]>([])
   const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
   const [fileDiffContent, setFileDiffContent] = useState<string | null>(null)
@@ -120,6 +122,11 @@ function useCondocWS() {
             setReprStatus(p.status)
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
+          } else if (msg.type === 'self-info') {
+            setDevMode((msg.payload as SelfInfoMsg).dev_mode)
+          } else if (msg.type === 'mode-mismatch') {
+            const p = msg.payload as ModeMismatchMsg
+            setModeMismatch(p.mismatched ? p : null)
           } else if (msg.type === 'diff-list') {
             const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
             setDiffFiles(p.files ?? [])
@@ -150,6 +157,8 @@ function useCondocWS() {
     reprStatus,
     reprHost,
     reprPort,
+    devMode,
+    modeMismatch,
     connectRepr,
     disconnectRepr,
     getDiff,
@@ -1507,6 +1516,8 @@ export default function App() {
     reprStatus,
     reprHost,
     reprPort,
+    devMode,
+    modeMismatch,
     connectRepr,
     disconnectRepr,
     getDiff,
@@ -1655,7 +1666,13 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {modeMismatch && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch with local-representative ({modeMismatch.peer_mode}):
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
       <button
         className="mobile-nav-toggle"
         aria-label="Open navigation"

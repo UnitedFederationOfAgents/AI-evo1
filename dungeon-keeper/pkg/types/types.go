@@ -108,6 +108,7 @@ type Config struct {
 	AgentRecordsPath   string    // AGENT_RECORDS_PATH
 	AgentType          AgentType // Which agent type to run as
 	WorkerID           string    // Unique identifier for this worker instance
+	DevMode            bool      // --dev-mode on `watch`: this instance is running from an in-progress branch -- see docs/DevMode.md
 }
 
 // DefaultConfig returns a Config with default values.

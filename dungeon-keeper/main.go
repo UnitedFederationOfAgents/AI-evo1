@@ -187,6 +187,7 @@ func loadConfig() *types.Config {
 func runWatch(cfg *types.Config, args []string) {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	agentType := fs.String("agent-type", "agent-worker", "Agent type: agent-worker or heuristic-request")
+	devMode := fs.Bool("dev-mode", false, "dev mode (see docs/DevMode.md): this watch loop is running from an in-progress branch")
 	fs.Parse(args)
 
 	switch *agentType {
@@ -197,11 +198,15 @@ func runWatch(cfg *types.Config, args []string) {
 	default:
 		log.Fatalf("Invalid agent type: %s", *agentType)
 	}
+	cfg.DevMode = *devMode
 
 	// Check dependencies at startup
 	log.Printf("[%s] Checking dependencies...", cfg.WorkerID)
 	if err := executor.CheckDependencies(); err != nil {
 		log.Printf("[%s] Warning: %v", cfg.WorkerID, err)
+	}
+	if cfg.DevMode {
+		log.Printf("[%s] dev mode — running from an in-progress branch (see docs/DevMode.md)", cfg.WorkerID)
 	}
 
 	worker := NewWorker(cfg)

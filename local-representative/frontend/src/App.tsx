@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -26,6 +26,9 @@ function useStatusWS() {
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
   const [filesState, setFilesState] = useState<FilesStateMsg | null>(null)
+  // Peer name -> current mismatch disclosure -- see docs/DevMode.md. A
+  // mismatched peer only ever exchanges health information with this LR.
+  const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -96,7 +99,12 @@ function useStatusWS() {
     const ws = new WebSocket(`ws://${window.location.host}/ws`)
     wsRef.current = ws
 
-    ws.onopen = () => setConnected(true)
+    ws.onopen = () => {
+      setConnected(true)
+      // The server resends a full mode-mismatch snapshot on connect; drop any
+      // stale entries from a mismatch that cleared while we were offline.
+      setModeMismatches({})
+    }
 
     ws.onclose = () => {
       setConnected(false)
@@ -158,6 +166,16 @@ function useStatusWS() {
           case 'files-state':
             setFilesState(msg.payload as FilesStateMsg)
             break
+          case 'mode-mismatch': {
+            const payload = msg.payload as ModeMismatchMsg
+            setModeMismatches(prev => {
+              const next = { ...prev }
+              if (payload.mismatched) next[payload.peer] = payload
+              else delete next[payload.peer]
+              return next
+            })
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -174,7 +192,7 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, filesState,
+    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, uploadFiles,
   }
 }
@@ -486,6 +504,7 @@ function SystemProcRow({
       <span className="sys-col sys-col-name">
         {label}
         {!proc.managed && <span className="sys-self-tag">this process</span>}
+        {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
@@ -925,10 +944,13 @@ export default function App() {
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, filesState,
+    ridealongState, condocState, acState, systemState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
     launchApp, terminateApp, uploadFiles,
   } = useStatusWS()
+
+  const devMode = systemState?.self.dev_mode ?? false
+  const mismatches = Object.values(modeMismatches)
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -942,7 +964,13 @@ export default function App() {
     : null
 
   return (
-    <div className="app">
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {mismatches.length > 0 && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch — {mismatches.map(m => `${m.peer} (${m.peer_mode})`).join(', ')}:
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
       <ACConnectionPanel
         acState={acState}
         onConnect={connectToAC}

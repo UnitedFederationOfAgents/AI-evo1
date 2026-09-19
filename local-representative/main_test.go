@@ -63,6 +63,40 @@ func TestResolveConfigLayering(t *testing.T) {
 	}
 }
 
+// TestResolveConfigDevMode verifies --dev-mode / dev-mode (see
+// docs/DevMode.md) resolve independently of the unrelated --dev flag.
+func TestResolveConfigDevMode(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "local-representative.yaml"),
+		[]byte("dev-mode: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conf, err := ufaconfig.Load("local-representative", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	got, err := resolveConfig(conf, map[string]bool{}, appConfig{})
+	if err != nil {
+		t.Fatalf("resolveConfig: %v", err)
+	}
+	if !got.devMode {
+		t.Errorf("devMode not applied from config")
+	}
+	if got.dev {
+		t.Errorf("dev-mode: true should not also set the unrelated dev flag")
+	}
+
+	// A CLI-set --dev-mode wins over the config file.
+	got, err = resolveConfig(conf, map[string]bool{"dev-mode": true}, appConfig{devMode: false})
+	if err != nil {
+		t.Fatalf("resolveConfig: %v", err)
+	}
+	if got.devMode {
+		t.Errorf("CLI-set dev-mode=false should win over dev-mode: true in config")
+	}
+}
+
 // TestResolveConfigRejectsBadBool verifies a malformed boolean in a config file
 // is a startup error rather than being silently ignored.
 func TestResolveConfigRejectsBadBool(t *testing.T) {

@@ -183,11 +183,10 @@ prompt: [`84b3bfc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8
 Implemented Revision D: created `condocs/initialDistributedSessionsImpls/SimpleDistributedSessionSequences.md` with "Sequence #1 - simple complete" — a topology (owner-node `FC-1`/`FC-2` plus secondary-node `FC-3`, connected via `LR-1`/`LR-2`/`AC`), an 8-step script exercising same-host primary/secondary consolidation, the `"list"` sync backend, and the still-stubbed `"append"` sync backend, followed by a concise description of the expected resulting `session.jsonl` (owner-only, five entries, with the `FC-3` entry contingent on the pending `"append"` backend). Only that new file was added — no other files touched.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Let's add specific commands that we can run and sample expected results for them to 'condocs/initialDistributedSessionsImpls/SimpleDistributedSessionSequences.md'.
 
+We can assume that the launching of the application can be in plain English, ie: "Launch LR and connect it to node 1's AC. Connect FC to LR on node 2." would be fine, but that any command inside FC would be explicit; ie: "sleep 5; echo hello; sleep 30"
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Also, let's respond (in the response, not the document) about why we need .txt.consolidated files - we should not expect to need these unless there is a good reason.

@@ -62,11 +62,10 @@ prompt: [`4927592`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4
 I strengthened the dev-mode visual cue in all three web UIs (local-representative, agent-coordinator, condoccer): the app-frame outline changed from a faint 1px/45%-opacity green to a thick, fully-opaque 4px green outline with an inset glow, and the per-process `dev` tag is now a filled badge instead of just an outlined one. Updated `docs/DevMode.md` to describe the new styling and note the Revision A rationale.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+This is still too subtle.
 
+Let's adjust FC's prompt cursor (the '>') to be green as well, let's also make sure the '[]' is the correct bring green (the same as '◆ dev mode — launched with --dev-mode; the blinker brackets [ ] render green for the life of this session')
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+For the web-UI sub-applications we will make things more pronounced - we can consider on-palette greens for more border or highlight element alternatives and/or just brightening up the green we have their now.

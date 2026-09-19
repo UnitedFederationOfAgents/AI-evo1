@@ -1,23 +1,7 @@
-# InitialDistributedDevelopment
+# Prompt
 
-<!--
-```condoc-yaml
-condoc:
-  startTime: 1789821651
-  controlScheme: same-repo
-  branch: condoc/InitialDistributedDevelopment-1789821651/main
-  callerPath: ..
-```
--->
+[InitialDistributedDevelopment](../InitialDistributedDevelopment.md)
 
-Add a foundation for distributed control for tight SDLC across multiple nodes.
-
-
-### Step 1 - Create plan documentation and implement 'dev mode' state concept.
-
-[Step 1 Prompt](initialDistributedDevelopmentImpls/Step1Prompt.md)
-
-```prompt
 We will add the ability to toggle 'dev mode' to all persistent sub-applications and document the features we'll add to our initial baseline.
 
 The sub-applications that we will implement this function for include:
@@ -42,9 +26,3 @@ In the document we create we will record the following features which we will la
 - Dev branch follower: A mechanism to follow a git branch of in-progress development and propose updates upon change
 - The global view in agent-coordinator -- an alternative set of panels to the per-host views we have today which present a net-centric style of interaction
 - The global system view in agent-coordinator -- the global mode panel which allows viewing of the working group of participants with health and version information. The location where we can push updates from.
-```
-
-
-## Human-Prompt
-
-The flow of the condoc is now within the first step.

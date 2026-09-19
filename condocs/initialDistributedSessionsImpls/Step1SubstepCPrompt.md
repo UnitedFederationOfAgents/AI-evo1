@@ -157,11 +157,20 @@ Implemented Revision C: `archive-sessions [-f]` is now a top-level alias for `uf
 clauditable: warning: failed to write written file: failed to write written file: open /host-agent-files/agent-records/2026-09-16_19-28-36-default/1789761142-raw.txt: no such file or directory
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's create a file: 'condocs/initialDistributedSessionsImpls/SimpleDistributedSessionSequences.md'
 
+## Sequence #1 - simple complete
 
-## Human-Prompt
+We will start by concisely describing a sequence called 'simple complete' where we create a new session in instance #1 of federation-command (FC) on an owner node, we run some sample commands (sleeps and echos are likely enough) from there.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Next we join the session from instance #2 of FC and execute a sample command that overlaps in time.
+
+Next we will connect FC instance 1 to local-representative and agent-coordinator, and we will connect a third FC instance on a secondary node as well. We will join the same session from FC instance 3.
+
+Then we will send commands that overlap in time on FC 1 and FC 3.
+
+We concisely describe the steps first, and then we concisely describe how we expect this to result in a session.jsonl that captures all of the processed captures.
+
+Let's create the document now.

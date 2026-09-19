@@ -48,11 +48,8 @@ Web UIs (LR/AC/condoccer) get a subtle green outline (`#4ec94e`, the existing "h
 Documentation lives in the new `docs/DevMode.md`, which also records the future-feature list (Loader, LR updater, AC updater, dev-branch follower, AC global view, AC global system view) as planned-not-built, per the prompt. I added Go tests for the new representable behavior and the LR/FC config parsing, but couldn't run `go build`/`go test` myself — the sandbox blocks invoking the `go` binary — so this has only had careful manual review, not a compiler check.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+The visual cues for the graphical applications with dev-mode should be more pronounced. It is too hard to recognize at a glance.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's correct them to make them more distinct.

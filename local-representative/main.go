@@ -9,14 +9,18 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"representable"
 	ufaconfig "ufa-configurable"
 	ufahostid "ufa-hostid"
+	"ufa-loader/restartsignal"
 )
 
 //go:embed frontend/dist
@@ -839,6 +843,26 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 	return out, nil
 }
 
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart (the "structured section after an identifying banner" a
+// ufa-loader wrapping this process watches stdout for — see
+// ufa-loader/README.md and docs/DevMode.md) as this process's final act
+// before exiting 0. The signal is sent directly to this process's own pid
+// (e.g. `kill -HUP <pid>`), not through ufa-loader itself: ufa-loader only
+// watches stdout, it doesn't originate the restart trigger. Run in its own
+// goroutine; never returns.
+func watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		log.Printf("received SIGHUP: announcing a restart and exiting")
+		if err := restartsignal.Announce(os.Stdout, "local-representative", "sighup"); err != nil {
+			log.Printf("restartsignal.Announce: %v", err)
+		}
+		os.Exit(0)
+	}
+}
+
 func main() {
 	defaultName := ufahostid.GetHostID()
 
@@ -1018,6 +1042,7 @@ func main() {
 
 	log.Printf("representable server listening on tcp://localhost:%s", cfg.heartbeatPort)
 
+	go watchRestartSignal()
 	go s.broadcastLoop()
 
 	if cfg.autoConnect {

@@ -11,6 +11,23 @@ make build      # build frontend + Go binary
 ./local-representative
 ```
 
+### Running under ufa-loader
+
+`SIGHUP` sent to LR's own pid makes it print a restart announcement on
+stdout and exit 0, instead of just logging and continuing — see
+[`docs/DevMode.md`](../docs/DevMode.md)'s "Loader" section. Run it under
+[`ufa-loader`](../ufa-loader) to have that turned into an actual relaunch —
+expected once the on-disk binary has been replaced with a newer build:
+
+```bash
+make run-loader                    # builds ufa-loader too, then wraps LR
+make run-loader ARGS="--dev-mode"  # ARGS is passed straight through to LR
+kill -HUP <local-representative pid>   # ask the running instance to restart
+```
+
+Plain `kill -HUP` without a wrapping `ufa-loader` still works — LR
+announces and exits — but nothing relaunches it in that case.
+
 ## Flags
 
 | Flag | Config key | Default | Purpose |

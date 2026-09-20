@@ -125,17 +125,39 @@ the mismatch in its own UI on top of that:
   listing every currently-mismatched peer.
 - `condoccer` does the same for its single LR connection.
 
+## Loader
+
+[`ufa-loader`](../ufa-loader) — Step 2 of
+[`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
+— is a wrapping executable that launches a sub-application binary and
+restarts it on request: `ufa-loader <binary> [binary-args...]` runs
+`<binary>`, watching its stdout for a restart announcement (an identifying
+banner, a line of structured JSON, and a footer — the
+[`restartsignal`](../ufa-loader/restartsignal/restartsignal.go) protocol) the
+sub-application prints as its final act before exiting. Seeing one turns
+that exit into a relaunch of the same binary/args instead of a stop — the
+expectation, per the condoc, being that the binary on disk has been replaced
+with a newer build by then. A plain exit with no announcement is propagated
+as-is (exit code and all): `ufa-loader` never restarts a binary that didn't
+ask for it.
+
+Only `local-representative` speaks the protocol so far: sending it `SIGHUP`
+(directly to its own pid, not through `ufa-loader`) makes it announce a
+restart and exit 0, exactly as described above — see `make run-loader` in
+[`local-representative`](../local-representative)'s Makefile for the wired-up
+dev loop. Other sub-applications gaining restart/version-switching is just a
+matter of them adopting `restartsignal.Announce` too; `ufa-loader` itself
+already has no sub-application-specific knowledge to extend.
+
+See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
+and flags.
+
 ## Future features
 
 The following are **recorded here as the plan, not implemented yet** — later
 steps of [`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
 build on the dev-mode foundation above:
 
-- **Loader**: a Go application responsible for launching a sub-application so
-  that it gains restart and version-switching capabilities (today, none of
-  these apps can be restarted or upgraded in place by anything other than an
-  operator or `local-representative`'s process manager killing and
-  relaunching them).
 - **LR updater**: the ability for `local-representative` to instruct updates
   to the sub-applications connected to it (today it can only launch and
   terminate them).

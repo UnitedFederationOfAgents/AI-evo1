@@ -160,6 +160,11 @@ type Server struct {
 	acAutoConnecting    bool          // true while the startup --auto-connect retry loop is trying
 	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
 
+	// loaderManaged is true when this process was launched by ufa-loader (see
+	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart"
+	// can be expected to actually come back up rather than just stop.
+	loaderManaged bool
+
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
@@ -677,6 +682,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		case "restart-app":
+			s.requestRestart("operator")
 		}
 	}
 }
@@ -843,24 +850,49 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 	return out, nil
 }
 
+// announceRestartAndExit writes the restartsignal announcement (the
+// "structured section after an identifying banner" a ufa-loader wrapping
+// this process watches stdout for — see ufa-loader/README.md and
+// docs/DevMode.md) and exits 0. Callers are expected to have already decided
+// a restart is appropriate; this never returns.
+func announceRestartAndExit(reason string) {
+	log.Printf("announcing a restart (%s) and exiting", reason)
+	if err := restartsignal.Announce(os.Stdout, "local-representative", reason); err != nil {
+		log.Printf("restartsignal.Announce: %v", err)
+	}
+	os.Exit(0)
+}
+
 // watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
-// restart (the "structured section after an identifying banner" a
-// ufa-loader wrapping this process watches stdout for — see
-// ufa-loader/README.md and docs/DevMode.md) as this process's final act
-// before exiting 0. The signal is sent directly to this process's own pid
-// (e.g. `kill -HUP <pid>`), not through ufa-loader itself: ufa-loader only
-// watches stdout, it doesn't originate the restart trigger. Run in its own
-// goroutine; never returns.
+// restart as this process's final act before exiting 0. The signal is sent
+// directly to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself: ufa-loader only watches stdout, it doesn't originate
+// the restart trigger. Unlike requestRestart, this always restarts — a bare
+// `kill -HUP` without a wrapping ufa-loader is documented to still announce
+// and exit, just with nothing there to relaunch it (see README.md). Run in
+// its own goroutine; never returns.
 func watchRestartSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP)
 	for range sigCh {
-		log.Printf("received SIGHUP: announcing a restart and exiting")
-		if err := restartsignal.Announce(os.Stdout, "local-representative", "sighup"); err != nil {
-			log.Printf("restartsignal.Announce: %v", err)
-		}
-		os.Exit(0)
+		announceRestartAndExit("sighup")
 	}
+}
+
+// requestRestart handles an operator-driven restart request — the system
+// tab's "restart" control (WebSocket "restart-app") or agent-coordinator's
+// "__system:restart" — which terminates this process such that a wrapping
+// ufa-loader relaunches it with the identical config. Unlike SIGHUP, this
+// refuses (logging why) when the process isn't loaderManaged: the system
+// tab greys the control out in that case since pressing it wouldn't come
+// back up, and this is the server-side enforcement of that same guard for
+// any caller (e.g. agent-coordinator) that bypasses the UI.
+func (s *Server) requestRestart(reason string) {
+	if !s.loaderManaged {
+		log.Printf("restart requested (%s) but this process is not loader-managed (no %s) — ignoring", reason, restartsignal.InitEnvVar)
+		return
+	}
+	announceRestartAndExit(reason)
 }
 
 func main() {
@@ -914,6 +946,7 @@ func main() {
 	}
 
 	s := newServer(cfg.name)
+	s.loaderManaged = restartsignal.IsLoaderManaged()
 	s.devMode = cfg.devMode
 	s.heartbeatPort = cfg.heartbeatPort
 	s.httpPort = cfg.httpPort

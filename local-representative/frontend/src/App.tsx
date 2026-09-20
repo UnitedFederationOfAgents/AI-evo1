@@ -78,6 +78,15 @@ function useStatusWS() {
     }
   }, [])
 
+  // Restarts this local-representative process itself — only expected to
+  // come back up when it is loader-managed (see ProcInfo.loader_managed);
+  // the system tab greys the control out otherwise.
+  const restartApp = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'restart-app', payload: {} }))
+    }
+  }, [])
+
   // File upload is a plain HTTP POST (not a websocket command) so the browser
   // can stream the multipart body directly to /api/files.
   const uploadFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -193,7 +202,7 @@ function useStatusWS() {
 
   return {
     connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, filesState, modeMismatches,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, uploadFiles,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, restartApp, uploadFiles,
   }
 }
 
@@ -486,10 +495,12 @@ function SystemProcRow({
   proc,
   nowSec,
   onTerminate,
+  onRestart,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
+  onRestart?: () => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -518,6 +529,18 @@ function SystemProcRow({
             {proc.status === 'running' ? 'terminate' : 'dismiss'}
           </button>
         )}
+        {!proc.managed && onRestart && (
+          <button
+            className="sys-btn sys-btn-restart"
+            disabled={!proc.loader_managed}
+            title={proc.loader_managed
+              ? 'terminate this process so ufa-loader relaunches it with the identical config'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={onRestart}
+          >
+            restart
+          </button>
+        )}
       </span>
     </div>
   )
@@ -528,11 +551,13 @@ function SystemPanel({
   fcState,
   onLaunch,
   onTerminate,
+  onRestart,
 }: {
   state: SystemStateMsg | null
   fcState: string
   onLaunch: (name: string) => void
   onTerminate: (id: string) => void
+  onRestart: () => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
@@ -570,7 +595,7 @@ function SystemPanel({
           <span className="sys-col sys-col-detail">uptime</span>
           <span className="sys-col sys-col-actions" />
         </div>
-        <SystemProcRow proc={state.self} nowSec={nowSec} />
+        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} />
         {state.managed.map(p => (
           <SystemProcRow key={p.instance_id} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
         ))}
@@ -946,7 +971,7 @@ export default function App() {
     connected, services, fcState, fcLog,
     ridealongState, condocState, acState, systemState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
-    launchApp, terminateApp, uploadFiles,
+    launchApp, terminateApp, restartApp, uploadFiles,
   } = useStatusWS()
 
   const devMode = systemState?.self.dev_mode ?? false
@@ -1004,6 +1029,7 @@ export default function App() {
                 fcState={fcState}
                 onLaunch={launchApp}
                 onTerminate={terminateApp}
+                onRestart={restartApp}
               />
             ) : activeTab === 'files' && viewerFileId ? (
               <FileViewer

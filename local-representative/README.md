@@ -28,6 +28,13 @@ kill -HUP <local-representative pid>   # ask the running instance to restart
 Plain `kill -HUP` without a wrapping `ufa-loader` still works — LR
 announces and exits — but nothing relaunches it in that case.
 
+The system tab's **restart** control (see below) does the same thing from
+the dashboard instead of a shell. `ufa-loader` sets `UFA_LOADER_INIT` on
+every sub-application it launches, which is how LR tells whether it is
+loader-managed at all — the control greys itself out (and the backend
+refuses the request) when it isn't, since pressing it would otherwise just
+stop LR for good.
+
 ## Flags
 
 | Flag | Config key | Default | Purpose |
@@ -111,6 +118,11 @@ here you can:
   trailing argv can't drop `--auto-connect` and leave FC stuck in local control;
 - **terminate** a managed instance (SIGTERM to its process group, escalating to
   SIGKILL after a grace period), or **dismiss** one that has already exited;
+- **restart** LR itself — the same as sending it `SIGHUP` (see "Running under
+  ufa-loader" above): it terminates so a wrapping `ufa-loader` relaunches it
+  with the identical config. Only enabled when this LR is loader-managed
+  (`UFA_LOADER_INIT` was set at startup) — otherwise the button is greyed
+  out, since there would be nothing to bring it back;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
   exit code.
 
@@ -167,11 +179,14 @@ confirm the machine-driven chain landed in remote control.
 
 When LR is connected to an `agent-coordinator`, it mirrors this system tab up
 over the `representable` channel (a `system-state` data message on every change)
-and accepts `__system:launch <app>` / `__system:terminate <instance-id>` commands
-back. The coordinator dashboard gains a matching **system** tab per host, so an
-operator can launch and terminate managed applications on any connected LR
-without a shell on that host — closing the loop for provisioning a new machine
-and bringing it up fully remote-controlled.
+and accepts `__system:launch <app>` / `__system:terminate <instance-id>` /
+`__system:restart` commands back. The coordinator dashboard gains a matching
+**system** tab per host, so an operator can launch, terminate, and restart
+managed applications on any connected LR without a shell on that host —
+closing the loop for provisioning a new machine and bringing it up fully
+remote-controlled. `__system:restart` is subject to the same loader-managed
+guard as the dashboard's own button — it's a no-op (logged) if this LR wasn't
+launched by `ufa-loader`.
 
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on

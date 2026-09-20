@@ -28,6 +28,12 @@ type ProcInfo struct {
 	ExitCode   int    `json:"exit_code"`        // meaningful once status != "running"
 	Detail     string `json:"detail,omitempty"` // launch/exit error text, if any
 	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode — see docs/DevMode.md
+
+	// LoaderManaged is only meaningful on Self: whether this local-representative
+	// process was launched by ufa-loader (see restartsignal.IsLoaderManaged),
+	// i.e. whether the system tab's "restart" control can be expected to
+	// actually come back up rather than just stop this process for good.
+	LoaderManaged bool `json:"loader_managed,omitempty"`
 }
 
 // SystemStateMsg is the payload of "system-state" WebSocket messages.
@@ -188,12 +194,13 @@ func (s *Server) systemState() SystemStateMsg {
 
 	return SystemStateMsg{
 		Self: ProcInfo{
-			Name:      s.lrName,
-			PID:       os.Getpid(),
-			Status:    "running",
-			Managed:   false,
-			StartedAt: s.selfStart.Unix(),
-			DevMode:   s.devMode,
+			Name:          s.lrName,
+			PID:           os.Getpid(),
+			Status:        "running",
+			Managed:       false,
+			StartedAt:     s.selfStart.Unix(),
+			DevMode:       s.devMode,
+			LoaderManaged: s.loaderManaged,
 		},
 		Managed: procs,
 	}
@@ -216,6 +223,7 @@ func (s *Server) broadcastSystemState() {
 //
 //	__system:launch <app>
 //	__system:terminate <instance-id-or-app>
+//	__system:restart
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -237,6 +245,8 @@ func (s *Server) handleSystemCommand(raw string) {
 		if err := s.terminateManaged(arg); err != nil {
 			log.Printf("system: remote terminate %q failed: %v", arg, err)
 		}
+	case "restart":
+		s.requestRestart("operator")
 	default:
 		log.Printf("system: ignoring unrecognised remote system command %q", raw)
 	}

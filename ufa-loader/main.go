@@ -104,6 +104,10 @@ func (l *loader) run() int {
 // final launch, and whether the child announced a restart before exiting.
 func (l *loader) runOnce(sigCh <-chan os.Signal) (exitCode int, announced bool) {
 	cmd := exec.Command(l.bin, l.binArgs...)
+	// Let the sub-application detect it is loader-managed (see
+	// restartsignal.IsLoaderManaged) without needing to know anything else
+	// about how it was invoked.
+	cmd.Env = append(os.Environ(), restartsignal.InitEnvVar+"=1")
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()

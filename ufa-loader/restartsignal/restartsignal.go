@@ -31,6 +31,20 @@ const (
 	Footer = "=== END-UFA-LOADER-RESTART ==="
 )
 
+// InitEnvVar is the environment variable ufa-loader sets to a non-empty
+// value on every sub-application it launches. A launched sub-application
+// checks it at startup (see IsLoaderManaged) to tell whether it is
+// loader-managed — i.e. whether announcing a restart and exiting can be
+// expected to actually relaunch it — without needing to know anything else
+// about how it was invoked.
+const InitEnvVar = "UFA_LOADER_INIT"
+
+// IsLoaderManaged reports whether this process was launched by ufa-loader,
+// per InitEnvVar.
+func IsLoaderManaged() bool {
+	return os.Getenv(InitEnvVar) != ""
+}
+
 // Announcement is the structured payload between Banner and Footer.
 type Announcement struct {
 	App    string `json:"app"`              // sub-application name, e.g. "local-representative"

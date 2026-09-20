@@ -31,3 +31,24 @@ Let's concisely add a 'restart' control to local-representative under the system
 When launching applications ufa-loader exports a UFA_LOADER_INIT environment variable that the launched sub-applications detect during startup. This is what makes the ufa-loaded sub-applications detect that they are loader-managed.
 
 When local-representative is not loader-managed the 'restart' control is greyed out (not usable).
+
+
+prompt: [`bc554c9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bc554c98a357773f1e9a438de724c82ed9d58cb4) → reply: [`c11c273`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c11c273c866c7be7c6386f28dce635ed282d6e99)
+
+## Reply A
+
+Everything checks out. All pieces are correctly wired end to end.
+
+## Summary
+
+Implemented Revision A: added a **restart** control to `local-representative`'s system tab that terminates the process so a wrapping `ufa-loader` relaunches it with the identical config (same mechanism as the existing SIGHUP handler, factored out into a shared `announceRestartAndExit` helper). `ufa-loader` now sets `UFA_LOADER_INIT` (defined as `restartsignal.InitEnvVar`, with an `IsLoaderManaged()` helper) on every child it launches; `local-representative` checks it at startup and exposes it via the system tab's `self` row (`loader_managed`), disabling the restart button and rejecting the request server-side (`requestRestart`, wired to both the new `restart-app` WebSocket message and `__system:restart` remote command) when not loader-managed. Updated `README.md`/`docs/DevMode.md`/`ufa-loader/README.md` accordingly. Couldn't run `go build`/`go test`/`tsc` in this sandbox (same toolchain-approval restriction as before), so this was verified by careful manual review.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

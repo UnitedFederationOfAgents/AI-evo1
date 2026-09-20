@@ -56,6 +56,7 @@ export interface ProcInfo {
   exit_code: number  // meaningful once status != "running"
   detail?: string
   dev_mode?: boolean // launched with --dev-mode -- see docs/DevMode.md
+  loader_managed?: boolean // self only: launched by ufa-loader, so "restart" comes back up
 }
 
 export interface SystemStateMsg {

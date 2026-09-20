@@ -37,6 +37,14 @@ then exits once the child does — the restart trigger itself is sent directly
 to the child's own pid (e.g. `kill -HUP <local-representative pid>`), not
 through `ufa-loader`.
 
+`ufa-loader` also sets `UFA_LOADER_INIT` (a non-empty value) in the child's
+environment on every launch. A sub-application checks it at startup
+(`restartsignal.IsLoaderManaged`) to tell whether it's loader-managed — i.e.
+whether asking for a restart can be expected to actually come back up —
+without needing to know anything else about how it was invoked.
+`local-representative` uses this to grey out its system tab's **restart**
+control when it isn't running under `ufa-loader`.
+
 ## The restart protocol
 
 Defined in [`restartsignal`](restartsignal/restartsignal.go), this is the

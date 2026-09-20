@@ -149,6 +149,15 @@ dev loop. Other sub-applications gaining restart/version-switching is just a
 matter of them adopting `restartsignal.Announce` too; `ufa-loader` itself
 already has no sub-application-specific knowledge to extend.
 
+`ufa-loader` also sets `UFA_LOADER_INIT` on every sub-application it
+launches, so a launched sub-application can tell it's loader-managed without
+knowing anything else about how it was invoked (`restartsignal.IsLoaderManaged`).
+LR's dashboard uses this for its system tab's **restart** control: pressing it
+does the same thing as `SIGHUP` (terminate so `ufa-loader` relaunches with the
+identical config), but the control greys itself out — and the equivalent
+`__system:restart` command from `agent-coordinator` is refused — when LR
+isn't loader-managed, since there would be nothing to bring it back up.
+
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
 

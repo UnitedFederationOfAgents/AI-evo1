@@ -812,6 +812,14 @@ body {
 
 .sys-btn-terminate:hover { background: #5a2e2e; }
 
+.sys-btn-restart {
+  background: #1a2a3a;
+  border: 1px solid #2e5a7a;
+  color: #6ea6c9;
+}
+
+.sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
+
 .sys-launch {
   display: flex;
   align-items: center;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -25,6 +25,7 @@ function useStatusWS() {
   const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
+  const [repoState, setRepoState] = useState<RepoStateMsg>({ watched: false, dirty: false, rebuild_ready: false, building: false, auto_rebuild: false })
   const [filesState, setFilesState] = useState<FilesStateMsg | null>(null)
   // Peer name -> current mismatch disclosure -- see docs/DevMode.md. A
   // mismatched peer only ever exchanges health information with this LR.
@@ -84,6 +85,21 @@ function useStatusWS() {
   const restartApp = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'restart-app', payload: {} }))
+    }
+  }, [])
+
+  // Dev-repo watcher controls (--dev-repo, see docs/DevMode.md): rebuildRepo
+  // runs 'make deploy-dev-binaries' at the watched repo's root; setAutoRebuild
+  // toggles whether that happens automatically whenever it becomes possible.
+  const rebuildRepo = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'rebuild-app', payload: {} }))
+    }
+  }, [])
+
+  const setAutoRebuild = useCallback((enabled: boolean) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-rebuild', payload: { enabled } }))
     }
   }, [])
 
@@ -172,6 +188,9 @@ function useStatusWS() {
           case 'system-state':
             setSystemState(msg.payload as SystemStateMsg)
             break
+          case 'repo-state':
+            setRepoState(msg.payload as RepoStateMsg)
+            break
           case 'files-state':
             setFilesState(msg.payload as FilesStateMsg)
             break
@@ -201,8 +220,9 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, filesState, modeMismatches,
+    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, restartApp, uploadFiles,
+    rebuildRepo, setAutoRebuild,
   }
 }
 
@@ -551,18 +571,80 @@ function SystemProcRow({
   )
 }
 
+// RepoWatchPanel is the system tab's dev-repo watcher widget (--dev-repo, see
+// docs/DevMode.md): the rebuild button turns orange and reads "dirty" while
+// the watched repo has uncommitted changes, plain "rebuild" once HEAD has
+// simply moved since the last build, and is disabled otherwise. Rendered
+// only when LR was actually launched with --dev-repo.
+function RepoWatchPanel({
+  repoState,
+  onRebuild,
+  onSetAutoRebuild,
+}: {
+  repoState: RepoStateMsg
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+}) {
+  if (!repoState.watched) return null
+
+  const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : 'rebuild'
+
+  return (
+    <div className="sys-repo-panel">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-repo</span>
+        <span className="sys-repo-root" title={repoState.root}>{repoState.root}</span>
+        {repoState.head && <span className="sys-repo-head">{repoState.head}</span>}
+      </div>
+      <div className="sys-repo-controls">
+        <button
+          className={`sys-btn sys-btn-rebuild${repoState.dirty ? ' sys-btn-rebuild-dirty' : ''}`}
+          disabled={repoState.building || !repoState.rebuild_ready}
+          onClick={onRebuild}
+          title={
+            repoState.dirty
+              ? 'uncommitted changes — runs make deploy-dev-binaries at the repo root'
+              : repoState.rebuild_ready
+              ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              : 'nothing to rebuild since the last successful build'
+          }
+        >
+          {label}
+        </button>
+        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible">
+          <input
+            type="checkbox"
+            checked={repoState.auto_rebuild}
+            onChange={e => onSetAutoRebuild(e.target.checked)}
+          />
+          auto-rebuild
+        </label>
+      </div>
+      {repoState.last_error && (
+        <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>
+      )}
+    </div>
+  )
+}
+
 function SystemPanel({
   state,
   fcState,
+  repoState,
   onLaunch,
   onTerminate,
   onRestart,
+  onRebuild,
+  onSetAutoRebuild,
 }: {
   state: SystemStateMsg | null
   fcState: string
+  repoState: RepoStateMsg
   onLaunch: (name: string) => void
   onTerminate: (id: string) => void
   onRestart: () => void
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
@@ -586,6 +668,7 @@ function SystemPanel({
 
   return (
     <div className="sys-panel">
+      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} />
       {fcRunning && (
         <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
           federation-command control: <strong>{fcControl}</strong>
@@ -974,9 +1057,9 @@ export default function App() {
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, filesState, modeMismatches,
+    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
-    launchApp, terminateApp, restartApp, uploadFiles,
+    launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild,
   } = useStatusWS()
 
   const devMode = systemState?.self.dev_mode ?? false
@@ -1032,9 +1115,12 @@ export default function App() {
               <SystemPanel
                 state={systemState}
                 fcState={fcState}
+                repoState={repoState}
                 onLaunch={launchApp}
                 onTerminate={terminateApp}
                 onRestart={restartApp}
+                onRebuild={rebuildRepo}
+                onSetAutoRebuild={setAutoRebuild}
               />
             ) : activeTab === 'files' && viewerFileId ? (
               <FileViewer

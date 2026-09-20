@@ -234,6 +234,8 @@ func (s *Server) broadcastSystemState() {
 //	__system:launch <app>
 //	__system:terminate <instance-id-or-app>
 //	__system:restart
+//	__system:rebuild
+//	__system:auto-rebuild <on|off>
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -257,6 +259,10 @@ func (s *Server) handleSystemCommand(raw string) {
 		}
 	case "restart":
 		s.requestRestart("operator")
+	case "rebuild":
+		s.requestRebuild("operator")
+	case "auto-rebuild":
+		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
 	default:
 		log.Printf("system: ignoring unrecognised remote system command %q", raw)
 	}

@@ -88,3 +88,18 @@ export interface FileInfo {
 export interface FilesStateMsg {
   files: FileInfo[]
 }
+
+// RepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,
+// see docs/DevMode.md): the git repo LR was launched from, watched for
+// rebuild-worthy changes. watched is false when LR wasn't launched with
+// --dev-repo, in which case the rest of the fields are meaningless.
+export interface RepoStateMsg {
+  watched: boolean
+  root?: string
+  dirty: boolean          // uncommitted staged or unstaged changes relative to HEAD
+  rebuild_ready: boolean  // the rebuild button is active -- dirty, or HEAD moved since the last successful rebuild
+  building: boolean       // 'make deploy-dev-binaries' is running right now
+  auto_rebuild: boolean
+  head?: string
+  last_error?: string
+}

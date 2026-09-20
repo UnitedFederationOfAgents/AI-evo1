@@ -16,6 +16,7 @@ add one. It's set with a `--dev-mode` flag:
 | --- | --- | --- |
 | `federation-command` | `--dev-mode` (also `FC_DEV_MODE=1` / config key `dev-mode`) | — |
 | `local-representative` | `--dev-mode` (also config key `dev-mode`) | every `federation-command` / `condoccer` it launches |
+| `local-representative` | `--dev-repo` (also config key `dev-repo`) | implies `--dev-mode`; also watches the launch working directory's git repo — see "Dev-repo watcher" below |
 | `agent-coordinator` | `--dev-mode` | — |
 | `condoccer` | `--dev-mode` | — |
 | `dungeon-keeper` | `dungeon-keeper watch --dev-mode` | — |
@@ -165,6 +166,48 @@ isn't loader-managed, since there would be nothing to bring it back up.
 
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
+
+## Dev-repo watcher
+
+[`--dev-repo`](../local-representative/repowatch.go) — Step 3 of
+[`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
+— gives `local-representative` the ability to detect changes in its own
+source repo and rebuild from them. It's a stronger form of `--dev-mode`:
+`--dev-repo` sets dev-mode automatically and additionally marks the *current
+working directory's* git repository as watched (LR refuses to start with
+`--dev-repo` if it isn't launched from inside one — `git rev-parse
+--show-toplevel` has to succeed).
+
+A watched repo is polled every 5 seconds:
+
+- **dirty** (`git diff HEAD` is non-empty — modified unstaged or staged
+  changes; untracked files don't count) — the system tab's rebuild button is
+  active, orange, and reads **dirty**.
+- **clean** — LR instead checks whether the upstream branch has moved
+  (`git fetch` + `git rev-list HEAD..@{u}`) and, if so, brings the repo
+  forward with `git pull --rebase`. If HEAD has moved since the last
+  successful rebuild (by this pull, or by a commit made by hand), the button
+  is active, green, and reads **rebuild**.
+- otherwise the button is inactive: nothing has changed since the last
+  successful rebuild.
+
+Pressing the button (or `agent-coordinator`'s `__system:rebuild`) runs `make
+deploy-dev-binaries` at the repo root, with the button reading **building…**
+and disabled meanwhile. The **auto-rebuild** toggle next to it (also settable
+remotely via `__system:auto-rebuild <on|off>`) makes LR press that button
+itself the moment it next detects the button would be active — including
+repeatedly while the repo stays dirty, since dirtiness isn't resolved by
+rebuilding, only by committing or reverting.
+
+Every git/make invocation the watcher makes — the poll's own status check,
+the pull, and a rebuild, whether triggered by the operator or by
+auto-rebuild — goes through one mutex, so **the check-and-rebuild process is
+single-threaded**: nothing here ever runs concurrently with itself, per the
+prompt.
+
+```bash
+./local-representative --dev-repo   # from inside a checkout of this repo
+```
 
 ## Versioning
 

@@ -46,6 +46,7 @@ stop LR for good.
 | `--name` | `name` | hostname | identifier reported to `agent-coordinator` |
 | `--dev` | `dev` | `false` | dev mode: don't serve the embedded frontend |
 | `--dev-mode` | `dev-mode` | `false` | dev mode in the SDLC sense (see [`docs/DevMode.md`](../docs/DevMode.md)): this LR — and every `federation-command`/`condoccer` it launches — is running from an in-progress branch. Unrelated to `--dev` above. |
+| `--dev-repo` | `dev-repo` | `false` | implies `--dev-mode`; also watches the launch working directory's git repo for changes to rebuild from (see "Dev-repo watcher" below and [`docs/DevMode.md`](../docs/DevMode.md)) — requires running inside a git repository |
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
 | `--ac-host` | `ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
 | `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
@@ -181,19 +182,44 @@ confirm the machine-driven chain landed in remote control.
 ### Driving the system tab from agent-coordinator
 
 When LR is connected to an `agent-coordinator`, it mirrors this system tab up
-over the `representable` channel (a `system-state` data message on every change)
-and accepts `__system:launch <app>` / `__system:terminate <instance-id>` /
-`__system:restart` commands back. The coordinator dashboard gains a matching
-**system** tab per host, so an operator can launch, terminate, and restart
-managed applications on any connected LR without a shell on that host —
-closing the loop for provisioning a new machine and bringing it up fully
-remote-controlled. `__system:restart` is subject to the same loader-managed
-guard as the dashboard's own button — it's a no-op (logged) if this LR wasn't
-launched by `ufa-loader`.
+over the `representable` channel (a `system-state` data message on every change,
+plus a `repo-state` one when `--dev-repo` is set) and accepts `__system:launch
+<app>` / `__system:terminate <instance-id>` / `__system:restart` /
+`__system:rebuild` / `__system:auto-rebuild <on|off>` commands back. The
+coordinator dashboard gains a matching **system** tab per host, so an operator
+can launch, terminate, and restart managed applications — and, for a
+`--dev-repo` host, trigger or auto-enable a rebuild — on any connected LR
+without a shell on that host, closing the loop for provisioning a new machine
+and bringing it up fully remote-controlled. `__system:restart` is subject to
+the same loader-managed guard as the dashboard's own button — it's a no-op
+(logged) if this LR wasn't launched by `ufa-loader`; `__system:rebuild` /
+`__system:auto-rebuild` are likewise no-ops (logged, or silent for
+auto-rebuild) if this LR wasn't launched with `--dev-repo`.
 
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 `$PATH`; `--fc-bin` / `fc-bin` overrides that.
+
+### Dev-repo watcher
+
+Launch with `--dev-repo` (from inside a git checkout — it refuses to start
+otherwise) and the system tab grows a **rebuild** control for the repo LR was
+launched from. Every 5 seconds LR checks the repo: a dirty working tree
+(`git diff HEAD` non-empty — untracked files don't count) makes the button
+active, orange, and labelled **dirty**; a clean tree instead pulls in any
+upstream movement (`git fetch` + `pull --rebase`) and, if HEAD has moved
+since the last successful rebuild, makes the button active, green, and
+labelled **rebuild**. Pressing it (or `agent-coordinator`'s
+`__system:rebuild`) runs `make deploy-dev-binaries` at the repo root, greying
+the button and showing **building…** meanwhile.
+
+The **auto-rebuild** checkbox next to it (also `__system:auto-rebuild
+<on|off>` from `agent-coordinator`) makes LR press that button itself
+whenever it becomes active. Every git/make call the watcher makes — checks,
+the pull, and a rebuild — is serialized through one mutex, so the
+check-and-rebuild process never overlaps itself. See
+[`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" for the full
+detection rules.
 
 ## Files tab
 

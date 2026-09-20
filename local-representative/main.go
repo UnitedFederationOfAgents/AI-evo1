@@ -142,6 +142,10 @@ type Server struct {
 	lrName     string
 	devMode    bool // --dev-mode: cascaded to every managed instance this LR launches — see docs/DevMode.md
 
+	// repoWatch is the dev-repo watcher (--dev-repo — see docs/DevMode.md and
+	// repowatch.go); nil unless this LR was launched with --dev-repo.
+	repoWatch *repoWatch
+
 	modeMu         sync.RWMutex
 	modeMismatches map[string]ModeMismatchMsg // peer name -> current mismatch disclosure, mismatched entries only
 
@@ -375,6 +379,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("ridealong-state", s.getRidealongState())
 	ac.SendData("condoc-state", s.getCondocState())
 	ac.SendData("system-state", s.systemState())
+	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
 	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
 	if cc := s.getCondoccerState(); cc != nil {
@@ -575,6 +580,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "condoc-state", s.getCondocState())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
+		s.sendToClient(c, "repo-state", s.repoState())
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
@@ -685,6 +691,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "restart-app":
 			s.requestRestart("operator")
+		case "rebuild-app":
+			s.requestRebuild("operator")
+		case "set-auto-rebuild":
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoRebuild(payload.Enabled)
+			}
 		}
 	}
 }
@@ -781,6 +796,7 @@ type appConfig struct {
 	name          string
 	dev           bool
 	devMode       bool // --dev-mode: this instance (and everything it launches) runs from an in-progress branch — see docs/DevMode.md. Distinct from dev, which just skips serving the embedded frontend.
+	devRepo       bool // --dev-repo: implies devMode and watches the launch working directory's git repo for rebuild-worthy changes — see docs/DevMode.md and repowatch.go.
 	autoConnect   bool
 	acHost        string
 	acPort        string
@@ -843,6 +859,9 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		return out, err
 	}
 	if out.devMode, err = pickBool("dev-mode", defaults.devMode); err != nil {
+		return out, err
+	}
+	if out.devRepo, err = pickBool("dev-repo", defaults.devRepo); err != nil {
 		return out, err
 	}
 	if out.autoConnect, err = pickBool("auto-connect", defaults.autoConnect); err != nil {
@@ -910,6 +929,7 @@ func main() {
 	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
 	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): launched from an in-progress branch. Cascades to every federation-command/condoccer instance this LR launches. Unrelated to --dev.")
+	devRepo := flag.Bool("dev-repo", false, "dev mode plus watch the current working directory's git repo for changes to rebuild from (see docs/DevMode.md); implies --dev-mode; requires running inside a git repository")
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
@@ -936,6 +956,7 @@ func main() {
 		name:          *name,
 		dev:           *dev,
 		devMode:       *devMode,
+		devRepo:       *devRepo,
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
@@ -949,6 +970,10 @@ func main() {
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+	if cfg.devRepo {
+		// --dev-repo automatically sets dev-mode too — see docs/DevMode.md.
+		cfg.devMode = true
 	}
 
 	s := newServer(cfg.name)
@@ -971,6 +996,16 @@ func main() {
 		log.Fatal("host store dir: ", err)
 	}
 	go s.cleanupFilesLoop()
+
+	if cfg.devRepo {
+		root, err := repoRootFromCWD()
+		if err != nil {
+			log.Fatalf("--dev-repo requires running inside a git repository: %v", err)
+		}
+		s.repoWatch = newRepoWatch(root, s.broadcastRepoState)
+		log.Printf("dev-repo: watching %s for changes to rebuild from (see docs/DevMode.md)", root)
+		go s.repoWatch.watchLoop()
+	}
 
 	reprSrv, err := representable.NewServer(":"+cfg.heartbeatPort, representable.Mode(s.devMode))
 	if err != nil {

@@ -44,11 +44,22 @@ Everything checks out. All pieces are correctly wired end to end.
 Implemented Revision A: added a **restart** control to `local-representative`'s system tab that terminates the process so a wrapping `ufa-loader` relaunches it with the identical config (same mechanism as the existing SIGHUP handler, factored out into a shared `announceRestartAndExit` helper). `ufa-loader` now sets `UFA_LOADER_INIT` (defined as `restartsignal.InitEnvVar`, with an `IsLoaderManaged()` helper) on every child it launches; `local-representative` checks it at startup and exposes it via the system tab's `self` row (`loader_managed`), disabling the restart button and rejecting the request server-side (`requestRestart`, wired to both the new `restart-app` WebSocket message and `__system:restart` remote command) when not loader-managed. Updated `README.md`/`docs/DevMode.md`/`ufa-loader/README.md` accordingly. Couldn't run `go build`/`go test`/`tsc` in this sandbox (same toolchain-approval restriction as before), so this was verified by careful manual review.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+It's about time we implemented 'version' in our sub-applications.
 
+When we use our makefiles to build our binaries they will now build the version into the binary so that we may see the version. We may do this by calling the binary and --version, which will simply return the version instead of launching the application.
 
-## Human-Prompt
+In federation-command we may use the commands 'version' or 'ufa-version' to retrieve the version.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In LR we see the version in the system tab.
+
+In condoccer the version is a subtle annotation in the banner.
+
+The version which is built in will be the same version as the git tag if THIS is a tagged commit. If this commit is not tagged then the version will take the form:
+
+<next-patch-version-of-most-recent-tag>-<branch-heuristic>-<current-repo-shortsha>
+
+So for example if we had a most recent tag of v0.4.2 and we were on main we might see: 'v0.4.3-main-8b1e2d4' or if we were on branch condoc/InitialDistributedDevelopment-1789821651/main we might see 'v0.4.3-inidisdev-8b1e2d4'.
+
+The versions are at the repo level, so a new 'make deploy-dev-binaries' with a change to any sub-application will result in an ew version for all sub-applications.

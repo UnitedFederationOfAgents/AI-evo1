@@ -74,11 +74,8 @@ Implemented Revision B: added a new shared `ufa-version` module (`Version` var +
 I could not run `go build`/`go test`/`make` or even `chmod` in this sandbox (all require approval that isn't available here), so I hand-verified `compute-version.sh`'s git/sed/tr/grep pipeline stage-by-stage against the real repo state instead of executing the script directly — since the script isn't executable, every Makefile invokes it as `bash ../scripts/compute-version.sh` rather than relying on the executable bit.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's adjust the appearance of the LR system tab view -- right now the version is cut of so we can only read 'v0...'
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We need to be able to see the full version string.

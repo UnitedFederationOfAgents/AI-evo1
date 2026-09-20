@@ -138,6 +138,13 @@ var agentModelConfigs = map[string]AgentModelConfig{
 	"clod": {ModelFlag: "", DefaultModel: "", Models: nil},
 }
 
+// devGreen is the single source of truth for FC's --dev-mode green (Revision
+// B): the blinker brackets (blinkerBracketDevStyle, blinker.go), the prompt
+// cursor and startup/mismatch banners (devModeStyle, below) all render in
+// this exact color so the two never drift apart. Same "healthy"/"connected"
+// green used across the web UIs — see docs/DevMode.md.
+const devGreen = lipgloss.Color("34")
+
 // Agent colors for visual distinction (matching ambiguous-agent)
 var agentColors = map[string]lipgloss.Color{
 	"copilot":  lipgloss.Color("39"),  // Cyan (GitHub blue)
@@ -172,11 +179,12 @@ var (
 				Foreground(lipgloss.Color("220")).
 				Bold(true)
 
-	// devModeStyle matches blinkerBracketDevStyle's green — used for the startup
-	// banner and any --dev-mode notices (distinct from devWarningStyle's yellow,
-	// which flags dev *dependencies*, an unrelated concept). See docs/DevMode.md.
+	// devModeStyle renders in devGreen — used for the startup banner, the
+	// prompt cursor, and any --dev-mode notices (distinct from
+	// devWarningStyle's yellow, which flags dev *dependencies*, an unrelated
+	// concept). See docs/DevMode.md.
 	devModeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("34")).
+			Foreground(devGreen).
 			Bold(true)
 
 	continuationStyle = lipgloss.NewStyle().
@@ -806,7 +814,7 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		m.input.Blur()
 	}
 
-	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
+	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0, m.devMode)
 	m.history = loadHistory(historyFilePath())
 	m.historyIdx = len(m.history)
 
@@ -910,7 +918,7 @@ func (m appModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd()}
 	if m.devMode {
 		cmds = append(cmds, tea.Println(devModeStyle.Render(
-			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] render green for the life of this session")))
+			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session")))
 	}
 	if devBins := devBinaries(); len(devBins) > 0 {
 		devNotice := devWarningStyle.Render("⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): " + strings.Join(devBins, ", "))
@@ -954,7 +962,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mlQuote = 0
 				m.mlMode = mlNone
 				m.input.SetValue("")
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				// Reset blinker to idle (was inactive while typing multi-line)
 				m.blinker.SetState(BlinkerIdle)
 				m.prevInputLen = 0
@@ -1020,7 +1028,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
 			Command:   msg.line,
@@ -1042,7 +1050,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionNewDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		if msg.exitCode == 0 && msg.newSessionID != "" {
 			newM, switchErr := m.switchToSession(msg.newSessionID)
 			if switchErr == nil {
@@ -1063,7 +1071,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionRenameDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		if msg.exitCode == 0 && msg.newName != "" {
 			if err := updateSessionName(m.sessionDir, msg.newName); err != nil {
 				m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 1)
@@ -1089,7 +1097,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		m.lastExitCode = msg.exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
 			Command:   msg.line,
@@ -1121,7 +1129,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case listModelsDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		var suffix string
 		if msg.currentModel != "" {
 			suffix = "\n" + sessionStyle.Render("current selection: "+msg.currentModel)
@@ -1344,7 +1352,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 
 		// Log the command
 		record := CommandRecord{
@@ -1377,7 +1385,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongReviewDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		reviewText := ""
 		if b, err := os.ReadFile(msg.cachePath); err == nil {
@@ -1406,7 +1414,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongFixDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		var postOutput string
 		if msg.execErr != nil {
@@ -1427,7 +1435,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		// Forward any new output lines to LR.
 		if m.reprOutPath != "" && m.reprClient != nil {
@@ -1598,7 +1606,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 				m.mlAccumulated = ""
 				m.mlDelim = ""
 				m.mlMode = mlNone
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				newM, execCmd := m.executeCommand(accumulated)
 				return newM, tea.Sequence(echo, execCmd)
 			}
@@ -1626,7 +1634,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 				m.mlAccumulated = ""
 				m.mlQuote = 0
 				m.mlMode = mlNone
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				newM, execCmd := m.executeCommand(newAccumulated)
 				return newM, tea.Sequence(echo, execCmd)
 			}
@@ -1995,7 +2003,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		m.oldCwd = m.cwd
 		m.cwd = newDir
 		m.lastExitCode = exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode)
 		return true, m, seqPrint(cdOutput, exitCode)
 	}
 
@@ -2015,7 +2023,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		if isValidAgent(newAgent) {
 			m.currentAgent = newAgent
 			m.currentModel = ""
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			return true, m, seqPrint(successStyle.Render("agent set to: "+m.currentAgent), 0)
 		}
 		out := errorStyle.Render("unknown agent: "+newAgent) + "\n" +
@@ -2040,7 +2048,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 			return true, m, seqPrint(errorStyle.Render(err.Error()), 1)
 		}
 		m.currentModel = newModel
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		return true, m, seqPrint(successStyle.Render("model set to: "+m.currentModel), 0)
 	}
 	if line == "set-model" {
@@ -2052,7 +2060,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	// clear-model
 	if line == "clear-model" {
 		m.currentModel = ""
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		return true, m, seqPrint(successStyle.Render("model cleared - using agent's default"), 0)
 	}
 
@@ -2691,7 +2699,7 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	m.sendRidealongState()
 	m.ridealongDynapane.Deactivate()
 	m.input.SetValue("")
-	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 	// Restore the control mode that was active before the ridealong started.
 	switch m.ridealongPrevState {
 	case BlinkerConnected:
@@ -3106,7 +3114,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			}
 		}
 		m.lastExitCode = exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode)
 		m.logRecord(line, cmdTime, deltaMs, exitCode)
 		if output != "" {
 			return m, tea.Println(output)
@@ -3141,7 +3149,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		if isValidAgent(newAgent) {
 			m.currentAgent = newAgent
 			m.currentModel = ""
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			output = successStyle.Render("agent set to: " + m.currentAgent)
 		} else {
 			exitCode = 1
@@ -3175,7 +3183,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			output = errorStyle.Render(err.Error())
 		} else {
 			m.currentModel = newModel
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			output = successStyle.Render("model set to: " + m.currentModel)
 		}
 		m.lastExitCode = exitCode
@@ -3192,7 +3200,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "clear-model" {
 		m.currentModel = ""
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render("model cleared - using agent's default"))
 	}
@@ -4587,7 +4595,7 @@ func abbreviatePath(path string, maxLen int) string {
 	return result
 }
 
-func buildPrompt(cwd string, agent string, model string, lastExitCode int) string {
+func buildPrompt(cwd string, agent string, model string, lastExitCode int, devMode bool) string {
 	dir := abbreviatePath(cwd, 30)
 	color := agentColors[agent]
 	if color == "" {
@@ -4601,7 +4609,14 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 	} else {
 		promptLabel = "[" + agent + "]"
 	}
-	prompt := agentPromptStyle.Render(promptLabel) + " " + promptStyle.Render(dir) + " > "
+	// Revision B: the cursor itself ('>') also renders in devModeStyle's green
+	// while --dev-mode is on, alongside the blinker's green brackets — see
+	// docs/DevMode.md.
+	cursor := "> "
+	if devMode {
+		cursor = devModeStyle.Render(cursor)
+	}
+	prompt := agentPromptStyle.Render(promptLabel) + " " + promptStyle.Render(dir) + " " + cursor
 	if lastExitCode != 0 {
 		rcStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 		prompt = rcStyle.Render(fmt.Sprintf("[%d]", lastExitCode)) + " " + prompt

@@ -55,23 +55,33 @@ process's name without any extra plumbing.
 
 - **Web UI apps** (`local-representative`, `agent-coordinator`, `condoccer`):
   the whole app frame gets an easily recognizable green outline —
-  `outline: 4px solid #4ec94e` plus an inset glow (`box-shadow: inset 0 0
-  16px rgba(78, 201, 78, 0.5)`) in each frontend's `index.css` — when that
-  instance's own `dev_mode` is true. `#4ec94e` is the same green already used
-  for "healthy" / "connected" indicators across these three frontends, reused
-  here rather than introducing a new accent color. An `outline` rather than a
+  `outline: 4px solid #6ec96e` plus an inset glow (`box-shadow: inset 0 0
+  24px rgba(110, 201, 110, 0.65)`) in each frontend's `index.css` — when that
+  instance's own `dev_mode` is true, plus a `DEV MODE` tag fixed to the top
+  center of the viewport (`.app-dev-mode::before`) so it's visible even when
+  the outline itself has scrolled out of view. An `outline` rather than a
   `border` was chosen so it never perturbs layout. (Revision A: the original
   `outline: 1px solid rgba(78, 201, 78, 0.45)` was too subtle to notice at a
   glance, so the outline was thickened to full opacity and the glow added for
-  contrast against dark panel backgrounds.) Each app also gets a small `dev`
-  badge, now filled instead of outline-only, next to any process/host row that
-  is itself in dev mode (`.sys-dev-tag`).
+  contrast against dark panel backgrounds. Revision B: still too subtle, so
+  the color moved from `#4ec94e` to the brighter `#6ec96e` — already used
+  elsewhere in these frontends for "connect"/"launch" accent text, so it
+  stays on-palette — the glow was enlarged and made more opaque, and the
+  fixed `DEV MODE` tag was added as a second, position-independent cue.)
+  Each app also gets a small `dev` badge, filled and now using the same
+  brighter `#6ec96e`, next to any process/host row that is itself in dev mode
+  (`.sys-dev-tag`).
 - **`federation-command`**: the square brackets enclosing the blinker (the
   `[` `]` either side of the `●`/`○` indicator) render in the same green
   instead of the default light blue — `blinkerBracketDevStyle` in
   `federation-command/blinker.go`. This is launch-time only, matching the
   blinker's other dev-mode-adjacent state (`devMode` is a plain field on
-  `Blinker`, set once from `NewBlinker(devMode)` and never mutated).
+  `Blinker`, set once from `NewBlinker(devMode)` and never mutated). Revision
+  B: the interactive prompt's cursor (the trailing `> `) now renders in the
+  same green too (`buildPrompt`'s `devMode` argument, `federation-command/main.go`),
+  and both it and the blinker brackets now read off a single shared constant
+  — `devGreen` in `federation-command/main.go` — so the two visual cues can
+  never drift apart.
 - **`dungeon-keeper`**: no web UI or long-lived interactive surface to put a
   border or badge on; `watch --dev-mode` just logs it at startup.
 

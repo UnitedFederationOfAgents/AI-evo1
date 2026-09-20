@@ -2543,7 +2543,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 	m.condoc = nil
 	m.blinker.SetState(BlinkerIdle)
 	m.input.Focus()
-	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 	m.prevInputLen = 0
 
 	return m, tea.Batch(
@@ -2564,7 +2564,7 @@ func (m appModel) exitCondoc() (appModel, tea.Cmd) {
 	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
 	m.input.Focus()
-	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 	m.prevInputLen = 0
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("condoc mode exited")),

@@ -156,10 +156,11 @@ var (
 				Foreground(lipgloss.Color("117"))
 
 	// Green brackets shown instead of blinkerBracketStyle when this FC instance
-	// was launched with --dev-mode (see docs/DevMode.md) — the one FC-specific
-	// visual cue called for alongside the web UIs' subtle green panel borders.
+	// was launched with --dev-mode (see docs/DevMode.md) — rendered in the same
+	// devGreen (main.go) as the prompt cursor and startup/mismatch banners, so
+	// the two can't drift apart (Revision B).
 	blinkerBracketDevStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("34"))
+				Foreground(devGreen)
 
 	// Grey indicator characters
 	blinkerBlockStyle = lipgloss.NewStyle().

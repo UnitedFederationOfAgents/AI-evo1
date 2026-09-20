@@ -513,9 +513,11 @@ function SystemProcRow({
   return (
     <div className={`sys-row sys-row-${proc.status}`}>
       <span className="sys-col sys-col-name">
-        {label}
-        {!proc.managed && <span className="sys-self-tag">this process</span>}
-        {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        <span className="sys-col-name-main">
+          {label}
+          {!proc.managed && <span className="sys-self-tag">this process</span>}
+          {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        </span>
         {!proc.managed && proc.version && (
           <span className="sys-version-tag" title="build version">{proc.version}</span>
         )}

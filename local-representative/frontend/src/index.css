@@ -759,7 +759,22 @@ body {
 
 .sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.sys-col-name { color: #d4d4d4; font-weight: 600; }
+.sys-col-name {
+  color: #d4d4d4;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  overflow: visible;
+  white-space: normal;
+}
+.sys-col-name-main {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sys-col-pid { color: #9c9c9c; }
 .sys-col-detail { color: #9c9c9c; }
 
@@ -785,10 +800,11 @@ body {
 }
 
 .sys-version-tag {
-  margin-left: 8px;
   font-size: 10px;
   font-weight: 400;
   color: #666;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .sys-col-status { font-weight: 600; }

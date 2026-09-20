@@ -79,3 +79,20 @@ I could not run `go build`/`go test`/`make` or even `chmod` in this sandbox (all
 Let's adjust the appearance of the LR system tab view -- right now the version is cut of so we can only read 'v0...'
 
 We need to be able to see the full version string.
+
+
+prompt: [`c84a8e3`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c84a8e319ca27ae380b90d5ad6101235adc8568f) → reply: [`f569785`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f5697857e651eb9dd612601008c3d8e958404e11)
+
+## Reply C
+
+Implemented Revision C: split the system tab's process-name cell into two lines — the name/tags stay on one truncating line, while the build-version tag now renders on its own line beneath it with normal wrapping instead of being clipped by the same `overflow:hidden; text-overflow:ellipsis; white-space:nowrap` rule that was cutting it off at `v0...`. This guarantees the full version string is always visible regardless of row width. Couldn't run `tsc`/build in this sandbox (toolchain approval denied), so verified by manual review of `App.tsx`/`index.css`.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

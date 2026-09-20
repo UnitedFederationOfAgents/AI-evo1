@@ -44,7 +44,14 @@ In the document we create we will record the following features which we will la
 - The global system view in agent-coordinator -- the global mode panel which allows viewing of the working group of participants with health and version information. The location where we can push updates from.
 ```
 
+### Step 2 - <REPLACE-TITLE>
+
+```prompt
+<REPLACE-PROMPT>
+```
+
 
 ## Human-Prompt
 
-The flow of the condoc is now within the first step.
+Once you have added the Title and Prompt add the '!HANDOFF!' directive to execute the first step.
+

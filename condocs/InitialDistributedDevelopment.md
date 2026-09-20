@@ -53,5 +53,4 @@ In the document we create we will record the following features which we will la
 
 ## Human-Prompt
 
-Once you have added the Title and Prompt add the '!HANDOFF!' directive to execute the first step.
-
+Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the fourth step, or submit the '!COMPLETED!' directive to complete this condoc.

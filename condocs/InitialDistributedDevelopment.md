@@ -44,13 +44,23 @@ In the document we create we will record the following features which we will la
 - The global system view in agent-coordinator -- the global mode panel which allows viewing of the working group of participants with health and version information. The location where we can push updates from.
 ```
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Implement the ufa-loader, starting with local-representative.
+
+[Step 2 Prompt](initialDistributedDevelopmentImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Next we are implementing the ufa-loader (see 'docs/DevMode.md' for some extra guidance).
+
+The loader will work by being a wrapping executable which launches the inner sub-application. The syntax of launching it will be: 'ufa-loader [optional-loader-flags] <binary> [binary-args]' -- for example 'ufa-loader local-representative --dev-mode'
+
+The sub-application will gain a behaviour where it prints a structured section after an identifying banner as the final act before termination. The loader will recognize this and will trigger a restart. We expect that the binary it calls will have been replaced with a more recent version.
+
+We will implement this ufa-loader sub-application to target only local-representative at first, but it will later be expanded to other sub-applications and so we may think ahead and use a common code approach.
+
+We will introduce a 'make run-loader' command to the makefile of all supporting sub-applications.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the fourth step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

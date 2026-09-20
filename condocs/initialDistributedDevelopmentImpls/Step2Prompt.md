@@ -24,11 +24,10 @@ This all looks correct and complete. I was not able to run `go build`/`go test` 
 Implemented Step 2: added the `ufa-loader` module (`main.go` + `restartsignal` sub-package) — a generic wrapping executable (`ufa-loader [flags] <binary> [args...]`) that launches a sub-application, watches its stdout for a `restartsignal.Announce` banner/JSON/footer sequence, and relaunches on that signal while propagating a plain exit's code untouched. Wired `local-representative` to speak the protocol (SIGHUP → announce-and-exit via `watchRestartSignal`), added `make run-loader` to its Makefile, added `ufa-loader` to the root Makefile's `SUBPROJECTS`, and updated `docs/DevMode.md` / `local-representative/README.md` / `ufa-loader/README.md` accordingly. Added unit tests for the `restartsignal` protocol and the loader's restart loop (using real `sh` subprocesses), but couldn't execute `go build`/`go test` in this session since the sandbox denies Go-toolchain invocations without interactive approval.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's concisely add a 'restart' control to local-representative under the system tab - it allows us to terminate the application such that the loader re-launches it with the identical config.
 
+When launching applications ufa-loader exports a UFA_LOADER_INIT environment variable that the launched sub-applications detect during startup. This is what makes the ufa-loaded sub-applications detect that they are loader-managed.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When local-representative is not loader-managed the 'restart' control is greyed out (not usable).

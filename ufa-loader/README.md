@@ -31,6 +31,7 @@ non-flag argument, so `ufa-loader`'s own flags must come before `<binary>`.
 | --- | --- | --- |
 | `-max-restarts` | `0` (unlimited) | stop relaunching after this many restarts |
 | `-restart-delay` | `500ms` | pause before relaunching, giving an in-flight binary replacement time to land on disk |
+| `-version` | — | print `ufa-loader`'s own version and exit instead of launching `<binary>`. Since flag parsing stops at the first non-flag argument, `ufa-loader --version` reports the loader's version; `ufa-loader <binary> --version` runs `<binary>` with `--version` instead, which reports *its* version (see "Versioning" in `docs/DevMode.md`) |
 
 `ufa-loader` forwards `SIGINT`/`SIGTERM` it receives to the running child and
 then exits once the child does — the restart trigger itself is sent directly

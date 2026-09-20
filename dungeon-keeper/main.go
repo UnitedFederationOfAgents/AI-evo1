@@ -38,11 +38,11 @@ import (
 	"dungeon-keeper/pkg/writespace"
 
 	"github.com/google/uuid"
+	ufaversion "ufa-version"
 )
 
 const (
 	checkInterval = 10 * time.Second
-	version       = "0.1.0"
 )
 
 var backoffLevels = []time.Duration{
@@ -69,8 +69,8 @@ func main() {
 		runReadspace(cfg, os.Args[2:])
 	case "writespace":
 		runWritespace(cfg, os.Args[2:])
-	case "version":
-		fmt.Printf("dungeon-keeper %s\n", version)
+	case "version", "--version", "-v":
+		fmt.Println(ufaversion.Version)
 	case "check-deps":
 		if err := executor.CheckDependencies(); err != nil {
 			log.Fatalf("Dependency check failed: %v", err)

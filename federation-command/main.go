@@ -30,10 +30,8 @@ import (
 	"representable"
 	ufaconfig "ufa-configurable"
 	ufahostid "ufa-hostid"
+	ufaversion "ufa-version"
 )
-
-// Version information
-const Version = "0.1.0"
 
 // Default configuration
 const (
@@ -2080,6 +2078,11 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
 	}
 
+	// version / ufa-version
+	if line == "version" || line == "ufa-version" {
+		return true, m, seqPrint(successStyle.Render(ufaversion.Version), 0)
+	}
+
 	// select-session — interactive picker not available inside ridealong
 	if line == "select-session" {
 		return true, m, seqPrint(errorStyle.Render("select-session: interactive picker not available in ridealong context — use set-session <id>"), 1)
@@ -3220,6 +3223,12 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	if line == "list-sessions" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
+	}
+
+	// version / ufa-version
+	if line == "version" || line == "ufa-version" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(ufaversion.Version))
 	}
 
 	if line == "select-session" {
@@ -4971,7 +4980,7 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 		arg := args[i]
 		switch {
 		case arg == "--version" || arg == "-v":
-			fmt.Printf("federation-command %s\n", Version)
+			fmt.Printf("federation-command %s\n", ufaversion.Version)
 			return cfg, true, nil
 		case arg == "--auto-connect" || arg == "-auto-connect":
 			cfg.autoConnect = true

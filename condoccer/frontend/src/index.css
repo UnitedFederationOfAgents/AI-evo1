@@ -104,6 +104,15 @@ body {
   text-transform: uppercase;
 }
 
+.app-version-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #666;
+}
+
 .sidebar-title {
   font-size: 12px;
   color: #aaa;

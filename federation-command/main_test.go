@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	ufaconfig "ufa-configurable"
+	ufaversion "ufa-version"
 )
 
 // writeConfigFile is a test helper for laying down ufa-configurable YAML files.
@@ -43,8 +44,8 @@ func TestVersion(t *testing.T) {
 	if !strings.Contains(output, "federation-command") {
 		t.Errorf("expected output to contain 'federation-command', got: %s", output)
 	}
-	if !strings.Contains(output, Version) {
-		t.Errorf("expected output to contain version '%s', got: %s", Version, output)
+	if !strings.Contains(output, ufaversion.Version) {
+		t.Errorf("expected output to contain version '%s', got: %s", ufaversion.Version, output)
 	}
 }
 

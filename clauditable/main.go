@@ -17,6 +17,7 @@ import (
 
 	"clauditable/pkg/records"
 	ufahostid "ufa-hostid"
+	ufaversion "ufa-version"
 )
 
 // openPTY opens a PTY master/slave pair. Returns (master, slave, error).
@@ -82,6 +83,12 @@ func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: clauditable <command> [args...]")
 		os.Exit(1)
+	}
+
+	// --version: print version and exit instead of wrapping a command
+	if os.Args[1] == "--version" {
+		fmt.Println(ufaversion.Version)
+		return
 	}
 
 	// archive subcommand: move all sessions to archive directory

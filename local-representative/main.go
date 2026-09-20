@@ -21,6 +21,7 @@ import (
 	ufaconfig "ufa-configurable"
 	ufahostid "ufa-hostid"
 	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
 
 //go:embed frontend/dist
@@ -896,8 +897,13 @@ func (s *Server) requestRestart(reason string) {
 }
 
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
 	defaultName := ufahostid.GetHostID()
 
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	configDir := flag.String("config", "", "directory holding ufa-configurable YAML files (default ~/.ufa/config)")
 	port := flag.String("port", "8081", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")

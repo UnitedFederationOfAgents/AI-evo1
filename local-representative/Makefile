@@ -4,6 +4,10 @@ BINARY_NAME=local-representative
 DEV_BIN_DIR=/AI-evo1-dev/bin
 LOADER_DIR=../ufa-loader
 
+# Repo-level version, embedded into the binary below -- see docs/DevMode.md
+# "Versioning" and scripts/compute-version.sh.
+VERSION := $(shell bash ../scripts/compute-version.sh)
+
 all: build
 
 # Full production build: frontend then Go binary (embeds the built frontend).
@@ -13,7 +17,7 @@ build-frontend:
 	cd frontend && npm install && npm run build
 
 build-go:
-	go build -o $(BINARY_NAME) .
+	go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 # Run the built binary.
 run: build

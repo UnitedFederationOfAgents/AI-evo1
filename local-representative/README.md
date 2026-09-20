@@ -39,6 +39,7 @@ stop LR for good.
 
 | Flag | Config key | Default | Purpose |
 | --- | --- | --- | --- |
+| `--version` | — | — | print version and exit instead of starting the dashboard (see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning") |
 | `--config` | — | `~/.ufa/config` | directory holding the `ufa-configurable` YAML files |
 | `--port` | `port` | `8081` | HTTP port for the dashboard / WebSocket |
 | `--repr-port` | `repr-port` | `8082` | TCP port for the `representable` heartbeat server FC dials |
@@ -124,7 +125,9 @@ here you can:
   (`UFA_LOADER_INIT` was set at startup) — otherwise the button is greyed
   out, since there would be nothing to bring it back;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
-  exit code.
+  exit code;
+- see this LR's own build **version** next to its name (see
+  [`docs/DevMode.md`](../docs/DevMode.md) "Versioning").
 
 `federation-command` is **N-per-host**: the launch button stays enabled while
 instances run and each press starts another, listed as `federation-command #1`,

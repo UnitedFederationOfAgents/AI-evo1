@@ -63,3 +63,22 @@ The version which is built in will be the same version as the git tag if THIS is
 So for example if we had a most recent tag of v0.4.2 and we were on main we might see: 'v0.4.3-main-8b1e2d4' or if we were on branch condoc/InitialDistributedDevelopment-1789821651/main we might see 'v0.4.3-inidisdev-8b1e2d4'.
 
 The versions are at the repo level, so a new 'make deploy-dev-binaries' with a change to any sub-application will result in an ew version for all sub-applications.
+
+
+prompt: [`17e485a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/17e485a29a5415d96146fab81ca12cfd73ee77a8) → reply: [`8b96618`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8b96618f66b97055eafef3bde87faf48ce489a32)
+
+## Reply B
+
+Implemented Revision B: added a new shared `ufa-version` module (`Version` var + `HandleVersionFlag()` helper, with tests) and `scripts/compute-version.sh`, which derives a repo-level version at build time — the exact git tag if `HEAD` is tagged, else `<next-patch>-<branch-heuristic>-<shortsha>` (verified matching the two examples in the prompt: `v0.4.3-main-...` and `v0.4.3-inidisdev-...`). Wired every sub-application's Makefile to inject it via `-ldflags -X`, and every binary now answers `--version` (federation-command also gains `version`/`ufa-version` shell commands, local-representative shows it on the system tab, condoccer shows it as a subtle annotation next to its "Condoccer" banner). Documented the whole scheme in a new `docs/DevMode.md` "Versioning" section plus README updates.
+
+I could not run `go build`/`go test`/`make` or even `chmod` in this sandbox (all require approval that isn't available here), so I hand-verified `compute-version.sh`'s git/sed/tr/grep pipeline stage-by-stage against the real repo state instead of executing the script directly — since the script isn't executable, every Makefile invokes it as `bash ../scripts/compute-version.sh` rather than relying on the executable bit.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

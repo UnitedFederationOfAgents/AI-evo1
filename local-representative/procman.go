@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	ufaversion "ufa-version"
 )
 
 // ProcInfo is a snapshot of one process shown on the "system" tab: either
@@ -34,6 +36,13 @@ type ProcInfo struct {
 	// i.e. whether the system tab's "restart" control can be expected to
 	// actually come back up rather than just stop this process for good.
 	LoaderManaged bool `json:"loader_managed,omitempty"`
+
+	// Version is only meaningful on Self: this local-representative binary's
+	// build version (ufa-version.Version — see docs/DevMode.md
+	// "Versioning"). Managed instances don't report their own version here;
+	// LR only knows what it launched them with, not what they'd say to
+	// --version.
+	Version string `json:"version,omitempty"`
 }
 
 // SystemStateMsg is the payload of "system-state" WebSocket messages.
@@ -201,6 +210,7 @@ func (s *Server) systemState() SystemStateMsg {
 			StartedAt:     s.selfStart.Unix(),
 			DevMode:       s.devMode,
 			LoaderManaged: s.loaderManaged,
+			Version:       ufaversion.Version,
 		},
 		Managed: procs,
 	}

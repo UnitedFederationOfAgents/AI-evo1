@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
 
 func main() {
@@ -29,8 +30,14 @@ func main() {
 
 	maxRestarts := flag.Int("max-restarts", 0, "stop relaunching after this many restarts (0 = unlimited)")
 	restartDelay := flag.Duration("restart-delay", 500*time.Millisecond, "pause before relaunching, giving an in-flight binary replacement time to land")
+	showVersion := flag.Bool("version", false, "print ufa-loader's own version and exit (a wrapped binary's --version goes to the binary, not here)")
 	flag.Usage = usage
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(ufaversion.Version)
+		return
+	}
 
 	args := flag.Args()
 	if len(args) == 0 {

@@ -516,6 +516,9 @@ function SystemProcRow({
         {label}
         {!proc.managed && <span className="sys-self-tag">this process</span>}
         {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        {!proc.managed && proc.version && (
+          <span className="sys-version-tag" title="build version">{proc.version}</span>
+        )}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>

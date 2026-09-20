@@ -20,7 +20,7 @@ make build
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) **and adopt remote control** once connected — for fully machine-driven auto-launch/auto-connect chains |
 | `--lr-host <host>` | `lr-host` | `localhost` | `local-representative` host for auto-connect and the manual blinker connect |
 | `--lr-port <n>` | `lr-port` | `8082` | `local-representative` `representable` port (same two flows) |
-| `--version`, `-v` | — | — | print version and exit |
+| `--version`, `-v` | — | — | print version and exit (build-time-injected — see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning"); also available inside the shell as `version` / `ufa-version` |
 
 Single-dash spellings (`-auto-connect`, `-lr-port`, ...) also work. Unknown
 flags are ignored for backward compatibility.

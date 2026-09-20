@@ -59,10 +59,12 @@ export interface ReprStatusMsg {
   port?: string
 }
 
-// SelfInfoMsg discloses this condoccer instance's own dev-mode status (see
-// docs/DevMode.md) -- sent once when the WebSocket connects.
+// SelfInfoMsg discloses this condoccer instance's own dev-mode status and
+// build version (see docs/DevMode.md) -- sent once when the WebSocket
+// connects.
 export interface SelfInfoMsg {
   dev_mode: boolean
+  version: string
 }
 
 // ModeMismatchMsg discloses that the connected local-representative's

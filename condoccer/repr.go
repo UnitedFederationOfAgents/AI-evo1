@@ -39,10 +39,12 @@ type ReprStatusMsg struct {
 	Port   string `json:"port,omitempty"`
 }
 
-// SelfInfoMsg discloses this condoccer instance's own dev-mode status to its
-// frontend (see docs/DevMode.md) -- sent once when a browser client connects.
+// SelfInfoMsg discloses this condoccer instance's own dev-mode status and
+// build version to its frontend (see docs/DevMode.md) -- sent once when a
+// browser client connects.
 type SelfInfoMsg struct {
-	DevMode bool `json:"dev_mode"`
+	DevMode bool   `json:"dev_mode"`
+	Version string `json:"version"`
 }
 
 // ModeMismatchMsg discloses that the connected local-representative's

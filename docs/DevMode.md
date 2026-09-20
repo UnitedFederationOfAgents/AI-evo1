@@ -161,6 +161,45 @@ isn't loader-managed, since there would be nothing to bring it back up.
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
 
+## Versioning
+
+Every sub-application binary knows its own build version, per
+[`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
+Step 2 Revision B — this is what a "dev branch follower" (see "Future
+features" below) would eventually compare across hosts to decide whether an
+update is available.
+
+Versions are computed at the **repo level**, not per sub-application:
+[`scripts/compute-version.sh`](../scripts/compute-version.sh) derives one
+string from the current git state and every Makefile embeds the *same*
+string into whatever it builds, via
+[`ufa-version`](../ufa-version)'s `Version` variable and `-ldflags -X`:
+
+- if `HEAD` is exactly a `vX.Y.Z` tag, that tag is the version, verbatim;
+- otherwise it's `<next-patch-of-most-recent-tag>-<branch-heuristic>-<shortsha>`
+  — e.g. most recent tag `v0.4.2` on branch `main` gives `v0.4.3-main-8b1e2d4`,
+  or on a condoc branch like
+  `condoc/InitialDistributedDevelopment-1789821651/main` gives
+  `v0.4.3-inidisdev-8b1e2d4` (the heuristic condenses the branch's CamelCase
+  step name to its words' initials).
+
+Because it's one version for the whole repo, `make deploy-dev-binaries` after
+touching *any single* sub-application gives *every* binary a new version
+(the shortsha moved). Outside a git checkout (e.g. a Docker build that
+doesn't `COPY` `.git`) it falls back to `dev`, same as a plain `go
+build`/`go run .` with no `-ldflags` at all.
+
+Every sub-application binary answers `--version` by printing its version and
+exiting instead of starting up (`ufa-version.HandleVersionFlag`; `ufa-loader`
+handles it separately since its own argv is followed by a wrapped binary's —
+see [`ufa-loader/README.md`](../ufa-loader/README.md)). A few sub-applications
+also surface it somewhere more visible:
+
+- **`federation-command`**: the `version` / `ufa-version` shell commands.
+- **`local-representative`**: next to its own name on the system tab.
+- **`condoccer`**: a subtle annotation next to the "Condoccer" banner in the
+  sidebar.
+
 ## Future features
 
 The following are **recorded here as the plan, not implemented yet** — later

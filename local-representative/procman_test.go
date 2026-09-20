@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ufaversion "ufa-version"
 )
 
 // TestSplitList covers the comma/whitespace list parsing used for --auto-launch.
@@ -283,6 +285,9 @@ func TestSystemStateSelf(t *testing.T) {
 	}
 	if st.Self.DevMode {
 		t.Errorf("Self.DevMode should be false by default")
+	}
+	if st.Self.Version != ufaversion.Version {
+		t.Errorf("Self.Version = %q, want %q", st.Self.Version, ufaversion.Version)
 	}
 	if len(st.Managed) != 0 {
 		t.Errorf("fresh server should manage nothing, got %v", st.Managed)

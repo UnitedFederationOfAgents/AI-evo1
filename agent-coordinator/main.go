@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"representable"
+	ufaversion "ufa-version"
 )
 
 //go:embed frontend/dist
@@ -754,6 +755,11 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 }
 
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	port := flag.String("port", "8083", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8084", "TCP port for local-representative connections")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")

@@ -22,6 +22,7 @@ function useCondocWS() {
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
   const [devMode, setDevMode] = useState(false)
+  const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
   const [diffFiles, setDiffFiles] = useState<string[]>([])
   const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
@@ -123,7 +124,9 @@ function useCondocWS() {
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
           } else if (msg.type === 'self-info') {
-            setDevMode((msg.payload as SelfInfoMsg).dev_mode)
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setVersion(p.version)
           } else if (msg.type === 'mode-mismatch') {
             const p = msg.payload as ModeMismatchMsg
             setModeMismatch(p.mismatched ? p : null)
@@ -158,6 +161,7 @@ function useCondocWS() {
     reprHost,
     reprPort,
     devMode,
+    version,
     modeMismatch,
     connectRepr,
     disconnectRepr,
@@ -574,6 +578,7 @@ interface SidebarProps {
   reprPort: string
   onReprConnect: (host: string, port: string) => void
   onReprDisconnect: () => void
+  version: string
 }
 
 function Sidebar({
@@ -604,6 +609,7 @@ function Sidebar({
   reprPort,
   onReprConnect,
   onReprDisconnect,
+  version,
 }: SidebarProps) {
   const reprFooter = (
     <ReprFooter
@@ -619,7 +625,7 @@ function Sidebar({
     return (
       <div className="sidebar">
         <div className="sidebar-header">
-          <h1>Condoccer</h1>
+          <h1>Condoccer{version && <span className="app-version-tag">{version}</span>}</h1>
         </div>
         <div className="nav-list">
           {condocs.length === 0 && (
@@ -844,7 +850,7 @@ function Sidebar({
 
   return (
     <div className="sidebar">
-      <div className="sidebar-header"><h1>Condoccer</h1></div>
+      <div className="sidebar-header"><h1>Condoccer{version && <span className="app-version-tag">{version}</span>}</h1></div>
       {reprFooter}
     </div>
   )
@@ -1517,6 +1523,7 @@ export default function App() {
     reprHost,
     reprPort,
     devMode,
+    version,
     modeMismatch,
     connectRepr,
     disconnectRepr,
@@ -1738,6 +1745,7 @@ export default function App() {
           reprPort={reprPort}
           onReprConnect={connectRepr}
           onReprDisconnect={disconnectRepr}
+          version={version}
         />
       </div>
 

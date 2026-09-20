@@ -6,6 +6,7 @@ require (
 	representable v0.0.0
 	ufa-configurable v0.0.0
 	ufa-hostid v0.0.0
+	ufa-version v0.0.0
 )
 
 replace representable => ../representable
@@ -13,6 +14,8 @@ replace representable => ../representable
 replace ufa-configurable => ../ufa-configurable
 
 replace ufa-hostid => ../ufa-hostid
+
+replace ufa-version => ../ufa-version
 
 require (
 	github.com/charmbracelet/bubbles v0.20.0

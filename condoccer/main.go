@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"representable"
+	ufaversion "ufa-version"
 )
 
 //go:embed frontend/dist
@@ -605,7 +606,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial condoc list and representable connection status.
 	go s.sendList(c)
 	go s.sendReprStatus(c)
-	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode})
+	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
 
 	// Write pump.
@@ -1056,6 +1057,11 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 }
 
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	port := flag.String("port", "8080", "HTTP port to listen on")
 	root := flag.String("root", ".", "repository root to scan for condocs")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")

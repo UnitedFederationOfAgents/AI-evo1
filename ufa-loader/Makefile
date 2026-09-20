@@ -3,10 +3,14 @@
 BINARY_NAME=ufa-loader
 DEV_BIN_DIR=/AI-evo1-dev/bin
 
+# Repo-level version, embedded into the binary below -- see docs/DevMode.md
+# "Versioning" and scripts/compute-version.sh.
+VERSION := $(shell bash ../scripts/compute-version.sh)
+
 all: build
 
 build:
-	go build -o $(BINARY_NAME) .
+	go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 # Example: make run BIN=../local-representative/local-representative ARGS="--dev-mode"
 run: build

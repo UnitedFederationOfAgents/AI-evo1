@@ -12,6 +12,22 @@ make build
 ./federation-command
 ```
 
+### Running under ufa-loader
+
+`SIGHUP` sent to FC's own pid makes it quit the TUI, restore the terminal,
+print a restart announcement on stdout, and exit 0 — see
+[`docs/DevMode.md`](../docs/DevMode.md)'s "Loader" section. Run it under
+[`ufa-loader`](../ufa-loader) to have that turned into an actual relaunch —
+expected once the on-disk binary has been replaced with a newer build:
+
+```bash
+make run-loader                       # builds ufa-loader too, then wraps FC
+kill -HUP <federation-command pid>    # ask the running instance to restart
+```
+
+Plain `kill -HUP` without a wrapping `ufa-loader` still works — FC announces
+and exits — but nothing relaunches it in that case.
+
 ## Flags
 
 | Flag | Config key | Default | Purpose |
@@ -20,7 +36,7 @@ make build
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) **and adopt remote control** once connected — for fully machine-driven auto-launch/auto-connect chains |
 | `--lr-host <host>` | `lr-host` | `localhost` | `local-representative` host for auto-connect and the manual blinker connect |
 | `--lr-port <n>` | `lr-port` | `8082` | `local-representative` `representable` port (same two flows) |
-| `--version`, `-v` | — | — | print version and exit (build-time-injected — see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning"); also available inside the shell as `version` / `ufa-version` |
+| `--version`, `-v` | — | — | print version and exit (build-time-injected — see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning"); also available inside the shell as `version` / `ufa version` |
 
 Single-dash spellings (`-auto-connect`, `-lr-port`, ...) also work. Unknown
 flags are ignored for backward compatibility.

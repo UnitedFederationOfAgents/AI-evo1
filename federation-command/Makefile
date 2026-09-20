@@ -1,6 +1,7 @@
-.PHONY: build docker-build run clean test all deploy-dev-binary
+.PHONY: build docker-build run run-loader clean test all deploy-dev-binary
 
 BINARY_NAME=federation-command
+LOADER_DIR=../ufa-loader
 
 # Repo-level version, embedded into the binary below -- see docs/DevMode.md
 # "Versioning" and scripts/compute-version.sh.
@@ -20,6 +21,13 @@ docker-build:
 run: build
 	@echo "Starting federation-command interactive shell..."
 	./$(BINARY_NAME)
+
+# Run under ufa-loader: it relaunches $(BINARY_NAME) whenever a SIGHUP sent to
+# its pid makes it announce a restart on stdout before exiting (see
+# ufa-loader/README.md / docs/DevMode.md).
+run-loader: build
+	$(MAKE) -C $(LOADER_DIR) build
+	$(LOADER_DIR)/ufa-loader ./$(BINARY_NAME)
 
 # Clean up build artifacts
 clean:

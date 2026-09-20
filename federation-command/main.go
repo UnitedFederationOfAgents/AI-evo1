@@ -15,11 +15,13 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -30,6 +32,7 @@ import (
 	"representable"
 	ufaconfig "ufa-configurable"
 	ufahostid "ufa-hostid"
+	"ufa-loader/restartsignal"
 	ufaversion "ufa-version"
 )
 
@@ -2078,8 +2081,8 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
 	}
 
-	// version / ufa-version
-	if line == "version" || line == "ufa-version" {
+	// version / ufa version
+	if line == "version" || line == "ufa version" {
 		return true, m, seqPrint(successStyle.Render(ufaversion.Version), 0)
 	}
 
@@ -3225,8 +3228,9 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
 	}
 
-	// version / ufa-version
-	if line == "version" || line == "ufa-version" {
+	// version (also available as "ufa version", handled by the "ufa "
+	// dispatch below)
+	if line == "version" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render(ufaversion.Version))
 	}
@@ -3565,6 +3569,10 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
 
+	case "version":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(ufaversion.Version))
+
 	case "session archive":
 		clauditablePath, err := findBinary("clauditable")
 		if err != nil {
@@ -3676,6 +3684,7 @@ func ufaHelpText() string {
 		sessionStyle.Render("ufa — unified federation actions"),
 		"",
 		"  ufa help               show this help",
+		"  ufa version            print federation-command's version",
 		"  ufa host <sub>         host identification commands",
 		"  ufa head <sub>         head (instance) identification commands",
 		"  ufa session <sub>      session management commands",
@@ -5093,8 +5102,38 @@ func main() {
 	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder, cfg)
 
 	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
+
+	restartReason := make(chan string, 1)
+	go watchRestartSignal(p, restartReason)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	// If the TUI stopped because watchRestartSignal asked it to (rather than
+	// the user quitting normally), announce the restart now that the
+	// terminal has been restored — this must be the final act before exit,
+	// see ufa-loader/README.md and docs/DevMode.md's "Loader" section.
+	select {
+	case reason := <-restartReason:
+		if err := restartsignal.Announce(os.Stdout, "federation-command", reason); err != nil {
+			fmt.Fprintf(os.Stderr, "restartsignal.Announce: %v\n", err)
+		}
+	default:
+	}
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, tells p to
+// quit (so the terminal is restored before anything else is printed) and
+// sends the trigger reason on restartReason for main to announce and exit
+// with once p.Run() returns. The signal is sent directly to this process's
+// own pid (e.g. `kill -HUP <pid>`), not through ufa-loader itself. Run in
+// its own goroutine; returns once it has handled one signal.
+func watchRestartSignal(p *tea.Program, restartReason chan<- string) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	<-sigCh
+	restartReason <- "sighup"
+	p.Quit()
 }

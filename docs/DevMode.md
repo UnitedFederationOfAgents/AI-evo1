@@ -141,13 +141,18 @@ with a newer build by then. A plain exit with no announcement is propagated
 as-is (exit code and all): `ufa-loader` never restarts a binary that didn't
 ask for it.
 
-Only `local-representative` speaks the protocol so far: sending it `SIGHUP`
-(directly to its own pid, not through `ufa-loader`) makes it announce a
-restart and exit 0, exactly as described above — see `make run-loader` in
-[`local-representative`](../local-representative)'s Makefile for the wired-up
-dev loop. Other sub-applications gaining restart/version-switching is just a
-matter of them adopting `restartsignal.Announce` too; `ufa-loader` itself
-already has no sub-application-specific knowledge to extend.
+`local-representative`, `condoccer`, `federation-command`, `dungeon-keeper`
+(its `watch` loop only — every other subcommand already exits on its own),
+and `agent-coordinator` all speak the protocol: sending `SIGHUP` directly to
+one of their pids (not through `ufa-loader`) makes it announce a restart and
+exit 0, exactly as described above — see `make run-loader` in each of their
+Makefiles for the wired-up dev loop. `federation-command`'s TUI quits and
+restores the terminal first, then announces, since the banner has to land as
+a clean stdout line rather than get interleaved with the live TUI's own
+redraws. Any further sub-application gaining restart/version-switching is
+just a matter of it adopting
+`restartsignal.Announce` too; `ufa-loader` itself already has no
+sub-application-specific knowledge to extend.
 
 `ufa-loader` also sets `UFA_LOADER_INIT` on every sub-application it
 launches, so a launched sub-application can tell it's loader-managed without
@@ -195,7 +200,7 @@ handles it separately since its own argv is followed by a wrapped binary's —
 see [`ufa-loader/README.md`](../ufa-loader/README.md)). A few sub-applications
 also surface it somewhere more visible:
 
-- **`federation-command`**: the `version` / `ufa-version` shell commands.
+- **`federation-command`**: the `version` / `ufa version` shell commands.
 - **`local-representative`**: next to its own name on the system tab.
 - **`condoccer`**: a subtle annotation next to the "Condoccer" banner in the
   sidebar.

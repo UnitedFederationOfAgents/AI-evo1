@@ -97,3 +97,20 @@ Now let's add the implementation for ufa-loader for:
 - agent-coordinator
 
 Let's also fix up the 'ufa-version' command - it should be 'ufa version'.
+
+
+prompt: [`80819a1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/80819a12b1bfe4f1018a70e786c81567b6d61713) → reply: [`2ccee81`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2ccee8150b55ba4f095a5b68e5be7f5d01bd1b62)
+
+## Reply D
+
+Implemented Revision D: extended the `ufa-loader`/`restartsignal` protocol adoption from `local-representative` to `condoccer`, `agent-coordinator`, `dungeon-keeper` (its `watch` loop), and `federation-command` — each now watches `SIGHUP` on its own pid and announces-and-exits (FC quits its bubbletea TUI and restores the terminal first, since it's the only wrapped app that's a raw-mode TUI rather than a headless daemon), with matching `go.mod` requires/replaces and new `make run-loader` targets in every Makefile. Also fixed federation-command's `ufa-version` shell command to `ufa version`, wiring it as a proper `case` inside the existing `handleUFACommand` "ufa" subcommand dispatcher (help text, README, and `docs/DevMode.md` updated to match) while keeping the bare `version` alias working. Couldn't run `go build`/`go vet` in this sandbox (same toolchain-approval restriction as prior revisions), so verified by careful manual review of every edited file for import correctness and control flow.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

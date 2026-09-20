@@ -10,16 +10,19 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
 	"github.com/gorilla/websocket"
 	"representable"
+	"ufa-loader/restartsignal"
 	ufaversion "ufa-version"
 )
 
@@ -1056,6 +1059,23 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	return mux
 }
 
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart (see ufa-loader/README.md and docs/DevMode.md's "Loader" section)
+// as this process's final act before exiting 0. The signal is sent directly
+// to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself. Run in its own goroutine; never returns.
+func watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		log.Printf("received SIGHUP: announcing a restart and exiting")
+		if err := restartsignal.Announce(os.Stdout, "condoccer", "sighup"); err != nil {
+			log.Printf("restartsignal.Announce: %v", err)
+		}
+		os.Exit(0)
+	}
+}
+
 func main() {
 	if ufaversion.HandleVersionFlag() {
 		return
@@ -1082,6 +1102,7 @@ func main() {
 	s.name = *name
 	s.devMode = *devMode
 	go s.watchLoop()
+	go watchRestartSignal()
 
 	if *autoConnect {
 		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",

@@ -1,7 +1,8 @@
-.PHONY: build build-frontend build-go run dev dev-frontend clean test deploy-dev-binary deps
+.PHONY: build build-frontend build-go run run-loader dev dev-frontend clean test deploy-dev-binary deps
 
 BINARY_NAME=agent-coordinator
 DEV_BIN_DIR=/AI-evo1-dev/bin
+LOADER_DIR=../ufa-loader
 
 # Repo-level version, embedded into the binary below -- see docs/DevMode.md
 # "Versioning" and scripts/compute-version.sh.
@@ -21,6 +22,14 @@ build-go:
 # Run the built binary.
 run: build
 	./$(BINARY_NAME)
+
+# Run under ufa-loader: it relaunches $(BINARY_NAME) whenever a SIGHUP sent to
+# its pid makes it announce a restart on stdout before exiting (see
+# ufa-loader/README.md / docs/DevMode.md). Extra flags: `make run-loader
+# ARGS="--dev-mode"`.
+run-loader: build
+	$(MAKE) -C $(LOADER_DIR) build
+	$(LOADER_DIR)/ufa-loader ./$(BINARY_NAME) $(ARGS)
 
 # Dev mode: run Go server without frontend (use dev-frontend in a separate terminal).
 dev:

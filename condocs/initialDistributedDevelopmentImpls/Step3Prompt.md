@@ -88,11 +88,12 @@ prompt: [`b837bb1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b
 Implemented Revision D (re-executing after Reply C's tooling failure): extended `restartsignal` with a generic `State` field and `AnnounceState`/`PreviousState` API, and taught `ufa-loader` to carry an announced restart's state forward as the `UFA_LOADER_STATE` env var on the next launch — all app-agnostic, per the package's existing "knows nothing about the sub-application" design. On the local-representative side, added `reststate.go`'s `lrState` (auto-rebuild toggle + auto-connect/host/port), wired it into every restart announcement (`announceRestartAndExit`, now a `*Server` method) and applied it at startup — overriding `--auto-connect`/`--ac-host`/`--ac-port` and the dev-repo watcher's auto-rebuild flag — so a newly launched instance picks up exactly the live state established before the restart. Added Go tests for both packages and updated `docs/DevMode.md`, `local-representative/README.md`, and `ufa-loader/README.md`; as with every prior reply, the Go toolchain couldn't be run here (approval denied), so this was verified by manual review only.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Let's add a mechanism for LR's 'auto-rebuild' function where a 90 second timer kicks off when the change is detected before the rebuild happens. If any further changes are detected the timer is bumped back to 90 seconds.
 
+The rebuild will only occur when the timer hits 0 and auto-rebuild is still active.
 
-## Human-Prompt
+This will reduce the amount of churn when sequential updates are happening to the repo.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's implement this now.

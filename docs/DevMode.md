@@ -56,7 +56,7 @@ process's name without any extra plumbing.
 
 - **Web UI apps** (`local-representative`, `agent-coordinator`, `condoccer`):
   the whole app frame gets an easily recognizable green outline —
-  `outline: 4px solid #6ec96e` plus an inset glow (`box-shadow: inset 0 0
+  `outline: 2px solid #6ec96e` plus an inset glow (`box-shadow: inset 0 0
   24px rgba(110, 201, 110, 0.65)`) in each frontend's `index.css` — when that
   instance's own `dev_mode` is true, plus a `DEV MODE` tag fixed to the top
   center of the viewport (`.app-dev-mode::before`) so it's visible even when
@@ -68,10 +68,11 @@ process's name without any extra plumbing.
   the color moved from `#4ec94e` to the brighter `#6ec96e` — already used
   elsewhere in these frontends for "connect"/"launch" accent text, so it
   stays on-palette — the glow was enlarged and made more opaque, and the
-  fixed `DEV MODE` tag was added as a second, position-independent cue.)
-  Each app also gets a small `dev` badge, filled and now using the same
-  brighter `#6ec96e`, next to any process/host row that is itself in dev mode
-  (`.sys-dev-tag`).
+  fixed `DEV MODE` tag was added as a second, position-independent cue.
+  Revision G: with the brighter green now easy to spot on its own, the
+  outline was thinned from `4px` back down to `2px`.) Each app also gets a
+  small `dev` badge, filled and now using the same brighter `#6ec96e`, next
+  to any process/host row that is itself in dev mode (`.sys-dev-tag`).
 - **`federation-command`**: the square brackets enclosing the blinker (the
   `[` `]` either side of the `●`/`○` indicator) render in the same green
   instead of the default light blue — `blinkerBracketDevStyle` in

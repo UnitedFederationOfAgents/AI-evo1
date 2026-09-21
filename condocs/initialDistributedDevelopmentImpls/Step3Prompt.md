@@ -125,3 +125,24 @@ Given `maybeAutoRebuild()` already gates on `rebuildReadyLocked()` (which is `!d
 Let's take a moment to adjust the dev-mode highlights on all of the web UIs again.
 
 Now that we are using such a bright green we can reduce the border thickness by half.
+
+
+prompt: [`bc1203a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bc1203aa01ce8f32743a98e7c97e3508095bdbd6) → reply: [`d366422`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d366422fdc0e38f2bac7c728e99a4f14b9e90d70)
+
+## Reply G
+
+All three frontends are covered. This completes Revision G.
+
+## Summary
+
+Halved the dev-mode outline thickness in all three frontends' `index.css` (`local-representative`, `agent-coordinator`, `condoccer`) from `outline: 4px solid #6ec96e` / `outline-offset: -4px` to `2px`/`-2px`, since the brighter green from Revision B is now vivid enough at half the thickness. Updated the comment blocks in each CSS file and `docs/DevMode.md` to document this as Revision G.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

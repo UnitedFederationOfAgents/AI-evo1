@@ -35,10 +35,12 @@ body {
    the brighter #6ec96e (already used elsewhere for "connect"/"launch" accent
    text) instead of the darker #4ec94e, the glow is bigger and more opaque,
    and a fixed "DEV MODE" tag is pinned to the top of the viewport so it's
-   visible even when the outline itself is scrolled out of view. */
+   visible even when the outline itself is scrolled out of view. Revision G:
+   now that the outline uses such a bright green, it reads clearly at half
+   the thickness, so it dropped from 4px to 2px. */
 .app-dev-mode {
-  outline: 4px solid #6ec96e;
-  outline-offset: -4px;
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
   box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
 }
 

@@ -164,6 +164,10 @@ does the same thing as `SIGHUP` (terminate so `ufa-loader` relaunches with the
 identical config), but the control greys itself out — and the equivalent
 `__system:restart` command from `agent-coordinator` is refused — when LR
 isn't loader-managed, since there would be nothing to bring it back up.
+`agent-coordinator`'s own per-host system tab shows the identical **restart**
+control (sending `__system:restart` over the same representable link), since
+these controls always act on the selected host's LR, never on
+`agent-coordinator` itself.
 
 An announcement can also carry opaque `state` that `ufa-loader` hands the
 *next* launch back as `UFA_LOADER_STATE` (`restartsignal.AnnounceState` /
@@ -243,6 +247,16 @@ auto-rebuild — goes through one mutex, so **the check-and-rebuild process is
 single-threaded**: nothing here ever runs concurrently with itself, per the
 prompt.
 
+LR forwards its watcher snapshot up to `agent-coordinator` as `repo-state`,
+and `agent-coordinator`'s own per-host system tab renders the identical
+rebuild/dirty/auto-rebuild panel from it — the **rebuild** button and
+**auto-rebuild** toggle there drive the selected host's LR the same way LR's
+own dashboard does (`__system:rebuild` / `__system:auto-rebuild <on|off>`).
+It's only ever shown for a host whose LR is actually watching a repo
+(`watched: true`), i.e. one launched with `--dev-repo` — an ops-mode LR never
+shows it, so the trigger stays dev-mode-only regardless of which dashboard
+it's driven from.
+
 ```bash
 ./local-representative --dev-repo   # from inside a checkout of this repo
 ```
@@ -293,6 +307,11 @@ the same way) — LR lists it next to each managed instance on the system tab,
 same as its own. It's a one-shot report on connect, not a live poll: a
 managed instance's version tag reflects whatever build it was launched with,
 until it reconnects.
+
+Every version tag on LR's system tab (its own and each managed instance's)
+rides along in the `system-state` LR already forwards to `agent-coordinator`,
+so `agent-coordinator`'s per-host system tab shows the same version column
+without any protocol addition of its own.
 
 ## Future features
 

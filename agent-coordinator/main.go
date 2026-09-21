@@ -177,12 +177,43 @@ type ProcInfo struct {
 	ExitCode   int    `json:"exit_code"`
 	Detail     string `json:"detail,omitempty"`
 	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode -- see docs/DevMode.md
+
+	// LoaderManaged is only meaningful on Self: whether that local-representative
+	// was launched by ufa-loader, i.e. whether its "restart" control can be
+	// expected to actually come back up -- see docs/DevMode.md "Loader".
+	LoaderManaged bool `json:"loader_managed,omitempty"`
+
+	// Version is this process's build version -- see docs/DevMode.md
+	// "Versioning". Empty until it has reported at least once.
+	Version string `json:"version,omitempty"`
+
+	// UpdateAvailable is only meaningful on Self: true once that LR's on-disk
+	// binary answers "--version" differently than the version it's running --
+	// see docs/DevMode.md "Loader".
+	UpdateAvailable bool `json:"update_available,omitempty"`
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.
 type SystemStateMsg struct {
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
+}
+
+// RepoStateMsg mirrors local-representative's dev-repo watcher payload (see
+// local-representative/repowatch.go): its current view of the git repo it's
+// watching for rebuild-worthy changes. Watched is false when that LR wasn't
+// launched with --dev-repo.
+type RepoStateMsg struct {
+	Watched            bool   `json:"watched"`
+	Root               string `json:"root,omitempty"`
+	Dirty              bool   `json:"dirty"`
+	RebuildReady       bool   `json:"rebuild_ready"`
+	Building           bool   `json:"building"`
+	AutoRebuild        bool   `json:"auto_rebuild"`
+	AutoRebuildPending bool   `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
+	Head               string `json:"head,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -232,6 +263,24 @@ type LRSystemStateMsg struct {
 	Managed []ProcInfo `json:"managed"`
 }
 
+// LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
+// clients: local-representative's dev-repo watcher for one host (see
+// local-representative/repowatch.go). Watched is false both when that LR
+// isn't watching a repo and when it isn't connected.
+type LRRepoStateMsg struct {
+	HostID             string `json:"host_id"`
+	Watched            bool   `json:"watched"`
+	Root               string `json:"root,omitempty"`
+	Dirty              bool   `json:"dirty"`
+	RebuildReady       bool   `json:"rebuild_ready"`
+	Building           bool   `json:"building"`
+	AutoRebuild        bool   `json:"auto_rebuild"`
+	AutoRebuildPending bool   `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
+	Head               string `json:"head,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+}
+
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
 // clients: local-representative's files tab for one host. Upload is relayed
 // through handleFileUploadRelay rather than AC keeping its own copy of the
@@ -264,6 +313,7 @@ type hostState struct {
 	ridealong  *RidealongStateMsg
 	condoc     *CondocStateMsg
 	system     *SystemStateMsg
+	repo       *RepoStateMsg
 	condoccer  *CondoccerStateMsg
 	files      *FilesStateMsg
 	lrHTTPPort string
@@ -406,6 +456,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	ridealong := hs.ridealong
 	condoc := hs.condoc
 	system := hs.system
+	repo := hs.repo
 	condoccer := hs.condoccer
 	files := hs.files
 	hs.mu.RUnlock()
@@ -429,6 +480,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 	}
+	s.sendToClient(c, "lr-repo-state", repoStateMsg(name, repo))
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
@@ -460,6 +512,27 @@ func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
 		Autoplay:     r.Autoplay,
 		Countdown:    r.Countdown,
 		Waypoints:    r.Waypoints,
+	}
+}
+
+// repoStateMsg builds a host-scoped lr-repo-state payload; a nil state means
+// no repo-state has been reported yet (treated the same as "not watched").
+func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
+	if r == nil {
+		return LRRepoStateMsg{HostID: hostID}
+	}
+	return LRRepoStateMsg{
+		HostID:             hostID,
+		Watched:            r.Watched,
+		Root:               r.Root,
+		Dirty:              r.Dirty,
+		RebuildReady:       r.RebuildReady,
+		Building:           r.Building,
+		AutoRebuild:        r.AutoRebuild,
+		AutoRebuildPending: r.AutoRebuildPending,
+		AutoRebuildSeconds: r.AutoRebuildSeconds,
+		Head:               r.Head,
+		LastError:          r.LastError,
 	}
 }
 
@@ -587,6 +660,35 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
 				payload.HostID != "" && payload.ID != "" && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__system:terminate "+payload.ID)
+			}
+		case "lr-restart-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:restart")
+			}
+		case "lr-rebuild-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:rebuild")
+			}
+		case "lr-set-auto-rebuild":
+			var payload struct {
+				HostID  string `json:"host_id"`
+				Enabled bool   `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				state := "off"
+				if payload.Enabled {
+					state = "on"
+				}
+				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
 			}
 		}
 	}
@@ -805,6 +907,7 @@ func main() {
 			hs.ridealong = nil
 			hs.condoc = nil
 			hs.system = nil
+			hs.repo = nil
 			hs.condoccer = nil
 			hs.files = nil
 			hs.lrHTTPPort = ""
@@ -815,6 +918,7 @@ func main() {
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
+			s.broadcast("lr-repo-state", LRRepoStateMsg{HostID: name})
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
@@ -893,6 +997,14 @@ func main() {
 				s.broadcast("lr-system-state", LRSystemStateMsg{
 					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed,
 				})
+			}
+		case "repo-state":
+			var payload RepoStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.repo = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-repo-state", repoStateMsg(name, &payload))
 			}
 		case "condoccer-state":
 			var payload CondoccerStateMsg

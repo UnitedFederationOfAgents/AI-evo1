@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg,
 } from './types'
 
@@ -24,6 +24,7 @@ interface HostClientState {
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
+  repo?: LRRepoStateMsg
   condoccer?: LRCondoccerMsg
   files?: LRFilesMsg
 }
@@ -57,6 +58,24 @@ function useCoordinatorWS() {
 
   const sendLRTerminateApp = useCallback((hostId: string, id: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-terminate-app', payload: { host_id: hostId, id } }))
+  }, [])
+
+  // Restarts the selected host's local-representative itself (not
+  // agent-coordinator) -- only expected to come back up when it's
+  // loader-managed; see docs/DevMode.md "Loader".
+  const sendLRRestartApp = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-restart-app', payload: { host_id: hostId } }))
+  }, [])
+
+  // Dev-repo watcher controls for the selected host's LR (--dev-repo, see
+  // docs/DevMode.md): sendLRRebuildApp runs 'make deploy-dev-binaries' at the
+  // watched repo's root; sendLRSetAutoRebuild toggles the auto-rebuild flag.
+  const sendLRRebuildApp = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-rebuild-app', payload: { host_id: hostId } }))
+  }, [])
+
+  const sendLRSetAutoRebuild = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
   }, [])
 
   const selectHost = useCallback((hostId: string) => {
@@ -196,6 +215,14 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-repo-state': {
+            const p = msg.payload as LRRepoStateMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), repo: p.watched ? p : undefined },
+            }))
+            break
+          }
           case 'lr-condoccer-state': {
             const p = msg.payload as LRCondoccerMsg
             setHostData(prev => ({
@@ -230,6 +257,7 @@ function useCoordinatorWS() {
   return {
     connected, hosts, hostData, selectHost, devMode, modeMismatches,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   }
 }
 
@@ -473,11 +501,12 @@ function formatUptime(startedAt: number, nowSec: number): string {
 }
 
 function SystemProcRow({
-  proc, nowSec, onTerminate,
+  proc, nowSec, onTerminate, onRestart,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
+  onRestart?: () => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -490,9 +519,14 @@ function SystemProcRow({
   return (
     <div className={`sys-row sys-row-${proc.status}`}>
       <span className="sys-col sys-col-name">
-        {label}
-        {!proc.managed && <span className="sys-self-tag">this LR</span>}
-        {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        <span className="sys-col-name-main">
+          {label}
+          {!proc.managed && <span className="sys-self-tag">this LR</span>}
+          {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        </span>
+        {proc.version && (
+          <span className="sys-version-tag" title="build version">{proc.version}</span>
+        )}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
@@ -506,20 +540,99 @@ function SystemProcRow({
             {proc.status === 'running' ? 'terminate' : 'dismiss'}
           </button>
         )}
+        {!proc.managed && onRestart && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            disabled={!proc.loader_managed}
+            title={proc.loader_managed
+              ? (proc.update_available
+                ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
+                : 'terminate this LR so ufa-loader relaunches it with the identical config')
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={onRestart}
+          >
+            {proc.update_available ? 'update and restart' : 'restart'}
+          </button>
+        )}
       </span>
     </div>
   )
 }
 
+// RepoWatchPanel mirrors local-representative's own dev-repo watcher widget
+// (--dev-repo, see docs/DevMode.md): the rebuild button turns orange and
+// reads "dirty" while the watched repo has uncommitted changes -- but stays
+// disabled, since rebuilding a dirty tree would silently bake in unreviewed
+// changes. It's selectable, plain, and reads "rebuild" only once HEAD has
+// moved since the last build with the repo clean; otherwise it's disabled.
+// Rendered only when that host's LR was actually launched with --dev-repo.
+function RepoWatchPanel({
+  repoState, onRebuild, onSetAutoRebuild,
+}: {
+  repoState: LRRepoStateMsg | undefined
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+}) {
+  if (!repoState?.watched) return null
+
+  const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : 'rebuild'
+
+  return (
+    <div className="sys-repo-panel">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-repo</span>
+        <span className="sys-repo-root" title={repoState.root}>{repoState.root}</span>
+        {repoState.head && <span className="sys-repo-head">{repoState.head}</span>}
+      </div>
+      <div className="sys-repo-controls">
+        <button
+          className={`sys-btn sys-btn-rebuild${repoState.dirty ? ' sys-btn-rebuild-dirty' : ''}`}
+          disabled={repoState.building || !repoState.rebuild_ready}
+          onClick={onRebuild}
+          title={
+            repoState.dirty
+              ? 'uncommitted changes — commit or revert to enable rebuilding'
+              : repoState.rebuild_ready
+              ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              : 'nothing to rebuild since the last successful build'
+          }
+        >
+          {label}
+        </button>
+        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst">
+          <input
+            type="checkbox"
+            checked={repoState.auto_rebuild}
+            onChange={e => onSetAutoRebuild(e.target.checked)}
+          />
+          auto-rebuild
+        </label>
+        {repoState.auto_rebuild_pending && (
+          <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time HEAD moves again">
+            rebuilding in {repoState.auto_rebuild_seconds ?? 0}s
+          </span>
+        )}
+      </div>
+      {repoState.last_error && (
+        <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
+      )}
+    </div>
+  )
+}
+
 function SystemPanel({
-  hostId, state, active, fcState, onLaunch, onTerminate,
+  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRebuild, onSetAutoRebuild,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
   active: boolean
   fcState: string
+  repoState: LRRepoStateMsg | undefined
   onLaunch: (hostId: string, name: string) => void
   onTerminate: (hostId: string, id: string) => void
+  onRestart: (hostId: string) => void
+  onRebuild: (hostId: string) => void
+  onSetAutoRebuild: (hostId: string, enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
@@ -547,6 +660,11 @@ function SystemPanel({
 
   return (
     <div className="sys-panel">
+      <RepoWatchPanel
+        repoState={repoState}
+        onRebuild={() => onRebuild(hostId)}
+        onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
+      />
       {fcRunning && (
         <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
           federation-command control: <strong>{fcControl}</strong>
@@ -561,7 +679,7 @@ function SystemPanel({
           <span className="sys-col sys-col-detail">uptime</span>
           <span className="sys-col sys-col-actions" />
         </div>
-        <SystemProcRow proc={state.self} nowSec={nowSec} />
+        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={() => onRestart(hostId)} />
         {managed.map(p => (
           <SystemProcRow
             key={p.instance_id}
@@ -925,7 +1043,8 @@ function FileViewer({
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+  sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles,
 }: {
   host: Host
   data: HostClientState
@@ -933,6 +1052,9 @@ function LRView({
   sendLRRidealongCommand: (hostId: string, action: string) => void
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList) => void
 }) {
   const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
@@ -991,8 +1113,12 @@ function LRView({
                 state={data.system}
                 active={active}
                 fcState={data.fcState}
+                repoState={data.repo}
                 onLaunch={sendLRLaunchApp}
                 onTerminate={sendLRTerminateApp}
+                onRestart={sendLRRestartApp}
+                onRebuild={sendLRRebuildApp}
+                onSetAutoRebuild={sendLRSetAutoRebuild}
               />
             )}
             {activeTab === 'files' && viewerFileId ? (
@@ -1068,6 +1194,7 @@ export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, modeMismatches,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
@@ -1141,6 +1268,9 @@ export default function App() {
               sendLRRidealongCommand={sendLRRidealongCommand}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               uploadFiles={uploadFiles}
             />
           ) : (

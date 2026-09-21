@@ -475,7 +475,9 @@ body {
 .sys-row-none { display: block; color: #666; font-style: italic; padding: 10px 12px; }
 .sys-row-failed { background: #241717; }
 .sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sys-col-name { color: #d4d4d4; font-weight: 600; }
+.sys-col-name { color: #d4d4d4; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow: visible; white-space: normal; }
+.sys-col-name-main { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-version-tag { font-size: 10px; font-weight: 400; color: #666; white-space: normal; overflow-wrap: anywhere; }
 .sys-col-pid { color: #9c9c9c; }
 .sys-col-detail { color: #9c9c9c; }
 .sys-self-tag { margin-left: 8px; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; }
@@ -488,10 +490,37 @@ body {
 .sys-btn:disabled { opacity: 0.5; cursor: default; }
 .sys-btn-terminate { background: #3a1a1a; border: 1px solid #7a2e2e; color: #c96e6e; }
 .sys-btn-terminate:hover { background: #5a2e2e; }
+.sys-btn-restart { background: #1a2a3a; border: 1px solid #2e5a7a; color: #6ea6c9; }
+.sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
+/* A newer build has landed on disk since this LR started -- orange, matching
+   .sys-btn-rebuild-dirty's "worth your attention" treatment. */
+.sys-btn-restart-update { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
+.sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
 .sys-launch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
 .sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) -- mirrors this
+   host's LR system tab, forwarded up as "lr-repo-state" ---- */
+.sys-repo-panel { display: flex; flex-direction: column; gap: 8px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-repo-info { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sys-repo-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+.sys-repo-root { color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sys-repo-head { color: #666; font-size: 11px; flex-shrink: 0; }
+.sys-repo-controls { display: flex; align-items: center; gap: 12px; }
+.sys-btn-rebuild { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-rebuild:hover:not(:disabled) { background: #2e5a2e; }
+/* Dirty repo: orange, per the prompt -- distinct from the plain green "HEAD
+   moved" rebuild state. */
+.sys-btn-rebuild-dirty { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
+.sys-btn-rebuild-dirty:hover:not(:disabled) { background: #5a4420; }
+.sys-auto-rebuild { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; cursor: pointer; }
+/* Auto-rebuild's 90s debounce countdown (Step3Prompt.md Revision E) -- shown
+   next to the auto-rebuild toggle while it's waiting for changes to settle
+   before building. */
+.sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
+.sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- Main pane with optional right-hand detail pane (files tab) ---- */
 

@@ -65,6 +65,9 @@ export interface ProcInfo {
   exit_code: number  // meaningful once status != "running"
   detail?: string
   dev_mode?: boolean // launched with --dev-mode -- see docs/DevMode.md
+  loader_managed?: boolean // self only: launched by ufa-loader, so "restart" comes back up
+  version?: string // this process's build version -- see docs/DevMode.md "Versioning"
+  update_available?: boolean // self only: the on-disk binary now answers --version differently than this running process -- see docs/DevMode.md "Loader"
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
@@ -87,6 +90,27 @@ export interface LRSystemStateMsg {
   active: boolean
   self: ProcInfo
   managed: ProcInfo[]
+}
+
+// LRRepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,
+// see docs/DevMode.md) for one host. watched is false both when that LR isn't
+// watching a repo and when it isn't connected.
+export interface LRRepoStateMsg {
+  host_id: string
+  watched: boolean
+  root?: string
+  dirty: boolean          // uncommitted staged or unstaged changes relative to HEAD
+  rebuild_ready: boolean  // the rebuild button is active -- HEAD moved since the last successful rebuild, and the repo isn't dirty
+  building: boolean       // 'make deploy-dev-binaries' is running right now
+  auto_rebuild: boolean
+  // 90s auto-rebuild debounce timer (Step3Prompt.md Revision E): pending is
+  // true from the moment the rebuild button first becomes active with
+  // auto-rebuild on, until the debounced build actually starts; seconds
+  // counts down and is re-armed to 90 whenever a further change lands.
+  auto_rebuild_pending?: boolean
+  auto_rebuild_seconds?: number
+  head?: string
+  last_error?: string
 }
 
 export interface CondocInfo {

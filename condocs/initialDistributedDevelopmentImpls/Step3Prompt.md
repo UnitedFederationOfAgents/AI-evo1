@@ -143,3 +143,20 @@ Halved the dev-mode outline thickness in all three frontends' `index.css` (`loca
 Let's make the updates to the 'system' pane in agent-coordinator that we have in local-representative for restarting/viewing versions/triggering builds (triggering builds in dev mode only).
 
 These controls refer to the local-representative instance, of course, no to agent-coordinator itself.
+
+
+prompt: [`d005002`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d005002f44c31c6f37a7aea81107a0b701d86649) → reply: [`f2b70cb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f2b70cb76fb94ec32fb8fc5c19e52d1bfebef890)
+
+## Reply H
+
+Implemented Revision H: `agent-coordinator`'s per-host system pane now has the same restart/version/dev-repo-build controls as `local-representative`'s own system tab, and they act on the selected host's LR, never on agent-coordinator itself. Backend (`agent-coordinator/main.go`): `ProcInfo` now carries `loader_managed`/`version`/`update_available`, a new `repo-state` handler stores and forwards LR's dev-repo watcher snapshot as host-scoped `lr-repo-state`, and three new browser commands (`lr-restart-app`, `lr-rebuild-app`, `lr-set-auto-rebuild`) route to LR's existing `__system:restart`/`__system:rebuild`/`__system:auto-rebuild` remote commands. Frontend: added a `RepoWatchPanel` (rebuild/dirty button, auto-rebuild toggle, 90s countdown) mirroring LR's own, a restart button + version tag on the self row of `SystemProcRow`, matching CSS, and wired the new state/callbacks through `LRView`/`App`; the rebuild panel — and thus the build trigger — only renders when the host's LR reports `watched: true`, i.e. it was launched with `--dev-repo`, so it's dev-mode-only automatically. Updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` to document the additions. As with every prior reply, the Go/TS toolchain couldn't actually be run here (approval denied), so this was verified by careful manual review instead.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -237,9 +237,11 @@ makes the button active, green, and labelled **rebuild**. Pressing it (or
 the repo root, greying the button and showing **building…** meanwhile.
 
 The **auto-rebuild** checkbox next to it (also `__system:auto-rebuild
-<on|off>` from `agent-coordinator`) makes LR press that button itself
-whenever it becomes active — which, since rebuilding is disabled while
-dirty, means waiting for a clean repo with HEAD moved. Every git/make call
+<on|off>` from `agent-coordinator`) makes LR press that button itself once
+it becomes active — but only after a 90-second debounce settles (shown next
+to the toggle as **rebuilding in Ns**), re-armed to the full 90s every time
+a further change lands (HEAD moves again) before it fires. This avoids
+rebuilding once per commit when several land in a row. Every git/make call
 the watcher makes — checks, the pull, and a rebuild — is serialized through
 one mutex, so the check-and-rebuild process never overlaps itself. See
 [`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" for the full

@@ -615,7 +615,7 @@ function RepoWatchPanel({
         >
           {label}
         </button>
-        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible">
+        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst">
           <input
             type="checkbox"
             checked={repoState.auto_rebuild}
@@ -623,6 +623,11 @@ function RepoWatchPanel({
           />
           auto-rebuild
         </label>
+        {repoState.auto_rebuild_pending && (
+          <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time HEAD moves again">
+            rebuilding in {repoState.auto_rebuild_seconds ?? 0}s
+          </span>
+        )}
       </div>
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>

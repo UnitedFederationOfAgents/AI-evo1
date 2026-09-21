@@ -101,6 +101,12 @@ export interface RepoStateMsg {
   rebuild_ready: boolean  // the rebuild button is active -- dirty, or HEAD moved since the last successful rebuild
   building: boolean       // 'make deploy-dev-binaries' is running right now
   auto_rebuild: boolean
+  // 90s auto-rebuild debounce timer (Step3Prompt.md Revision E): pending is
+  // true from the moment the rebuild button first becomes active with
+  // auto-rebuild on, until the debounced build actually starts; seconds
+  // counts down and is re-armed to 90 whenever a further change lands.
+  auto_rebuild_pending?: boolean
+  auto_rebuild_seconds?: number
   head?: string
   last_error?: string
 }

@@ -230,6 +230,161 @@ func TestRepoWatchRequestRebuildSkipsWhenDirty(t *testing.T) {
 	}
 }
 
+// TestRepoWatchAutoRebuildDebounces verifies that auto-rebuild doesn't fire
+// the instant the button becomes active: it arms a ~90s debounce timer
+// instead (Step3Prompt.md Revision E).
+func TestRepoWatchAutoRebuildDebounces(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {})
+	rw.setAutoRebuild(true)
+
+	commitChange(t, dir, "v2\n") // moves HEAD past builtHead
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	if changed := rw.maybeAutoRebuild(); !changed {
+		t.Fatalf("expected maybeAutoRebuild to report a change when first arming the debounce timer")
+	}
+	rw.opMu.Unlock()
+
+	snap := rw.snapshot()
+	if !snap.AutoRebuildPending {
+		t.Fatalf("expected auto-rebuild to be pending once the button becomes active")
+	}
+	if snap.Building {
+		t.Fatalf("expected no rebuild to have started yet -- the debounce timer should still be counting down")
+	}
+	if snap.AutoRebuildSeconds < 85 || snap.AutoRebuildSeconds > 90 {
+		t.Errorf("expected ~90s remaining, got %d", snap.AutoRebuildSeconds)
+	}
+}
+
+// TestRepoWatchAutoRebuildFiresWhenDeadlineElapses verifies the debounced
+// rebuild actually runs once the timer reaches 0 with auto-rebuild still on.
+func TestRepoWatchAutoRebuildFiresWhenDeadlineElapses(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {})
+	rw.setAutoRebuild(true)
+
+	commitChange(t, dir, "v2\n")
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	rw.maybeAutoRebuild() // arms the timer
+	rw.opMu.Unlock()
+
+	// Simulate the 90s debounce having elapsed, rather than actually
+	// waiting on it.
+	rw.mu.Lock()
+	rw.autoRebuildDeadline = time.Now().Add(-time.Second)
+	rw.mu.Unlock()
+
+	rw.opMu.Lock()
+	rw.maybeAutoRebuild()
+	rw.opMu.Unlock()
+
+	snap := rw.snapshot()
+	if snap.AutoRebuildPending {
+		t.Errorf("expected the debounce timer to clear once the rebuild fires")
+	}
+	if snap.RebuildReady {
+		t.Errorf("expected rebuild_ready=false after the debounced auto-rebuild ran")
+	}
+	if snap.LastError != "" {
+		t.Errorf("expected no error, got %q", snap.LastError)
+	}
+}
+
+// TestRepoWatchAutoRebuildResetsOnFurtherChange verifies a further change
+// detected while the debounce timer is counting down bumps it back to a
+// full 90s rather than letting the original deadline fire.
+func TestRepoWatchAutoRebuildResetsOnFurtherChange(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {})
+	rw.setAutoRebuild(true)
+
+	commitChange(t, dir, "v2\n")
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	rw.maybeAutoRebuild() // arms the timer
+	rw.opMu.Unlock()
+
+	// Pretend the timer is about to fire...
+	rw.mu.Lock()
+	rw.autoRebuildDeadline = time.Now().Add(time.Second)
+	rw.mu.Unlock()
+
+	// ...then a further change lands before it does.
+	commitChange(t, dir, "v3\n")
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	if changed := rw.maybeAutoRebuild(); !changed {
+		t.Fatalf("expected maybeAutoRebuild to report a change when re-arming on a further change")
+	}
+	rw.opMu.Unlock()
+
+	snap := rw.snapshot()
+	if !snap.AutoRebuildPending {
+		t.Fatalf("expected auto-rebuild to still be pending after being bumped back out")
+	}
+	if snap.Building {
+		t.Fatalf("expected no rebuild yet -- the further change should have reset the timer to 90s")
+	}
+	if snap.AutoRebuildSeconds < 85 {
+		t.Errorf("expected the timer to be bumped back close to 90s, got %d", snap.AutoRebuildSeconds)
+	}
+}
+
+// TestRepoWatchAutoRebuildDisarmsWhenNotReady verifies the pending debounce
+// timer is cancelled (not left to fire later) if the repo stops being
+// rebuild-ready in the meantime -- e.g. it goes dirty.
+func TestRepoWatchAutoRebuildDisarmsWhenNotReady(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {})
+	rw.setAutoRebuild(true)
+
+	commitChange(t, dir, "v2\n")
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	rw.maybeAutoRebuild() // arms the timer
+	rw.opMu.Unlock()
+	if !rw.snapshot().AutoRebuildPending {
+		t.Fatalf("expected the timer to be armed before this test's own change")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatal(err) // leaves the repo dirty
+	}
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	changed := rw.maybeAutoRebuild()
+	rw.opMu.Unlock()
+
+	if !changed {
+		t.Errorf("expected a reported change when the pending timer is disarmed by going dirty")
+	}
+	if snap := rw.snapshot(); snap.AutoRebuildPending {
+		t.Errorf("expected auto-rebuild pending to clear once the repo goes dirty")
+	}
+}
+
+// TestRepoWatchAutoRebuildOffStaysDisarmed verifies the debounce timer never
+// arms while the auto-rebuild toggle is off.
+func TestRepoWatchAutoRebuildOffStaysDisarmed(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {}) // auto-rebuild left off (default)
+
+	commitChange(t, dir, "v2\n")
+	rw.opMu.Lock()
+	rw.pollAndMaybePull()
+	if changed := rw.maybeAutoRebuild(); changed {
+		t.Errorf("expected no debounce state change with auto-rebuild off")
+	}
+	rw.opMu.Unlock()
+
+	if snap := rw.snapshot(); snap.AutoRebuildPending {
+		t.Errorf("expected auto-rebuild not pending when the toggle is off")
+	}
+}
+
 // TestServerRebuildControlsNoRepoWatched verifies the Server-level entry
 // points (the "rebuild-app"/"set-auto-rebuild" WebSocket messages and
 // "__system:rebuild"/"__system:auto-rebuild" both route through) are safe,

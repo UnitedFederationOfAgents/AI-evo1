@@ -929,6 +929,15 @@ body {
   cursor: pointer;
 }
 
+/* Auto-rebuild's 90s debounce countdown (Step3Prompt.md Revision E) --
+   shown next to the auto-rebuild toggle while it's waiting for changes to
+   settle before building. */
+.sys-repo-auto-pending {
+  font-size: 11px;
+  color: #e0a83e;
+  font-style: italic;
+}
+
 .sys-repo-error {
   font-size: 11px;
   color: #e05c5c;

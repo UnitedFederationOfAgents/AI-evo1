@@ -226,9 +226,15 @@ Pressing the button (or `agent-coordinator`'s `__system:rebuild`) runs `make
 deploy-dev-binaries` at the repo root, with the button reading **building…**
 and disabled meanwhile. The **auto-rebuild** toggle next to it (also settable
 remotely via `__system:auto-rebuild <on|off>`) makes LR press that button
-itself the moment it next detects the button would be active — which, since
-rebuilding is disabled while dirty, means it waits for the repo to be clean
-with HEAD moved rather than repeatedly firing while the repo stays dirty.
+itself — but not the instant the button becomes active. Instead it starts a
+90-second debounce timer, shown next to the toggle as **rebuilding in Ns**;
+if a further change lands before the timer runs out (HEAD moves again — a
+new commit, or another `pull --rebase`), the timer is bumped back to the
+full 90 seconds. The rebuild only actually happens once the timer reaches 0
+with auto-rebuild still on and the button still active. This keeps a burst
+of sequential commits landing on the watched repo from triggering a rebuild
+per commit. Turning auto-rebuild off, the repo going dirty, or the button
+otherwise going inactive cancels the pending timer.
 
 Every git/make invocation the watcher makes — the poll's own status check,
 the pull, and a rebuild, whether triggered by the operator or by

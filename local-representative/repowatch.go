@@ -17,6 +17,14 @@ import (
 // branch has moved.
 const repoWatchPollInterval = 5 * time.Second
 
+// autoRebuildDebounce is how long auto-rebuild waits, once the rebuild
+// button first becomes active, before actually building -- restarted from
+// scratch every time a further change is detected in the meantime, per
+// Revision E ("If any further changes are detected the timer is bumped back
+// to 90 seconds"). Cuts down on rebuild churn while a sequence of commits is
+// landing.
+const autoRebuildDebounce = 90 * time.Second
+
 // RepoStateMsg is the "repo-state" WebSocket payload: local-representative's
 // current view of the git repo it is watching for rebuild-worthy changes.
 // Sent as a zero value (Watched: false) when this LR wasn't launched with
@@ -28,8 +36,17 @@ type RepoStateMsg struct {
 	RebuildReady bool   `json:"rebuild_ready"` // the rebuild button is active -- HEAD moved since the last successful rebuild, and the repo isn't dirty
 	Building     bool   `json:"building"`      // 'make deploy-dev-binaries' is running right now
 	AutoRebuild  bool   `json:"auto_rebuild"`
-	Head         string `json:"head,omitempty"`
-	LastError    string `json:"last_error,omitempty"` // most recent rebuild failure, if any
+
+	// AutoRebuildPending/AutoRebuildSeconds describe the 90s auto-rebuild
+	// debounce timer (see autoRebuildDebounce): pending is true from the
+	// moment the rebuild button first becomes active with auto-rebuild on
+	// until the debounced build actually starts, and seconds is how much of
+	// that 90s window is left, re-armed whenever a further change lands.
+	AutoRebuildPending bool `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int  `json:"auto_rebuild_seconds,omitempty"`
+
+	Head      string `json:"head,omitempty"`
+	LastError string `json:"last_error,omitempty"` // most recent rebuild failure, if any
 }
 
 // repoWatch is local-representative's dev-repo watcher for a single git
@@ -56,6 +73,14 @@ type repoWatch struct {
 	head        string
 	builtHead   string // HEAD as of the last successful rebuild (the watcher's starting HEAD before the first one)
 	lastErr     string
+
+	// autoRebuildDeadline/autoRebuildArmedHead track the 90s debounce timer
+	// (autoRebuildDebounce): zero deadline means no auto-rebuild is pending.
+	// armedHead is the HEAD the deadline was last (re)armed against, so a
+	// further change (HEAD moving again while still pending) is detected by
+	// comparing it to the current head and bumps the deadline back out.
+	autoRebuildDeadline  time.Time
+	autoRebuildArmedHead string
 }
 
 func newRepoWatch(root string, notify func()) *repoWatch {
@@ -90,7 +115,7 @@ func (w *repoWatch) snapshot() RepoStateMsg {
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
-	return RepoStateMsg{
+	msg := RepoStateMsg{
 		Watched:      true,
 		Root:         w.root,
 		Dirty:        w.dirty,
@@ -100,6 +125,13 @@ func (w *repoWatch) snapshot() RepoStateMsg {
 		Head:         w.head,
 		LastError:    w.lastErr,
 	}
+	if !w.autoRebuildDeadline.IsZero() {
+		msg.AutoRebuildPending = true
+		if left := time.Until(w.autoRebuildDeadline); left > 0 {
+			msg.AutoRebuildSeconds = int(left.Round(time.Second) / time.Second)
+		}
+	}
+	return msg
 }
 
 func (w *repoWatch) setAutoRebuild(v bool) {
@@ -218,31 +250,63 @@ func (w *repoWatch) rebuild() {
 	w.notify()
 }
 
-// maybeAutoRebuild triggers rebuild() if the auto-rebuild toggle is on and
-// the rebuild button is currently active. Callers must hold opMu (same as
+// maybeAutoRebuild manages the 90s auto-rebuild debounce timer
+// (autoRebuildDebounce) and triggers rebuild() once it expires with
+// auto-rebuild still on. Callers must hold opMu (same as
 // pollAndMaybePull/rebuild), so this never races an operator-driven request.
-func (w *repoWatch) maybeAutoRebuild() {
-	w.mu.RLock()
-	should := w.autoRebuild && !w.building && w.rebuildReadyLocked()
-	w.mu.RUnlock()
-	if should {
-		w.rebuild()
+// Returns true if the pending/countdown state visible in the snapshot
+// changed, so the watch loop should notify.
+func (w *repoWatch) maybeAutoRebuild() bool {
+	w.mu.Lock()
+	if !w.autoRebuild || w.building || !w.rebuildReadyLocked() {
+		// Nothing to debounce right now -- e.g. auto-rebuild is off, a
+		// rebuild is already running, or there's nothing to rebuild (clean
+		// repo, unmoved HEAD, or dirty). Disarm any pending timer.
+		wasPending := !w.autoRebuildDeadline.IsZero()
+		w.autoRebuildDeadline = time.Time{}
+		w.autoRebuildArmedHead = ""
+		w.mu.Unlock()
+		return wasPending
 	}
+
+	now := time.Now()
+	if w.autoRebuildDeadline.IsZero() || w.head != w.autoRebuildArmedHead {
+		// The rebuild button either just became active, or a further change
+		// landed while we were already counting down (HEAD moved again) --
+		// either way, (re)arm the full 90s per the prompt ("the timer is
+		// bumped back to 90 seconds").
+		w.autoRebuildDeadline = now.Add(autoRebuildDebounce)
+		w.autoRebuildArmedHead = w.head
+		w.mu.Unlock()
+		return true
+	}
+
+	due := !now.Before(w.autoRebuildDeadline)
+	w.mu.Unlock()
+	if due {
+		w.rebuild() // rebuild() notifies on its own; deadline clears next pass
+		return false
+	}
+	return true // still counting down -- the reported seconds-left changed
 }
 
 // watchLoop is the single goroutine that polls this repo and, when
-// auto-rebuild is on, triggers a rebuild. Run in its own goroutine; never
-// returns. Both this and requestRebuild go through opMu, so nothing here
-// ever overlaps an operator-driven rebuild or another poll pass.
+// auto-rebuild is on, counts down (and eventually triggers) a rebuild. Run
+// in its own goroutine; never returns. Both this and requestRebuild go
+// through opMu, so nothing here ever overlaps an operator-driven rebuild or
+// another poll pass.
 func (w *repoWatch) watchLoop() {
 	ticker := time.NewTicker(repoWatchPollInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		w.opMu.Lock()
-		if w.pollAndMaybePull() {
+		changed := w.pollAndMaybePull()
+		if w.maybeAutoRebuild() {
+			changed = true
+		}
+		if changed {
 			w.notify()
 		}
-		w.maybeAutoRebuild()
 		w.opMu.Unlock()
 	}
 }

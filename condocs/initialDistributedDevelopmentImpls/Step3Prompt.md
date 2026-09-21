@@ -120,11 +120,8 @@ Frontend just renders whatever `auto_rebuild_pending`/`auto_rebuild_seconds` the
 Given `maybeAutoRebuild()` already gates on `rebuildReadyLocked()` (which is `!dirty && head != builtHead`) before either keeping the timer armed or letting it fire, going dirty mid-countdown already disarms the timer and blocks the rebuild from ever running — this was built into Revision E's implementation itself (`repowatch.go`'s `maybeAutoRebuild`), is already covered by `TestRepoWatchAutoRebuildDisarmsWhenNotReady`, and is already documented in `docs/DevMode.md` ("the repo going dirty ... cancels the pending timer"). I verified this by re-reading the code, tests, and docs closely and found no gap: the dirty check happens on the very next poll tick (≤5s) before the debounce deadline is ever evaluated, so no rebuild can slip through. No code changes were needed for this revision.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+Let's take a moment to adjust the dev-mode highlights on all of the web UIs again.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Now that we are using such a bright green we can reduce the border thickness by half.

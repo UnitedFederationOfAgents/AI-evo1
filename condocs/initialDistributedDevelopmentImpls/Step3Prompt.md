@@ -63,3 +63,20 @@ Let's add functionality to the ufa-loader restart sequence for LR.
 The return value will now hold local state data (covering only LR - nothing yet for the sub-applications it manages) such as the 'auto-rebuild' and 'auto-connect' state.
 
 This will be fed back into the newly launched instance, bringing the state up to date with that established before the restart. The live state will take precedence over arguments where applicable.
+
+
+prompt: [`cfc5743`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/cfc574363764764a2e9eb9a37284cf22254e52ff) → reply: [`ea086d5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ea086d5b3c65291c0fc46a07796995c2fe12f6e5)
+
+## Reply C
+
+bash: line 1: /AI-evo1-dev/bin/clauditable: No such file or directory
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -106,11 +106,6 @@ prompt: [`2f78416`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2
 Implemented Revision E: LR's auto-rebuild now arms a 90-second debounce timer (`autoRebuildDeadline`/`autoRebuildArmedHead` in `repowatch.go`) the moment the rebuild button first becomes active, re-arming to a full 90s whenever HEAD moves again before it fires, and only actually running the build once the timer expires with auto-rebuild still on (or clearing it if the button goes inactive/dirty/toggled off). Wired the new `auto_rebuild_pending`/`auto_rebuild_seconds` fields through the `repo-state` message, the system tab's UI ("rebuilding in Ns" next to the toggle) and CSS, added six new Go tests exercising the arm/fire/reset/disarm cases, and updated `docs/DevMode.md`/`local-representative/README.md`. As with every prior reply, the Go/TS toolchain couldn't actually be run here (approval denied), so this was verified by manual review only.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's ensure that if the repo becomes dirty during the countdown before the auto-rebuild occurs that the countdown (and auto-rebuild process) is cancelled.

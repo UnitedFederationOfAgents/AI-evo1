@@ -138,11 +138,8 @@ All three frontends are covered. This completes Revision G.
 Halved the dev-mode outline thickness in all three frontends' `index.css` (`local-representative`, `agent-coordinator`, `condoccer`) from `outline: 4px solid #6ec96e` / `outline-offset: -4px` to `2px`/`-2px`, since the brighter green from Revision B is now vivid enough at half the thickness. Updated the comment blocks in each CSS file and `docs/DevMode.md` to document this as Revision G.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+Let's make the updates to the 'system' pane in agent-coordinator that we have in local-representative for restarting/viewing versions/triggering builds (triggering builds in dev mode only).
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+These controls refer to the local-representative instance, of course, no to agent-coordinator itself.

@@ -39,10 +39,32 @@ const (
 // about how it was invoked.
 const InitEnvVar = "UFA_LOADER_INIT"
 
+// StateEnvVar is the environment variable ufa-loader sets, alongside
+// InitEnvVar, when relaunching a sub-application whose prior exit announced
+// restart State (see AnnounceState): the newly launched instance finds its
+// own predecessor's disclosed state here (see PreviousState) rather than
+// needing any other channel back to it. Unset on the very first launch, or
+// whenever the prior announcement carried no State.
+const StateEnvVar = "UFA_LOADER_STATE"
+
 // IsLoaderManaged reports whether this process was launched by ufa-loader,
 // per InitEnvVar.
 func IsLoaderManaged() bool {
 	return os.Getenv(InitEnvVar) != ""
+}
+
+// PreviousState returns the State a prior instance of this same
+// sub-application attached to the restart announcement that led to this
+// launch (see AnnounceState and StateEnvVar), as raw JSON ready for the
+// caller to unmarshal into its own app-specific type — restartsignal itself
+// is deliberately ignorant of what's inside. ok is false on a fresh launch
+// or whenever the prior announcement carried no State.
+func PreviousState() (raw json.RawMessage, ok bool) {
+	v, present := os.LookupEnv(StateEnvVar)
+	if !present || v == "" {
+		return nil, false
+	}
+	return json.RawMessage(v), true
 }
 
 // Announcement is the structured payload between Banner and Footer.
@@ -51,18 +73,42 @@ type Announcement struct {
 	Reason string `json:"reason,omitempty"` // human-readable trigger, e.g. "sighup"
 	PID    int    `json:"pid"`
 	Time   string `json:"time"` // RFC3339, UTC
+
+	// State is optional app-defined data — e.g. local-representative's
+	// in-memory toggles (see
+	// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md Revision D)
+	// — describing live state established since startup that the app would
+	// like the instance replacing it to pick back up. Opaque to
+	// restartsignal and ufa-loader alike: they only carry it from this
+	// announcement into StateEnvVar on the next launch (see PreviousState).
+	State json.RawMessage `json:"state,omitempty"`
 }
 
 // Announce writes the full Banner/JSON/Footer sequence to w. Call it as the
 // very last act before the process exits: from that point on, a loader
 // watching this output treats the child's exit as a restart request rather
-// than a stop.
+// than a stop. Equivalent to AnnounceState(w, app, reason, nil).
 func Announce(w io.Writer, app, reason string) error {
+	return AnnounceState(w, app, reason, nil)
+}
+
+// AnnounceState behaves like Announce but also attaches state — marshaled
+// as-is into the announcement's State field — for the instance that
+// replaces this one to read back via PreviousState. Pass nil for state to
+// disclose none (equivalent to calling Announce).
+func AnnounceState(w io.Writer, app, reason string, state interface{}) error {
 	a := Announcement{
 		App:    app,
 		Reason: reason,
 		PID:    os.Getpid(),
 		Time:   time.Now().UTC().Format(time.RFC3339),
+	}
+	if state != nil {
+		raw, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		a.State = raw
 	}
 	body, err := json.Marshal(a)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,25 @@ echo "$n" > "$COUNTFILE"
 if [ "$n" -le "$LIMIT" ]; then
 	echo "$BANNER"
 	echo '{"app":"test-app","reason":"loop","pid":1,"time":"t"}'
+	echo "$FOOTER"
+else
+	echo "final run ($n)"
+fi
+`
+
+// echoStateLoopScript is announceLoopScript's sibling for the restart-state
+// carryover feature: each launch records the UFA_LOADER_STATE it was handed
+// (one line per launch, in $SEENFILE) and announces a restart carrying its
+// own launch count as state, for as long as $LIMIT allows -- so a test can
+// verify launch N+1 saw launch N's announced state.
+const echoStateLoopScript = `
+n=$(cat "$COUNTFILE" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$COUNTFILE"
+echo "${UFA_LOADER_STATE:-<none>}" >> "$SEENFILE"
+if [ "$n" -le "$LIMIT" ]; then
+	echo "$BANNER"
+	echo "{\"app\":\"test-app\",\"reason\":\"loop\",\"pid\":1,\"time\":\"t\",\"state\":{\"n\":$n}}"
 	echo "$FOOTER"
 else
 	echo "final run ($n)"
@@ -89,6 +109,42 @@ func TestLoaderPropagatesExitCodeWithoutRestarting(t *testing.T) {
 
 	if code := l.run(); code != 7 {
 		t.Fatalf("exit code = %d, want 7", code)
+	}
+}
+
+// TestLoaderCarriesStateForward verifies each relaunch is handed the
+// previous launch's announced state (via UFA_LOADER_STATE), and that the
+// very first launch sees none.
+func TestLoaderCarriesStateForward(t *testing.T) {
+	t.Setenv("BANNER", restartsignal.Banner)
+	t.Setenv("FOOTER", restartsignal.Footer)
+	t.Setenv("LIMIT", "3")
+	t.Setenv("COUNTFILE", filepath.Join(t.TempDir(), "count"))
+	seenFile := filepath.Join(t.TempDir(), "seen")
+	t.Setenv("SEENFILE", seenFile)
+
+	l := &loader{
+		bin:          "sh",
+		binArgs:      []string{"-c", echoStateLoopScript},
+		restartDelay: time.Millisecond,
+	}
+	if code := l.run(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+
+	data, err := os.ReadFile(seenFile)
+	if err != nil {
+		t.Fatalf("reading seen file: %v", err)
+	}
+	seen := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	want := []string{"<none>", `{"n":1}`, `{"n":2}`, `{"n":3}`}
+	if len(seen) != len(want) {
+		t.Fatalf("UFA_LOADER_STATE seen per launch = %v, want %v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("UFA_LOADER_STATE seen per launch = %v, want %v", seen, want)
+		}
 	}
 }
 

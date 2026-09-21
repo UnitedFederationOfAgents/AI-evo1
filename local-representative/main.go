@@ -890,12 +890,15 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 // announceRestartAndExit writes the restartsignal announcement (the
 // "structured section after an identifying banner" a ufa-loader wrapping
 // this process watches stdout for — see ufa-loader/README.md and
-// docs/DevMode.md) and exits 0. Callers are expected to have already decided
-// a restart is appropriate; this never returns.
-func announceRestartAndExit(reason string) {
+// docs/DevMode.md), attaching this process's live state (see
+// lrState/currentState and Revision D of
+// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md) for the
+// instance replacing it to pick back up, and exits 0. Callers are expected
+// to have already decided a restart is appropriate; this never returns.
+func (s *Server) announceRestartAndExit(reason string) {
 	log.Printf("announcing a restart (%s) and exiting", reason)
-	if err := restartsignal.Announce(os.Stdout, "local-representative", reason); err != nil {
-		log.Printf("restartsignal.Announce: %v", err)
+	if err := restartsignal.AnnounceState(os.Stdout, "local-representative", reason, s.currentState()); err != nil {
+		log.Printf("restartsignal.AnnounceState: %v", err)
 	}
 	os.Exit(0)
 }
@@ -908,28 +911,29 @@ func announceRestartAndExit(reason string) {
 // `kill -HUP` without a wrapping ufa-loader is documented to still announce
 // and exit, just with nothing there to relaunch it (see README.md). Run in
 // its own goroutine; never returns.
-func watchRestartSignal() {
+func (s *Server) watchRestartSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP)
 	for range sigCh {
-		announceRestartAndExit("sighup")
+		s.announceRestartAndExit("sighup")
 	}
 }
 
 // requestRestart handles an operator-driven restart request — the system
 // tab's "restart" control (WebSocket "restart-app") or agent-coordinator's
 // "__system:restart" — which terminates this process such that a wrapping
-// ufa-loader relaunches it with the identical config. Unlike SIGHUP, this
-// refuses (logging why) when the process isn't loaderManaged: the system
-// tab greys the control out in that case since pressing it wouldn't come
-// back up, and this is the server-side enforcement of that same guard for
-// any caller (e.g. agent-coordinator) that bypasses the UI.
+// ufa-loader relaunches it with the same config, plus this instance's live
+// state carried forward (see announceRestartAndExit/lrState). Unlike
+// SIGHUP, this refuses (logging why) when the process isn't loaderManaged:
+// the system tab greys the control out in that case since pressing it
+// wouldn't come back up, and this is the server-side enforcement of that
+// same guard for any caller (e.g. agent-coordinator) that bypasses the UI.
 func (s *Server) requestRestart(reason string) {
 	if !s.loaderManaged {
 		log.Printf("restart requested (%s) but this process is not loader-managed (no %s) — ignoring", reason, restartsignal.InitEnvVar)
 		return
 	}
-	announceRestartAndExit(reason)
+	s.announceRestartAndExit(reason)
 }
 
 func main() {
@@ -993,6 +997,19 @@ func main() {
 		cfg.devMode = true
 	}
 
+	// A restart-carrying relaunch (see reststate.go and Revision D of
+	// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md) overrides
+	// the auto-connect settings just resolved above -- the live state as of
+	// the moment the prior instance asked to be restarted wins over whatever
+	// flags/config this launch happens to carry. prevState/havePrevState is
+	// also consulted below once repoWatch exists, for the auto-rebuild half.
+	prevState, havePrevState := loadPreviousState()
+	if havePrevState {
+		log.Printf("restart state: restoring auto-rebuild=%v auto-connect=%v (ac=%s:%s) from before the restart",
+			prevState.AutoRebuild, prevState.AutoConnect, prevState.ACHost, prevState.ACPort)
+		prevState.applyToConfig(&cfg)
+	}
+
 	s := newServer(cfg.name)
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
@@ -1029,6 +1046,9 @@ func main() {
 		}
 		s.repoWatch = newRepoWatch(root, s.broadcastRepoState)
 		log.Printf("dev-repo: watching %s for changes to rebuild from (see docs/DevMode.md)", root)
+		if havePrevState && prevState.AutoRebuild {
+			s.repoWatch.setAutoRebuild(true)
+		}
 		go s.repoWatch.watchLoop()
 	}
 
@@ -1152,7 +1172,7 @@ func main() {
 
 	log.Printf("representable server listening on tcp://localhost:%s", cfg.heartbeatPort)
 
-	go watchRestartSignal()
+	go s.watchRestartSignal()
 	go s.broadcastLoop()
 
 	if cfg.autoConnect {

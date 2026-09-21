@@ -79,3 +79,20 @@ Let's add functionality to the ufa-loader restart sequence for LR.
 The return value will now hold local state data (covering only LR - nothing yet for the sub-applications it manages) such as the 'auto-rebuild' and 'auto-connect' state.
 
 This will be fed back into the newly launched instance, bringing the state up to date with that established before the restart. The live state will take precedence over arguments where applicable.
+
+
+prompt: [`b837bb1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b837bb131e288c124c44b037cad504b73b82265b) → reply: [`bc8154a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bc8154a96b100a9d513f1d618c096326d2daa740)
+
+## Reply D
+
+Implemented Revision D (re-executing after Reply C's tooling failure): extended `restartsignal` with a generic `State` field and `AnnounceState`/`PreviousState` API, and taught `ufa-loader` to carry an announced restart's state forward as the `UFA_LOADER_STATE` env var on the next launch — all app-agnostic, per the package's existing "knows nothing about the sub-application" design. On the local-representative side, added `reststate.go`'s `lrState` (auto-rebuild toggle + auto-connect/host/port), wired it into every restart announcement (`announceRestartAndExit`, now a `*Server` method) and applied it at startup — overriding `--auto-connect`/`--ac-host`/`--ac-port` and the dev-repo watcher's auto-rebuild flag — so a newly launched instance picks up exactly the live state established before the restart. Added Go tests for both packages and updated `docs/DevMode.md`, `local-representative/README.md`, and `ufa-loader/README.md`; as with every prior reply, the Go toolchain couldn't be run here (approval denied), so this was verified by manual review only.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

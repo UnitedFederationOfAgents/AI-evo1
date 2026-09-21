@@ -2,6 +2,7 @@ package restartsignal
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -105,5 +106,84 @@ func TestScanReaderNoAnnouncement(t *testing.T) {
 	got := ScanReader(strings.NewReader("just some output\nand more\n"), nil)
 	if got != nil {
 		t.Fatalf("expected nil, got %+v", got)
+	}
+}
+
+// TestAnnounceStateRoundTrip verifies AnnounceState's attached state survives
+// the Banner/JSON/Footer round trip intact, and that a plain Announce (no
+// state) comes back with an empty State field.
+func TestAnnounceStateRoundTrip(t *testing.T) {
+	type payload struct {
+		AutoRebuild bool `json:"auto_rebuild"`
+	}
+
+	var buf bytes.Buffer
+	if err := AnnounceState(&buf, "local-representative", "restart", payload{AutoRebuild: true}); err != nil {
+		t.Fatalf("AnnounceState: %v", err)
+	}
+
+	sc := NewScanner()
+	var got *Announcement
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if a, ok := sc.Feed(line); ok {
+			got = a
+		}
+	}
+	if got == nil {
+		t.Fatal("Scanner did not recognize the announcement")
+	}
+	var decoded payload
+	if err := json.Unmarshal(got.State, &decoded); err != nil {
+		t.Fatalf("unmarshaling State: %v", err)
+	}
+	if !decoded.AutoRebuild {
+		t.Errorf("got AutoRebuild=false after round trip, want true")
+	}
+
+	buf.Reset()
+	if err := Announce(&buf, "local-representative", "sighup"); err != nil {
+		t.Fatalf("Announce: %v", err)
+	}
+	sc = NewScanner()
+	got = nil
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		if a, ok := sc.Feed(line); ok {
+			got = a
+		}
+	}
+	if got == nil {
+		t.Fatal("Scanner did not recognize the plain announcement")
+	}
+	if len(got.State) != 0 {
+		t.Errorf("got State=%q for a plain Announce, want empty", got.State)
+	}
+}
+
+// TestPreviousState verifies PreviousState reflects StateEnvVar, and reports
+// false when it's unset or empty (a fresh launch, or a prior announcement
+// with no state).
+func TestPreviousState(t *testing.T) {
+	if _, ok := PreviousState(); ok {
+		t.Fatal("expected ok=false with StateEnvVar unset")
+	}
+
+	t.Setenv(StateEnvVar, `{"auto_rebuild":true}`)
+	raw, ok := PreviousState()
+	if !ok {
+		t.Fatal("expected ok=true with StateEnvVar set")
+	}
+	var decoded struct {
+		AutoRebuild bool `json:"auto_rebuild"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshaling PreviousState: %v", err)
+	}
+	if !decoded.AutoRebuild {
+		t.Errorf("got AutoRebuild=false, want true")
+	}
+
+	t.Setenv(StateEnvVar, "")
+	if _, ok := PreviousState(); ok {
+		t.Fatal("expected ok=false with StateEnvVar set to empty string")
 	}
 }

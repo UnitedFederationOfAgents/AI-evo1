@@ -46,6 +46,22 @@ without needing to know anything else about how it was invoked.
 `local-representative` uses this to grey out its system tab's **restart**
 control when it isn't running under `ufa-loader`.
 
+## Carrying state across a restart
+
+An announcement may attach opaque `state` (see the JSON shape below).
+`ufa-loader` doesn't look at what's inside — it just hands it back to the
+*next* launch of the same binary as the `UFA_LOADER_STATE` environment
+variable, mirroring `UFA_LOADER_INIT`. A sub-application that wants to bring
+some of its own live state forward across a restart writes it via
+`restartsignal.AnnounceState(w, app, reason, state)` before exiting, and
+reads its predecessor's via `restartsignal.PreviousState()` on the next
+launch (`ok` is false on the very first launch, or whenever the previous
+announcement carried no state). `local-representative` uses this for its own
+`auto-rebuild`/`auto-connect` toggles — see
+[`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" and
+[`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
+Revision D.
+
 ## The restart protocol
 
 Defined in [`restartsignal`](restartsignal/restartsignal.go), this is the
@@ -70,7 +86,9 @@ following exit is treated:
   relaunches `<binary>` with the same arguments, expecting the file on disk
   to have been replaced with a newer build in the meantime (that replacement
   step — the "dev branch follower" — is a later piece of this condoc, not
-  `ufa-loader` itself).
+  `ufa-loader` itself). If the announcement carried `state`, it's handed to
+  the relaunched process as `UFA_LOADER_STATE` — see "Carrying state across a
+  restart" above.
 
 The sub-application never restarts itself; `Announce` only discloses that a
 restart is wanted and why. Actually relaunching is `ufa-loader`'s job, kept

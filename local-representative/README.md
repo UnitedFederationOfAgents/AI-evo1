@@ -35,6 +35,15 @@ loader-managed at all — the control greys itself out (and the backend
 refuses the request) when it isn't, since pressing it would otherwise just
 stop LR for good.
 
+Every restart also carries this LR's own live state forward — currently the
+`auto-rebuild` toggle and whether/where it was connected to
+`agent-coordinator` (`auto-connect`) — so the instance that comes back up
+matches what was live just before the restart rather than resetting to
+whatever `--auto-connect`/`--ac-host`/`--ac-port` it happens to be relaunched
+with (see [`docs/DevMode.md`](../docs/DevMode.md) "Loader" and
+`reststate.go`). This covers only LR's own state, nothing about the
+sub-applications it manages.
+
 ## Flags
 
 | Flag | Config key | Default | Purpose |
@@ -105,6 +114,9 @@ the dashboard supersedes and cancels the background loop.
 ./local-representative --auto-connect --ac-host 10.0.0.5 --ac-port 9000
 ```
 
+A loader-managed restart carries the live connection state forward regardless
+of these flags — see "Running under ufa-loader" above.
+
 ## System tab
 
 The dashboard's right-most tab, **system**, shows `local-representative` as a
@@ -128,7 +140,9 @@ here you can:
   also polls its own on-disk binary's `--version` every 5 seconds; once it
   disagrees with the version actually running, the button turns orange and
   reads **update and restart** instead of a plain **restart**, so you know
-  pressing it lands a newer build rather than just cycling the same one;
+  pressing it lands a newer build rather than just cycling the same one. The
+  restart carries this LR's own live state (auto-rebuild, auto-connect) into
+  the instance that comes back up — see "Running under ufa-loader" above;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
   exit code;
 - see this LR's own build **version** next to its name (see

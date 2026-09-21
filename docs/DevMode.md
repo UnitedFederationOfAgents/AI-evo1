@@ -164,6 +164,20 @@ identical config), but the control greys itself out — and the equivalent
 `__system:restart` command from `agent-coordinator` is refused — when LR
 isn't loader-managed, since there would be nothing to bring it back up.
 
+An announcement can also carry opaque `state` that `ufa-loader` hands the
+*next* launch back as `UFA_LOADER_STATE` (`restartsignal.AnnounceState` /
+`restartsignal.PreviousState`), so live in-memory state established since
+startup survives a restart instead of resetting to whatever the relaunch's
+flags/config say. LR uses this for its own `auto-rebuild` toggle (see
+"Dev-repo watcher" below) and its `auto-connect` connection to
+agent-coordinator: `reststate.go`'s `lrState` is attached to every restart
+announcement and re-applied — taking precedence over `--auto-connect`/
+`--ac-host`/`--ac-port` — before the replacement instance dials out. This
+covers only LR's own state today, nothing about the sub-applications it
+manages — see
+[`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
+Revision D.
+
 When LR is loader-managed it also polls its own on-disk binary every 5
 seconds — running it with `--version` and comparing the answer against the
 version running in this process (see

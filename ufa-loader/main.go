@@ -11,6 +11,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -83,9 +84,10 @@ func (l *loader) run() int {
 	defer signal.Stop(sigCh)
 
 	restarts := 0
+	var state json.RawMessage // carried forward from the previous announcement's State, if any
 	for {
-		code, announced := l.runOnce(sigCh)
-		if !announced {
+		code, ann := l.runOnce(sigCh, state)
+		if ann == nil {
 			return code
 		}
 		if l.maxRestarts > 0 && restarts >= l.maxRestarts {
@@ -93,6 +95,7 @@ func (l *loader) run() int {
 			return code
 		}
 		restarts++
+		state = ann.State
 		log.Printf("%s announced a restart (#%d) — relaunching in %s", l.bin, restarts, l.restartDelay)
 
 		select {
@@ -107,25 +110,34 @@ func (l *loader) run() int {
 // runOnce launches one instance of bin, forwards SIGINT/SIGTERM received by
 // ufa-loader on to it while it runs, streams its stdout through to our own
 // (watching for the restart announcement along the way), and waits for it to
-// exit. It returns the exit code to propagate if this turns out to be the
-// final launch, and whether the child announced a restart before exiting.
-func (l *loader) runOnce(sigCh <-chan os.Signal) (exitCode int, announced bool) {
+// exit. state is the previous instance's disclosed restart State, if any
+// (see restartsignal.PreviousState); pass nil on the first launch. It
+// returns the exit code to propagate if this turns out to be the final
+// launch, and the announcement the child made before exiting, if any (nil
+// for a plain exit).
+func (l *loader) runOnce(sigCh <-chan os.Signal, state json.RawMessage) (exitCode int, ann *restartsignal.Announcement) {
 	cmd := exec.Command(l.bin, l.binArgs...)
 	// Let the sub-application detect it is loader-managed (see
 	// restartsignal.IsLoaderManaged) without needing to know anything else
 	// about how it was invoked.
-	cmd.Env = append(os.Environ(), restartsignal.InitEnvVar+"=1")
+	env := append(os.Environ(), restartsignal.InitEnvVar+"=1")
+	if len(state) > 0 {
+		// Hand the previous instance's disclosed state back to this one
+		// (see restartsignal.PreviousState) — opaque to ufa-loader itself.
+		env = append(env, restartsignal.StateEnvVar+"="+string(state))
+	}
+	cmd.Env = env
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		log.Printf("%s: %v", l.bin, err)
-		return 1, false
+		return 1, nil
 	}
 
 	if err := cmd.Start(); err != nil {
 		log.Printf("%s: %v", l.bin, err)
-		return 1, false
+		return 1, nil
 	}
 	log.Printf("launched %s (pid %d)", l.bin, cmd.Process.Pid)
 
@@ -145,7 +157,7 @@ func (l *loader) runOnce(sigCh <-chan os.Signal) (exitCode int, announced bool) 
 	}()
 
 	// All reads from the stdout pipe must finish before Wait is called.
-	ann := restartsignal.ScanReader(stdout, os.Stdout)
+	ann = restartsignal.ScanReader(stdout, os.Stdout)
 
 	err = cmd.Wait()
 	close(stopForwarding)
@@ -162,8 +174,8 @@ func (l *loader) runOnce(sigCh <-chan os.Signal) (exitCode int, announced bool) 
 	}
 	if ann != nil {
 		log.Printf("%s (pid %d) exited %d after announcing a restart (%s)", l.bin, cmd.Process.Pid, code, ann.Reason)
-		return code, true
+		return code, ann
 	}
 	log.Printf("%s (pid %d) exited %d", l.bin, cmd.Process.Pid, code)
-	return code, false
+	return code, nil
 }

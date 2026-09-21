@@ -72,11 +72,10 @@ prompt: [`cfc5743`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c
 bash: line 1: /AI-evo1-dev/bin/clauditable: No such file or directory
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's add functionality to the ufa-loader restart sequence for LR.
 
+The return value will now hold local state data (covering only LR - nothing yet for the sub-applications it manages) such as the 'auto-rebuild' and 'auto-connect' state.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This will be fed back into the newly launched instance, bringing the state up to date with that established before the restart. The live state will take precedence over arguments where applicable.

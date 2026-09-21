@@ -20,11 +20,10 @@ prompt: [`0eab75d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0
 Implemented Step 3: added local-representative's dev-repo watcher (`--dev-repo`, implying `--dev-mode`, refusing to start outside a git repo) as a new `repowatch.go`, polling the watched repo every 5s to drive a system-tab **rebuild** control that turns orange/"dirty" on uncommitted changes or green/"rebuild" once HEAD has moved (auto-pulling a clean repo's upstream with `pull --rebase` first), runs `make deploy-dev-binaries` at the repo root on press (showing "building…"), and offers an **auto-rebuild** toggle — all serialized through one mutex so the check-and-rebuild process is single-threaded, plus matching `agent-coordinator` `__system:rebuild`/`__system:auto-rebuild` remote commands. Wired the full stack: WebSocket `repo-state`/`rebuild-app`/`set-auto-rebuild` messages, the React system-tab UI and CSS, `docs/DevMode.md`/`local-representative/README.md` documentation, and new Go tests (`repowatch_test.go`) exercising the logic against real temporary git repos. As with every prior reply in this sandbox, `go build`/`go test`/`tsc` couldn't actually be run (toolchain approval denied), so this was verified by careful manual review instead.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's add the ufa-loader binary to the .gitignore.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also fix the 'rebuild' control:
+- We should not see the illuminated button when the HEAD has not moved (currently we see it even with no changes)
+- When the repo is 'dirty' we should not be able to select the control

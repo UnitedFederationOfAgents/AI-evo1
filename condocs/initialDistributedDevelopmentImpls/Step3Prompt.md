@@ -109,3 +109,22 @@ Implemented Revision E: LR's auto-rebuild now arms a 90-second debounce timer (`
 ## Revision F
 
 Let's ensure that if the repo becomes dirty during the countdown before the auto-rebuild occurs that the countdown (and auto-rebuild process) is cancelled.
+
+
+prompt: [`fa58c3c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fa58c3cc932a193a278395d635c74106a19c41a9) → reply: [`1c8b651`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1c8b651341b808208613c7d5f48cb2f1b27b3fc3)
+
+## Reply F
+
+Frontend just renders whatever `auto_rebuild_pending`/`auto_rebuild_seconds` the backend reports, so when the backend clears those on dirty, the "rebuilding in Ns" label disappears on its own. This confirms the requested behavior is already fully wired end-to-end.
+
+Given `maybeAutoRebuild()` already gates on `rebuildReadyLocked()` (which is `!dirty && head != builtHead`) before either keeping the timer armed or letting it fire, going dirty mid-countdown already disarms the timer and blocks the rebuild from ever running — this was built into Revision E's implementation itself (`repowatch.go`'s `maybeAutoRebuild`), is already covered by `TestRepoWatchAutoRebuildDisarmsWhenNotReady`, and is already documented in `docs/DevMode.md` ("the repo going dirty ... cancels the pending timer"). I verified this by re-reading the code, tests, and docs closely and found no gap: the dirty check happens on the very next poll tick (≤5s) before the debounce deadline is ever evaluated, so no rebuild can slip through. No code changes were needed for this revision.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

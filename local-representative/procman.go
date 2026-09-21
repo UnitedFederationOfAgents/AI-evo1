@@ -37,12 +37,30 @@ type ProcInfo struct {
 	// actually come back up rather than just stop this process for good.
 	LoaderManaged bool `json:"loader_managed,omitempty"`
 
-	// Version is only meaningful on Self: this local-representative binary's
-	// build version (ufa-version.Version — see docs/DevMode.md
-	// "Versioning"). Managed instances don't report their own version here;
-	// LR only knows what it launched them with, not what they'd say to
-	// --version.
+	// Version is this process's build version (ufa-version.Version — see
+	// docs/DevMode.md "Versioning"). On Self it's this local-representative
+	// binary's own compiled-in version; on a managed instance it's whatever
+	// that instance most recently reported over representable's "version"
+	// data message (see setManagedVersion) -- empty until it has connected
+	// and reported at least once, or if it doesn't speak the protocol at
+	// all yet.
 	Version string `json:"version,omitempty"`
+
+	// UpdateAvailable is only meaningful on Self: true once this process's
+	// on-disk binary answers "--version" differently than the version
+	// running in this process (see selfversion.go) -- i.e. a newer build
+	// has landed since startup and pressing "restart" would pick it up.
+	// Only ever true for a loader-managed process; see docs/DevMode.md
+	// "Loader".
+	UpdateAvailable bool `json:"update_available,omitempty"`
+}
+
+// VersionMsg is the payload of a representable "version" data message: sent
+// once a managed sub-application connects, reporting its own build version
+// so LR can surface it on the system tab alongside its own (see
+// docs/DevMode.md "Versioning").
+type VersionMsg struct {
+	Version string `json:"version"`
 }
 
 // SystemStateMsg is the payload of "system-state" WebSocket messages.
@@ -191,6 +209,7 @@ func (s *Server) systemState() SystemStateMsg {
 		// Every instance LR launches cascades LR's own mode (see
 		// docs/DevMode.md) — there is no per-instance override.
 		info.DevMode = s.devMode
+		info.Version = s.managedVersion(p.app)
 		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
@@ -203,17 +222,42 @@ func (s *Server) systemState() SystemStateMsg {
 
 	return SystemStateMsg{
 		Self: ProcInfo{
-			Name:          s.lrName,
-			PID:           os.Getpid(),
-			Status:        "running",
-			Managed:       false,
-			StartedAt:     s.selfStart.Unix(),
-			DevMode:       s.devMode,
-			LoaderManaged: s.loaderManaged,
-			Version:       ufaversion.Version,
+			Name:            s.lrName,
+			PID:             os.Getpid(),
+			Status:          "running",
+			Managed:         false,
+			StartedAt:       s.selfStart.Unix(),
+			DevMode:         s.devMode,
+			LoaderManaged:   s.loaderManaged,
+			Version:         ufaversion.Version,
+			UpdateAvailable: s.selfVersion.available(),
 		},
 		Managed: procs,
 	}
+}
+
+// setManagedVersion records the build version a managed sub-application most
+// recently reported over representable (see the "version" data message
+// handled in main.go), broadcasting a fresh system-state if it's new or has
+// changed since the last report.
+func (s *Server) setManagedVersion(name, version string) {
+	s.versionMu.Lock()
+	changed := s.managedVersions[name] != version
+	if changed {
+		s.managedVersions[name] = version
+	}
+	s.versionMu.Unlock()
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// managedVersion returns the build version most recently reported by the
+// named application, or "" if none has connected/reported yet.
+func (s *Server) managedVersion(name string) string {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	return s.managedVersions[name]
 }
 
 func (s *Server) broadcastSystemState() {

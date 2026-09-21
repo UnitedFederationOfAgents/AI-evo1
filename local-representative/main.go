@@ -170,6 +170,13 @@ type Server struct {
 	// can be expected to actually come back up rather than just stop.
 	loaderManaged bool
 
+	// selfVersion watches this process's own on-disk binary for a newer
+	// build landing while it runs (see selfversion.go) so the system tab's
+	// restart control can offer "update and restart". Only started when
+	// loaderManaged, since that's the only case restart actually helps; nil
+	// (and selfVersion.available() reports false) otherwise.
+	selfVersion *selfVersionWatch
+
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
@@ -181,6 +188,15 @@ type Server struct {
 	procMu        sync.Mutex
 	managed       map[string]*managedProc // instance id -> running/finished child
 	instanceSeq   map[string]int          // app name -> highest instance ordinal handed out
+
+	// versionMu guards managedVersions: app name -> the build version most
+	// recently reported over representable's "version" data message (see
+	// procman.go). Keyed by app name, not instance id, mirroring how
+	// representable itself only tracks one connection identity per app name
+	// today (see reprServer.IsHealthy("federation-command")) -- multiple
+	// instances of the same N-per-host app share one reported version.
+	versionMu       sync.RWMutex
+	managedVersions map[string]string
 
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
@@ -198,13 +214,14 @@ func newServer(lrName string) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:        make(map[*wsClient]bool),
-		lrName:         lrName,
-		selfStart:      time.Now(),
-		binOverrides:   make(map[string]string),
-		managed:        make(map[string]*managedProc),
-		instanceSeq:    make(map[string]int),
-		modeMismatches: make(map[string]ModeMismatchMsg),
+		clients:         make(map[*wsClient]bool),
+		lrName:          lrName,
+		selfStart:       time.Now(),
+		binOverrides:    make(map[string]string),
+		managed:         make(map[string]*managedProc),
+		instanceSeq:     make(map[string]int),
+		modeMismatches:  make(map[string]ModeMismatchMsg),
+		managedVersions: make(map[string]string),
 	}
 }
 
@@ -978,6 +995,14 @@ func main() {
 
 	s := newServer(cfg.name)
 	s.loaderManaged = restartsignal.IsLoaderManaged()
+	if s.loaderManaged {
+		// Only worth polling for an on-disk update when a restart could
+		// actually pick it up -- see selfversion.go.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSystemState)
+		if s.selfVersion != nil {
+			go s.selfVersion.watchLoop()
+		}
+	}
 	s.devMode = cfg.devMode
 	s.heartbeatPort = cfg.heartbeatPort
 	s.httpPort = cfg.httpPort
@@ -1070,6 +1095,17 @@ func main() {
 	})
 
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if dataType == "version" {
+			// Every managed app reports its build version once it connects
+			// (see docs/DevMode.md "Versioning") -- generic across app names
+			// so any future adopter gets it for free, unlike the
+			// per-app-name dispatch below.
+			var payload VersionMsg
+			if err := json.Unmarshal(data, &payload); err == nil && payload.Version != "" {
+				s.setManagedVersion(name, payload.Version)
+			}
+			return
+		}
 		if name == "condoccer" {
 			if dataType == "condoccer-state" {
 				var payload CondoccerStateMsg

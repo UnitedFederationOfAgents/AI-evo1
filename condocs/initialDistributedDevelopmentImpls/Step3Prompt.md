@@ -47,3 +47,20 @@ For the `.gitignore` request I added `ufa-loader/.gitignore` (matching the `# Bi
 Now let's add two more elements to improve this dev loop:
 - We need the LR-managed sub-applications to report their version so we can see that listed in the LR 'system' tab
 - We want the 'restart' button for LR's self-management row in the system tab to show 'update and restart' when the binary the loader is managing has changed. (We could watch this file or we could poll the 'version' command)
+
+
+prompt: [`05a523e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/05a523e86d1a58f90025b0323f4095e8bc3bae53) → reply: [`7fc1f1a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7fc1f1aad5e5851eb1da16f3e690d0ee3581ca42)
+
+## Reply B
+
+Implemented Revision B's two additions: (1) `federation-command` and `condoccer` now report their build version to LR once over `representable` (a new "version" data message, mirrored by generic handling in LR's data dispatcher plus a `managedVersions` map), so the system tab lists each managed instance's version alongside LR's own; (2) a new `selfversion.go` watcher polls LR's own on-disk binary's `--version` every 5s when loader-managed, and the system tab's restart control now turns orange and reads "update and restart" once that differs from the running version. Updated `types.ts`/`App.tsx`/`index.css`, `docs/DevMode.md`, `local-representative/README.md`, and added Go tests (`selfversion_test.go`, plus new cases in `procman_test.go`); as before, the toolchain (`go build`/`go vet`/`gofmt`) couldn't actually be run here (approval denied), so this was verified by careful manual review instead.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

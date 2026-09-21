@@ -315,6 +315,47 @@ func TestSystemStateDevModeCascadesToManaged(t *testing.T) {
 	}
 }
 
+// TestSystemStateSelfUpdateAvailable verifies systemState() surfaces the
+// self-version watcher's verdict on Self, and that a process without one
+// (not loader-managed, per main.go) always reports false rather than
+// panicking on the nil watch.
+func TestSystemStateSelfUpdateAvailable(t *testing.T) {
+	s := newServer("test-lr")
+	if s.systemState().Self.UpdateAvailable {
+		t.Errorf("a fresh (non-loader-managed) server should report UpdateAvailable=false")
+	}
+
+	s.selfVersion = &selfVersionWatch{updateAvailable: true}
+	if !s.systemState().Self.UpdateAvailable {
+		t.Errorf("systemState() should surface a true selfVersion.available()")
+	}
+}
+
+// TestManagedVersionInSystemState verifies a version reported over
+// representable's "version" data message (see setManagedVersion, wired up in
+// main.go's SetDataHandler) shows up on the matching managed instance's
+// ProcInfo, keyed by app name rather than instance id -- representable
+// itself only tracks one connection identity per app name today.
+func TestManagedVersionInSystemState(t *testing.T) {
+	s := newServer("test-lr")
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+
+	if v := s.managedVersion("federation-command"); v != "" {
+		t.Errorf("managedVersion before any report = %q, want empty", v)
+	}
+
+	s.setManagedVersion("federation-command", "v0.4.3-main-8b1e2d4")
+
+	st := s.systemState()
+	if len(st.Managed) != 1 || st.Managed[0].Version != "v0.4.3-main-8b1e2d4" {
+		t.Fatalf("expected the reported version on the managed instance, got %+v", st.Managed)
+	}
+}
+
 // TestLaunchManagedUnknown verifies an unrecognised application name is an error.
 func TestLaunchManagedUnknown(t *testing.T) {
 	s := newServer("test-lr")

@@ -843,6 +843,16 @@ body {
 
 .sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
 
+/* A newer build has landed on disk since this process started -- orange,
+   matching .sys-btn-rebuild-dirty's "worth your attention" treatment. */
+.sys-btn-restart-update {
+  background: #3a2a14;
+  border: 1px solid #a06a1e;
+  color: #e0a83e;
+}
+
+.sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
+
 /* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) ---- */
 
 .sys-repo-panel {

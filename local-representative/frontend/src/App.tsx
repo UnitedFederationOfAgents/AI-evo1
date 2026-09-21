@@ -538,7 +538,7 @@ function SystemProcRow({
           {!proc.managed && <span className="sys-self-tag">this process</span>}
           {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
         </span>
-        {!proc.managed && proc.version && (
+        {proc.version && (
           <span className="sys-version-tag" title="build version">{proc.version}</span>
         )}
       </span>
@@ -556,14 +556,16 @@ function SystemProcRow({
         )}
         {!proc.managed && onRestart && (
           <button
-            className="sys-btn sys-btn-restart"
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
             disabled={!proc.loader_managed}
             title={proc.loader_managed
-              ? 'terminate this process so ufa-loader relaunches it with the identical config'
+              ? (proc.update_available
+                ? 'a newer build has landed on disk — terminate this process so ufa-loader relaunches it with the new binary'
+                : 'terminate this process so ufa-loader relaunches it with the identical config')
               : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
             onClick={onRestart}
           >
-            restart
+            {proc.update_available ? 'update and restart' : 'restart'}
           </button>
         )}
       </span>

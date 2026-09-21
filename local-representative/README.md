@@ -124,11 +124,17 @@ here you can:
   ufa-loader" above): it terminates so a wrapping `ufa-loader` relaunches it
   with the identical config. Only enabled when this LR is loader-managed
   (`UFA_LOADER_INIT` was set at startup) — otherwise the button is greyed
-  out, since there would be nothing to bring it back;
+  out, since there would be nothing to bring it back. When loader-managed, LR
+  also polls its own on-disk binary's `--version` every 5 seconds; once it
+  disagrees with the version actually running, the button turns orange and
+  reads **update and restart** instead of a plain **restart**, so you know
+  pressing it lands a newer build rather than just cycling the same one;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
   exit code;
 - see this LR's own build **version** next to its name (see
-  [`docs/DevMode.md`](../docs/DevMode.md) "Versioning").
+  [`docs/DevMode.md`](../docs/DevMode.md) "Versioning") — and, once a managed
+  `federation-command`/`condoccer` instance has connected and reported in,
+  its version next to *its* name too.
 
 `federation-command` is **N-per-host**: the launch button stays enabled while
 instances run and each press starts another, listed as `federation-command #1`,

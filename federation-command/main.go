@@ -602,6 +602,24 @@ type condocStatePayload struct {
 	StatusMsg string `json:"status_msg,omitempty"`
 }
 
+// versionPayload is sent once over the representable data channel right
+// after connecting, so local-representative's system tab can list this
+// instance's build version alongside its own (see docs/DevMode.md
+// "Versioning").
+type versionPayload struct {
+	Version string `json:"version"`
+}
+
+// sendVersion reports this binary's build version to local-representative.
+// Called once a representable connection lands, mirroring how control state
+// is announced immediately after connecting.
+func (m appModel) sendVersion() {
+	if m.reprClient == nil {
+		return
+	}
+	m.reprClient.SendData("version", versionPayload{Version: ufaversion.Version})
+}
+
 // sendRidealongState pushes the current ridealong state to local-representative.
 func (m appModel) sendRidealongState() {
 	if m.reprClient == nil {
@@ -1204,6 +1222,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		})
 		m.wireModeMismatchHandler()
+		m.sendVersion()
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
 			m.reprOutPath = tf.Name()
@@ -1254,6 +1273,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		})
 		m.wireModeMismatchHandler()
+		m.sendVersion()
 		// Create temp file for output capture.
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()

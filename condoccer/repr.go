@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"representable"
+	ufaversion "ufa-version"
 )
 
 // Auto-connect (--auto-connect) tuning: on startup condoccer dials
@@ -171,6 +172,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 			s.setModeMismatch(mismatched, peerMode)
 		})
 		s.pushCondoccerState()
+		s.sendVersion()
 
 		<-client.DisconnectCh()
 
@@ -239,6 +241,25 @@ func (s *Server) pushCondoccerState() {
 		Root:     s.root,
 		Condocs:  infos,
 	})
+}
+
+// versionPayload is sent once over the representable data channel right
+// after connecting, so local-representative's system tab can list this
+// instance's build version alongside its own (see docs/DevMode.md
+// "Versioning").
+type versionPayload struct {
+	Version string `json:"version"`
+}
+
+// sendVersion reports this binary's build version to local-representative.
+func (s *Server) sendVersion() {
+	s.reprMu.Lock()
+	client := s.reprClient
+	s.reprMu.Unlock()
+	if client == nil {
+		return
+	}
+	client.SendData("version", versionPayload{Version: ufaversion.Version})
 }
 
 // handleReprCommand handles commands local-representative relays down the

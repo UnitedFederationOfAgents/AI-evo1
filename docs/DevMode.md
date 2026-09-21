@@ -164,6 +164,17 @@ identical config), but the control greys itself out — and the equivalent
 `__system:restart` command from `agent-coordinator` is refused — when LR
 isn't loader-managed, since there would be nothing to bring it back up.
 
+When LR is loader-managed it also polls its own on-disk binary every 5
+seconds — running it with `--version` and comparing the answer against the
+version running in this process (see
+[`selfversion.go`](../local-representative/selfversion.go)) — to notice a
+newer build has already landed. While it hasn't, the control reads plain
+**restart**; once it has, the control turns orange and reads **update and
+restart** instead, so pressing it visibly means "come back up on the newer
+build" rather than just "come back up". Polling `--version` keeps this
+consistent with every other version check in the codebase, rather than
+introducing a second, file-mtime-based notion of "changed".
+
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
 
@@ -253,6 +264,14 @@ also surface it somewhere more visible:
 - **`local-representative`**: next to its own name on the system tab.
 - **`condoccer`**: a subtle annotation next to the "Condoccer" banner in the
   sidebar.
+
+`federation-command` and `condoccer` also report their version to
+`local-representative` once they connect over `representable` (a "version"
+data message, mirroring how `condoccer` already reports its condoc summary
+the same way) — LR lists it next to each managed instance on the system tab,
+same as its own. It's a one-shot report on connect, not a live poll: a
+managed instance's version tag reflects whatever build it was launched with,
+until it reconnects.
 
 ## Future features
 

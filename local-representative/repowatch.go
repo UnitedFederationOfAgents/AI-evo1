@@ -25,7 +25,7 @@ type RepoStateMsg struct {
 	Watched      bool   `json:"watched"`
 	Root         string `json:"root,omitempty"`
 	Dirty        bool   `json:"dirty"`         // uncommitted staged or unstaged changes relative to HEAD
-	RebuildReady bool   `json:"rebuild_ready"` // the rebuild button is active -- dirty, or HEAD moved since the last successful rebuild
+	RebuildReady bool   `json:"rebuild_ready"` // the rebuild button is active -- HEAD moved since the last successful rebuild, and the repo isn't dirty
 	Building     bool   `json:"building"`      // 'make deploy-dev-binaries' is running right now
 	AutoRebuild  bool   `json:"auto_rebuild"`
 	Head         string `json:"head,omitempty"`
@@ -54,20 +54,34 @@ type repoWatch struct {
 	building    bool
 	autoRebuild bool
 	head        string
-	builtHead   string // HEAD as of the last successful rebuild ("" before the first one)
+	builtHead   string // HEAD as of the last successful rebuild (the watcher's starting HEAD before the first one)
 	lastErr     string
 }
 
 func newRepoWatch(root string, notify func()) *repoWatch {
-	return &repoWatch{root: root, notify: notify}
+	w := &repoWatch{root: root, notify: notify}
+	// Best-effort: seed builtHead with the HEAD we're starting at, so the
+	// rebuild button doesn't light up the moment LR starts watching a repo
+	// that hasn't actually changed since it was last built (see
+	// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md Revision A).
+	// If this fails, head/builtHead both stay "" -- still equal, so the
+	// button starts inactive either way; pollAndMaybePull sorts out the real
+	// head shortly after.
+	if head, err := w.headSHA(); err == nil {
+		w.head = head
+		w.builtHead = head
+	}
+	return w
 }
 
 // rebuildReadyLocked reports whether the rebuild button should be active:
-// there is something uncommitted (dirty -- rebuilding is how it'd land in the
-// dev binaries), or HEAD has moved since the last successful rebuild.
-// Callers must hold mu (read or write).
+// HEAD has moved since the last successful rebuild (or since the watcher
+// started, per newRepoWatch) and the repo isn't dirty. A dirty repo shows
+// "dirty" but is deliberately not selectable -- rebuilding would silently
+// bake in uncommitted, unreviewed changes; commit or revert first. Callers
+// must hold mu (read or write).
 func (w *repoWatch) rebuildReadyLocked() bool {
-	return w.dirty || w.head != w.builtHead
+	return !w.dirty && w.head != w.builtHead
 }
 
 func (w *repoWatch) snapshot() RepoStateMsg {

@@ -178,26 +178,32 @@ working directory's* git repository as watched (LR refuses to start with
 `--dev-repo` if it isn't launched from inside one — `git rev-parse
 --show-toplevel` has to succeed).
 
-A watched repo is polled every 5 seconds:
+A watched repo is polled every 5 seconds. The watcher treats whatever HEAD it
+first sees as already built, so the button starts out inactive rather than
+lighting up for a repo that hasn't actually changed since LR started
+watching it:
 
 - **dirty** (`git diff HEAD` is non-empty — modified unstaged or staged
-  changes; untracked files don't count) — the system tab's rebuild button is
-  active, orange, and reads **dirty**.
+  changes; untracked files don't count) — the system tab's rebuild button
+  turns orange and reads **dirty**, but stays disabled: rebuilding a dirty
+  tree would silently bake in uncommitted, unreviewed changes, so it isn't
+  selectable until the changes are committed or reverted.
 - **clean** — LR instead checks whether the upstream branch has moved
   (`git fetch` + `git rev-list HEAD..@{u}`) and, if so, brings the repo
   forward with `git pull --rebase`. If HEAD has moved since the last
   successful rebuild (by this pull, or by a commit made by hand), the button
   is active, green, and reads **rebuild**.
 - otherwise the button is inactive: nothing has changed since the last
-  successful rebuild.
+  successful rebuild (or since the watcher started, if none has happened
+  yet).
 
 Pressing the button (or `agent-coordinator`'s `__system:rebuild`) runs `make
 deploy-dev-binaries` at the repo root, with the button reading **building…**
 and disabled meanwhile. The **auto-rebuild** toggle next to it (also settable
 remotely via `__system:auto-rebuild <on|off>`) makes LR press that button
-itself the moment it next detects the button would be active — including
-repeatedly while the repo stays dirty, since dirtiness isn't resolved by
-rebuilding, only by committing or reverting.
+itself the moment it next detects the button would be active — which, since
+rebuilding is disabled while dirty, means it waits for the repo to be clean
+with HEAD moved rather than repeatedly firing while the repo stays dirty.
 
 Every git/make invocation the watcher makes — the poll's own status check,
 the pull, and a rebuild, whether triggered by the operator or by

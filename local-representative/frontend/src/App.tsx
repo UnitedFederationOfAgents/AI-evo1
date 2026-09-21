@@ -573,9 +573,11 @@ function SystemProcRow({
 
 // RepoWatchPanel is the system tab's dev-repo watcher widget (--dev-repo, see
 // docs/DevMode.md): the rebuild button turns orange and reads "dirty" while
-// the watched repo has uncommitted changes, plain "rebuild" once HEAD has
-// simply moved since the last build, and is disabled otherwise. Rendered
-// only when LR was actually launched with --dev-repo.
+// the watched repo has uncommitted changes -- but stays disabled, since
+// rebuilding a dirty tree would silently bake in unreviewed changes. It's
+// selectable, plain, and reads "rebuild" only once HEAD has moved since the
+// last build with the repo clean; otherwise it's disabled. Rendered only
+// when LR was actually launched with --dev-repo.
 function RepoWatchPanel({
   repoState,
   onRebuild,
@@ -603,7 +605,7 @@ function RepoWatchPanel({
           onClick={onRebuild}
           title={
             repoState.dirty
-              ? 'uncommitted changes — runs make deploy-dev-binaries at the repo root'
+              ? 'uncommitted changes — commit or revert to enable rebuilding'
               : repoState.rebuild_ready
               ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
               : 'nothing to rebuild since the last successful build'

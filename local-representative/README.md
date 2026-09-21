@@ -204,20 +204,24 @@ executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 
 Launch with `--dev-repo` (from inside a git checkout — it refuses to start
 otherwise) and the system tab grows a **rebuild** control for the repo LR was
-launched from. Every 5 seconds LR checks the repo: a dirty working tree
-(`git diff HEAD` non-empty — untracked files don't count) makes the button
-active, orange, and labelled **dirty**; a clean tree instead pulls in any
-upstream movement (`git fetch` + `pull --rebase`) and, if HEAD has moved
-since the last successful rebuild, makes the button active, green, and
-labelled **rebuild**. Pressing it (or `agent-coordinator`'s
-`__system:rebuild`) runs `make deploy-dev-binaries` at the repo root, greying
-the button and showing **building…** meanwhile.
+launched from. The watcher treats the HEAD it first sees as already built, so
+the button starts out inactive rather than lighting up for a repo that hasn't
+changed since LR started watching. Every 5 seconds LR checks the repo: a
+dirty working tree (`git diff HEAD` non-empty — untracked files don't count)
+turns the button orange and labels it **dirty**, but leaves it disabled —
+rebuilding a dirty tree would silently bake in uncommitted, unreviewed
+changes; a clean tree instead pulls in any upstream movement (`git fetch` +
+`pull --rebase`) and, if HEAD has moved since the last successful rebuild,
+makes the button active, green, and labelled **rebuild**. Pressing it (or
+`agent-coordinator`'s `__system:rebuild`) runs `make deploy-dev-binaries` at
+the repo root, greying the button and showing **building…** meanwhile.
 
 The **auto-rebuild** checkbox next to it (also `__system:auto-rebuild
 <on|off>` from `agent-coordinator`) makes LR press that button itself
-whenever it becomes active. Every git/make call the watcher makes — checks,
-the pull, and a rebuild — is serialized through one mutex, so the
-check-and-rebuild process never overlaps itself. See
+whenever it becomes active — which, since rebuilding is disabled while
+dirty, means waiting for a clean repo with HEAD moved. Every git/make call
+the watcher makes — checks, the pull, and a rebuild — is serialized through
+one mutex, so the check-and-rebuild process never overlaps itself. See
 [`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" for the full
 detection rules.
 

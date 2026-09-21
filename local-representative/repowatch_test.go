@@ -42,6 +42,29 @@ func initTestRepo(t *testing.T, buildCmd string) string {
 	return dir
 }
 
+// commitChange writes file.txt with the given content and commits it,
+// moving HEAD forward in dir -- used to get a watcher past its
+// newRepoWatch-seeded builtHead so rebuild_ready can go true.
+func commitChange(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	run("commit", "-q", "-am", "change")
+}
+
 // TestResolveConfigDevRepo verifies --dev-repo / dev-repo layers the same way
 // every other bool flag does (see TestResolveConfigDevMode). Whether it
 // forces dev-mode on is main()'s job, not resolveConfig's, so that's not
@@ -76,21 +99,20 @@ func TestResolveConfigDevRepo(t *testing.T) {
 }
 
 // TestRepoWatchPollAndMaybePull verifies pollAndMaybePull's dirty/head/
-// rebuild-ready derivation against a real git repo: rebuild_ready before any
-// build has happened, dirty once a tracked file is modified.
+// rebuild-ready derivation against a real git repo: not rebuild_ready right
+// after the watcher starts (HEAD hasn't moved since), and not rebuild_ready
+// once the repo goes dirty either.
 func TestRepoWatchPollAndMaybePull(t *testing.T) {
 	dir := initTestRepo(t, "true")
 	rw := newRepoWatch(dir, func() {})
 
-	if changed := rw.pollAndMaybePull(); !changed {
-		t.Fatalf("expected the first poll to report a change (nothing built yet)")
-	}
+	rw.pollAndMaybePull()
 	snap := rw.snapshot()
 	if snap.Dirty {
 		t.Errorf("freshly-committed repo should not be dirty")
 	}
-	if !snap.RebuildReady {
-		t.Errorf("expected rebuild_ready before any build has happened")
+	if snap.RebuildReady {
+		t.Errorf("expected rebuild_ready=false right after the watcher starts (HEAD hasn't moved since)")
 	}
 	if snap.Head == "" {
 		t.Errorf("expected a HEAD sha to be recorded")
@@ -99,13 +121,15 @@ func TestRepoWatchPollAndMaybePull(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rw.pollAndMaybePull()
+	if changed := rw.pollAndMaybePull(); !changed {
+		t.Fatalf("expected becoming dirty to report a change")
+	}
 	snap = rw.snapshot()
 	if !snap.Dirty {
 		t.Errorf("expected dirty after modifying a tracked file")
 	}
-	if !snap.RebuildReady {
-		t.Errorf("expected rebuild_ready while dirty")
+	if snap.RebuildReady {
+		t.Errorf("expected rebuild_ready=false while dirty")
 	}
 }
 
@@ -117,9 +141,13 @@ func TestRepoWatchRebuildSuccessClearsRebuildReady(t *testing.T) {
 	var notified int32
 	rw := newRepoWatch(dir, func() { atomic.AddInt32(&notified, 1) })
 
+	// Move HEAD past the watcher's starting point so there's something to
+	// build -- a fresh watcher on an unchanged repo is never rebuild_ready
+	// (Revision A).
+	commitChange(t, dir, "v2\n")
 	rw.pollAndMaybePull()
 	if !rw.snapshot().RebuildReady {
-		t.Fatalf("expected rebuild_ready before the first build")
+		t.Fatalf("expected rebuild_ready once HEAD has moved past the watcher's starting point")
 	}
 
 	rw.rebuild()
@@ -172,6 +200,33 @@ func TestRepoWatchRequestRebuildSkipsWhenNotReady(t *testing.T) {
 
 	if got := atomic.LoadInt32(&notified); got != before {
 		t.Errorf("requestRebuild triggered a rebuild despite rebuild_ready=false (notify count %d -> %d)", before, got)
+	}
+}
+
+// TestRepoWatchRequestRebuildSkipsWhenDirty verifies the operator-driven path
+// refuses a rebuild while the repo is dirty even though HEAD has also moved
+// -- dirty always wins, per Revision A ("we should not be able to select the
+// control" while dirty).
+func TestRepoWatchRequestRebuildSkipsWhenDirty(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	var notified int32
+	rw := newRepoWatch(dir, func() { atomic.AddInt32(&notified, 1) })
+
+	commitChange(t, dir, "v2\n") // moves HEAD past builtHead
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("v3\n"), 0o644); err != nil {
+		t.Fatal(err) // and leaves the repo dirty
+	}
+	rw.pollAndMaybePull()
+	if snap := rw.snapshot(); !snap.Dirty || snap.RebuildReady {
+		t.Fatalf("expected dirty=true, rebuild_ready=false, got dirty=%v rebuild_ready=%v", snap.Dirty, snap.RebuildReady)
+	}
+
+	before := atomic.LoadInt32(&notified)
+	rw.requestRebuild() // async; should be a no-op
+	time.Sleep(300 * time.Millisecond)
+
+	if got := atomic.LoadInt32(&notified); got != before {
+		t.Errorf("requestRebuild triggered a rebuild despite the repo being dirty (notify count %d -> %d)", before, got)
 	}
 }
 

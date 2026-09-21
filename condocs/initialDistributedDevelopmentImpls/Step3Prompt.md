@@ -27,3 +27,26 @@ Let's add the ufa-loader binary to the .gitignore.
 Let's also fix the 'rebuild' control:
 - We should not see the illuminated button when the HEAD has not moved (currently we see it even with no changes)
 - When the repo is 'dirty' we should not be able to select the control
+
+
+prompt: [`9819f4c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9819f4c415722c954395f0afae418b4359b4499c) → reply: [`6b8dca8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6b8dca828e189604da5c0c1f4f3c2187a7879650)
+
+## Reply A
+
+These are unrelated (Makefile target references, not the binary path), so no further changes needed.
+
+## Summary
+
+For the rebuild-control fix I changed `rebuildReadyLocked` in `repowatch.go` from `dirty || head != builtHead` to `!dirty && head != builtHead`, and seeded `builtHead`/`head` from the actual HEAD when the watcher starts (`newRepoWatch`) instead of leaving `builtHead` empty — this stops the button lighting up on launch when nothing has actually changed, and now makes the button disabled (not just orange) whenever the repo is dirty, since `requestRebuild`/`maybeAutoRebuild` both gate on the same flag. Updated the Go tests, `App.tsx`'s tooltip/doc comment, and `docs/DevMode.md`/`local-representative/README.md` to match the corrected behavior.
+
+For the `.gitignore` request I added `ufa-loader/.gitignore` (matching the `# Binary\n<name>` pattern every other sub-project uses). One caveat: `ufa-loader/ufa-loader` is currently a tracked file in this repo (unlike the other components' binaries), and untracking it needs a `git rm --cached ufa-loader/ufa-loader`, which this sandbox blocked me from running (all state-mutating git commands here return "requires approval" with no prompt reaching me) — you'll need to run that yourself for the new `.gitignore` entry to actually take effect. As with prior replies, `go build`/`go test`/`tsc` also couldn't be run here, so this was verified by manual review.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

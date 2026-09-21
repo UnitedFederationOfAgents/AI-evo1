@@ -42,11 +42,8 @@ For the rebuild-control fix I changed `rebuildReadyLocked` in `repowatch.go` fro
 For the `.gitignore` request I added `ufa-loader/.gitignore` (matching the `# Binary\n<name>` pattern every other sub-project uses). One caveat: `ufa-loader/ufa-loader` is currently a tracked file in this repo (unlike the other components' binaries), and untracking it needs a `git rm --cached ufa-loader/ufa-loader`, which this sandbox blocked me from running (all state-mutating git commands here return "requires approval" with no prompt reaching me) — you'll need to run that yourself for the new `.gitignore` entry to actually take effect. As with prior replies, `go build`/`go test`/`tsc` also couldn't be run here, so this was verified by manual review.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Now let's add two more elements to improve this dev loop:
+- We need the LR-managed sub-applications to report their version so we can see that listed in the LR 'system' tab
+- We want the 'restart' button for LR's self-management row in the system tab to show 'update and restart' when the binary the loader is managing has changed. (We could watch this file or we could poll the 'version' command)

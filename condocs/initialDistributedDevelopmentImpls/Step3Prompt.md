@@ -56,11 +56,10 @@ prompt: [`05a523e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0
 Implemented Revision B's two additions: (1) `federation-command` and `condoccer` now report their build version to LR once over `representable` (a new "version" data message, mirrored by generic handling in LR's data dispatcher plus a `managedVersions` map), so the system tab lists each managed instance's version alongside LR's own; (2) a new `selfversion.go` watcher polls LR's own on-disk binary's `--version` every 5s when loader-managed, and the system tab's restart control now turns orange and reads "update and restart" once that differs from the running version. Updated `types.ts`/`App.tsx`/`index.css`, `docs/DevMode.md`, `local-representative/README.md`, and added Go tests (`selfversion_test.go`, plus new cases in `procman_test.go`); as before, the toolchain (`go build`/`go vet`/`gofmt`) couldn't actually be run here (approval denied), so this was verified by careful manual review instead.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's add functionality to the ufa-loader restart sequence for LR.
 
+The return value will now hold local state data (covering only LR - nothing yet for the sub-applications it manages) such as the 'auto-rebuild' and 'auto-connect' state.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This will be fed back into the newly launched instance, bringing the state up to date with that established before the restart. The live state will take precedence over arguments where applicable.

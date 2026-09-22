@@ -152,11 +152,12 @@ prompt: [`d005002`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d
 Implemented Revision H: `agent-coordinator`'s per-host system pane now has the same restart/version/dev-repo-build controls as `local-representative`'s own system tab, and they act on the selected host's LR, never on agent-coordinator itself. Backend (`agent-coordinator/main.go`): `ProcInfo` now carries `loader_managed`/`version`/`update_available`, a new `repo-state` handler stores and forwards LR's dev-repo watcher snapshot as host-scoped `lr-repo-state`, and three new browser commands (`lr-restart-app`, `lr-rebuild-app`, `lr-set-auto-rebuild`) route to LR's existing `__system:restart`/`__system:rebuild`/`__system:auto-rebuild` remote commands. Frontend: added a `RepoWatchPanel` (rebuild/dirty button, auto-rebuild toggle, 90s countdown) mirroring LR's own, a restart button + version tag on the self row of `SystemProcRow`, matching CSS, and wired the new state/callbacks through `LRView`/`App`; the rebuild panel — and thus the build trigger — only renders when the host's LR reports `watched: true`, i.e. it was launched with `--dev-repo`, so it's dev-mode-only automatically. Updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` to document the additions. As with every prior reply, the Go/TS toolchain couldn't actually be run here (approval denied), so this was verified by careful manual review instead.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+Now let's make auto-connect a first class state in all implementing sub-applications.
 
+Wherever we have a UI with a 'connect' button we want to also have an 'auto-connect' toggle.
 
-## Human-Prompt
+In federation-command we'll have a new set of commands: 'auto-connect|auto-connect enable|auto-connect disable' or 'ufa fc auto-connect [<enable|disable>]' (Where 'ufa fc auto-connect' prints the status and the available enable/disable commands)
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The auto-connect state remains intact when a successful connection occurs, and the auto-connect cycle begins automatically upon unintentional disconnection. (Intentionally disconnect terminates auto-connect)

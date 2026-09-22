@@ -60,9 +60,13 @@ managed-app spec always passes `--auto-connect`, so a condoccer that comes up
 through the autolaunch chain is wired in without any manual step. It heartbeats
 to LR's `:8082` server and pushes `data` / `"condoccer-state"` (its HTTP port +
 a condoc summary). `--auto-connect` isn't mandatory, though: condoccer's own UI
-has a connect/disconnect widget (bottom of the sidebar) so a condoccer started
-by hand, or one whose auto-connect window gave up, can link to LR on demand and
-drop the link again. Its browser UI is **forwarded, not re-implemented**: LR
+has a connect/disconnect widget (bottom of the sidebar), plus its own
+first-class **auto-connect** toggle alongside it, so a condoccer started by
+hand can link to LR on demand and drop the link again — the toggle stays
+armed across a successful connection and resumes the retry cycle on its own
+after an unintentional drop, but an explicit disconnect turns it off (see
+`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md` Revision I). Its
+browser UI is **forwarded, not re-implemented**: LR
 reverse-proxies `/condoccer/*` → condoccer's loopback port, and AC
 reverse-proxies `/host/<id>/*` → that host's LR (which in turn forwards
 `/condoccer/*`). A browser on AC — including one arriving through the
@@ -132,9 +136,10 @@ also covers the still-open Path 2 (LR-to-LR transfer brokered through AC).
 
 | Message type | Direction | Payload | Description |
 |---|---|---|---|
-| `ac-state` | LR → Browser | `{ connected, host?, port? }` | AC connection status |
+| `ac-state` | LR → Browser | `{ connected, host?, port?, connecting?, auto_connect? }` | AC connection status; `auto_connect` is the persistent toggle (Revision I), independent of `connecting`/`connected` |
 | `connect-ac` | Browser → LR | `{ host, port }` | Initiate connection to AC |
-| `disconnect-ac` | Browser → LR | `{}` | Close AC connection |
+| `disconnect-ac` | Browser → LR | `{}` | Close AC connection — also disarms auto-connect |
+| `set-auto-connect-ac` | Browser → LR | `{ enabled, host?, port? }` | Arm/disarm the persistent auto-connect toggle |
 
 ## Host States
 

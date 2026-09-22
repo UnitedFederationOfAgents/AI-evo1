@@ -21,12 +21,14 @@ type lrState struct {
 	// watching a repo at all.
 	AutoRebuild bool `json:"auto_rebuild,omitempty"`
 
-	// AutoConnect, ACHost and ACPort mirror whether this LR was connected --
-	// or attempting to connect, via the startup auto-connect retry loop or
-	// an explicit operator connect -- to agent-coordinator, and at what
-	// address, so the newly launched instance picks the connection back up
-	// at the same target regardless of what --auto-connect/--ac-host/
-	// --ac-port it happens to be relaunched with.
+	// AutoConnect is the persistent auto-connect toggle (see Revision I of
+	// Step3Prompt.md) -- a first-class state independent of any single
+	// connection attempt, so it carries forward whether this LR was armed to
+	// keep reaching for agent-coordinator, not merely whether it happened to
+	// be connected/connecting at the instant of the restart. ACHost/ACPort
+	// carry the target it was armed for, so the newly launched instance
+	// picks the connection back up at the same address regardless of what
+	// --auto-connect/--ac-host/--ac-port it happens to be relaunched with.
 	AutoConnect bool   `json:"auto_connect,omitempty"`
 	ACHost      string `json:"ac_host,omitempty"`
 	ACPort      string `json:"ac_port,omitempty"`
@@ -40,7 +42,7 @@ func (s *Server) currentState() lrState {
 		st.AutoRebuild = s.repoWatch.snapshot().AutoRebuild
 	}
 	ac := s.getACState()
-	st.AutoConnect = ac.Connected || ac.Connecting
+	st.AutoConnect = ac.AutoConnect
 	if st.AutoConnect {
 		st.ACHost, st.ACPort = ac.Host, ac.Port
 	}

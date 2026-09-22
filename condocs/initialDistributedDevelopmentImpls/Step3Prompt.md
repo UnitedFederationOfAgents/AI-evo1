@@ -161,3 +161,20 @@ Wherever we have a UI with a 'connect' button we want to also have an 'auto-conn
 In federation-command we'll have a new set of commands: 'auto-connect|auto-connect enable|auto-connect disable' or 'ufa fc auto-connect [<enable|disable>]' (Where 'ufa fc auto-connect' prints the status and the available enable/disable commands)
 
 The auto-connect state remains intact when a successful connection occurs, and the auto-connect cycle begins automatically upon unintentional disconnection. (Intentionally disconnect terminates auto-connect)
+
+
+prompt: [`02f7240`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/02f7240368f3f5b18751745664fe89c2d4ec0109) → reply: [`618bdbb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/618bdbbe5e0e277e45aa64c534e469ae24919ea5)
+
+## Reply I
+
+Implemented Revision I across all three sub-applications with a persistent, first-class **auto-connect** toggle: **local-representative** (its agent-coordinator connection panel gained an auto-connect checkbox plus a `set-auto-connect-ac` WS message) and **condoccer** (its connect/disconnect widget gained the same, over a new `set-auto-connect` message) both now distinguish an *intentional* disconnect (which disarms the toggle) from an *unintentional* drop (which auto-resumes the retry cycle), with the toggle surviving a successful connection either way. **federation-command** gained a new `auto-connect`/`auto-connect enable`/`auto-connect disable` command set (also reachable as `ufa fc auto-connect [<enable|disable>]`), plus a previously-missing background listener on the representable connection's `DisconnectCh()` so it can now detect a dropped connection at all and resume auto-connect when armed. Updated Go tests (`main_test.go`/`repr_test.go`) exercising the toggle/resume/terminate semantics with real loopback `representable` servers, and refreshed `local-representative/README.md`, `federation-command/README.md` and `docs/brief-tour.md`, and `agent-coordinator/docs/architecture.md` to document the new behavior. While reviewing, I caught and fixed a real race in local-representative's original design where a superseded/stale connection's teardown could spuriously broadcast stale state or restart a retry loop against the wrong target — now guarded correctly. As with every prior reply in this sandbox, the Go/TS toolchain couldn't actually be run (approval denied), so this was verified by careful manual review of every diff instead.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

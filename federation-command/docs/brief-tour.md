@@ -53,6 +53,13 @@ connection landed:
 `--lr-host` / `--lr-port` override the target for both the background auto-connect
 and the manual blinker connect flow; they default to `localhost:8082`.
 
+Auto-connect is a runtime-toggleable, first-class state, not just a startup
+flag: run `auto-connect` (or `ufa fc auto-connect`) to see whether it's armed,
+and `auto-connect enable`/`auto-connect disable` to flip it. It stays armed
+across a successful connection, so an unintentional drop later resumes the
+retry cycle on its own; an explicit disconnect (`^C`) disarms it. See
+[../README.md](../README.md) "Auto-connect as a runtime toggle".
+
 ## Configuration files
 
 `--auto-connect`, `--lr-host` and `--lr-port` can also be set from YAML via the

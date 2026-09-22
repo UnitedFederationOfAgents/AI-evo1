@@ -725,6 +725,19 @@ button:disabled {
   font-size: 11px;
 }
 
+/* Auto-connect toggle (Step3Prompt.md Revision I): a first-class state
+   rendered alongside every ReprFooter variant. */
+.repr-footer-auto-connect {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #aaa;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 /* ---- Diff views ---- */
 
 .diff-content {

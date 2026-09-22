@@ -67,6 +67,18 @@ function useStatusWS() {
     }
   }, [])
 
+  // setAutoConnectAC toggles the persistent auto-connect state: on, it arms
+  // the background retry loop at host/port (falling back to the last-used
+  // target server-side when omitted) and keeps it armed across a successful
+  // connection, so a later unintentional disconnect resumes the cycle on its
+  // own; off, it only cancels a retry in progress -- disconnecting an active
+  // connection is still a separate, explicit action (see disconnectFromAC).
+  const setAutoConnectAC = useCallback((enabled: boolean, host?: string, port?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-connect-ac', payload: { enabled, host, port } }))
+    }
+  }, [])
+
   const launchApp = useCallback((name: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'launch-app', payload: { name } }))
@@ -221,7 +233,7 @@ function useStatusWS() {
 
   return {
     connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, restartApp, uploadFiles,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
     rebuildRepo, setAutoRebuild,
   }
 }
@@ -450,19 +462,39 @@ function ACConnectionPanel({
   acState,
   onConnect,
   onDisconnect,
+  onSetAutoConnect,
 }: {
-  acState: { connected: boolean; host?: string; port?: string; connecting?: boolean }
+  acState: { connected: boolean; host?: string; port?: string; connecting?: boolean; auto_connect?: boolean }
   onConnect: (host: string, port: string) => void
   onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
 }) {
   const [host, setHost] = useState(acState.host ?? 'localhost')
   const [port, setPort] = useState(acState.port ?? '8084')
+
+  // auto-connect toggle: a first-class state independent of the current
+  // connection, so it's rendered alongside every panel variant (see Revision
+  // I of Step3Prompt.md) -- checking it arms the background retry loop and
+  // keeps it armed across a successful connection; unchecking it only stops a
+  // retry in progress, not an already-live connection (use disconnect below
+  // for that, which also unchecks this).
+  const autoConnectToggle = (
+    <label className="ac-auto-connect" title="keep reaching for agent-coordinator: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off">
+      <input
+        type="checkbox"
+        checked={acState.auto_connect ?? false}
+        onChange={e => onSetAutoConnect(e.target.checked, host, port)}
+      />
+      auto-connect
+    </label>
+  )
 
   if (acState.connected) {
     return (
       <div className="ac-panel ac-panel-connected">
         <span className="ac-label">agent-coordinator</span>
         <span className="ac-addr">{acState.host}:{acState.port}</span>
+        {autoConnectToggle}
         <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>disconnect</button>
       </div>
     )
@@ -473,6 +505,7 @@ function ACConnectionPanel({
       <div className="ac-panel ac-panel-connecting">
         <span className="ac-label">agent-coordinator</span>
         <span className="ac-connecting">auto-connecting… {acState.host}:{acState.port}</span>
+        {autoConnectToggle}
         <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>cancel</button>
       </div>
     )
@@ -499,6 +532,7 @@ function ACConnectionPanel({
         onKeyDown={e => { if (e.key === 'Enter') onConnect(host, port) }}
       />
       <button className="ac-btn ac-btn-connect" onClick={() => onConnect(host, port)}>connect</button>
+      {autoConnectToggle}
     </div>
   )
 }
@@ -1067,7 +1101,7 @@ export default function App() {
   const {
     connected, services, fcState, fcLog,
     ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
     launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild,
   } = useStatusWS()
 
@@ -1097,6 +1131,7 @@ export default function App() {
         acState={acState}
         onConnect={connectToAC}
         onDisconnect={disconnectFromAC}
+        onSetAutoConnect={setAutoConnectAC}
       />
       <div className="tab-bar">
         <span className="app-title">local-representative</span>

@@ -21,6 +21,7 @@ function useCondocWS() {
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
+  const [reprAutoConnect, setReprAutoConnect] = useState(false)
   const [devMode, setDevMode] = useState(false)
   const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
@@ -60,6 +61,19 @@ function useCondocWS() {
   const disconnectRepr = useCallback(() => {
     send('disconnect', {})
   }, [send])
+
+  // setAutoConnectRepr toggles the persistent auto-connect state: on, it arms
+  // the retry cycle (starting a connect attempt at host/port if none is
+  // already underway) and keeps it armed across a successful connection, so a
+  // later unintentional disconnect resumes on its own; off, it only stops a
+  // retry in progress -- Disconnect above is still the separate, explicit
+  // action for dropping an active connection.
+  const setAutoConnectRepr = useCallback(
+    (enabled: boolean, host?: string, port?: string) => {
+      send('set-auto-connect', { enabled, host, port })
+    },
+    [send],
+  )
 
   const getDiff = useCallback(
     (fromCommit: string, toCommit: string) => {
@@ -123,6 +137,7 @@ function useCondocWS() {
             setReprStatus(p.status)
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
+            setReprAutoConnect(!!p.auto_connect)
           } else if (msg.type === 'self-info') {
             const p = msg.payload as SelfInfoMsg
             setDevMode(p.dev_mode)
@@ -160,11 +175,13 @@ function useCondocWS() {
     reprStatus,
     reprHost,
     reprPort,
+    reprAutoConnect,
     devMode,
     version,
     modeMismatch,
     connectRepr,
     disconnectRepr,
+    setAutoConnectRepr,
     getDiff,
     getFileDiff,
     diffFiles,
@@ -355,11 +372,13 @@ interface ReprFooterProps {
   status: ReprStatus
   host: string
   port: string
+  autoConnect: boolean
   onConnect: (host: string, port: string) => void
   onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
 }
 
-function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterProps) {
+function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, onSetAutoConnect }: ReprFooterProps) {
   const [hostInput, setHostInput] = useState(host)
   const [portInput, setPortInput] = useState(port)
 
@@ -368,6 +387,23 @@ function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterP
   // the fields themselves.
   useEffect(() => setHostInput(host), [host])
   useEffect(() => setPortInput(port), [port])
+
+  // Auto-connect toggle: a first-class state independent of the current
+  // connection (see Revision I of Step3Prompt.md) -- checking it arms the
+  // retry cycle and keeps it armed across a successful connection, so a later
+  // unintentional disconnect resumes on its own; unchecking it only stops a
+  // retry in progress. Disconnect above is still the separate, explicit
+  // action that drops an active connection and also turns this off.
+  const autoConnectToggle = (
+    <label className="repr-footer-auto-connect" title="keep reaching for local-representative: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off">
+      <input
+        type="checkbox"
+        checked={autoConnect}
+        onChange={(e) => onSetAutoConnect(e.target.checked, hostInput.trim(), portInput.trim())}
+      />
+      auto-connect
+    </label>
+  )
 
   return (
     <div className="repr-footer">
@@ -394,10 +430,12 @@ function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterP
           <button className="btn-secondary" onClick={() => onConnect(hostInput.trim(), portInput.trim())}>
             Connect
           </button>
+          {autoConnectToggle}
         </div>
       ) : (
         <div className="repr-footer-form">
           <span className="repr-footer-addr">{host}:{port}</span>
+          {autoConnectToggle}
           <button className="btn-secondary" onClick={onDisconnect}>
             Disconnect
           </button>
@@ -576,8 +614,10 @@ interface SidebarProps {
   reprStatus: ReprStatus
   reprHost: string
   reprPort: string
+  reprAutoConnect: boolean
   onReprConnect: (host: string, port: string) => void
   onReprDisconnect: () => void
+  onReprSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
   version: string
 }
 
@@ -607,8 +647,10 @@ function Sidebar({
   reprStatus,
   reprHost,
   reprPort,
+  reprAutoConnect,
   onReprConnect,
   onReprDisconnect,
+  onReprSetAutoConnect,
   version,
 }: SidebarProps) {
   const reprFooter = (
@@ -616,8 +658,10 @@ function Sidebar({
       status={reprStatus}
       host={reprHost}
       port={reprPort}
+      autoConnect={reprAutoConnect}
       onConnect={onReprConnect}
       onDisconnect={onReprDisconnect}
+      onSetAutoConnect={onReprSetAutoConnect}
     />
   )
 
@@ -1522,11 +1566,13 @@ export default function App() {
     reprStatus,
     reprHost,
     reprPort,
+    reprAutoConnect,
     devMode,
     version,
     modeMismatch,
     connectRepr,
     disconnectRepr,
+    setAutoConnectRepr,
     getDiff,
     getFileDiff,
     diffFiles,
@@ -1743,8 +1789,10 @@ export default function App() {
           reprStatus={reprStatus}
           reprHost={reprHost}
           reprPort={reprPort}
+          reprAutoConnect={reprAutoConnect}
           onReprConnect={connectRepr}
           onReprDisconnect={disconnectRepr}
+          onReprSetAutoConnect={setAutoConnectRepr}
           version={version}
         />
       </div>

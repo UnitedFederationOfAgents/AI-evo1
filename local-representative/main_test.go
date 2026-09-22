@@ -1,11 +1,13 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"representable"
 	ufaconfig "ufa-configurable"
 )
 
@@ -174,4 +176,117 @@ func TestStopAutoConnectAC(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("auto-connect loop did not release its cancel channel after stop")
+}
+
+// freeTCPAddr reserves and immediately releases an ephemeral TCP port, for
+// tests that need a real address to bind a representable.Server to without a
+// way to read back the port NewServer chose (it has no Addr() accessor).
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// TestSetAutoConnectACTogglesEnabledFlag verifies the persistent auto-connect
+// toggle (Step3Prompt.md Revision I) is a first-class state, settable
+// independent of any single connection attempt: enabling it is reported
+// through ac-state's AutoConnect field, and disabling it clears that flag and
+// stops the retry loop.
+func TestSetAutoConnectACTogglesEnabledFlag(t *testing.T) {
+	s := newServer("test-lr")
+
+	// Target a closed port so the retry loop's dial attempts fail fast
+	// rather than hanging or actually connecting.
+	s.setAutoConnectAC(true, "127.0.0.1", "1")
+	if !s.getACState().AutoConnect {
+		t.Fatalf("expected AutoConnect=true after enabling")
+	}
+
+	s.setAutoConnectAC(false, "", "")
+	if s.getACState().AutoConnect {
+		t.Fatalf("expected AutoConnect=false after disabling")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.acMu.RLock()
+		cleared := s.acAutoConnectCancel == nil
+		s.acMu.RUnlock()
+		if cleared {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("disabling auto-connect did not stop the retry loop")
+}
+
+// TestDisconnectACTerminatesAutoConnect verifies an explicit, operator-driven
+// disconnect (a) actually drops the connection, (b) clears the persistent
+// auto-connect toggle, and (c) -- being marked intentional -- does not resume
+// the retry cycle, unlike an unintentional drop (Step3Prompt.md Revision I:
+// "Intentionally disconnect terminates auto-connect").
+func TestDisconnectACTerminatesAutoConnect(t *testing.T) {
+	addr := freeTCPAddr(t)
+	srv, err := representable.NewServer(addr, representable.Mode(false))
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+
+	s := newServer("test-lr")
+	s.startAutoConnectAC(host, port)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !s.getACState().Connected {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !s.getACState().Connected {
+		t.Fatalf("expected LR to connect to the test agent-coordinator server")
+	}
+	if !s.getACState().AutoConnect {
+		t.Fatalf("expected AutoConnect=true once armed and connected")
+	}
+
+	s.stopAutoConnectAC()
+	s.disconnectAC()
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st := s.getACState()
+		if !st.Connected && !st.AutoConnect && !st.Connecting {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	st := s.getACState()
+	if st.Connected {
+		t.Fatalf("expected disconnectAC to drop the connection")
+	}
+	if st.AutoConnect {
+		t.Fatalf("expected an intentional disconnect to clear the auto-connect toggle")
+	}
+
+	// Give a would-be (buggy) resume a moment to kick in, then confirm it
+	// didn't: no retry loop running, still disconnected.
+	time.Sleep(200 * time.Millisecond)
+	s.acMu.RLock()
+	stillNoLoop := s.acAutoConnectCancel == nil
+	s.acMu.RUnlock()
+	if !stillNoLoop {
+		t.Fatalf("expected an intentional disconnect to not resume the auto-connect retry loop")
+	}
+	if s.getACState().Connected || s.getACState().Connecting {
+		t.Fatalf("expected LR to stay disconnected after an intentional disconnect")
+	}
+
+	_ = srv // keep the test server alive for the duration of the test
 }

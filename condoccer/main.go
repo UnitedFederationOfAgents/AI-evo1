@@ -513,8 +513,15 @@ type Server struct {
 	reprHost     string        // host of the current/last connect attempt (widget default)
 	reprPort     string        // port of the current/last connect attempt (widget default)
 	reprStop     chan struct{} // non-nil while a connectLoop is running; closing it stops retries
-	modeMismatch bool          // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
-	modeMismatchPeer string    // the mismatched LR's disclosed mode ("dev" or "ops")
+	// reprAutoConnect is the persistent auto-connect toggle (see Revision I
+	// of Step3Prompt.md) -- a first-class state independent of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// connectLoop); only an explicit disconnect (see disconnectRepr) turns it
+	// off.
+	reprAutoConnect  bool
+	modeMismatch     bool   // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
+	modeMismatchPeer string // the mismatched LR's disclosed mode ("dev" or "ops")
 }
 
 func newServer(root string) *Server {
@@ -693,7 +700,16 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		s.startConnectLoop(host, port)
 
 	case "disconnect":
-		s.stopConnectLoop()
+		s.disconnectRepr()
+
+	case "set-auto-connect":
+		var p struct {
+			Enabled bool   `json:"enabled"`
+			Host    string `json:"host"`
+			Port    string `json:"port"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setAutoConnect(p.Enabled, strings.TrimSpace(p.Host), strings.TrimSpace(p.Port))
 
 	case "get-diff":
 		var p struct {
@@ -1107,7 +1123,7 @@ func main() {
 	if *autoConnect {
 		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",
 			*lrHost, *lrPort, autoConnectInterval, autoConnectWindow)
-		s.startConnectLoop(*lrHost, *lrPort)
+		s.setAutoConnect(true, *lrHost, *lrPort)
 	} else {
 		// No --auto-connect: still record the configured target as the manual
 		// widget's default so a "Connect" click dials the same place

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"representable"
 	ufaconfig "ufa-configurable"
 	ufaversion "ufa-version"
 )
@@ -537,4 +538,83 @@ func TestParseCLIArgsEnvOverrides(t *testing.T) {
 			t.Fatal("expected an error for a non-numeric FC_LR_PORT")
 		}
 	})
+}
+
+// TestEnableDisableAutoConnect verifies the persistent auto-connect toggle
+// (Step3Prompt.md Revision I) is a first-class state, settable independent
+// of any single connection attempt: enabling it arms both the toggle and the
+// background retry loop, and disabling it clears both.
+func TestEnableDisableAutoConnect(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082"}
+
+	if cmd := m.enableAutoConnect(); cmd == nil {
+		t.Fatalf("expected enableAutoConnect to return a command that kicks off the retry loop")
+	}
+	if !m.autoConnectEnabled || !m.autoConnect {
+		t.Fatalf("expected enableAutoConnect to arm both the persistent toggle and the retry loop, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
+
+	// Enabling again while already retrying is a no-op for the retry loop.
+	if cmd := m.enableAutoConnect(); cmd != nil {
+		t.Fatalf("expected a redundant enable while already retrying to return nil")
+	}
+
+	if cmd := m.disableAutoConnect(); cmd == nil {
+		t.Fatalf("expected disableAutoConnect to return a blinker-reset command while cancelling a running retry")
+	}
+	if m.autoConnectEnabled || m.autoConnect {
+		t.Fatalf("expected disableAutoConnect to clear both flags, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
+
+	// Disabling again with nothing running is a safe no-op.
+	if cmd := m.disableAutoConnect(); cmd != nil {
+		t.Fatalf("expected a redundant disable to return nil")
+	}
+}
+
+// TestEnableAutoConnectNoopWhenAlreadyConnected verifies enabling the toggle
+// while already connected only arms the persistent flag -- it doesn't start
+// a redundant retry loop.
+func TestEnableAutoConnectNoopWhenAlreadyConnected(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082", reprClient: &representable.Client{}}
+
+	if cmd := m.enableAutoConnect(); cmd != nil {
+		t.Fatalf("expected enableAutoConnect to be a no-op (nil command) while already connected")
+	}
+	if !m.autoConnectEnabled {
+		t.Fatalf("expected the persistent toggle to be armed")
+	}
+	if m.autoConnect {
+		t.Fatalf("expected the transient retry-loop flag to stay false while already connected")
+	}
+}
+
+// TestAutoConnectStatusLine verifies the status line reflects the toggle and
+// current connection phase, since it's the sole output of the bare
+// "auto-connect" / "ufa fc auto-connect" commands.
+func TestAutoConnectStatusLine(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082"}
+	if got := m.autoConnectStatusLine(); !strings.Contains(got, "disabled") {
+		t.Errorf("expected 'disabled' in status line before enabling, got %q", got)
+	}
+
+	m.enableAutoConnect()
+	if got := m.autoConnectStatusLine(); !strings.Contains(got, "retrying") {
+		t.Errorf("expected 'retrying' in status line while the loop runs, got %q", got)
+	}
+}
+
+// TestDisconnectReprClearsAutoConnect verifies an explicit, operator-driven
+// disconnect (^C) terminates auto-connect entirely (Step3Prompt.md Revision
+// I: "Intentionally disconnect terminates auto-connect"), including
+// cancelling a retry loop that was still in progress.
+func TestDisconnectReprClearsAutoConnect(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082", listenerStop: make(chan struct{})}
+	m.enableAutoConnect()
+
+	m.disconnectRepr()
+
+	if m.autoConnectEnabled || m.autoConnect {
+		t.Fatalf("expected disconnectRepr to clear both auto-connect flags, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
 }

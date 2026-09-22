@@ -92,6 +92,11 @@ type ACStateMsg struct {
 	// Connecting is true while the background --auto-connect retry loop is still
 	// attempting to reach agent-coordinator (visible indication in the UI).
 	Connecting bool `json:"connecting,omitempty"`
+	// AutoConnect is the persistent auto-connect toggle (see Revision I of
+	// Step3Prompt.md): true whenever the auto-connect cycle is armed, whether
+	// or not it is currently connected/connecting -- it stays true across a
+	// successful connection and only an explicit disconnect turns it off.
+	AutoConnect bool `json:"auto_connect,omitempty"`
 }
 
 // CondocInfo mirrors condoccer's per-condoc summary row (see condoccer/main.go).
@@ -162,8 +167,19 @@ type Server struct {
 	acClient            *representable.Client
 	acHost              string
 	acPort              string
-	acAutoConnecting    bool          // true while the startup --auto-connect retry loop is trying
+	acAutoConnecting    bool          // true while the --auto-connect retry loop is currently trying
 	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
+	// acAutoConnectEnabled is the persistent auto-connect toggle (see Revision
+	// I of Step3Prompt.md) -- a first-class state independent of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// connectAC); only an explicit disconnect (see disconnectAC) turns it off.
+	acAutoConnectEnabled bool
+	// acIntentionalDisconnect marks the next DisconnectCh close as
+	// operator-driven (see disconnectAC) so connectAC's teardown can tell it
+	// apart from the remote end dropping unexpectedly, which representable
+	// itself does not distinguish (both close the same channel).
+	acIntentionalDisconnect bool
 
 	// loaderManaged is true when this process was launched by ufa-loader (see
 	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart"
@@ -362,10 +378,11 @@ func (s *Server) getACState() ACStateMsg {
 	s.acMu.RLock()
 	defer s.acMu.RUnlock()
 	return ACStateMsg{
-		Connected:  s.acClient != nil,
-		Host:       s.acHost,
-		Port:       s.acPort,
-		Connecting: s.acAutoConnecting,
+		Connected:   s.acClient != nil,
+		Host:        s.acHost,
+		Port:        s.acPort,
+		Connecting:  s.acAutoConnecting,
+		AutoConnect: s.acAutoConnectEnabled,
 	}
 }
 
@@ -375,8 +392,9 @@ func (s *Server) getACState() ACStateMsg {
 func (s *Server) acStateMsg(connected bool, host, port string) ACStateMsg {
 	s.acMu.RLock()
 	connecting := s.acAutoConnecting
+	enabled := s.acAutoConnectEnabled
 	s.acMu.RUnlock()
-	return ACStateMsg{Connected: connected, Host: host, Port: port, Connecting: connecting}
+	return ACStateMsg{Connected: connected, Host: host, Port: port, Connecting: connecting, AutoConnect: enabled}
 }
 
 func (s *Server) setACAutoConnecting(v bool) {
@@ -464,30 +482,62 @@ func (s *Server) connectAC(host, port string) {
 	<-client.DisconnectCh()
 
 	s.acMu.Lock()
-	if s.acClient == client {
+	current := s.acClient == client
+	if current {
 		s.acClient = nil
 	}
+	intentional := s.acIntentionalDisconnect
+	if current {
+		s.acIntentionalDisconnect = false
+	}
 	s.acMu.Unlock()
+
+	if !current {
+		// This connection was already superseded by a newer connect attempt
+		// (e.g. an explicit connect to a different target, which closes
+		// whatever was live first) -- that attempt owns the current
+		// ac-state and any resume decision, so there's nothing left to
+		// report for this one.
+		return
+	}
 
 	log.Printf("disconnected from agent-coordinator at %s", addr)
 	s.broadcast("ac-state", s.acStateMsg(false, host, port))
 	s.setModeMismatch("agent-coordinator", false, "")
+
+	if !intentional && s.acAutoConnectEnabled {
+		// Auto-connect is still enabled and this wasn't an operator-driven
+		// disconnect -- the cycle begins automatically again at the same
+		// target (see Revision I of Step3Prompt.md: "the auto-connect cycle
+		// begins automatically upon unintentional disconnection").
+		log.Printf("auto-connect: connection to agent-coordinator dropped unexpectedly -- resuming the retry cycle")
+		s.startAutoConnectAC(host, port)
+	}
 }
 
-// disconnectAC closes the AC connection; the connectAC goroutine handles cleanup.
+// disconnectAC closes the AC connection; the connectAC goroutine handles
+// cleanup. Being operator-driven, this is always an *intentional* disconnect,
+// which (per Revision I of Step3Prompt.md) terminates auto-connect entirely:
+// it marks the drop so connectAC's teardown won't resume the retry cycle, and
+// clears the persistent enabled flag so the toggle reports off afterward.
 func (s *Server) disconnectAC() {
 	s.acMu.Lock()
 	client := s.acClient
+	s.acAutoConnectEnabled = false
+	if client != nil {
+		s.acIntentionalDisconnect = true
+	}
 	s.acMu.Unlock()
 	if client != nil {
 		client.Close()
 	}
 }
 
-// startAutoConnectAC launches the background agent-coordinator auto-connect loop.
-// It is a no-op if a loop is already running.
+// startAutoConnectAC arms the persistent auto-connect toggle and launches the
+// background agent-coordinator retry loop unless one is already running.
 func (s *Server) startAutoConnectAC(host, port string) {
 	s.acMu.Lock()
+	s.acAutoConnectEnabled = true
 	if s.acAutoConnectCancel != nil {
 		s.acMu.Unlock()
 		return
@@ -496,6 +546,40 @@ func (s *Server) startAutoConnectAC(host, port string) {
 	s.acAutoConnectCancel = cancel
 	s.acMu.Unlock()
 	go s.autoConnectAC(host, port, cancel)
+}
+
+// setAutoConnectAC drives the auto-connect toggle from an explicit UI/API
+// action (see the "set-auto-connect-ac" WebSocket message): enabling it arms
+// the persistent state and, unless already connected, (re)starts the
+// background retry loop at host/port (falling back to the last-used target,
+// then defaultACHost/defaultACPort, when unset). Disabling it only stops a
+// retry in progress -- it does not drop an existing connection; only an
+// explicit disconnect (see disconnectAC) does that, and disconnect already
+// clears this flag on its own.
+func (s *Server) setAutoConnectAC(enabled bool, host, port string) {
+	s.acMu.Lock()
+	s.acAutoConnectEnabled = enabled
+	if host == "" {
+		host = s.acHost
+	}
+	if host == "" {
+		host = defaultACHost
+	}
+	if port == "" {
+		port = s.acPort
+	}
+	if port == "" {
+		port = defaultACPort
+	}
+	connected := s.acClient != nil
+	s.acMu.Unlock()
+
+	if !enabled {
+		s.stopAutoConnectAC()
+	} else if !connected {
+		s.startAutoConnectAC(host, port)
+	}
+	s.broadcast("ac-state", s.acStateMsg(connected, host, port))
 }
 
 // stopAutoConnectAC cancels the background auto-connect retry loop if it is
@@ -681,6 +765,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case "disconnect-ac":
 			s.stopAutoConnectAC()
 			s.disconnectAC()
+		case "set-auto-connect-ac":
+			var payload struct {
+				Enabled bool   `json:"enabled"`
+				Host    string `json:"host,omitempty"`
+				Port    string `json:"port,omitempty"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoConnectAC(payload.Enabled, payload.Host, payload.Port)
+			}
 		case "launch-app":
 			var payload struct {
 				Name string `json:"name"`

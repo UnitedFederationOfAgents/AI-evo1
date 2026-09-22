@@ -173,6 +173,19 @@ body {
   background: #5a2e2e;
 }
 
+/* Auto-connect toggle (Step3Prompt.md Revision I): a first-class state
+   rendered alongside every ACConnectionPanel variant, mirroring
+   .sys-auto-rebuild's checkbox styling. */
+.ac-auto-connect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 /* ---- Tab bar ---- */
 
 .tab-bar {

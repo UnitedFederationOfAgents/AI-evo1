@@ -102,3 +102,33 @@ suspended** (the prompt does not accept keystrokes), closing the window in which
 the FC terminal would otherwise be locally controllable. Input is handed back if
 auto-connect gives up after 10 minutes, or stays with LR once it connects. An FC
 started *without* auto-connect is always locally controlled.
+
+## Auto-connect as a runtime toggle
+
+`--auto-connect` (and its config/env equivalents above) only arms the toggle at
+startup; from the shell it can be checked and flipped at any time with:
+
+```
+auto-connect                  # print whether it's armed, and the connection phase
+auto-connect enable           # arm it (kicks off the retry loop if not already connected)
+auto-connect disable          # disarm it (cancels a retry in progress; leaves a live connection alone)
+```
+
+or, namespaced under `ufa` (`ufa fc auto-connect` with no argument prints the
+same status plus this list of subcommands):
+
+```
+ufa fc auto-connect
+ufa fc auto-connect enable
+ufa fc auto-connect disable
+```
+
+The toggle is a first-class state, independent of any single connection
+attempt (see
+[`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
+Revision I): it stays armed across a successful connection, so if that
+connection later drops *unintentionally* (LR going away, a network blip) the
+retry cycle begins again on its own. An *explicit* disconnect (`^C` while
+connected/connecting/in local control) disarms it as well as dropping the
+link; `auto-connect disable` alone only cancels a retry in progress, leaving an
+already-live connection up.

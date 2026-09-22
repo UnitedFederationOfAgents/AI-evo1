@@ -419,9 +419,22 @@ type appModel struct {
 
 	// Auto-connect: background retry loop that dials local-representative on startup.
 	lrAddr              string    // representable address used for both manual and auto connects
-	autoConnect         bool      // true while the background retry loop is still running
+	autoConnect         bool      // true while the background retry loop is currently running
 	autoConnectDeadline time.Time // stop retrying once this instant has passed
 	remoteDefault       bool      // auto-connect implies this: adopt remote control (not local) when the background connection is established
+	// autoConnectEnabled is the persistent auto-connect toggle (see Revision
+	// I of Step3Prompt.md: "ufa fc auto-connect [<enable|disable>]") -- a
+	// first-class state independent of autoConnect above (which just tracks
+	// whether the retry loop is currently running) or of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// the reprDisconnectedMsg handler); only an explicit disconnect (see
+	// disconnectRepr) turns it off. disconnectRepr also nils reprClient
+	// synchronously, so the reprDisconnectedMsg handler's own staleness
+	// check (msg.client no longer matching m.reprClient) is what tells an
+	// intentional disconnect apart from the remote end dropping
+	// unexpectedly -- no separate "was this intentional" flag is needed.
+	autoConnectEnabled bool
 
 	// Dev mode: launch-time only (no runtime switch — see docs/DevMode.md).
 	devMode          bool
@@ -676,6 +689,27 @@ func attemptConnectCmd(addr string, devMode bool) tea.Cmd {
 	}
 }
 
+// reprDisconnectedMsg is delivered when an established representable
+// connection to local-representative drops -- via DisconnectCh, so it fires
+// whether the remote end closed it (unintentional) or this side called
+// Close (an intentional disconnectRepr -- see Revision I of Step3Prompt.md).
+// client guards against a stale message: disconnectRepr nils m.reprClient
+// synchronously, so by the time an intentional disconnect's message is
+// processed it no longer matches, and the handler tells the two cases apart
+// that way rather than via a separate flag.
+type reprDisconnectedMsg struct{ client *representable.Client }
+
+// listenForDisconnectCmd blocks until client's connection drops, then
+// delivers reprDisconnectedMsg so Update can decide whether to resume
+// auto-connect. Started once per adopted connection (see reprConnectedMsg and
+// the successful half of autoConnectResultMsg).
+func listenForDisconnectCmd(client *representable.Client) tea.Cmd {
+	return func() tea.Msg {
+		<-client.DisconnectCh()
+		return reprDisconnectedMsg{client: client}
+	}
+}
+
 // autoConnectTickMsg fires on the auto-connect retry interval.
 type autoConnectTickMsg struct{}
 
@@ -735,6 +769,51 @@ func (m *appModel) autoConnectGaveUp() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// autoConnectStatusLine renders the persistent auto-connect toggle plus a
+// hint at the enable/disable commands -- used by both "auto-connect" and
+// "ufa fc auto-connect" with no argument (see Revision I of Step3Prompt.md).
+func (m *appModel) autoConnectStatusLine() string {
+	state := "disabled"
+	if m.autoConnectEnabled {
+		switch {
+		case m.reprClient != nil:
+			state = fmt.Sprintf("enabled (connected to local-representative at %s)", m.lrAddr)
+		case m.autoConnect:
+			state = fmt.Sprintf("enabled (retrying local-representative at %s)", m.lrAddr)
+		default:
+			state = "enabled (idle)"
+		}
+	}
+	return fmt.Sprintf("auto-connect: %s\ncommands: auto-connect enable | auto-connect disable (or: ufa fc auto-connect enable|disable)", state)
+}
+
+// enableAutoConnect arms the persistent auto-connect toggle (see Revision I
+// of Step3Prompt.md) and, unless already connected or already retrying,
+// starts the background retry loop at m.lrAddr.
+func (m *appModel) enableAutoConnect() tea.Cmd {
+	m.autoConnectEnabled = true
+	if m.reprClient != nil || m.autoConnect {
+		return nil // already connected, or already retrying
+	}
+	m.autoConnect = true
+	m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+	m.blinker.EnableAccent()
+	return tea.Batch(autoConnectDialCmd(m.lrAddr, m.devMode), m.blinker.accentTickCmd())
+}
+
+// disableAutoConnect clears the persistent auto-connect toggle and, if a
+// retry loop is currently running (not yet connected), cancels it. It never
+// drops an already-established connection -- only disconnectRepr does that.
+func (m *appModel) disableAutoConnect() tea.Cmd {
+	m.autoConnectEnabled = false
+	if !m.autoConnect {
+		return nil
+	}
+	m.autoConnect = false
+	m.blinker.DisableAccent()
+	return m.blinker.ResetTick()
+}
+
 // listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
 func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
@@ -748,8 +827,19 @@ func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
 }
 
 // disconnectRepr closes the representable client and resets the listener stop channel
-// so any in-flight listenForRemoteCmdCmd goroutine exits.
+// so any in-flight listenForRemoteCmdCmd goroutine exits. Being operator-driven,
+// this also terminates auto-connect entirely (see Revision I of Step3Prompt.md:
+// "Intentionally disconnect terminates auto-connect") -- unlike an unintentional
+// drop, which resumes the retry cycle automatically as long as auto-connect is
+// still armed (see the reprDisconnectedMsg handler).
 func (m *appModel) disconnectRepr() {
+	m.autoConnectEnabled = false
+	if m.autoConnect {
+		// A background retry loop was still running (not yet connected) --
+		// stop it too, mirroring autoConnectGaveUp's cleanup.
+		m.autoConnect = false
+		m.blinker.DisableAccent()
+	}
 	if m.reprClient != nil {
 		m.reprClient.Close()
 		m.reprClient = nil
@@ -809,14 +899,15 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		recordsPath:   recordsPath,
 		logFile:       logFile,
 		encoder:       encoder,
-		blinker:        NewBlinker(cfg.devMode),
-		remoteCmdCh:    make(chan string, 8),
-		listenerStop:   make(chan struct{}),
-		lrAddr:         cfg.lrAddr,
-		autoConnect:    cfg.autoConnect,
-		remoteDefault:  cfg.remote,
-		devMode:        cfg.devMode,
-		modeMismatchCh: make(chan modeMismatchInfo, 4),
+		blinker:            NewBlinker(cfg.devMode),
+		remoteCmdCh:        make(chan string, 8),
+		listenerStop:       make(chan struct{}),
+		lrAddr:             cfg.lrAddr,
+		autoConnect:        cfg.autoConnect,
+		autoConnectEnabled: cfg.autoConnect,
+		remoteDefault:      cfg.remote,
+		devMode:            cfg.devMode,
+		modeMismatchCh:     make(chan modeMismatchInfo, 4),
 	}
 
 	if cfg.autoConnect {
@@ -1245,6 +1336,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			resetTick,
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
 			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+			listenForDisconnectCmd(m.reprClient),
 		}
 		if !wantsRemote {
 			cmds = append(cmds, textinput.Blink)
@@ -1287,6 +1379,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.blinker.ResetTick(),
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
 			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+			listenForDisconnectCmd(m.reprClient),
 		)
 
 	case reprConnectFailedMsg:
@@ -1296,6 +1389,46 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.blinker.ResetTick()
 		}
 		return m, nil
+
+	case reprDisconnectedMsg:
+		if m.reprClient != msg.client {
+			// Stale: this connection was already superseded or torn down --
+			// which also covers an *intentional* disconnect, since
+			// disconnectRepr nils m.reprClient synchronously (before this
+			// async message can ever arrive), so it always lands here too.
+			return m, nil
+		}
+		m.reprClient = nil
+		wasActive := m.blinker.IsRemoteControlActive()
+		if !m.autoConnectEnabled {
+			if !wasActive {
+				return m, nil
+			}
+			m.blinker.SetState(BlinkerIdle)
+			return m, tea.Batch(
+				tea.Println(errorStyle.Render("disconnected from local-representative at "+m.lrAddr)),
+				m.blinker.ResetTick(),
+			)
+		}
+		// Auto-connect is still armed and this wasn't an operator-driven
+		// disconnect -- the cycle begins automatically again at the same
+		// target (see Revision I of Step3Prompt.md: "the auto-connect cycle
+		// begins automatically upon unintentional disconnection").
+		m.autoConnect = true
+		m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+		m.blinker.EnableAccent()
+		if wasActive {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		notice := fmt.Sprintf(
+			"auto-connect: connection to local-representative at %s dropped unexpectedly — resuming the retry cycle",
+			m.lrAddr)
+		return m, tea.Batch(
+			tea.Println(errorStyle.Render(notice)),
+			autoConnectDialCmd(m.lrAddr, m.devMode),
+			m.blinker.accentTickCmd(),
+			m.blinker.ResetTick(),
+		)
 
 	case reprModeMismatchMsg:
 		listenCmd := listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop)
@@ -3255,6 +3388,24 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(successStyle.Render(ufaversion.Version))
 	}
 
+	// auto-connect | auto-connect enable | auto-connect disable (also
+	// available as "ufa fc auto-connect [<enable|disable>]", handled by the
+	// "ufa " dispatch below) -- see Revision I of Step3Prompt.md.
+	if line == "auto-connect" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(m.autoConnectStatusLine()))
+	}
+	if line == "auto-connect enable" {
+		cmd := m.enableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+	}
+	if line == "auto-connect disable" {
+		cmd := m.disableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+	}
+
 	if line == "select-session" {
 		sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 		if sp == nil {
@@ -3593,6 +3744,24 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render(ufaversion.Version))
 
+	case "fc", "fc help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaFcHelpText())
+
+	case "fc auto-connect":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(m.autoConnectStatusLine()))
+
+	case "fc auto-connect enable":
+		cmd := m.enableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+
+	case "fc auto-connect disable":
+		cmd := m.disableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+
 	case "session archive":
 		clauditablePath, err := findBinary("clauditable")
 		if err != nil {
@@ -3695,6 +3864,10 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			unknown := strings.TrimPrefix(sub, "head ")
 			return m, tea.Println(errorStyle.Render("ufa head: unknown subcommand '"+unknown+"'")+"\n"+ufaHeadHelpText())
 		}
+		if strings.HasPrefix(sub, "fc ") {
+			unknown := strings.TrimPrefix(sub, "fc ")
+			return m, tea.Println(errorStyle.Render("ufa fc: unknown subcommand '"+unknown+"'")+"\n"+ufaFcHelpText())
+		}
 		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
 	}
 }
@@ -3708,8 +3881,25 @@ func ufaHelpText() string {
 		"  ufa host <sub>         host identification commands",
 		"  ufa head <sub>         head (instance) identification commands",
 		"  ufa session <sub>      session management commands",
+		"  ufa fc <sub>           federation-command auto-connect commands",
 		"",
-		sessionStyle.Render("run 'ufa host help', 'ufa head help', or 'ufa session help' for subcommands"),
+		sessionStyle.Render("run 'ufa host help', 'ufa head help', 'ufa session help', or 'ufa fc help' for subcommands"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaFcHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa fc — federation-command auto-connect"),
+		"",
+		"  ufa fc help                     show this help",
+		"  ufa fc auto-connect             show whether auto-connect is armed",
+		"  ufa fc auto-connect enable      arm auto-connect (also: 'auto-connect enable')",
+		"  ufa fc auto-connect disable     disarm auto-connect (also: 'auto-connect disable')",
+		"",
+		sessionStyle.Render("also available unprefixed: 'auto-connect [enable|disable]'"),
+		sessionStyle.Render("armed auto-connect stays armed across a successful connection, and resumes"),
+		sessionStyle.Render("on its own after an unintentional disconnect; an explicit disconnect (^C) disarms it"),
 	}
 	return strings.Join(lines, "\n")
 }

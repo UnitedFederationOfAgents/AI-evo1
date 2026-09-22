@@ -106,13 +106,26 @@ background, retrying every 10 seconds for up to 10 minutes. The retry runs
 without blocking the HTTP server; while it is in progress the dashboard's
 agent-coordinator panel shows a pulsing "auto-connecting…" indicator. On success
 the connection is adopted like a manual connect; if the 10-minute window elapses
-first, LR prints that it gave up. Driving an explicit connect or disconnect from
-the dashboard supersedes and cancels the background loop.
+first without connecting, LR prints that it gave up (but see below — the
+retry cycle can resume later without a restart).
 
 ```bash
 ./local-representative --auto-connect                       # localhost:8084
 ./local-representative --auto-connect --ac-host 10.0.0.5 --ac-port 9000
 ```
+
+Auto-connect is a first-class toggle, not a one-shot startup action: the
+agent-coordinator panel has its own **auto-connect** checkbox alongside the
+connect/disconnect control. It stays armed across a successful connection, so
+if that connection later drops *unintentionally* (agent-coordinator going
+away, a network blip) the retry cycle begins again on its own; an *explicit*
+disconnect from the dashboard, though, turns the toggle off as well as
+dropping the link — driving a manual connect or unchecking the toggle mid-retry
+only stops that one attempt/cycle, it doesn't touch an already-live
+connection. This mirrors `condoccer`'s and `federation-command`'s own
+auto-connect toggles (see their docs) — see
+[`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
+Revision I.
 
 A loader-managed restart carries the live connection state forward regardless
 of these flags — see "Running under ufa-loader" above.
@@ -164,8 +177,9 @@ it in an iframe), and `agent-coordinator` reverse-proxies `/host/<name>/*` back
 through this LR — so the coordinator dashboard (and anything reaching it through
 the web-exposure path) can drive condoccer on this box with no shell here.
 `--auto-connect` is how LR always launches it, but it isn't mandatory for
-condoccer in general: its UI has its own connect/disconnect widget for the case
-where it's started by hand instead.
+condoccer in general: its UI has its own connect/disconnect widget — with the
+same first-class auto-connect toggle described above — for the case where
+it's started by hand instead.
 
 `federation-command` is an interactive shell and must run in a real terminal or
 its input reader dies on startup ("error creating cancelreader"). It should be

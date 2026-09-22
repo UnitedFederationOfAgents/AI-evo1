@@ -42,7 +42,12 @@ export interface ACStateMsg {
   connected: boolean
   host?: string
   port?: string
-  connecting?: boolean // background --auto-connect retry loop is still trying
+  connecting?: boolean // background --auto-connect retry loop is currently trying
+  // auto_connect is the persistent auto-connect toggle: true whenever the
+  // cycle is armed, whether or not it's currently connected/connecting -- it
+  // stays true across a successful connection, and only an explicit
+  // disconnect turns it off.
+  auto_connect?: boolean
 }
 
 export interface ProcInfo {

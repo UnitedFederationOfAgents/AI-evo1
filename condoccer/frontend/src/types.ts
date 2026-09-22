@@ -57,6 +57,11 @@ export interface ReprStatusMsg {
   status: ReprStatus
   host?: string
   port?: string
+  // auto_connect is the persistent auto-connect toggle: true whenever the
+  // cycle is armed, whether or not it's currently connected/connecting -- it
+  // stays true across a successful connection, and only an explicit
+  // disconnect turns it off.
+  auto_connect?: boolean
 }
 
 // SelfInfoMsg discloses this condoccer instance's own dev-mode status and

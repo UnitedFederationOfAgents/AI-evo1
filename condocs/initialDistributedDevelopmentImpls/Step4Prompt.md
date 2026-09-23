@@ -51,11 +51,10 @@ Each function appears exactly once, in the right order, with matching structure.
 Implemented the first operational steps for the global topology view per Revision A: `agent-coordinator`'s self card and per-host cards now render through one unified, ordered list (self pinned to its own row via CSS, hosts below), host cards are click-selectable, and their FC/CO/W boxes turn green based on that host's live `lr-state` service health while AC/LR stay statically colored. The Details & Control pane moved out from under `.sys-panel`'s width cap (now `.global-sys-panel`, unconstrained) so it sits at the tab's actual right edge, and it now shows a selected host's real label/status/version/uptime with a working "restart" button wired to `sendLRRestartApp` (enabled only when that host's LR is loader-managed); "update" stays a disabled placeholder. Also updated `docs/architecture.md`'s Global view section to describe this behavior.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's keep working on this - we want to update the topology pane so that the 'agent-coordinator' panel and the host panel for the AC host are the same panel - not two separate panels. The single panel should keep the name of the host.
 
+Let's also add a faint divider line between that 'self' host and the hosts below, to make a stronger distinction.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also ensure that if we have a particular tab (such as the 'system' tab) selected and we move from having the 'global' view selected to having a host-specific view selected that we stay on the same tab.

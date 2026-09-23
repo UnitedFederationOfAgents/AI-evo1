@@ -24,11 +24,17 @@ I've implemented the global view for agent-coordinator's frontend. Note: shell c
 **Summary:** Added a "global" sidebar entry (mutually exclusive with host selection, default on load) and a `GlobalView` component mirroring a host's tab layout, where only the `system` tab is implemented — with nested `topology`/`timeline` tabs — and everything else shows "not yet implemented." The `topology` tab renders dummy host cards (mimicking `global_topology_panel.jpg`'s AC/LR/FC/CO/W node diagram) in a main pane plus a static details-and-control readout pane on the right, neither interactive yet, matching the CSS/theme conventions already used throughout `App.tsx`/`index.css`. Also documented the new view in `docs/architecture.md`.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+We have implemented the global view for the system panel and it looks good.
 
+Now we will take the first few steps in implementing the operation of the view.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will:
+- Collapse the 'agent-coordinator (self)' panel with the LR panel of the same node.
+- We will create LR panels for each connected host
+- We will arrange it so that self is always at the top and the other LR panels are below
+- We will colour the sub-application panels green if they are connected to LR for that host (we can keep AC blue for self - this looks good)
+- We will move the Details & Control pane so that it sits farther right, always near the right edge of the tab's view
+- We will allow selection of the host panels (this will drive the content of the Details & Control pane
+- We will make the 'restart' button available and this will send the restart control to that LR

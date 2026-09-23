@@ -70,15 +70,21 @@ export interface ProcInfo {
   update_available?: boolean // the on-disk binary now answers --version differently than this running process (self: docs/DevMode.md "Loader"; managed: Step4Prompt.md Revision D)
 }
 
-// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
-// (see docs/DevMode.md) and host identity -- sent once when the WebSocket
-// connects. host_id is the same ufahostid value a co-located
+// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
+// status (see docs/DevMode.md), host identity, and restart-ability -- sent
+// when the WebSocket connects and re-sent whenever loader_managed/
+// update_available change. host_id is the same ufahostid value a co-located
 // local-representative defaults its "-name" to, letting the frontend
 // recognize which connected host (if any) is the one agent-coordinator
-// itself runs on.
+// itself runs on. loader_managed/update_available mirror ProcInfo's
+// same-named fields for a local-representative's own self row -- see the
+// global topology view's "restart agent-coordinator" control
+// (Step4Prompt.md Revision E).
 export interface SelfInfoMsg {
   dev_mode: boolean
   host_id: string
+  loader_managed: boolean
+  update_available: boolean
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode

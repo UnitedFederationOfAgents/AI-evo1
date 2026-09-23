@@ -332,6 +332,20 @@ type Server struct {
 	devMode    bool   // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
 	selfHostID string // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
 
+	// loaderManaged is true when this process was launched by ufa-loader (see
+	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart
+	// agent-coordinator" (Step4Prompt.md Revision E) can be expected to
+	// actually come back up rather than just stop.
+	loaderManaged bool
+
+	// selfVersion watches this process's own on-disk binary for a newer
+	// build landing while it runs (see selfversion.go) so the "restart
+	// agent-coordinator" control can offer "restart and update". Only
+	// started when loaderManaged, since that's the only case restart
+	// actually helps; nil (and selfVersion.available() reports false)
+	// otherwise.
+	selfVersion *selfVersionWatch
+
 	hostsMu    sync.RWMutex
 	hostStates map[string]*hostState
 
@@ -350,17 +364,27 @@ func newServer() *Server {
 	}
 }
 
-// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
-// and host identity to its frontend (see docs/DevMode.md) — sent once when a
-// browser client connects, since AC has no representable server above it
-// forwarding a "self" ProcInfo the way LR forwards one for itself. HostID is
-// the same ufahostid.GetHostID() value a co-located local-representative
-// defaults its "-name" to, letting the frontend recognize which connected
-// host (if any) is the one agent-coordinator itself runs on -- see the
-// global topology panel's self-card collapsing in App.tsx.
+// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
+// status, host identity, and restart-ability to its frontend (see
+// docs/DevMode.md) — sent when a browser client connects and re-broadcast
+// whenever LoaderManaged/UpdateAvailable change, since AC has no
+// representable server above it forwarding a "self" ProcInfo the way LR
+// forwards one for itself. HostID is the same ufahostid.GetHostID() value a
+// co-located local-representative defaults its "-name" to, letting the
+// frontend recognize which connected host (if any) is the one
+// agent-coordinator itself runs on -- see the global topology panel's
+// self-card collapsing in App.tsx. LoaderManaged/UpdateAvailable mirror
+// ProcInfo's same-named fields for a local-representative's own self row,
+// duplicated here (see selfversion.go) rather than reused because it's a
+// legitimate deployment to run agent-coordinator alone on a box with only
+// off-node local-representatives -- driving the "restart agent-coordinator"
+// control added to the global topology view's Details & Control pane, see
+// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision E.
 type SelfInfoMsg struct {
-	DevMode bool   `json:"dev_mode"`
-	HostID  string `json:"host_id"`
+	DevMode         bool   `json:"dev_mode"`
+	HostID          string `json:"host_id"`
+	LoaderManaged   bool   `json:"loader_managed"`
+	UpdateAvailable bool   `json:"update_available"`
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode
@@ -395,6 +419,25 @@ func (s *Server) currentModeMismatches() []ModeMismatchMsg {
 		out = append(out, m)
 	}
 	return out
+}
+
+// selfInfo returns this agent-coordinator instance's current SelfInfoMsg
+// snapshot, including its own restart-ability (see selfversion.go).
+func (s *Server) selfInfo() SelfInfoMsg {
+	return SelfInfoMsg{
+		DevMode:         s.devMode,
+		HostID:          s.selfHostID,
+		LoaderManaged:   s.loaderManaged,
+		UpdateAvailable: s.selfVersion.available(),
+	}
+}
+
+// broadcastSelfInfo pushes a fresh self-info snapshot to every connected
+// browser client -- called whenever selfVersion's verdict changes (see
+// newSelfVersionWatch in main below), since self-info is otherwise only sent
+// once per connection.
+func (s *Server) broadcastSelfInfo() {
+	s.broadcast("self-info", s.selfInfo())
 }
 
 func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
@@ -576,7 +619,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial state.
 	go func() {
-		s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, HostID: s.selfHostID})
+		s.sendToClient(c, "self-info", s.selfInfo())
 		s.sendToClient(c, "hosts", HostsMsg{Hosts: s.getHosts()})
 		s.hostsMu.RLock()
 		names := make([]string, 0, len(s.hostStates))
@@ -700,6 +743,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
 			}
+		case "ac-restart-app":
+			// Restarts agent-coordinator itself, not any host's LR -- the
+			// global topology view's "restart agent-coordinator" control
+			// (Step4Prompt.md Revision E). No payload: there's only ever one
+			// agent-coordinator to restart.
+			s.requestRestart("operator")
 		}
 	}
 }
@@ -870,21 +919,49 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	return mux
 }
 
+// announceRestartAndExit writes the restartsignal announcement (see
+// ufa-loader/README.md and docs/DevMode.md's "Loader" section) as this
+// process's final act before exiting 0. Callers are expected to have already
+// decided a restart is appropriate; this never returns.
+func (s *Server) announceRestartAndExit(reason string) {
+	log.Printf("announcing a restart (%s) and exiting", reason)
+	if err := restartsignal.Announce(os.Stdout, "agent-coordinator", reason); err != nil {
+		log.Printf("restartsignal.Announce: %v", err)
+	}
+	os.Exit(0)
+}
+
 // watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
-// restart (see ufa-loader/README.md and docs/DevMode.md's "Loader" section)
-// as this process's final act before exiting 0. The signal is sent directly
-// to this process's own pid (e.g. `kill -HUP <pid>`), not through
-// ufa-loader itself. Run in its own goroutine; never returns.
-func watchRestartSignal() {
+// restart as this process's final act before exiting 0. The signal is sent
+// directly to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself: ufa-loader only watches stdout, it doesn't originate the
+// restart trigger. Unlike requestRestart, this always restarts -- a bare
+// `kill -HUP` without a wrapping ufa-loader is documented to still announce
+// and exit, just with nothing there to relaunch it. Run in its own
+// goroutine; never returns.
+func (s *Server) watchRestartSignal() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP)
 	for range sigCh {
-		log.Printf("received SIGHUP: announcing a restart and exiting")
-		if err := restartsignal.Announce(os.Stdout, "agent-coordinator", "sighup"); err != nil {
-			log.Printf("restartsignal.Announce: %v", err)
-		}
-		os.Exit(0)
+		s.announceRestartAndExit("sighup")
 	}
+}
+
+// requestRestart handles an operator-driven restart request -- the global
+// topology view's "restart agent-coordinator" control (WebSocket
+// "ac-restart-app", see condocs/initialDistributedDevelopmentImpls/
+// Step4Prompt.md Revision E) -- which terminates this process such that a
+// wrapping ufa-loader relaunches it with the same config. Unlike SIGHUP,
+// this refuses (logging why) when the process isn't loaderManaged: the
+// frontend control is greyed out in that case since pressing it wouldn't
+// come back up, and this is the server-side enforcement of that same guard
+// for any caller that bypasses the UI.
+func (s *Server) requestRestart(reason string) {
+	if !s.loaderManaged {
+		log.Printf("restart requested (%s) but agent-coordinator is not loader-managed (no %s) — ignoring", reason, restartsignal.InitEnvVar)
+		return
+	}
+	s.announceRestartAndExit(reason)
 }
 
 func main() {
@@ -902,6 +979,16 @@ func main() {
 	s := newServer()
 	s.devMode = *devMode
 	s.selfHostID = ufahostid.GetHostID()
+
+	s.loaderManaged = restartsignal.IsLoaderManaged()
+	if s.loaderManaged {
+		// Only worth polling for an on-disk update when a restart could
+		// actually pick it up -- see selfversion.go.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSelfInfo)
+		if s.selfVersion != nil {
+			go s.selfVersion.watchLoop()
+		}
+	}
 
 	reprSrv, err := representable.NewServer(":"+*reprPort, representable.Mode(s.devMode))
 	if err != nil {
@@ -1049,7 +1136,7 @@ func main() {
 
 	log.Printf("representable server (LR connections) listening on tcp://localhost:%s", *reprPort)
 
-	go watchRestartSignal()
+	go s.watchRestartSignal()
 	go s.broadcastLoop()
 
 	addr := ":" + *port

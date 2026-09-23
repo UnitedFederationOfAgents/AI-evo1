@@ -131,6 +131,7 @@ also covers the still-open Path 2 (LR-to-LR transfer brokered through AC).
 | `lr-restart-app` | `{ host_id }` | Restart the host's LR itself (only takes effect if it's loader-managed) |
 | `lr-rebuild-app` | `{ host_id }` | Run `make deploy-dev-binaries` on the host's watched dev-repo |
 | `lr-set-auto-rebuild` | `{ host_id, enabled }` | Toggle the host's dev-repo watcher auto-rebuild flag |
+| `ac-restart-app` | `{}` | Restart agent-coordinator itself (only takes effect if it's loader-managed) — no host to target, unlike `lr-restart-app` |
 
 ## WebSocket Protocol (LR ↔ Browser) — additions
 
@@ -205,3 +206,19 @@ main pane of host cards plus a details-and-control pane on the right:
 - The active tab (e.g. `system`) is shared between the global view and a
   host's view (lifted to `App`), so selecting or deselecting a host keeps
   whichever tab was active instead of resetting it.
+- When the selected card is the one agent-coordinator itself runs on (i.e.
+  `selectedHostId === selfHostId`), the details pane grows a small
+  "agent-coordinator" section below the rebuild/restart controls, with its
+  own restart button that sends `ac-restart-app` — distinct from the control
+  above it, which always targets that host's *LR*. It follows the same
+  paradigm as every other restart control here: always enabled once
+  loader-managed (never gated on dev mode), turning orange and reading
+  "restart and update" instead of "restart" only when both dev mode is on
+  and AC's own on-disk binary has drifted from what's running. Since it's a
+  legitimate deployment to run agent-coordinator alone on a box with only
+  off-node LRs, AC can't lean on any LR's `pollManagedVersions` for this —
+  it runs its own duplicate of local-representative's `selfVersionWatch`
+  (`agent-coordinator/selfversion.go`, polling its own executable's
+  `--version` every 5s) and discloses the verdict via `self-info`'s new
+  `loader_managed`/`update_available` fields, re-broadcasting that message
+  whenever the verdict changes rather than only once per connection.

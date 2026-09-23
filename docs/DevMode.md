@@ -167,7 +167,15 @@ isn't loader-managed, since there would be nothing to bring it back up.
 `agent-coordinator`'s own per-host system tab shows the identical **restart**
 control (sending `__system:restart` over the same representable link), since
 these controls always act on the selected host's LR, never on
-`agent-coordinator` itself.
+`agent-coordinator` itself. The one control that *does* act on
+`agent-coordinator` itself lives in the global topology view's
+Details & Control pane: selecting the host AC runs on grows a small
+"agent-coordinator" section below the per-host rebuild/restart controls with
+its own **restart** button, sending a dedicated `ac-restart-app` WebSocket
+message (no host to target, unlike `lr-restart-app`) straight to AC's own
+`requestRestart` — see
+[`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
+Revision E.
 
 An announcement can also carry opaque `state` that `ufa-loader` hands the
 *next* launch back as `UFA_LOADER_STATE` (`restartsignal.AnnounceState` /
@@ -193,6 +201,19 @@ restart** instead, so pressing it visibly means "come back up on the newer
 build" rather than just "come back up". Polling `--version` keeps this
 consistent with every other version check in the codebase, rather than
 introducing a second, file-mtime-based notion of "changed".
+
+`agent-coordinator` runs the identical poll-and-compare against its *own*
+on-disk binary, independently of any LR (see
+[`agent-coordinator/selfversion.go`](../agent-coordinator/selfversion.go), a
+deliberate duplicate of LR's `selfversion.go` rather than a shared package):
+it's a legitimate deployment to run `agent-coordinator` alone on a box with
+only off-node LRs, so AC can't lean on any LR's self-version watch to detect
+its own binary drifting. The verdict rides along in `self-info` (new
+`loader_managed`/`update_available` fields, re-broadcast whenever it
+changes rather than sent only once per connection) and drives the global
+topology view's "restart agent-coordinator" button the same way: plain
+**restart** until an update lands on disk, then orange **restart and
+update**.
 
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.

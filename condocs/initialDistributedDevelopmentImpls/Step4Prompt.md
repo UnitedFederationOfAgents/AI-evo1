@@ -118,3 +118,24 @@ Now let's extend the 'Details & Control' panel so that if the selected node is a
 In this case we must duplicate the functionality of LR into AC for detecting the different binary (because it is a legitimate use-case to run AC alone on a node and only have off-node LRs).
 
 We will use the same paradigm of the restart button always being available, but having it turn orange if we have a pending update.
+
+
+prompt: [`973d698`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/973d698561d89ced120e88d236ef24201b884f69) → reply: [`228a317`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/228a3173dc636d9886ce14ada9ab540161b43e05)
+
+## Reply E
+
+Everything looks correct and complete. The implementation is done.
+
+## Summary
+
+Implemented Revision E: the global topology view's Details & Control pane now grows a small "agent-coordinator" section below the rebuild/restart controls whenever the selected node is the host AC itself runs on, with its own restart button (`isSelfSelected` in `App.tsx`, sending a new `ac-restart-app` WebSocket message with no host to target). As required, AC duplicates LR's self-version-watch logic rather than depending on it — `agent-coordinator/selfversion.go` mirrors `local-representative/selfversion.go`, polling AC's own on-disk binary's `--version` every 5s so it works even when AC runs alone on a box with only off-node LRs. The verdict, plus whether AC is loader-managed (`restartsignal.IsLoaderManaged()`), rides along on the existing `self-info` message (new `loader_managed`/`update_available` fields), now re-broadcast whenever it changes instead of sent only once per connection. `main.go` gained a `requestRestart`/`announceRestartAndExit` pair mirroring LR's, guarding the new control's server-side enforcement. The button follows the same paradigm as every other restart control: always enabled once loader-managed, turning orange and reading "restart and update" only in dev mode with a pending update. Added backend tests for the new `selfVersionWatch` and updated `docs/architecture.md`/`docs/DevMode.md`. As with prior replies in this chain, shell approval was unavailable so I verified via careful manual review rather than running `go build`/`tsc`.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

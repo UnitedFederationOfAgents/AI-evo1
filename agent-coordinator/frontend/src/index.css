@@ -589,6 +589,20 @@ body {
 .topo-controls-buttons { display: flex; gap: 8px; }
 .topo-controls-hint { font-size: 11px; color: #555; font-style: italic; }
 
+/* Small "restart agent-coordinator" section shown under the rebuild &
+   restart controls when the selected card is the self host -- see
+   isSelfSelected in App.tsx and Step4Prompt.md Revision E. Mirrors
+   .topo-controls's own divider treatment so it reads as a distinct
+   sub-section rather than more of the same control block. */
+.topo-ac-controls {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 12px;
+}
+
 /* ---- System panel (host system tab) ---- */
 
 .sys-panel { display: flex; flex-direction: column; gap: 20px; max-width: 720px; }

@@ -42,6 +42,11 @@ function useCoordinatorWS() {
   // GlobalTopologyPanel's self-card collapsing. null until self-info arrives
   // or when it discloses no id.
   const [selfHostId, setSelfHostId] = useState<string | null>(null)
+  // agent-coordinator's own restart-ability -- mirrors a local-representative
+  // self row's loader_managed/update_available, but for AC itself (see
+  // types.ts SelfInfoMsg and Step4Prompt.md Revision E).
+  const [acLoaderManaged, setACLoaderManaged] = useState(false)
+  const [acUpdateAvailable, setACUpdateAvailable] = useState(false)
   // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
@@ -80,6 +85,13 @@ function useCoordinatorWS() {
 
   const sendLRSetAutoRebuild = useCallback((hostId: string, enabled: boolean) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
+  }, [])
+
+  // Restarts agent-coordinator itself (not any host's LR) -- only expected to
+  // come back up when it's loader-managed; mirrors sendLRRestartApp but for
+  // AC's own process, with no host to target (see Step4Prompt.md Revision E).
+  const sendACRestartApp = useCallback(() => {
+    wsRef.current?.send(JSON.stringify({ type: 'ac-restart-app', payload: {} }))
   }, [])
 
   const selectHost = useCallback((hostId: string) => {
@@ -132,6 +144,8 @@ function useCoordinatorWS() {
             const p = msg.payload as SelfInfoMsg
             setDevMode(p.dev_mode)
             setSelfHostId(p.host_id || null)
+            setACLoaderManaged(p.loader_managed)
+            setACUpdateAvailable(p.update_available)
             break
           }
           case 'mode-mismatch': {
@@ -263,8 +277,9 @@ function useCoordinatorWS() {
 
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
+    acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
+    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
   }
 }
 
@@ -1189,9 +1204,14 @@ function TopologyNodeCard({
 // as before. Everything else here (live per-app data beyond health) is still
 // a placeholder. devMode gates the out-of-date halo and the rebuild/restart
 // controls below (Step4Prompt.md Revision C) -- both are meaningless outside
-// a dev workflow.
+// a dev workflow. When the selected card is the self host, the details pane
+// also grows a small "agent-coordinator" section below the rebuild/restart
+// controls with its own restart button, since that selection's restart
+// control above only ever targets that host's LR -- restarting AC itself is
+// a separate action (Step4Prompt.md Revision E).
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1200,6 +1220,9 @@ function GlobalTopologyPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  sendACRestartApp: () => void
 }) {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1214,6 +1237,10 @@ function GlobalTopologyPanel({
   const selfProc = selectedData?.system?.self
   const canRestart = !!selectedHostId && !!selfProc?.loader_managed
   const willUpdate = devMode && !!selfProc?.update_available
+  // The selected card is the one agent-coordinator itself runs on -- see
+  // GlobalTopologyPanel's self-card collapsing above.
+  const isSelfSelected = !!selectedHostId && selectedHostId === selfHostId
+  const acWillUpdate = devMode && acUpdateAvailable
 
   const selfHost = selfHostId ? hosts.find(h => h.id === selfHostId) ?? null : null
   const otherHosts = selfHost ? hosts.filter(h => h.id !== selfHost.id) : hosts
@@ -1308,6 +1335,27 @@ function GlobalTopologyPanel({
             <div className="topo-controls-hint">select a host to enable rebuild/restart controls</div>
           )}
         </div>
+        {isSelfSelected && (
+          <div className="topo-ac-controls">
+            <div className="topo-controls-label">agent-coordinator</div>
+            <div className="topo-controls-buttons">
+              <button
+                className={`sys-btn sys-btn-restart${acWillUpdate ? ' sys-btn-restart-update' : ''}`}
+                disabled={!acLoaderManaged}
+                title={
+                  !acLoaderManaged
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : acWillUpdate
+                    ? 'a newer build has landed on disk — terminate agent-coordinator so ufa-loader relaunches it with the new binary'
+                    : 'terminate agent-coordinator so ufa-loader relaunches it with the identical config'
+                }
+                onClick={sendACRestartApp}
+              >
+                {acWillUpdate ? 'restart and update' : 'restart'} agent-coordinator
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1315,6 +1363,7 @@ function GlobalTopologyPanel({
 
 function GlobalSystemPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1323,6 +1372,9 @@ function GlobalSystemPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  sendACRestartApp: () => void
 }) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
   return (
@@ -1349,6 +1401,9 @@ function GlobalSystemPanel({
           sendLRRestartApp={sendLRRestartApp}
           sendLRRebuildApp={sendLRRebuildApp}
           sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          acLoaderManaged={acLoaderManaged}
+          acUpdateAvailable={acUpdateAvailable}
+          sendACRestartApp={sendACRestartApp}
         />
       ) : (
         <div className="service-empty">not yet implemented</div>
@@ -1359,6 +1414,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, activeTab, setActiveTab,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1369,6 +1425,9 @@ function GlobalView({
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  sendACRestartApp: () => void
 }) {
   return (
     <div className="lr-view">
@@ -1398,6 +1457,9 @@ function GlobalView({
             sendLRRestartApp={sendLRRestartApp}
             sendLRRebuildApp={sendLRRebuildApp}
             sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+            acLoaderManaged={acLoaderManaged}
+            acUpdateAvailable={acUpdateAvailable}
+            sendACRestartApp={sendACRestartApp}
           />
         ) : (
           <div className="service-empty">not yet implemented</div>
@@ -1559,8 +1621,9 @@ function LRView({
 export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
+    acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
+    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
@@ -1664,6 +1727,9 @@ export default function App() {
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
+              acLoaderManaged={acLoaderManaged}
+              acUpdateAvailable={acUpdateAvailable}
+              sendACRestartApp={sendACRestartApp}
             />
           )}
         </div>

@@ -1208,7 +1208,13 @@ function TopologyNodeCard({
 // also grows a small "agent-coordinator" section below the rebuild/restart
 // controls with its own restart button, since that selection's restart
 // control above only ever targets that host's LR -- restarting AC itself is
-// a separate action (Step4Prompt.md Revision E).
+// a separate action (Step4Prompt.md Revision E) -- its rebuild & restart
+// controls sibling above is labeled "restart LR"/"restart and update LR" to
+// keep the two unambiguous now that they sit side by side. That same
+// agent-coordinator section also grows a "host update all" button, enabled
+// once any connected sub-application on this host is out of date (see
+// anySubAppUpdateAvailable), which restarts this host's LR followed by AC
+// itself in one click (Step4Prompt.md Revision F).
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   acLoaderManaged, acUpdateAvailable, sendACRestartApp,
@@ -1244,6 +1250,19 @@ function GlobalTopologyPanel({
 
   const selfHost = selfHostId ? hosts.find(h => h.id === selfHostId) ?? null : null
   const otherHosts = selfHost ? hosts.filter(h => h.id !== selfHost.id) : hosts
+
+  // Drives the "host update all" button below: true once any connected
+  // sub-application on the AC host itself is running an older build than
+  // what's on disk (same per-app check TopologyNodeCard uses for that box's
+  // own halo -- see subAppOutOfDate) -- LR/AC's own staleness isn't counted
+  // here since they're what the button updates, not what it's watching for.
+  const selfHostData = selfHost ? hostData[selfHost.id] : undefined
+  const selfServices = selfHostData?.lrState?.services
+  const selfManaged = selfHostData?.system?.managed
+  const anySubAppUpdateAvailable = devMode && ['federation-command', 'condoccer', 'worker'].some(
+    name => serviceHealthy(selfServices, name) && subAppOutOfDate(selfManaged, name)
+  )
+  const canUpdateAll = anySubAppUpdateAvailable && !!selfHostData?.system?.self?.loader_managed && acLoaderManaged
 
   return (
     <div className="topo-panel">
@@ -1328,7 +1347,7 @@ function GlobalTopologyPanel({
               }
               onClick={() => selectedHostId && sendLRRestartApp(selectedHostId)}
             >
-              {willUpdate ? 'restart and update' : 'restart'}
+              {willUpdate ? 'restart and update LR' : 'restart LR'}
             </button>
           </div>
           {!selectedHostId && (
@@ -1352,6 +1371,23 @@ function GlobalTopologyPanel({
                 onClick={sendACRestartApp}
               >
                 {acWillUpdate ? 'restart and update' : 'restart'} agent-coordinator
+              </button>
+              <button
+                className={`sys-btn sys-btn-restart${anySubAppUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
+                disabled={!canUpdateAll}
+                title={
+                  !anySubAppUpdateAvailable
+                    ? 'no sub-application on this host has a pending update'
+                    : !canUpdateAll
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : "terminate this host's LR, then agent-coordinator, so ufa-loader relaunches both with their new binaries"
+                }
+                onClick={() => {
+                  if (selfHost) sendLRRestartApp(selfHost.id)
+                  sendACRestartApp()
+                }}
+              >
+                host update all
               </button>
             </div>
           </div>

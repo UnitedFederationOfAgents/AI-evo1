@@ -213,7 +213,17 @@ its own binary drifting. The verdict rides along in `self-info` (new
 changes rather than sent only once per connection) and drives the global
 topology view's "restart agent-coordinator" button the same way: plain
 **restart** until an update lands on disk, then orange **restart and
-update**.
+update**. (The neighboring per-host **restart**/**restart and update**
+control above it is labeled **restart LR**/**restart and update LR** in this
+view specifically, so the two restart targets read unambiguously side by
+side — it still just targets the selected host's LR, same as everywhere
+else.) That same "agent-coordinator" section also has a **host update all**
+button, enabled once one or more of the host's connected `federation-command`/
+`condoccer`/`worker` instances are out of date per the poll below — pressing
+it sends `lr-restart-app` for that host followed by `ac-restart-app`, so one
+click updates the LR and then AC — see
+[`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
+Revision F.
 
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.

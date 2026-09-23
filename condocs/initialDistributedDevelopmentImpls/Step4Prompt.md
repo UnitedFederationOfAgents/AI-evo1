@@ -138,3 +138,24 @@ Now let's add a button in the Agent-Coordinator section of the Details & Control
 The button is 'host update all' and when selected it will update the LR followed by the AC.
 
 Let's also adjust the 'REBUILD & RESTART CONTROLS' 'restart'/'restart and update' to be 'restart LR'/'restart and update LR'.
+
+
+prompt: [`acb5612`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/acb5612af666872dd5c7f330ba76d833e02e8f10) → reply: [`c60c287`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c60c2879c5c672767c15556e56b18120667e8845)
+
+## Reply F
+
+The step file itself wasn't touched, as required. Implementation is complete.
+
+## Summary
+
+Implemented Revision F: the global topology view's Details & Control pane now has a "host update all" button in the agent-coordinator section, enabled (turning orange) once any connected FC/CO/W sub-application on the AC host has a pending update (`anySubAppUpdateAvailable` in `App.tsx`) and both that host's LR and AC itself are loader-managed; clicking it sends `lr-restart-app` for that host followed by `ac-restart-app`. Also renamed the rebuild & restart controls' "restart"/"restart and update" labels to "restart LR"/"restart and update LR" to disambiguate now that they sit beside the AC section's own restart controls. Updated `docs/architecture.md` and `docs/DevMode.md` to describe both changes. As with prior replies in this chain, shell approval was unavailable, so I verified via careful manual review rather than running `tsc`/`npm run build`.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

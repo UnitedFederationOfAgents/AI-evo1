@@ -184,8 +184,10 @@ main pane of host cards plus a details-and-control pane on the right:
   for the selected host), plus the restart button, enabled once that host's
   LR is loader-managed -- it sends `lr-restart-app` for that host, same as
   the per-host system tab's self-restart control, and reads "restart and
-  update" instead of "restart" whenever that host's self `ProcInfo` reports
-  `update_available`.
+  update LR" instead of "restart LR" whenever that host's self `ProcInfo`
+  reports `update_available` (labeled "...LR" rather than the per-host tab's
+  bare "restart" now that it sits alongside the agent-coordinator section's
+  own restart controls below).
 - Still in dev mode only: a host card gets a faint orange halo -- distinct
   from, and layered outside, the grey-vs-blue selected ring -- whenever that
   host is out of date with the dev branch its LR tracks: its dev-repo watcher
@@ -222,3 +224,11 @@ main pane of host cards plus a details-and-control pane on the right:
   `--version` every 5s) and discloses the verdict via `self-info`'s new
   `loader_managed`/`update_available` fields, re-broadcasting that message
   whenever the verdict changes rather than only once per connection.
+- That same "agent-coordinator" section also gets a "host update all" button,
+  next to the AC restart button, enabled only once at least one connected
+  FC/CO/W sub-application on this host has `update_available` set (the same
+  per-app check that drives that box's own halo above --
+  `anySubAppUpdateAvailable` in `App.tsx`) and both this host's LR and AC
+  itself are loader-managed. Clicking it sends `lr-restart-app` for this host
+  followed immediately by `ac-restart-app`, updating the LR and then AC in
+  one action instead of requiring both restart buttons separately.

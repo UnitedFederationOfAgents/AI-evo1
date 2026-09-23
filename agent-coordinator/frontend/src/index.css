@@ -586,7 +586,7 @@ body {
   padding-top: 12px;
 }
 .topo-controls-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
-.topo-controls-buttons { display: flex; gap: 8px; }
+.topo-controls-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
 .topo-controls-hint { font-size: 11px; color: #555; font-style: italic; }
 
 /* Small "restart agent-coordinator" section shown under the rebuild &

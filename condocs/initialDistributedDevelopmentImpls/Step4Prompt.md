@@ -111,11 +111,10 @@ The step file was not touched, as required. Implementation is complete.
 Implemented Revision D: local-representative now polls every managed sub-application's on-disk binary every 5 seconds (mirroring `selfversion.go`'s own-binary check) and compares it against the version that application's connected instance last reported, surfacing the result as `update_available` on that instance's `ProcInfo` (`pollManagedVersions` in `procman.go`, gated on dev mode). Agent-coordinator's global topology view (`App.tsx`) now draws the same orange halo used for host-level staleness around an individual FC/CO/W box's green border once that sub-app is connected but out of date (`subAppOutOfDate`), leaving the green border itself untouched and deliberately excluding LR since the host card's halo already covers it. Updated `docs/architecture.md`, `docs/DevMode.md`, and added backend tests for the new polling logic; as with prior replies in this chain, shell approval was unavailable so I verified via careful manual review rather than running `go build`/`tsc`.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Now let's extend the 'Details & Control' panel so that if the selected node is an agent-coordinator node that we get a small section under the Rebuild & Restart Controls with a button to restart agent-coordinator itself.
 
+In this case we must duplicate the functionality of LR into AC for detecting the different binary (because it is a legitimate use-case to run AC alone on a node and only have off-node LRs).
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will use the same paradigm of the restart button always being available, but having it turn orange if we have a pending update.

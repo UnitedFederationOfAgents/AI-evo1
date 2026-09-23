@@ -176,10 +176,22 @@ main pane of host cards plus a details-and-control pane on the right:
 - Clicking a host card selects it (mutually exclusive, click again to
   deselect), which drives the details pane's Host/status/version/uptime
   readouts (version/uptime come from that host's `lr-system-state`, same as
-  the per-host system tab) and enables its "restart" button once that host's
-  LR is loader-managed -- restart sends `lr-restart-app` for that host, same
-  as the per-host system tab's self-restart control. "update" is still a
-  disabled placeholder.
+  the per-host system tab) and its controls. The details pane's "update"
+  placeholder button is gone -- in its place, when AC's own `dev_mode` is on,
+  sits the same `lr-repo-state`-driven rebuild/auto-rebuild widget the
+  per-host system tab shows (sends `lr-rebuild-app` / `lr-set-auto-rebuild`
+  for the selected host), plus the restart button, enabled once that host's
+  LR is loader-managed -- it sends `lr-restart-app` for that host, same as
+  the per-host system tab's self-restart control, and reads "restart and
+  update" instead of "restart" whenever that host's self `ProcInfo` reports
+  `update_available`.
+- Still in dev mode only: a host card gets a faint orange halo -- distinct
+  from, and layered outside, the grey-vs-blue selected ring -- whenever that
+  host is out of date with the dev branch its LR tracks: its dev-repo watcher
+  has a rebuild ready (`lr-repo-state.rebuild_ready`, not currently building)
+  and/or its self `ProcInfo` has `update_available` set (`hostOutOfDate` in
+  `App.tsx`). Outside dev mode neither the halo nor the rebuild widget
+  appears, and the restart button never reads "update".
 - The active tab (e.g. `system`) is shared between the global view and a
   host's view (lifted to `App`), so selecting or deselecting a host keeps
   whichever tab was active instead of resetting it.

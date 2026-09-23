@@ -82,3 +82,24 @@ When the LR on a particular host is not up to date with the dev branch they are 
 The Details & Control panel will have the 'update' button removed and replaced with the same 'rebuild'/'auto-rebuild' and 'restart' controls we see in the per-host system tab. (With restart showing 'restart and update' when it will result in an update)
 
 This functionality is only active in dev mode.
+
+
+prompt: [`4f72a7d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4f72a7d8c9eb1b7d555d8d2f5621de42d4fb1632) → reply: [`5013dcc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5013dccde9170415277dd804d98473fd115ae476)
+
+## Reply C
+
+This all looks complete and consistent. As with the prior replies, shell command approval was unavailable, so I verified via careful manual review (types, prop threading, JSX/CSS balance) rather than running `tsc`/`npm run build`.
+
+## Summary
+
+Implemented Revision C: each host card in the global topology view now gets a faint orange halo (`.topo-node-outdated`, layered outside the existing grey/blue selected ring so the two never conflict) whenever that host's dev-repo watcher has a rebuild ready and/or its self `ProcInfo` reports `update_available` (`hostOutOfDate` in `App.tsx`). The Details & Control pane's disabled "update" placeholder is gone, replaced by the same rebuild/auto-rebuild widget (`RepoWatchPanel`, wired to `lr-rebuild-app`/`lr-set-auto-rebuild`) and restart button used in the per-host system tab, with the restart button reading "restart and update" (and turning orange) when that host's LR has a newer build waiting. Both the halo and these controls are gated on `devMode` and only appear when agent-coordinator's own dev mode is on. Also updated `agent-coordinator/docs/architecture.md`'s Global view section to describe this.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

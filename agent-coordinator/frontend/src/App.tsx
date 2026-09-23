@@ -1083,19 +1083,35 @@ function serviceHealthy(services: ServiceStatus[] | undefined, name: string): bo
   return services?.find(s => s.name === name)?.status === 'healthy'
 }
 
+// hostOutOfDate reports whether a host's LR is behind the dev branch it's
+// tracking -- true while either the "rebuild" control would be enabled (HEAD
+// has moved past the last successful build of its watched --dev-repo) or the
+// "restart" control would read "update and restart" (a newer build has
+// already landed on disk but isn't running yet). Drives the topology card's
+// orange halo (Step4Prompt.md Revision C); dev-mode-only, so callers gate
+// this on the viewing agent-coordinator's own devMode.
+function hostOutOfDate(data: HostClientState | undefined): boolean {
+  const rebuildReady = !!data?.repo?.watched && !data.repo.building && !!data.repo.rebuild_ready
+  const updateAvailable = !!data?.system?.self?.update_available
+  return rebuildReady || updateAvailable
+}
+
 // TopologyNodeCard is one node in the topology main pane: the "self" card
 // (agent-coordinator collapsed together with its own LR box -- there's no
 // separate self-only panel any more) is pinned to its own row above the
 // per-host cards, which are selectable and color their sub-application boxes
-// green once that host's LR reports them healthy.
+// green once that host's LR reports them healthy. outOfDate draws a faint
+// orange halo around the whole card (dev mode only) without displacing the
+// grey-vs-blue selected indication -- see hostOutOfDate.
 function TopologyNodeCard({
-  label, status, isSelf, services, selected, onClick,
+  label, status, isSelf, services, selected, outOfDate, onClick,
 }: {
   label: string
   status?: string
   isSelf?: boolean
   services?: ServiceStatus[]
   selected?: boolean
+  outOfDate?: boolean
   onClick?: () => void
 }) {
   const fcHealthy = serviceHealthy(services, 'federation-command')
@@ -1104,7 +1120,8 @@ function TopologyNodeCard({
 
   return (
     <div
-      className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}`}
+      className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}${outOfDate ? ' topo-node-outdated' : ''}`}
+      title={outOfDate ? "this host's LR is behind the dev branch it's tracking — see details & control" : undefined}
       onClick={onClick}
     >
       <div className="topo-node-header">
@@ -1139,15 +1156,20 @@ function TopologyNodeCard({
 // panel, keeping the host's real name) and it's selectable like any other
 // host. Without a match (no co-located LR connected), a static,
 // unselectable "agent-coordinator" placeholder card is shown instead, same
-// as before. Everything else here (update control, live per-app data beyond
-// health) is still a placeholder.
+// as before. Everything else here (live per-app data beyond health) is still
+// a placeholder. devMode gates the out-of-date halo and the rebuild/restart
+// controls below (Step4Prompt.md Revision C) -- both are meaningless outside
+// a dev workflow.
 function GlobalTopologyPanel({
-  hosts, hostData, selfHostId, sendLRRestartApp,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
+  devMode: boolean
   sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
 }) {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1161,6 +1183,7 @@ function GlobalTopologyPanel({
   const selectedData = selectedHostId ? hostData[selectedHostId] : undefined
   const selfProc = selectedData?.system?.self
   const canRestart = !!selectedHostId && !!selfProc?.loader_managed
+  const willUpdate = devMode && !!selfProc?.update_available
 
   const selfHost = selfHostId ? hosts.find(h => h.id === selfHostId) ?? null : null
   const otherHosts = selfHost ? hosts.filter(h => h.id !== selfHost.id) : hosts
@@ -1175,6 +1198,7 @@ function GlobalTopologyPanel({
             isSelf
             services={hostData[selfHost.id]?.lrState?.services}
             selected={selectedHostId === selfHost.id}
+            outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
             onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
           />
         ) : (
@@ -1188,6 +1212,7 @@ function GlobalTopologyPanel({
             status={h.status}
             services={hostData[h.id]?.lrState?.services}
             selected={selectedHostId === h.id}
+            outOfDate={devMode && hostOutOfDate(hostData[h.id])}
             onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}
           />
         ))}
@@ -1219,27 +1244,35 @@ function GlobalTopologyPanel({
           </span>
         </div>
         <div className="topo-controls">
-          <div className="topo-controls-label">update and restart controls</div>
+          <div className="topo-controls-label">rebuild &amp; restart controls</div>
+          {devMode && (
+            <RepoWatchPanel
+              repoState={selectedData?.repo}
+              onRebuild={() => selectedHostId && sendLRRebuildApp(selectedHostId)}
+              onSetAutoRebuild={enabled => selectedHostId && sendLRSetAutoRebuild(selectedHostId, enabled)}
+            />
+          )}
           <div className="topo-controls-buttons">
-            <button className="sys-btn sys-btn-restart" disabled>update</button>
             <button
-              className="sys-btn sys-btn-restart"
+              className={`sys-btn sys-btn-restart${willUpdate ? ' sys-btn-restart-update' : ''}`}
               disabled={!canRestart}
               title={
                 !selectedHostId
                   ? 'select a host to enable'
-                  : canRestart
-                  ? "terminate that host's LR so ufa-loader relaunches it with the identical config"
-                  : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                  : !canRestart
+                  ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                  : willUpdate
+                  ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
+                  : "terminate that host's LR so ufa-loader relaunches it with the identical config"
               }
               onClick={() => selectedHostId && sendLRRestartApp(selectedHostId)}
             >
-              restart
+              {willUpdate ? 'restart and update' : 'restart'}
             </button>
           </div>
-          <div className="topo-controls-hint">
-            {selectedHostId ? 'update not yet implemented' : 'select a host to enable restart'}
-          </div>
+          {!selectedHostId && (
+            <div className="topo-controls-hint">select a host to enable rebuild/restart controls</div>
+          )}
         </div>
       </div>
     </div>
@@ -1247,12 +1280,15 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, selfHostId, sendLRRestartApp,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
+  devMode: boolean
   sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
 }) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
   return (
@@ -1271,7 +1307,15 @@ function GlobalSystemPanel({
         </div>
       </div>
       {subTab === 'topology' ? (
-        <GlobalTopologyPanel hosts={hosts} hostData={hostData} selfHostId={selfHostId} sendLRRestartApp={sendLRRestartApp} />
+        <GlobalTopologyPanel
+          hosts={hosts}
+          hostData={hostData}
+          selfHostId={selfHostId}
+          devMode={devMode}
+          sendLRRestartApp={sendLRRestartApp}
+          sendLRRebuildApp={sendLRRebuildApp}
+          sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+        />
       ) : (
         <div className="service-empty">not yet implemented</div>
       )}
@@ -1280,12 +1324,15 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, selfHostId, sendLRRestartApp, activeTab, setActiveTab,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, activeTab, setActiveTab,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
+  devMode: boolean
   sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
 }) {
@@ -1309,7 +1356,15 @@ function GlobalView({
       </div>
       <div className="main-pane">
         {activeTab === 'system' ? (
-          <GlobalSystemPanel hosts={hosts} hostData={hostData} selfHostId={selfHostId} sendLRRestartApp={sendLRRestartApp} />
+          <GlobalSystemPanel
+            hosts={hosts}
+            hostData={hostData}
+            selfHostId={selfHostId}
+            devMode={devMode}
+            sendLRRestartApp={sendLRRestartApp}
+            sendLRRebuildApp={sendLRRebuildApp}
+            sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          />
         ) : (
           <div className="service-empty">not yet implemented</div>
         )}
@@ -1569,7 +1624,10 @@ export default function App() {
               hosts={hosts}
               hostData={hostData}
               selfHostId={selfHostId}
+              devMode={devMode}
               sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
             />

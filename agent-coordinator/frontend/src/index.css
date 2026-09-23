@@ -529,6 +529,13 @@ body {
 .topo-node-clickable:hover { border-color: #565656; }
 .topo-node-selected { border-color: #007acc; box-shadow: 0 0 0 1px #007acc; }
 
+/* Out-of-date halo (dev mode only -- see hostOutOfDate in App.tsx): an orange
+   glow just outside the card's own border, distinct from the grey-vs-blue
+   selected ring above so the two stack instead of fighting for the same
+   box-shadow layer. */
+.topo-node-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 10px 2px rgba(224, 168, 62, 0.45); }
+.topo-node-outdated.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(224, 168, 62, 0.55), 0 0 10px 2px rgba(224, 168, 62, 0.45); }
+
 .topo-node-header { display: flex; align-items: center; gap: 6px; }
 .topo-node-label { color: #d4d4d4; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }

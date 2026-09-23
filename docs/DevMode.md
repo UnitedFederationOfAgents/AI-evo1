@@ -220,10 +220,12 @@ side — it still just targets the selected host's LR, same as everywhere
 else.) That same "agent-coordinator" section also has a **host update all**
 button, enabled once one or more of the host's connected `federation-command`/
 `condoccer`/`worker` instances are out of date per the poll below — pressing
-it sends `lr-restart-app` for that host followed by `ac-restart-app`, so one
-click updates the LR and then AC — see
+it sends a restart only to whichever of that host's LR / AC is itself
+actually stale (`lr-restart-app` when the LR's own `update_available` is set,
+`ac-restart-app` when AC's is, both in sequence when both are), so one click
+never restarts a process that's already running the latest build — see
 [`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
-Revision F.
+Revisions F and G.
 
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.

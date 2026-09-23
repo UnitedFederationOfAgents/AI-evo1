@@ -1213,8 +1213,11 @@ function TopologyNodeCard({
 // keep the two unambiguous now that they sit side by side. That same
 // agent-coordinator section also grows a "host update all" button, enabled
 // once any connected sub-application on this host is out of date (see
-// anySubAppUpdateAvailable), which restarts this host's LR followed by AC
-// itself in one click (Step4Prompt.md Revision F).
+// anySubAppUpdateAvailable) -- but pressing it only actually restarts
+// whichever of this host's LR / AC itself is the one running a stale
+// binary (each checked independently, same willUpdate/acWillUpdate flags
+// the controls above already use), rather than always restarting both
+// (Step4Prompt.md Revision F, narrowed by Revision G).
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   acLoaderManaged, acUpdateAvailable, sendACRestartApp,
@@ -1380,11 +1383,17 @@ function GlobalTopologyPanel({
                     ? 'no sub-application on this host has a pending update'
                     : !canUpdateAll
                     ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
-                    : "terminate this host's LR, then agent-coordinator, so ufa-loader relaunches both with their new binaries"
+                    : willUpdate && acWillUpdate
+                    ? "terminate this host's LR, then agent-coordinator, so ufa-loader relaunches both with their new binaries"
+                    : willUpdate
+                    ? "terminate this host's LR so ufa-loader relaunches it with its new binary — agent-coordinator is already up to date"
+                    : acWillUpdate
+                    ? "terminate agent-coordinator so ufa-loader relaunches it with its new binary — this host's LR is already up to date"
+                    : "this host's LR and agent-coordinator are both already up to date"
                 }
                 onClick={() => {
-                  if (selfHost) sendLRRestartApp(selfHost.id)
-                  sendACRestartApp()
+                  if (selfHost && willUpdate) sendLRRestartApp(selfHost.id)
+                  if (acWillUpdate) sendACRestartApp()
                 }}
               >
                 host update all

@@ -156,3 +156,22 @@ Implemented Revision F: the global topology view's Details & Control pane now ha
 Let's take another pass and ensure that when we use the 'host update all' control the restart signal only targets the sub-applications which are not running the latest version (and would update to the latest version with a restart).
 
 For example, if we have the most recent LR version but not the most recent AC then only AC would restart.
+
+
+prompt: [`d6dfde0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d6dfde018e4009da8ef1433f50de775f34e0333a) → reply: [`31f1ff5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/31f1ff5781b7537c279198f2ddd528fc6f5db77f)
+
+## Reply G
+
+That's expected given the noted shell-approval limitation this session.
+
+Implemented Revision G: the "host update all" button now only sends a restart to whichever of the AC host's LR/AC is actually running a stale binary — `lr-restart-app` when `willUpdate` (that host's LR `update_available`) and/or `ac-restart-app` when `acWillUpdate` (AC's own `update_available`), independently, instead of unconditionally restarting both. Updated the button's tooltip to reflect each of the four cases (both stale, LR-only, AC-only, neither), and updated the surrounding code comment plus `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` to describe the new selective-restart behavior. Shell approval was again unavailable, so this was verified by manual review rather than `tsc`/`npm run build`.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

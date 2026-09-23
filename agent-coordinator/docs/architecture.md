@@ -229,6 +229,9 @@ main pane of host cards plus a details-and-control pane on the right:
   FC/CO/W sub-application on this host has `update_available` set (the same
   per-app check that drives that box's own halo above --
   `anySubAppUpdateAvailable` in `App.tsx`) and both this host's LR and AC
-  itself are loader-managed. Clicking it sends `lr-restart-app` for this host
-  followed immediately by `ac-restart-app`, updating the LR and then AC in
-  one action instead of requiring both restart buttons separately.
+  itself are loader-managed. Clicking it only sends a restart to whichever of
+  the two is actually running a stale binary -- `lr-restart-app` for this
+  host when its LR's own `update_available` is set, `ac-restart-app` when
+  AC's is (both, one after the other, when both are stale; neither when the
+  pending update is limited to a FC/CO/W instance) -- so it never restarts a
+  process that's already current.

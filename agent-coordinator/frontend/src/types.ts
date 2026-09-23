@@ -67,7 +67,7 @@ export interface ProcInfo {
   dev_mode?: boolean // launched with --dev-mode -- see docs/DevMode.md
   loader_managed?: boolean // self only: launched by ufa-loader, so "restart" comes back up
   version?: string // this process's build version -- see docs/DevMode.md "Versioning"
-  update_available?: boolean // self only: the on-disk binary now answers --version differently than this running process -- see docs/DevMode.md "Loader"
+  update_available?: boolean // the on-disk binary now answers --version differently than this running process (self: docs/DevMode.md "Loader"; managed: Step4Prompt.md Revision D)
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status

@@ -214,6 +214,15 @@ type Server struct {
 	versionMu       sync.RWMutex
 	managedVersions map[string]string
 
+	// managedUpdateAvailable mirrors selfVersion.available() but per managed
+	// sub-application: app name -> whether that app's on-disk binary now
+	// answers "--version" differently than the version most recently
+	// reported in managedVersions (see pollManagedVersions). Guarded by
+	// versionMu alongside managedVersions since the two are always read and
+	// compared together. Drives the topology view's per-sub-app halo (see
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
+	managedUpdateAvailable map[string]bool
+
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
@@ -230,14 +239,15 @@ func newServer(lrName string) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:         make(map[*wsClient]bool),
-		lrName:          lrName,
-		selfStart:       time.Now(),
-		binOverrides:    make(map[string]string),
-		managed:         make(map[string]*managedProc),
-		instanceSeq:     make(map[string]int),
-		modeMismatches:  make(map[string]ModeMismatchMsg),
-		managedVersions: make(map[string]string),
+		clients:                make(map[*wsClient]bool),
+		lrName:                 lrName,
+		selfStart:              time.Now(),
+		binOverrides:           make(map[string]string),
+		managed:                make(map[string]*managedProc),
+		instanceSeq:            make(map[string]int),
+		modeMismatches:         make(map[string]ModeMismatchMsg),
+		managedVersions:        make(map[string]string),
+		managedUpdateAvailable: make(map[string]bool),
 	}
 }
 
@@ -1114,6 +1124,13 @@ func main() {
 		}
 	}
 	s.devMode = cfg.devMode
+	if s.devMode {
+		// Per-sub-application out-of-date detection (see pollManagedVersions)
+		// is, like the rest of this dev/ops-mode-gated feature set, only
+		// meaningful for a dev workflow -- see
+		// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision C/D.
+		go s.watchManagedVersions()
+	}
 	s.heartbeatPort = cfg.heartbeatPort
 	s.httpPort = cfg.httpPort
 	s.condoccerPort = cfg.condoccerPort

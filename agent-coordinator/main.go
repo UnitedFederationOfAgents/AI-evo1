@@ -188,9 +188,12 @@ type ProcInfo struct {
 	// "Versioning". Empty until it has reported at least once.
 	Version string `json:"version,omitempty"`
 
-	// UpdateAvailable is only meaningful on Self: true once that LR's on-disk
-	// binary answers "--version" differently than the version it's running --
-	// see docs/DevMode.md "Loader".
+	// UpdateAvailable is true once this process's on-disk binary answers
+	// "--version" differently than the version currently running. On Self
+	// that's the LR itself -- see docs/DevMode.md "Loader". On a managed
+	// instance it's the same comparison against that application's binary --
+	// see local-representative/procman.go's pollManagedVersions and
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D.
 	UpdateAvailable bool `json:"update_available,omitempty"`
 }
 

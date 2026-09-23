@@ -356,6 +356,54 @@ func TestManagedVersionInSystemState(t *testing.T) {
 	}
 }
 
+// TestPollManagedVersionsDetectsDrift verifies pollManagedVersions flips
+// managedUpdateAvailable (and systemState() surfaces it on the matching
+// managed instance) once a reported running version disagrees with what the
+// resolved on-disk binary now answers to "--version" -- the per-sub-app
+// analogue of TestSelfVersionWatchPoll. See
+// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D.
+func TestPollManagedVersionsDetectsDrift(t *testing.T) {
+	s := newServer("test-lr")
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+	s.binOverrides["federation-command"] = fakeVersionBin(t, "v2")
+	s.setManagedVersion("federation-command", "v1")
+
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("should report no update available before the first poll")
+	}
+
+	s.pollManagedVersions()
+	if !s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("expected an update to be available: on-disk v2 != reported v1")
+	}
+	if st := s.systemState(); len(st.Managed) != 1 || !st.Managed[0].UpdateAvailable {
+		t.Errorf("systemState() should surface the drift on the managed instance, got %+v", st.Managed)
+	}
+
+	// The running instance "catches up" (as it would after a terminate +
+	// re-launch onto the newer build) -- the verdict flips back.
+	s.setManagedVersion("federation-command", "v2")
+	s.pollManagedVersions()
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("expected no update available once the reported version matches on-disk")
+	}
+}
+
+// TestPollManagedVersionsSkipsUnreported verifies pollManagedVersions neither
+// panics nor shells out for an app that has never reported a running version
+// (nothing to compare against yet).
+func TestPollManagedVersionsSkipsUnreported(t *testing.T) {
+	s := newServer("test-lr")
+	s.pollManagedVersions()
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("an app that never reported a version should never show an update available")
+	}
+}
+
 // TestLaunchManagedUnknown verifies an unrecognised application name is an error.
 func TestLaunchManagedUnknown(t *testing.T) {
 	s := newServer("test-lr")

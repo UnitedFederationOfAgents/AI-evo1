@@ -197,6 +197,10 @@ introducing a second, file-mtime-based notion of "changed".
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
 
+The same 5-second poll-and-compare exists for LR's managed instances (`federation-command`, `condoccer`), independent of `ufa-loader` -- see
+[`procman.go`](../local-representative/procman.go)'s `pollManagedVersions`. Instead of comparing an on-disk binary against the version compiled into the running process, it compares that on-disk binary's `--version` against whatever version the connected instance last reported (see "Versioning" below): a `terminate` + `launch` from LR's system tab is what "restart" is for self, so no loader is involved. This drives `agent-coordinator`'s global topology view, which draws an orange halo around a connected sub-application's green box once it's out of date this way — see
+[`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md) Revision D.
+
 ## Dev-repo watcher
 
 [`--dev-repo`](../local-representative/repowatch.go) — Step 3 of
@@ -304,9 +308,11 @@ also surface it somewhere more visible:
 `local-representative` once they connect over `representable` (a "version"
 data message, mirroring how `condoccer` already reports its condoc summary
 the same way) — LR lists it next to each managed instance on the system tab,
-same as its own. It's a one-shot report on connect, not a live poll: a
+same as its own. The report itself is one-shot on connect, not a live poll: a
 managed instance's version tag reflects whatever build it was launched with,
-until it reconnects.
+until it reconnects. LR does separately poll the *on-disk* binary for that
+application every 5 seconds and compares it against the last-reported tag —
+see the "Loader" section above.
 
 Every version tag on LR's system tab (its own and each managed instance's)
 rides along in the `system-state` LR already forwards to `agent-coordinator`,

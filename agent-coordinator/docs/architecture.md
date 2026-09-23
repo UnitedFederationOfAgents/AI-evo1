@@ -192,6 +192,16 @@ main pane of host cards plus a details-and-control pane on the right:
   and/or its self `ProcInfo` has `update_available` set (`hostOutOfDate` in
   `App.tsx`). Outside dev mode neither the halo nor the rebuild widget
   appears, and the restart button never reads "update".
+- Also dev mode only, and independent of the card-level halo above: an
+  individual FC/CO/W box gets that same orange halo drawn around its own
+  green border once it's connected *and* out of date -- that managed
+  instance's `ProcInfo.update_available` is set, meaning the application's
+  on-disk binary (see local-representative's `pollManagedVersions`) now
+  differs from the version it last reported over representable (`system.
+  managed`, matched by app name against `services`, in `subAppOutOfDate` in
+  `App.tsx`). The green border itself is unaffected -- it's kept as a future
+  health indication independent of update state (dev or ops mode). LR is
+  deliberately excluded: the host card's own halo already covers it.
 - The active tab (e.g. `system`) is shared between the global view and a
   host's view (lifted to `App`), so selecting or deselecting a host keeps
   whichever tab was active instead of resetting it.

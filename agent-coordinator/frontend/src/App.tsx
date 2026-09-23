@@ -1083,6 +1083,19 @@ function serviceHealthy(services: ServiceStatus[] | undefined, name: string): bo
   return services?.find(s => s.name === name)?.status === 'healthy'
 }
 
+// subAppOutOfDate reports whether `managed` (a host's system.managed, keyed
+// by app name the same way ServiceStatus.name is -- representable only
+// tracks one connection identity per app name today) lists `name` with
+// update_available set: that application's on-disk binary now differs from
+// the version its connected instance last reported (see
+// local-representative/procman.go's pollManagedVersions). Drives the orange
+// halo drawn around that sub-application's green "connected" box in the
+// topology diagram (Step4Prompt.md Revision D) -- LR itself is excluded
+// because hostOutOfDate already covers it at the whole-card level.
+function subAppOutOfDate(managed: ProcInfo[] | undefined, name: string): boolean {
+  return !!managed?.find(p => p.name === name)?.update_available
+}
+
 // hostOutOfDate reports whether a host's LR is behind the dev branch it's
 // tracking -- true while either the "rebuild" control would be enabled (HEAD
 // has moved past the last successful build of its watched --dev-repo) or the
@@ -1102,14 +1115,19 @@ function hostOutOfDate(data: HostClientState | undefined): boolean {
 // per-host cards, which are selectable and color their sub-application boxes
 // green once that host's LR reports them healthy. outOfDate draws a faint
 // orange halo around the whole card (dev mode only) without displacing the
-// grey-vs-blue selected indication -- see hostOutOfDate.
+// grey-vs-blue selected indication -- see hostOutOfDate. devMode/managed
+// additionally draw that same halo around an individual FC/CO/W box's own
+// green border once it's connected but out of date (see subAppOutOfDate) --
+// LR/AC never get one; the card-level halo already implies it for LR.
 function TopologyNodeCard({
-  label, status, isSelf, services, selected, outOfDate, onClick,
+  label, status, isSelf, services, managed, devMode, selected, outOfDate, onClick,
 }: {
   label: string
   status?: string
   isSelf?: boolean
   services?: ServiceStatus[]
+  managed?: ProcInfo[]
+  devMode?: boolean
   selected?: boolean
   outOfDate?: boolean
   onClick?: () => void
@@ -1117,6 +1135,9 @@ function TopologyNodeCard({
   const fcHealthy = serviceHealthy(services, 'federation-command')
   const coHealthy = serviceHealthy(services, 'condoccer')
   const wHealthy = serviceHealthy(services, 'worker')
+  const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
+  const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
+  const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
 
   return (
     <div
@@ -1135,9 +1156,18 @@ function TopologyNodeCard({
           <span className="topo-node-box topo-node-box-lr">LR</span>
         </div>
         <div className="topo-node-row topo-node-row-bottom">
-          <span className={`topo-node-box${fcHealthy ? ' topo-node-box-healthy' : ''}`}>FC</span>
-          <span className={`topo-node-box${coHealthy ? ' topo-node-box-healthy' : ''}`}>CO</span>
-          <span className={`topo-node-box${wHealthy ? ' topo-node-box-healthy' : ''}`}>W</span>
+          <span
+            className={`topo-node-box${fcHealthy ? ' topo-node-box-healthy' : ''}${fcOutdated ? ' topo-node-box-outdated' : ''}`}
+            title={fcOutdated ? "federation-command is connected but running an older build than what's on disk" : undefined}
+          >FC</span>
+          <span
+            className={`topo-node-box${coHealthy ? ' topo-node-box-healthy' : ''}${coOutdated ? ' topo-node-box-outdated' : ''}`}
+            title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
+          >CO</span>
+          <span
+            className={`topo-node-box${wHealthy ? ' topo-node-box-healthy' : ''}${wOutdated ? ' topo-node-box-outdated' : ''}`}
+            title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
+          >W</span>
         </div>
       </div>
     </div>
@@ -1197,6 +1227,8 @@ function GlobalTopologyPanel({
             status={selfHost.status}
             isSelf
             services={hostData[selfHost.id]?.lrState?.services}
+            managed={hostData[selfHost.id]?.system?.managed}
+            devMode={devMode}
             selected={selectedHostId === selfHost.id}
             outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
             onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
@@ -1211,6 +1243,8 @@ function GlobalTopologyPanel({
             label={h.label}
             status={h.status}
             services={hostData[h.id]?.lrState?.services}
+            managed={hostData[h.id]?.system?.managed}
+            devMode={devMode}
             selected={selectedHostId === h.id}
             outOfDate={devMode && hostOutOfDate(hostData[h.id])}
             onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}

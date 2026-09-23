@@ -553,6 +553,12 @@ body {
 /* A sub-application box (FC/CO/W) turns the same green as the LR box once
    that host's LR reports it healthy (see serviceHealthy in App.tsx). */
 .topo-node-box-healthy { border-color: #2e7a2e; color: #6ec96e; }
+/* Sub-application out-of-date halo (dev mode only -- see subAppOutOfDate in
+   App.tsx): the same orange glow as .topo-node-outdated, scaled down for a
+   box this small, drawn just outside a connected (green-bordered) FC/CO/W
+   box so the green "connected" border stays visible underneath -- it never
+   applies without .topo-node-box-healthy already being set. */
+.topo-node-box-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 6px 1px rgba(224, 168, 62, 0.45); }
 
 .topo-details {
   width: 240px;

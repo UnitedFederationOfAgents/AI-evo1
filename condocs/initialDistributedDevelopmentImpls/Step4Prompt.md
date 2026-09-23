@@ -100,3 +100,22 @@ Implemented Revision C: each host card in the global topology view now gets a fa
 Now let's add orange halos to any sub-application which is connected but out of date. We do not need to include LR because the host panel implies this, but for any sub-app connected to LR we will have an orange halo AROUND the green border.
 
 (We will keep the green border because in the future this will be a health indication visible in dev mode or ops mode)
+
+
+prompt: [`09dc26e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/09dc26efcf3376ed5916a77107f0421488915b2d) → reply: [`a791398`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a791398f48b9075c20821cb7cb30e611f4bf145a)
+
+## Reply D
+
+The step file was not touched, as required. Implementation is complete.
+
+Implemented Revision D: local-representative now polls every managed sub-application's on-disk binary every 5 seconds (mirroring `selfversion.go`'s own-binary check) and compares it against the version that application's connected instance last reported, surfacing the result as `update_available` on that instance's `ProcInfo` (`pollManagedVersions` in `procman.go`, gated on dev mode). Agent-coordinator's global topology view (`App.tsx`) now draws the same orange halo used for host-level staleness around an individual FC/CO/W box's green border once that sub-app is connected but out of date (`subAppOutOfDate`), leaving the green border itself untouched and deliberately excluding LR since the host card's halo already covers it. Updated `docs/architecture.md`, `docs/DevMode.md`, and added backend tests for the new polling logic; as with prior replies in this chain, shell approval was unavailable so I verified via careful manual review rather than running `go build`/`tsc`.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

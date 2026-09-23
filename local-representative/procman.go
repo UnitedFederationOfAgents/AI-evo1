@@ -46,12 +46,17 @@ type ProcInfo struct {
 	// all yet.
 	Version string `json:"version,omitempty"`
 
-	// UpdateAvailable is only meaningful on Self: true once this process's
-	// on-disk binary answers "--version" differently than the version
-	// running in this process (see selfversion.go) -- i.e. a newer build
-	// has landed since startup and pressing "restart" would pick it up.
-	// Only ever true for a loader-managed process; see docs/DevMode.md
-	// "Loader".
+	// UpdateAvailable is true once the on-disk binary for this process
+	// answers "--version" differently than the version currently running.
+	// On Self that's this local-representative binary itself (see
+	// selfversion.go) -- i.e. a newer build has landed since startup and
+	// pressing "restart" would pick it up; only ever true for a
+	// loader-managed process, see docs/DevMode.md "Loader". On a managed
+	// instance it's the same comparison against that application's resolved
+	// binary (see pollManagedVersions) -- i.e. a rebuild has landed since
+	// this instance was launched and re-launching it (terminate + launch)
+	// would pick it up. Drives the topology view's per-sub-app halo (see
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
 	UpdateAvailable bool `json:"update_available,omitempty"`
 }
 
@@ -210,6 +215,7 @@ func (s *Server) systemState() SystemStateMsg {
 		// docs/DevMode.md) — there is no per-instance override.
 		info.DevMode = s.devMode
 		info.Version = s.managedVersion(p.app)
+		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
 		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
@@ -258,6 +264,78 @@ func (s *Server) managedVersion(name string) string {
 	s.versionMu.RLock()
 	defer s.versionMu.RUnlock()
 	return s.managedVersions[name]
+}
+
+// managedUpdateAvailableFor reports whether the named managed application's
+// on-disk binary currently differs from the version most recently reported
+// by a connected instance (see pollManagedVersions). Always false for a name
+// that has never reported a version, mirroring selfVersion.available() being
+// false until its own first poll.
+func (s *Server) managedUpdateAvailableFor(name string) bool {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	return s.managedUpdateAvailable[name]
+}
+
+// pollManagedVersions re-derives managedUpdateAvailable for every managed
+// application that has reported a running version at least once, by
+// resolving that application's binary the same way launchManaged would and
+// comparing its own "--version" output against the version last reported
+// over representable (managedVersion). This is the per-sub-application
+// analogue of selfVersionWatch.poll -- the difference is that the "running"
+// side here is whatever a connected instance most recently self-reported,
+// not a value fixed at this process's own startup, since a managed instance
+// can be launched (and can report in) at any point in LR's lifetime.
+// Broadcasts a fresh system-state if anything changed.
+func (s *Server) pollManagedVersions() {
+	s.versionMu.RLock()
+	running := make(map[string]string, len(s.managedVersions))
+	for name, v := range s.managedVersions {
+		running[name] = v
+	}
+	s.versionMu.RUnlock()
+
+	changed := false
+	for name, runningVersion := range running {
+		if runningVersion == "" {
+			continue
+		}
+		spec, ok := managedApps[name]
+		if !ok {
+			continue
+		}
+		bin, err := s.resolveAppBinary(name, spec.binName)
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(bin, "--version").Output()
+		if err != nil {
+			log.Printf("managed-version: %s --version failed: %v", bin, err)
+			continue
+		}
+		updated := strings.TrimSpace(string(out)) != runningVersion
+
+		s.versionMu.Lock()
+		if s.managedUpdateAvailable[name] != updated {
+			s.managedUpdateAvailable[name] = updated
+			changed = true
+		}
+		s.versionMu.Unlock()
+	}
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// watchManagedVersions polls pollManagedVersions on selfVersionPollInterval,
+// forever. Run in its own goroutine, only while in dev mode (see main.go);
+// never returns.
+func (s *Server) watchManagedVersions() {
+	ticker := time.NewTicker(selfVersionPollInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.pollManagedVersions()
+	}
 }
 
 func (s *Server) broadcastSystemState() {

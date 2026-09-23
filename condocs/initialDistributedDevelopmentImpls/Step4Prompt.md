@@ -151,11 +151,8 @@ The step file itself wasn't touched, as required. Implementation is complete.
 Implemented Revision F: the global topology view's Details & Control pane now has a "host update all" button in the agent-coordinator section, enabled (turning orange) once any connected FC/CO/W sub-application on the AC host has a pending update (`anySubAppUpdateAvailable` in `App.tsx`) and both that host's LR and AC itself are loader-managed; clicking it sends `lr-restart-app` for that host followed by `ac-restart-app`. Also renamed the rebuild & restart controls' "restart"/"restart and update" labels to "restart LR"/"restart and update LR" to disambiguate now that they sit beside the AC section's own restart controls. Updated `docs/architecture.md` and `docs/DevMode.md` to describe both changes. As with prior replies in this chain, shell approval was unavailable, so I verified via careful manual review rather than running `tsc`/`npm run build`.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+Let's take another pass and ensure that when we use the 'host update all' control the restart signal only targets the sub-applications which are not running the latest version (and would update to the latest version with a restart).
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+For example, if we have the most recent LR version but not the most recent AC then only AC would restart.

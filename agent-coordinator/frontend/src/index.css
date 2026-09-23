@@ -520,6 +520,11 @@ body {
    wrap onto the next line. */
 .topo-node-self { flex-basis: 100%; width: auto; max-width: 180px; }
 
+/* Faint separator between the self card and the per-host cards below --
+   flex-basis: 100% pushes it onto its own line, same trick as
+   .topo-node-self. */
+.topo-divider { flex-basis: 100%; height: 1px; background: #2a2a2a; margin: 2px 0; }
+
 .topo-node-clickable { cursor: pointer; }
 .topo-node-clickable:hover { border-color: #565656; }
 .topo-node-selected { border-color: #007acc; box-shadow: 0 0 0 1px #007acc; }

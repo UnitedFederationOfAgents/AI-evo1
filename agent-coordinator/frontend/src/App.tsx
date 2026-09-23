@@ -38,6 +38,10 @@ function useCoordinatorWS() {
   const [hosts, setHosts] = useState<Host[]>([])
   const [hostData, setHostData] = useState<Record<string, HostClientState>>({})
   const [devMode, setDevMode] = useState(false)
+  // The connected host (if any) that agent-coordinator itself runs on -- see
+  // GlobalTopologyPanel's self-card collapsing. null until self-info arrives
+  // or when it discloses no id.
+  const [selfHostId, setSelfHostId] = useState<string | null>(null)
   // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
@@ -124,9 +128,12 @@ function useCoordinatorWS() {
       try {
         const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown }
         switch (msg.type) {
-          case 'self-info':
-            setDevMode((msg.payload as SelfInfoMsg).dev_mode)
+          case 'self-info': {
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setSelfHostId(p.host_id || null)
             break
+          }
           case 'mode-mismatch': {
             const payload = msg.payload as ModeMismatchMsg
             setModeMismatches(prev => {
@@ -255,7 +262,7 @@ function useCoordinatorWS() {
   }, [connect])
 
   return {
-    connected, hosts, hostData, selectHost, devMode, modeMismatches,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   }
@@ -1121,18 +1128,25 @@ function TopologyNodeCard({
 }
 
 // GlobalTopologyPanel: main pane of host cards (left, agent-coordinator's own
-// collapsed self+LR card always on top) plus a details-and-control pane
-// (right) -- see condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
+// card always on top, a faint divider below it) plus a details-and-control
+// pane (right) -- see
+// condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
 // Selecting a host card drives the details pane's readouts and its restart
 // control (which sends that host's LR a restart, same as the per-host system
-// tab's self-restart button); the self card isn't selectable -- there's no
-// host id to restart or report readouts for. Everything else here (update
-// control, live per-app data beyond health) is still a placeholder.
+// tab's self-restart button). When selfHostId names a currently-connected
+// host, that's the host agent-coordinator itself runs on -- its card
+// collapses the AC box together with that host's own LR/FC/CO/W card (one
+// panel, keeping the host's real name) and it's selectable like any other
+// host. Without a match (no co-located LR connected), a static,
+// unselectable "agent-coordinator" placeholder card is shown instead, same
+// as before. Everything else here (update control, live per-app data beyond
+// health) is still a placeholder.
 function GlobalTopologyPanel({
-  hosts, hostData, sendLRRestartApp,
+  hosts, hostData, selfHostId, sendLRRestartApp,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
+  selfHostId: string | null
   sendLRRestartApp: (hostId: string) => void
 }) {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
@@ -1148,11 +1162,26 @@ function GlobalTopologyPanel({
   const selfProc = selectedData?.system?.self
   const canRestart = !!selectedHostId && !!selfProc?.loader_managed
 
+  const selfHost = selfHostId ? hosts.find(h => h.id === selfHostId) ?? null : null
+  const otherHosts = selfHost ? hosts.filter(h => h.id !== selfHost.id) : hosts
+
   return (
     <div className="topo-panel">
       <div className="topo-main">
-        <TopologyNodeCard label="agent-coordinator" isSelf />
-        {hosts.map(h => (
+        {selfHost ? (
+          <TopologyNodeCard
+            label={selfHost.label}
+            status={selfHost.status}
+            isSelf
+            services={hostData[selfHost.id]?.lrState?.services}
+            selected={selectedHostId === selfHost.id}
+            onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
+          />
+        ) : (
+          <TopologyNodeCard label="agent-coordinator" isSelf />
+        )}
+        {otherHosts.length > 0 && <div className="topo-divider" />}
+        {otherHosts.map(h => (
           <TopologyNodeCard
             key={h.id}
             label={h.label}
@@ -1218,10 +1247,11 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, sendLRRestartApp,
+  hosts, hostData, selfHostId, sendLRRestartApp,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
+  selfHostId: string | null
   sendLRRestartApp: (hostId: string) => void
 }) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
@@ -1241,7 +1271,7 @@ function GlobalSystemPanel({
         </div>
       </div>
       {subTab === 'topology' ? (
-        <GlobalTopologyPanel hosts={hosts} hostData={hostData} sendLRRestartApp={sendLRRestartApp} />
+        <GlobalTopologyPanel hosts={hosts} hostData={hostData} selfHostId={selfHostId} sendLRRestartApp={sendLRRestartApp} />
       ) : (
         <div className="service-empty">not yet implemented</div>
       )}
@@ -1250,14 +1280,15 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, sendLRRestartApp,
+  hosts, hostData, selfHostId, sendLRRestartApp, activeTab, setActiveTab,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
+  selfHostId: string | null
   sendLRRestartApp: (hostId: string) => void
+  activeTab: LRTab
+  setActiveTab: (tab: LRTab) => void
 }) {
-  const [activeTab, setActiveTab] = useState<LRTab>('system')
-
   return (
     <div className="lr-view">
       <div className="lr-header">
@@ -1278,7 +1309,7 @@ function GlobalView({
       </div>
       <div className="main-pane">
         {activeTab === 'system' ? (
-          <GlobalSystemPanel hosts={hosts} hostData={hostData} sendLRRestartApp={sendLRRestartApp} />
+          <GlobalSystemPanel hosts={hosts} hostData={hostData} selfHostId={selfHostId} sendLRRestartApp={sendLRRestartApp} />
         ) : (
           <div className="service-empty">not yet implemented</div>
         )}
@@ -1289,7 +1320,7 @@ function GlobalView({
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
-  sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles,
+  sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles, activeTab, setActiveTab,
 }: {
   host: Host
   data: HostClientState
@@ -1301,8 +1332,9 @@ function LRView({
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList) => void
+  activeTab: LRTab
+  setActiveTab: (tab: LRTab) => void
 }) {
-  const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const lrState = data.lrState
@@ -1437,12 +1469,16 @@ function LRView({
 
 export default function App() {
   const {
-    connected, hosts, hostData, selectHost, devMode, modeMismatches,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  // Shared across the global view and any host's view, so switching between
+  // them (selecting/deselecting a host) keeps whichever tab was active
+  // instead of resetting it.
+  const [activeTab, setActiveTab] = useState<LRTab>('system')
   // Mobile nav drawer: the host sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css), same treatment as condoccer's
   // sidebar. Desktop layout is untouched -- this state has no visible effect
@@ -1525,9 +1561,18 @@ export default function App() {
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               uploadFiles={uploadFiles}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
             />
           ) : (
-            <GlobalView hosts={hosts} hostData={hostData} sendLRRestartApp={sendLRRestartApp} />
+            <GlobalView
+              hosts={hosts}
+              hostData={hostData}
+              selfHostId={selfHostId}
+              sendLRRestartApp={sendLRRestartApp}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+            />
           )}
         </div>
       </div>

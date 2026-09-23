@@ -58,3 +58,26 @@ Let's keep working on this - we want to update the topology pane so that the 'ag
 Let's also add a faint divider line between that 'self' host and the hosts below, to make a stronger distinction.
 
 Let's also ensure that if we have a particular tab (such as the 'system' tab) selected and we move from having the 'global' view selected to having a host-specific view selected that we stay on the same tab.
+
+
+prompt: [`7c599a0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7c599a06c7cb3e4a7627f212744a14ecc82f8d7d) → reply: [`3bcec24`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3bcec241346a2a16cda8712f15dfb1463f7c434b)
+
+## Reply B
+
+This all looks solid. I've made all three changes:
+
+1. **Merged self card**: Added `host_id` to the `self-info` websocket message (backend resolves it via `ufahostid.GetHostID()`, the same stable per-host ID a co-located local-representative defaults its `-name` to). The frontend now matches that ID against the connected hosts list — when found, the "agent-coordinator" card collapses into that host's own card (real label, live health/services, selectable, restart button works) instead of two separate panels; when no match exists it falls back to the old static placeholder.
+2. **Divider**: Added a `.topo-divider` CSS rule (thin `#2a2a2a` line, own flex row) rendered between the self card and the per-host cards below, when there are any.
+3. **Tab persistence**: Lifted `activeTab` state out of `GlobalView`/`LRView` into `App`, so switching between the global view and a host view (or back) keeps whichever top-level tab (e.g. "system") was already selected.
+
+Also updated `docs/architecture.md`'s Global view section to describe this behavior. As with the prior replies, shell command approval was unavailable, so I verified via manual review against the existing patterns (e.g. mirroring `federation-command`'s use of `ufahostid.GetHostID()`) rather than running `go build`/`tsc`.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

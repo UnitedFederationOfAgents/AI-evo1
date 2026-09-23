@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"representable"
+	ufahostid "ufa-hostid"
 	"ufa-loader/restartsignal"
 	ufaversion "ufa-version"
 )
@@ -325,7 +326,8 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
-	devMode    bool // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
+	devMode    bool   // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
+	selfHostID string // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
 
 	hostsMu    sync.RWMutex
 	hostStates map[string]*hostState
@@ -346,11 +348,16 @@ func newServer() *Server {
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
-// to its frontend (see docs/DevMode.md) — sent once when a browser client
-// connects, since AC has no representable server above it forwarding a "self"
-// ProcInfo the way LR forwards one for itself.
+// and host identity to its frontend (see docs/DevMode.md) — sent once when a
+// browser client connects, since AC has no representable server above it
+// forwarding a "self" ProcInfo the way LR forwards one for itself. HostID is
+// the same ufahostid.GetHostID() value a co-located local-representative
+// defaults its "-name" to, letting the frontend recognize which connected
+// host (if any) is the one agent-coordinator itself runs on -- see the
+// global topology panel's self-card collapsing in App.tsx.
 type SelfInfoMsg struct {
-	DevMode bool `json:"dev_mode"`
+	DevMode bool   `json:"dev_mode"`
+	HostID  string `json:"host_id"`
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode
@@ -566,7 +573,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial state.
 	go func() {
-		s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode})
+		s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, HostID: s.selfHostID})
 		s.sendToClient(c, "hosts", HostsMsg{Hosts: s.getHosts()})
 		s.hostsMu.RLock()
 		names := make([]string, 0, len(s.hostStates))
@@ -891,6 +898,7 @@ func main() {
 
 	s := newServer()
 	s.devMode = *devMode
+	s.selfHostID = ufahostid.GetHostID()
 
 	reprSrv, err := representable.NewServer(":"+*reprPort, representable.Mode(s.devMode))
 	if err != nil {

@@ -160,9 +160,15 @@ nested `topology`/`timeline` tabs of its own; the rest (including
 `condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg`) is a
 main pane of host cards plus a details-and-control pane on the right:
 
-- agent-coordinator's own card (AC collapsed together with its own LR box)
-  always leads its own row above the per-host cards, mirroring the sketch's
-  `(self)` node -- it isn't selectable, since there's no host id behind it.
+- agent-coordinator's own card always leads its own row above the per-host
+  cards, mirroring the sketch's `(self)` node, with a faint divider line
+  separating it from the hosts below. `self-info` now discloses AC's own
+  `host_id` (`ufahostid.GetHostID()`, the same value a co-located LR defaults
+  its `-name` to) alongside `dev_mode`; when that id matches a connected
+  host, the AC box collapses into that host's own LR/FC/CO/W card -- one
+  panel, keeping the host's real name -- and it's selectable like any other
+  host card. Without a match (no co-located LR connected), a static,
+  unselectable "agent-coordinator" placeholder card is shown instead.
 - Each host card's FC/CO/W sub-application boxes turn green once that host's
   `lr-state` reports that service healthy (the same `services` list
   `LRView`'s health indicator reads); the LR/AC boxes keep their static
@@ -174,3 +180,6 @@ main pane of host cards plus a details-and-control pane on the right:
   LR is loader-managed -- restart sends `lr-restart-app` for that host, same
   as the per-host system tab's self-restart control. "update" is still a
   disabled placeholder.
+- The active tab (e.g. `system`) is shared between the global view and a
+  host's view (lifted to `App`), so selecting or deselecting a host keeps
+  whichever tab was active instead of resetting it.

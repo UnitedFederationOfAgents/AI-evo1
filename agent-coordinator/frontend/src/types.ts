@@ -71,9 +71,14 @@ export interface ProcInfo {
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode status
-// (see docs/DevMode.md) -- sent once when the WebSocket connects.
+// (see docs/DevMode.md) and host identity -- sent once when the WebSocket
+// connects. host_id is the same ufahostid value a co-located
+// local-representative defaults its "-name" to, letting the frontend
+// recognize which connected host (if any) is the one agent-coordinator
+// itself runs on.
 export interface SelfInfoMsg {
   dev_mode: boolean
+  host_id: string
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode

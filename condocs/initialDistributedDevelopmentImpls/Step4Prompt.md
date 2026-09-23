@@ -73,11 +73,12 @@ This all looks solid. I've made all three changes:
 Also updated `docs/architecture.md`'s Global view section to describe this behavior. As with the prior replies, shell command approval was unavailable, so I verified via manual review against the existing patterns (e.g. mirroring `federation-command`'s use of `ufahostid.GetHostID()`) rather than running `go build`/`tsc`.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Now let's add indications on the global-->system-->topology view to highlight when hosts and components are out of date.
 
+When the LR on a particular host is not up to date with the dev branch they are tracking they will have an orange halo outside their host panel. This will not interfere with the grey-vs-blue 'selected' indication. This orange halo will exist whether the 'rebuild' control is available because the latest commit has not been built, and/or whether the 'update and restart' control is available because the latest version is not running.
 
-## Human-Prompt
+The Details & Control panel will have the 'update' button removed and replaced with the same 'rebuild'/'auto-rebuild' and 'restart' controls we see in the per-host system tab. (With restart showing 'restart and update' when it will result in an update)
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This functionality is only active in dev mode.

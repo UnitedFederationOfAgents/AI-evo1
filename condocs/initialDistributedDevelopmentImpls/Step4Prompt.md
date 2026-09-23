@@ -131,11 +131,10 @@ Everything looks correct and complete. The implementation is done.
 Implemented Revision E: the global topology view's Details & Control pane now grows a small "agent-coordinator" section below the rebuild/restart controls whenever the selected node is the host AC itself runs on, with its own restart button (`isSelfSelected` in `App.tsx`, sending a new `ac-restart-app` WebSocket message with no host to target). As required, AC duplicates LR's self-version-watch logic rather than depending on it — `agent-coordinator/selfversion.go` mirrors `local-representative/selfversion.go`, polling AC's own on-disk binary's `--version` every 5s so it works even when AC runs alone on a box with only off-node LRs. The verdict, plus whether AC is loader-managed (`restartsignal.IsLoaderManaged()`), rides along on the existing `self-info` message (new `loader_managed`/`update_available` fields), now re-broadcast whenever it changes instead of sent only once per connection. `main.go` gained a `requestRestart`/`announceRestartAndExit` pair mirroring LR's, guarding the new control's server-side enforcement. The button follows the same paradigm as every other restart control: always enabled once loader-managed, turning orange and reading "restart and update" only in dev mode with a pending update. Added backend tests for the new `selfVersionWatch` and updated `docs/architecture.md`/`docs/DevMode.md`. As with prior replies in this chain, shell approval was unavailable so I verified via careful manual review rather than running `go build`/`tsc`.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Now let's add a button in the Agent-Coordinator section of the Details & Control panel which is only available if one or more sub-apps on the AC host have a pending update.
 
+The button is 'host update all' and when selected it will update the LR followed by the AC.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also adjust the 'REBUILD & RESTART CONTROLS' 'restart'/'restart and update' to be 'restart LR'/'restart and update LR'.

@@ -157,7 +157,20 @@ tabs a host's dashboard has, but from a net-wide vantage point instead of one
 host's — only the `system` tab has a global view implemented so far, with
 nested `topology`/`timeline` tabs of its own; the rest (including
 `timeline`) render a "not yet implemented" placeholder. `topology` (see
-`condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg`) is
-frontend-only and not yet wired to live per-host process data or
-interactive — it's a dummy main pane of host cards plus a dummy
-details-and-control pane, both purely presentational this increment.
+`condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg`) is a
+main pane of host cards plus a details-and-control pane on the right:
+
+- agent-coordinator's own card (AC collapsed together with its own LR box)
+  always leads its own row above the per-host cards, mirroring the sketch's
+  `(self)` node -- it isn't selectable, since there's no host id behind it.
+- Each host card's FC/CO/W sub-application boxes turn green once that host's
+  `lr-state` reports that service healthy (the same `services` list
+  `LRView`'s health indicator reads); the LR/AC boxes keep their static
+  colors.
+- Clicking a host card selects it (mutually exclusive, click again to
+  deselect), which drives the details pane's Host/status/version/uptime
+  readouts (version/uptime come from that host's `lr-system-state`, same as
+  the per-host system tab) and enables its "restart" button once that host's
+  LR is loader-managed -- restart sends `lr-restart-app` for that host, same
+  as the per-host system tab's self-restart control. "update" is still a
+  disabled placeholder.

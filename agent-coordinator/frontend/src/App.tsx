@@ -1069,12 +1069,37 @@ function FileViewer({
 const GLOBAL_SYSTEM_TABS = ['topology', 'timeline'] as const
 type GlobalSystemTab = typeof GLOBAL_SYSTEM_TABS[number]
 
-// TopologyNodeCard is a dummy stand-in for a host's node in the topology
-// main pane -- later this will reflect that host's actually-running
-// sub-applications; for now every card shows the same placeholder diagram.
-function TopologyNodeCard({ label, status, isSelf }: { label: string; status?: string; isSelf?: boolean }) {
+// serviceHealthy reports whether `services` (a host's lrState.services, as
+// also used by LRView's getServiceStatus) lists `name` as healthy -- drives
+// whether that sub-application's box in the topology diagram renders green.
+function serviceHealthy(services: ServiceStatus[] | undefined, name: string): boolean {
+  return services?.find(s => s.name === name)?.status === 'healthy'
+}
+
+// TopologyNodeCard is one node in the topology main pane: the "self" card
+// (agent-coordinator collapsed together with its own LR box -- there's no
+// separate self-only panel any more) is pinned to its own row above the
+// per-host cards, which are selectable and color their sub-application boxes
+// green once that host's LR reports them healthy.
+function TopologyNodeCard({
+  label, status, isSelf, services, selected, onClick,
+}: {
+  label: string
+  status?: string
+  isSelf?: boolean
+  services?: ServiceStatus[]
+  selected?: boolean
+  onClick?: () => void
+}) {
+  const fcHealthy = serviceHealthy(services, 'federation-command')
+  const coHealthy = serviceHealthy(services, 'condoccer')
+  const wHealthy = serviceHealthy(services, 'worker')
+
   return (
-    <div className="topo-node">
+    <div
+      className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}`}
+      onClick={onClick}
+    >
       <div className="topo-node-header">
         {status && <span className={`host-dot ${hostDotClass(status)}`} />}
         <span className="topo-node-label">{label}</span>
@@ -1086,63 +1111,122 @@ function TopologyNodeCard({ label, status, isSelf }: { label: string; status?: s
           <span className="topo-node-box topo-node-box-lr">LR</span>
         </div>
         <div className="topo-node-row topo-node-row-bottom">
-          <span className="topo-node-box">FC</span>
-          <span className="topo-node-box">CO</span>
-          <span className="topo-node-box">W</span>
+          <span className={`topo-node-box${fcHealthy ? ' topo-node-box-healthy' : ''}`}>FC</span>
+          <span className={`topo-node-box${coHealthy ? ' topo-node-box-healthy' : ''}`}>CO</span>
+          <span className={`topo-node-box${wHealthy ? ' topo-node-box-healthy' : ''}`}>W</span>
         </div>
       </div>
     </div>
   )
 }
 
-// GlobalTopologyPanel: main pane of dummy host cards (left) plus a
-// details-and-control pane (right) with dummy readouts -- see
-// condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
-// Neither side is interactive yet.
-function GlobalTopologyPanel({ hosts }: { hosts: Host[] }) {
+// GlobalTopologyPanel: main pane of host cards (left, agent-coordinator's own
+// collapsed self+LR card always on top) plus a details-and-control pane
+// (right) -- see condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
+// Selecting a host card drives the details pane's readouts and its restart
+// control (which sends that host's LR a restart, same as the per-host system
+// tab's self-restart button); the self card isn't selectable -- there's no
+// host id to restart or report readouts for. Everything else here (update
+// control, live per-app data beyond health) is still a placeholder.
+function GlobalTopologyPanel({
+  hosts, hostData, sendLRRestartApp,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  sendLRRestartApp: (hostId: string) => void
+}) {
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+  const selectedData = selectedHostId ? hostData[selectedHostId] : undefined
+  const selfProc = selectedData?.system?.self
+  const canRestart = !!selectedHostId && !!selfProc?.loader_managed
+
   return (
     <div className="topo-panel">
       <div className="topo-main">
         <TopologyNodeCard label="agent-coordinator" isSelf />
         {hosts.map(h => (
-          <TopologyNodeCard key={h.id} label={h.label} status={h.status} />
+          <TopologyNodeCard
+            key={h.id}
+            label={h.label}
+            status={h.status}
+            services={hostData[h.id]?.lrState?.services}
+            selected={selectedHostId === h.id}
+            onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}
+          />
         ))}
       </div>
       <div className="topo-details">
         <div className="topo-details-header">details &amp; control</div>
         <div className="topo-readout-row">
           <span className="topo-readout-label">Host</span>
-          <span className="topo-readout-value topo-readout-placeholder">—</span>
+          <span className={`topo-readout-value${selectedHost ? '' : ' topo-readout-placeholder'}`}>
+            {selectedHost?.label ?? '—'}
+          </span>
         </div>
         <div className="topo-readout-row">
           <span className="topo-readout-label">status</span>
-          <span className="topo-readout-value topo-readout-placeholder">—</span>
+          <span className={`topo-readout-value${selectedHost ? '' : ' topo-readout-placeholder'}`}>
+            {selectedHost?.status ?? '—'}
+          </span>
         </div>
         <div className="topo-readout-row">
           <span className="topo-readout-label">version</span>
-          <span className="topo-readout-value topo-readout-placeholder">—</span>
+          <span className={`topo-readout-value${selfProc?.version ? '' : ' topo-readout-placeholder'}`}>
+            {selfProc?.version ?? '—'}
+          </span>
         </div>
         <div className="topo-readout-row">
           <span className="topo-readout-label">uptime</span>
-          <span className="topo-readout-value topo-readout-placeholder">—</span>
+          <span className={`topo-readout-value${selfProc ? '' : ' topo-readout-placeholder'}`}>
+            {selfProc ? formatUptime(selfProc.started_at, nowSec) : '—'}
+          </span>
         </div>
         <div className="topo-controls">
           <div className="topo-controls-label">update and restart controls</div>
           <div className="topo-controls-buttons">
             <button className="sys-btn sys-btn-restart" disabled>update</button>
-            <button className="sys-btn sys-btn-terminate" disabled>restart</button>
+            <button
+              className="sys-btn sys-btn-restart"
+              disabled={!canRestart}
+              title={
+                !selectedHostId
+                  ? 'select a host to enable'
+                  : canRestart
+                  ? "terminate that host's LR so ufa-loader relaunches it with the identical config"
+                  : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+              }
+              onClick={() => selectedHostId && sendLRRestartApp(selectedHostId)}
+            >
+              restart
+            </button>
           </div>
-          <div className="topo-controls-hint">select a node to enable — not yet interactive</div>
+          <div className="topo-controls-hint">
+            {selectedHostId ? 'update not yet implemented' : 'select a host to enable restart'}
+          </div>
         </div>
       </div>
     </div>
   )
 }
 
-function GlobalSystemPanel({ hosts }: { hosts: Host[] }) {
+function GlobalSystemPanel({
+  hosts, hostData, sendLRRestartApp,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  sendLRRestartApp: (hostId: string) => void
+}) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
   return (
-    <div className="sys-panel">
+    <div className="global-sys-panel">
       <div className="tab-bar tab-bar-nested">
         <div className="tabs">
           {GLOBAL_SYSTEM_TABS.map(t => (
@@ -1157,7 +1241,7 @@ function GlobalSystemPanel({ hosts }: { hosts: Host[] }) {
         </div>
       </div>
       {subTab === 'topology' ? (
-        <GlobalTopologyPanel hosts={hosts} />
+        <GlobalTopologyPanel hosts={hosts} hostData={hostData} sendLRRestartApp={sendLRRestartApp} />
       ) : (
         <div className="service-empty">not yet implemented</div>
       )}
@@ -1165,7 +1249,13 @@ function GlobalSystemPanel({ hosts }: { hosts: Host[] }) {
   )
 }
 
-function GlobalView({ hosts }: { hosts: Host[] }) {
+function GlobalView({
+  hosts, hostData, sendLRRestartApp,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  sendLRRestartApp: (hostId: string) => void
+}) {
   const [activeTab, setActiveTab] = useState<LRTab>('system')
 
   return (
@@ -1188,7 +1278,7 @@ function GlobalView({ hosts }: { hosts: Host[] }) {
       </div>
       <div className="main-pane">
         {activeTab === 'system' ? (
-          <GlobalSystemPanel hosts={hosts} />
+          <GlobalSystemPanel hosts={hosts} hostData={hostData} sendLRRestartApp={sendLRRestartApp} />
         ) : (
           <div className="service-empty">not yet implemented</div>
         )}
@@ -1437,7 +1527,7 @@ export default function App() {
               uploadFiles={uploadFiles}
             />
           ) : (
-            <GlobalView hosts={hosts} />
+            <GlobalView hosts={hosts} hostData={hostData} sendLRRestartApp={sendLRRestartApp} />
           )}
         </div>
       </div>

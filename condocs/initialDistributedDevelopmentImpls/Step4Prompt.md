@@ -38,3 +38,24 @@ We will:
 - We will move the Details & Control pane so that it sits farther right, always near the right edge of the tab's view
 - We will allow selection of the host panels (this will drive the content of the Details & Control pane
 - We will make the 'restart' button available and this will send the restart control to that LR
+
+
+prompt: [`5f5ad01`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5f5ad0124f7a25ca120e8d9c8483f6fc17d09ad9) → reply: [`24b27c5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/24b27c5aecb9ebe0f7fea719c3f716af31442eb6)
+
+## Reply A
+
+Each function appears exactly once, in the right order, with matching structure. Shell command approval was unavailable again in this session, so I verified the changes by careful manual review rather than running `npm run build`/`tsc`, same limitation noted in the original reply.
+
+## Summary
+
+Implemented the first operational steps for the global topology view per Revision A: `agent-coordinator`'s self card and per-host cards now render through one unified, ordered list (self pinned to its own row via CSS, hosts below), host cards are click-selectable, and their FC/CO/W boxes turn green based on that host's live `lr-state` service health while AC/LR stay statically colored. The Details & Control pane moved out from under `.sys-panel`'s width cap (now `.global-sys-panel`, unconstrained) so it sits at the tab's actual right edge, and it now shows a selected host's real label/status/version/uptime with a working "restart" button wired to `sendLRRestartApp` (enabled only when that host's LR is loader-managed); "update" stays a disabled placeholder. Also updated `docs/architecture.md`'s Global view section to describe this behavior.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

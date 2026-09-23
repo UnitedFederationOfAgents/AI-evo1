@@ -490,6 +490,12 @@ body {
 
 .topo-panel { display: flex; align-items: flex-start; gap: 24px; }
 
+/* GlobalSystemPanel's wrapper -- deliberately not .sys-panel (that class's
+   max-width is right for the single-host process table, but would keep the
+   topology pane's details-and-control column short of the tab's actual
+   right edge). */
+.global-sys-panel { display: flex; flex-direction: column; gap: 20px; }
+
 .topo-main {
   flex: 1;
   min-width: 0;
@@ -509,6 +515,15 @@ body {
   width: 180px;
 }
 
+/* Self (agent-coordinator collapsed with its own LR) always leads, on its
+   own row -- flex-basis: 100% forces every card after it in .topo-main's
+   wrap onto the next line. */
+.topo-node-self { flex-basis: 100%; width: auto; max-width: 180px; }
+
+.topo-node-clickable { cursor: pointer; }
+.topo-node-clickable:hover { border-color: #565656; }
+.topo-node-selected { border-color: #007acc; box-shadow: 0 0 0 1px #007acc; }
+
 .topo-node-header { display: flex; align-items: center; gap: 6px; }
 .topo-node-label { color: #d4d4d4; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
@@ -523,6 +538,9 @@ body {
 }
 .topo-node-box-ac { border-color: #245a7a; color: #6ea6c9; }
 .topo-node-box-lr { border-color: #2e7a2e; color: #6ec96e; }
+/* A sub-application box (FC/CO/W) turns the same green as the LR box once
+   that host's LR reports it healthy (see serviceHealthy in App.tsx). */
+.topo-node-box-healthy { border-color: #2e7a2e; color: #6ec96e; }
 
 .topo-details {
   width: 240px;

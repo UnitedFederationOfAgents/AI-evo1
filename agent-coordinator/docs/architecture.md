@@ -147,3 +147,17 @@ also covers the still-open Path 2 (LR-to-LR transfer brokered through AC).
 - `disconnected` — LR dropped or was never connected
 
 Hosts appear dynamically in the sidebar as LRs connect; they remain visible (as disconnected) after dropping.
+
+## Global view
+
+The sidebar's "global" entry sits above the per-host list and is mutually
+exclusive with selecting a particular host (`selectedHostId === null` in
+`App.tsx`); it's the default view on first load. It presents the same set of
+tabs a host's dashboard has, but from a net-wide vantage point instead of one
+host's — only the `system` tab has a global view implemented so far, with
+nested `topology`/`timeline` tabs of its own; the rest (including
+`timeline`) render a "not yet implemented" placeholder. `topology` (see
+`condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg`) is
+frontend-only and not yet wired to live per-host process data or
+interactive — it's a dummy main pane of host cards plus a dummy
+details-and-control pane, both purely presentational this increment.

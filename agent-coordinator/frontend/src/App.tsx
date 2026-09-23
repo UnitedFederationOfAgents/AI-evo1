@@ -266,15 +266,26 @@ function hostDotClass(status: string): string {
 }
 
 function HostSidebar({
-  hosts, selectedHostId, onSelect,
+  hosts, selectedHostId, onSelect, onSelectGlobal,
 }: {
   hosts: Host[]
   selectedHostId: string | null
   onSelect: (id: string) => void
+  onSelectGlobal: () => void
 }) {
   return (
     <div className="sidebar">
       <div className="sidebar-header">hosts</div>
+      {/* The global selection sits above the per-host list and is mutually
+          exclusive with picking a particular host -- selectedHostId === null
+          means global, which is also the default on first load. */}
+      <div
+        className={`host-item global-item${selectedHostId === null ? ' host-item-active' : ''}`}
+        onClick={onSelectGlobal}
+      >
+        <span className="global-icon">◎</span>
+        <span className="host-label">global</span>
+      </div>
       {hosts.length === 0 ? (
         <div className="sidebar-empty">no hosts connected</div>
       ) : (
@@ -1042,6 +1053,150 @@ function FileViewer({
   )
 }
 
+/* ---- Global view ----
+ *
+ * The global selection sits above the per-host list (App.tsx's
+ * selectedHostId === null) and shows a net-centric alternative to a single
+ * host's dashboard. Every one of a host's tabs (LR_TABS) has a global
+ * counterpart in principle, but only 'system' has one implemented so far --
+ * the rest render the same "not yet implemented" placeholder until a later
+ * increment gives them a real view (Step4Prompt.md).
+ */
+
+// GLOBAL_SYSTEM_TABS: nested tabs within the global system tab's main-view
+// selector. Only 'topology' is populated this increment -- it's not
+// interactive yet, just visible. 'timeline' is a placeholder.
+const GLOBAL_SYSTEM_TABS = ['topology', 'timeline'] as const
+type GlobalSystemTab = typeof GLOBAL_SYSTEM_TABS[number]
+
+// TopologyNodeCard is a dummy stand-in for a host's node in the topology
+// main pane -- later this will reflect that host's actually-running
+// sub-applications; for now every card shows the same placeholder diagram.
+function TopologyNodeCard({ label, status, isSelf }: { label: string; status?: string; isSelf?: boolean }) {
+  return (
+    <div className="topo-node">
+      <div className="topo-node-header">
+        {status && <span className={`host-dot ${hostDotClass(status)}`} />}
+        <span className="topo-node-label">{label}</span>
+        {isSelf && <span className="topo-node-self-tag">self</span>}
+      </div>
+      <div className="topo-node-diagram">
+        <div className="topo-node-row topo-node-row-top">
+          {isSelf && <span className="topo-node-box topo-node-box-ac">AC</span>}
+          <span className="topo-node-box topo-node-box-lr">LR</span>
+        </div>
+        <div className="topo-node-row topo-node-row-bottom">
+          <span className="topo-node-box">FC</span>
+          <span className="topo-node-box">CO</span>
+          <span className="topo-node-box">W</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// GlobalTopologyPanel: main pane of dummy host cards (left) plus a
+// details-and-control pane (right) with dummy readouts -- see
+// condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
+// Neither side is interactive yet.
+function GlobalTopologyPanel({ hosts }: { hosts: Host[] }) {
+  return (
+    <div className="topo-panel">
+      <div className="topo-main">
+        <TopologyNodeCard label="agent-coordinator" isSelf />
+        {hosts.map(h => (
+          <TopologyNodeCard key={h.id} label={h.label} status={h.status} />
+        ))}
+      </div>
+      <div className="topo-details">
+        <div className="topo-details-header">details &amp; control</div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">Host</span>
+          <span className="topo-readout-value topo-readout-placeholder">—</span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">status</span>
+          <span className="topo-readout-value topo-readout-placeholder">—</span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">version</span>
+          <span className="topo-readout-value topo-readout-placeholder">—</span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">uptime</span>
+          <span className="topo-readout-value topo-readout-placeholder">—</span>
+        </div>
+        <div className="topo-controls">
+          <div className="topo-controls-label">update and restart controls</div>
+          <div className="topo-controls-buttons">
+            <button className="sys-btn sys-btn-restart" disabled>update</button>
+            <button className="sys-btn sys-btn-terminate" disabled>restart</button>
+          </div>
+          <div className="topo-controls-hint">select a node to enable — not yet interactive</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GlobalSystemPanel({ hosts }: { hosts: Host[] }) {
+  const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
+  return (
+    <div className="sys-panel">
+      <div className="tab-bar tab-bar-nested">
+        <div className="tabs">
+          {GLOBAL_SYSTEM_TABS.map(t => (
+            <button
+              key={t}
+              className={`tab${subTab === t ? ' tab-active' : ''}`}
+              onClick={() => setSubTab(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {subTab === 'topology' ? (
+        <GlobalTopologyPanel hosts={hosts} />
+      ) : (
+        <div className="service-empty">not yet implemented</div>
+      )}
+    </div>
+  )
+}
+
+function GlobalView({ hosts }: { hosts: Host[] }) {
+  const [activeTab, setActiveTab] = useState<LRTab>('system')
+
+  return (
+    <div className="lr-view">
+      <div className="lr-header">
+        <span className="lr-host-label">global</span>
+      </div>
+      <div className="tab-bar">
+        <div className="tabs">
+          {LR_TABS.map(t => (
+            <button
+              key={t}
+              className={`tab${activeTab === t ? ' tab-active' : ''}`}
+              onClick={() => setActiveTab(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="main-pane">
+        {activeTab === 'system' ? (
+          <GlobalSystemPanel hosts={hosts} />
+        ) : (
+          <div className="service-empty">not yet implemented</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
   sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles,
@@ -1210,6 +1365,13 @@ export default function App() {
     setMobileNavOpen(false)
   }
 
+  // Global is the default landing view (selectedHostId === null) and is
+  // mutually exclusive with a particular host selection.
+  const handleSelectGlobal = () => {
+    setSelectedHostId(null)
+    setMobileNavOpen(false)
+  }
+
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
 
   return (
@@ -1257,6 +1419,7 @@ export default function App() {
             hosts={hosts}
             selectedHostId={selectedHostId}
             onSelect={handleSelectHost}
+            onSelectGlobal={handleSelectGlobal}
           />
         </div>
         <div className="content">
@@ -1274,9 +1437,7 @@ export default function App() {
               uploadFiles={uploadFiles}
             />
           ) : (
-            <div className="no-selection">
-              <span className="no-selection-text">select a host</span>
-            </div>
+            <GlobalView hosts={hosts} />
           )}
         </div>
       </div>

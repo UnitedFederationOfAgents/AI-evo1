@@ -218,18 +218,23 @@ body {
   overflow: hidden;
 }
 
-/* ---- No selection placeholder ---- */
+/* ---- Global sidebar item ----
+ *
+ * Sits above the per-host list; mutually exclusive with a particular host
+ * (App.tsx: selectedHostId === null) and is the default view on first load.
+ */
 
-.no-selection {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.global-item {
+  border-bottom: 1px solid #2a2a2a;
+  margin-bottom: 4px;
 }
 
-.no-selection-text {
-  color: #555;
-  font-style: italic;
+.global-icon {
+  display: inline-block;
+  width: 7px;
+  text-align: center;
+  color: #6ea6c9;
+  flex-shrink: 0;
 }
 
 /* ---- LR view ---- */
@@ -460,6 +465,93 @@ body {
 .condoc-step { font-size: 11px; color: #888; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 10px; padding: 1px 8px; flex-shrink: 0; }
 .condoc-phase-label { font-size: 13px; color: #6ec96e; font-weight: 600; }
 .condoc-msg { font-size: 11px; color: #888; font-style: italic; }
+
+/* ---- Nested tab bar (e.g. global system tab's topology/timeline selector) ---- */
+
+.tab-bar-nested {
+  background: none;
+  border-bottom: 1px solid #2a2a2a;
+  height: 30px;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.tab-bar-nested .tab {
+  font-size: 12px;
+  padding: 0 12px;
+}
+
+/* ---- Global topology panel (global system tab, see
+   condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg) ----
+ *
+ * Main pane of dummy host cards on the left, details-and-control pane on the
+ * right. This increment: visible but not interactive.
+ */
+
+.topo-panel { display: flex; align-items: flex-start; gap: 24px; }
+
+.topo-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.topo-node {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 12px 14px;
+  width: 180px;
+}
+
+.topo-node-header { display: flex; align-items: center; gap: 6px; }
+.topo-node-label { color: #d4d4d4; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+
+.topo-node-diagram { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.topo-node-row { display: flex; gap: 8px; }
+.topo-node-box {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 30px; height: 22px; padding: 0 6px;
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 10px; color: #9c9c9c;
+}
+.topo-node-box-ac { border-color: #245a7a; color: #6ea6c9; }
+.topo-node-box-lr { border-color: #2e7a2e; color: #6ec96e; }
+
+.topo-details {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.topo-details-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-readout-row { display: flex; flex-direction: column; gap: 2px; }
+.topo-readout-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-readout-value { font-size: 12px; color: #d4d4d4; }
+.topo-readout-placeholder { color: #555; font-style: italic; }
+
+.topo-controls {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 12px;
+}
+.topo-controls-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-controls-buttons { display: flex; gap: 8px; }
+.topo-controls-hint { font-size: 11px; color: #555; font-style: italic; }
 
 /* ---- System panel (host system tab) ---- */
 
@@ -724,11 +816,13 @@ body {
     padding: 0 12px;
   }
 
-  .main-pane-inner {
+  .main-pane-inner,
+  .topo-panel {
     flex-direction: column;
   }
 
-  .file-detail-pane {
+  .file-detail-pane,
+  .topo-details {
     width: 100%;
   }
 

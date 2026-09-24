@@ -209,21 +209,35 @@ only off-node LRs, so AC can't lean on any LR's self-version watch to detect
 its own binary drifting. The verdict rides along in `self-info` (new
 `loader_managed`/`update_available` fields, re-broadcast whenever it
 changes rather than sent only once per connection) and drives the global
-topology view's "restart agent-coordinator" button the same way: plain
-**restart** until an update lands on disk, then orange **restart and
-update**. (The neighboring per-host **restart**/**restart and update**
-control above it is labeled **restart LR**/**restart and update LR** in this
-view specifically, so the two restart targets read unambiguously side by
-side — it still just targets the selected host's LR, same as everywhere
-else.) That same "agent-coordinator" section also has a **host update all**
-button, enabled once one or more of the host's connected `federation-command`/
-`condoccer`/`worker` instances are out of date per the poll below — pressing
-it sends a restart only to whichever of that host's LR / AC is itself
-actually stale (`lr-restart-app` when the LR's own `update_available` is set,
+topology view's "restart AC" button the same way: plain **restart AC** until
+an update lands on disk, then orange **restart and update AC**. (It's
+labeled "...AC" rather than the bare **restart**/**restart and update** the
+neighboring per-host control uses, and "restart LR"/"restart and update LR"
+for the control above it in this view specifically, so the three restart
+targets read unambiguously alongside each other — that one above still just
+targets the selected host's LR, same as everywhere else.) That same
+"agent-coordinator" section also has a **host update all** button, enabled
+once one or more of the host's connected `federation-command`/`condoccer`/
+`worker` instances are out of date per the poll below — pressing it sends a
+restart only to whichever of that host's LR / AC is itself actually stale
+(`lr-restart-app` when the LR's own `update_available` is set,
 `ac-restart-app` when AC's is, both in sequence when both are), so one click
 never restarts a process that's already running the latest build — see
 [`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
 Revisions F and G.
+
+Two more controls round out that same section (Revision J). A green
+**rebuild all** button, enabled once one or more *connected* hosts' LRs have
+a rebuild ready (same per-host condition as the rebuild button above, just
+OR'd across every host instead of just the selected one), rebuilds only
+those hosts when pressed — its neighboring auto-rebuild checkbox instead
+reaches every connected host with a watched dev-repo at once, since
+auto-rebuild is a standing setting rather than a one-shot action, and reads
+checked only once all of them already have it on. And a blue-or-orange
+**network update all** button generalizes **host update all** to the whole
+network: enabled once any connected host's own LR is stale, or AC itself is
+— pressing it restarts every stale, loader-managed host's LR, plus AC itself
+if it's stale and loader-managed too, in one click.
 
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.

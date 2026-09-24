@@ -210,3 +210,24 @@ The first control, at the top of the section, is a green 'rebuild all' control w
 The second control, at the bottom, is a blue-or-orange button 'network update all' -- this control has the same effect as a 'host update all' but for every connected LR as well as the AC host.
 
 We will also adjust the 'restart agent-coordinator' label to say 'restart AC' to be consistent with 'restart LR'.
+
+
+prompt: [`3ee8120`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3ee8120cd4d125dca1e264d969563409d52f367a) → reply: [`abb5c09`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/abb5c096b2b3a896d26e817b7c7d1f6c2f9b11ee)
+
+## Reply J
+
+This all reads correctly and is consistent with the code. The revision is complete.
+
+## Summary
+
+Implemented Revision J: the global topology view's "AGENT-COORDINATOR" section of the Details & Control pane gained two new controls. A green **"rebuild all"** button (dev-mode only, with an accompanying network-wide auto-rebuild toggle) sits at the top, enabled once any connected host's LR has a rebuild ready — pressing it rebuilds only those hosts (`handleRebuildAll`/`handleSetAutoRebuildAll` in `App.tsx`, backed by a new `hostRebuildReady` helper factored out of `hostOutOfDate`). A blue-or-orange **"network update all"** button sits at the bottom, generalizing the existing "host update all" to every connected host's LR plus AC — restarting only whichever are actually stale and loader-managed. Also relabeled "restart agent-coordinator"/"restart and update" to **"restart AC"**/**"restart and update AC"** for consistency with "restart LR". Updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` accordingly. Shell approval remained unavailable this session (including for `npx tsc`/`git diff`), so this was verified via careful manual review of types and JSX/brace balance rather than a build.
+
+
+## <REPLACE-Revision|Retry> K
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

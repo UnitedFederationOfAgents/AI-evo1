@@ -1133,17 +1133,40 @@ function subAppOutOfDate(managed: ProcInfo[] | undefined, name: string): boolean
   return !!managed?.find(p => p.name === name)?.update_available
 }
 
+// hostRebuildReady reports whether this host's LR is watching a --dev-repo
+// whose "rebuild" control would be enabled right now (HEAD has moved past
+// the last successful build and the repo is clean) -- the same condition
+// RepoWatchPanel uses to un-disable its own rebuild button. Factored out of
+// hostOutOfDate so the global "rebuild all" control (Step4Prompt.md
+// Revision J) can ask the same question across every connected host at once.
+function hostRebuildReady(data: HostClientState | undefined): boolean {
+  return !!data?.repo?.watched && !data.repo.building && !!data.repo.rebuild_ready
+}
+
 // hostOutOfDate reports whether a host's LR is behind the dev branch it's
-// tracking -- true while either the "rebuild" control would be enabled (HEAD
-// has moved past the last successful build of its watched --dev-repo) or the
-// "restart" control would read "update and restart" (a newer build has
-// already landed on disk but isn't running yet). Drives the topology card's
-// orange halo (Step4Prompt.md Revision C); dev-mode-only, so callers gate
-// this on the viewing agent-coordinator's own devMode.
+// tracking -- true while either the "rebuild" control would be enabled (see
+// hostRebuildReady) or the "restart" control would read "update and restart"
+// (a newer build has already landed on disk but isn't running yet). Drives
+// the topology card's orange halo (Step4Prompt.md Revision C); dev-mode-only,
+// so callers gate this on the viewing agent-coordinator's own devMode.
 function hostOutOfDate(data: HostClientState | undefined): boolean {
-  const rebuildReady = !!data?.repo?.watched && !data.repo.building && !!data.repo.rebuild_ready
   const updateAvailable = !!data?.system?.self?.update_available
-  return rebuildReady || updateAvailable
+  return hostRebuildReady(data) || updateAvailable
+}
+
+// hostAnySubAppUpdateAvailable reports whether any of this host's connected
+// FC/CO/W sub-applications is running an older build than what's on disk --
+// the same per-app check that drives an individual box's own halo (see
+// subAppOutOfDate), OR'd across the three. Factored out so both the
+// self-host-only "host update all" button and the network-wide "network
+// update all" button (Step4Prompt.md Revisions F/G and J) share one
+// definition of "this host has a pending sub-app update".
+function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
+  const services = data?.lrState?.services
+  const managed = data?.system?.managed
+  return ['federation-command', 'condoccer', 'worker'].some(
+    name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
+  )
 }
 
 // TopologyNodeCard is one node in the topology main pane: the "self" card
@@ -1239,7 +1262,13 @@ function TopologyNodeCard({
 // whichever of this host's LR / AC itself is the one running a stale
 // binary (each checked independently, same willUpdate/acWillUpdate flags
 // the controls above already use), rather than always restarting both
-// (Step4Prompt.md Revision F, narrowed by Revision G).
+// (Step4Prompt.md Revision F, narrowed by Revision G). Two more controls
+// (Revision J) round out that section: a green "rebuild all" button plus its
+// accompanying auto-rebuild toggle at the top, sweeping every connected
+// host's dev-repo watcher instead of just the selected one; and a
+// blue-or-orange "network update all" button at the bottom, the same
+// selective-restart effect as "host update all" but generalized to every
+// connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
   acLoaderManaged, acUpdateAvailable, sendACRestartApp,
@@ -1279,15 +1308,48 @@ function GlobalTopologyPanel({
   // Drives the "host update all" button below: true once any connected
   // sub-application on the AC host itself is running an older build than
   // what's on disk (same per-app check TopologyNodeCard uses for that box's
-  // own halo -- see subAppOutOfDate) -- LR/AC's own staleness isn't counted
-  // here since they're what the button updates, not what it's watching for.
+  // own halo -- see hostAnySubAppUpdateAvailable) -- LR/AC's own staleness
+  // isn't counted here since they're what the button updates, not what it's
+  // watching for.
   const selfHostData = selfHost ? hostData[selfHost.id] : undefined
-  const selfServices = selfHostData?.lrState?.services
-  const selfManaged = selfHostData?.system?.managed
-  const anySubAppUpdateAvailable = devMode && ['federation-command', 'condoccer', 'worker'].some(
-    name => serviceHealthy(selfServices, name) && subAppOutOfDate(selfManaged, name)
-  )
+  const anySubAppUpdateAvailable = devMode && hostAnySubAppUpdateAvailable(selfHostData)
   const canUpdateAll = anySubAppUpdateAvailable && !!selfHostData?.system?.self?.loader_managed && acLoaderManaged
+
+  // allHosts: every connected host, self first when known -- the set both new
+  // agent-coordinator-section controls below (Step4Prompt.md Revision J)
+  // sweep across, since unlike the controls above them these two aren't
+  // scoped to whichever single host card is selected.
+  const allHosts = selfHost ? [selfHost, ...otherHosts] : otherHosts
+
+  // "rebuild all": green, enabled once any connected host's LR has a
+  // rebuild ready (see hostRebuildReady); clicking rebuilds only those hosts,
+  // leaving already-up-to-date ones untouched.
+  const rebuildableHosts = devMode ? allHosts.filter(h => hostRebuildReady(hostData[h.id])) : []
+  const anyRebuildReady = rebuildableHosts.length > 0
+  const handleRebuildAll = () => rebuildableHosts.forEach(h => sendLRRebuildApp(h.id))
+
+  // Accompanying auto-rebuild toggle-selector: applies to every connected
+  // host with a watched dev-repo (not just ones currently rebuild-ready,
+  // since auto-rebuild is a standing setting, not a one-shot action).
+  // Reads as checked only when every watched repo already has it on.
+  const watchedHosts = devMode ? allHosts.filter(h => hostData[h.id]?.repo?.watched) : []
+  const allAutoRebuildOn = watchedHosts.length > 0 && watchedHosts.every(h => !!hostData[h.id]?.repo?.auto_rebuild)
+  const handleSetAutoRebuildAll = (enabled: boolean) =>
+    watchedHosts.forEach(h => sendLRSetAutoRebuild(h.id, enabled))
+
+  // "network update all": the same selective-restart effect as "host update
+  // all" above, generalized to every connected host's LR plus AC -- each
+  // host's own `update_available` (not its sub-apps') decides whether that
+  // host's LR gets restarted, same as the "restart LR"/"restart and update
+  // LR" control above already does for whichever single host is selected.
+  const staleHosts = allHosts.filter(h => devMode && !!hostData[h.id]?.system?.self?.update_available)
+  const restartableStaleHosts = staleHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed)
+  const anyNetworkUpdateAvailable = staleHosts.length > 0 || acWillUpdate
+  const canNetworkUpdateAll = restartableStaleHosts.length > 0 || (acWillUpdate && acLoaderManaged)
+  const handleNetworkUpdateAll = () => {
+    restartableStaleHosts.forEach(h => sendLRRestartApp(h.id))
+    if (acWillUpdate && acLoaderManaged) sendACRestartApp()
+  }
 
   return (
     <div className="topo-panel">
@@ -1382,6 +1444,34 @@ function GlobalTopologyPanel({
         {isSelfSelected && (
           <div className="topo-ac-controls">
             <div className="topo-controls-label">agent-coordinator</div>
+            {devMode && (
+              <div className="topo-controls-buttons">
+                <button
+                  className="sys-btn sys-btn-rebuild"
+                  disabled={!anyRebuildReady}
+                  title={
+                    anyRebuildReady
+                      ? 'runs make deploy-dev-binaries on every connected host whose dev-repo has moved past its last rebuild'
+                      : 'no connected host has a rebuild ready'
+                  }
+                  onClick={handleRebuildAll}
+                >
+                  rebuild all
+                </button>
+                <label
+                  className="sys-auto-rebuild"
+                  title="rebuild automatically, per host, whenever it becomes possible -- toggles auto-rebuild for every connected host's dev-repo watcher at once"
+                >
+                  <input
+                    type="checkbox"
+                    disabled={watchedHosts.length === 0}
+                    checked={allAutoRebuildOn}
+                    onChange={e => handleSetAutoRebuildAll(e.target.checked)}
+                  />
+                  auto-rebuild
+                </label>
+              </div>
+            )}
             <div className="topo-controls-buttons">
               <button
                 className={`sys-btn sys-btn-restart${acWillUpdate ? ' sys-btn-restart-update' : ''}`}
@@ -1395,7 +1485,7 @@ function GlobalTopologyPanel({
                 }
                 onClick={sendACRestartApp}
               >
-                {acWillUpdate ? 'restart and update' : 'restart'} agent-coordinator
+                {acWillUpdate ? 'restart and update AC' : 'restart AC'}
               </button>
               <button
                 className={`sys-btn sys-btn-restart${anySubAppUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
@@ -1419,6 +1509,22 @@ function GlobalTopologyPanel({
                 }}
               >
                 host update all
+              </button>
+            </div>
+            <div className="topo-controls-buttons">
+              <button
+                className={`sys-btn sys-btn-restart${anyNetworkUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
+                disabled={!canNetworkUpdateAll}
+                title={
+                  !anyNetworkUpdateAvailable
+                    ? 'every connected host and agent-coordinator are already up to date'
+                    : !canNetworkUpdateAll
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : "terminate every connected host's LR that has a newer build waiting, plus agent-coordinator itself if it does, so ufa-loader relaunches each with its new binary"
+                }
+                onClick={handleNetworkUpdateAll}
+              >
+                network update all
               </button>
             </div>
           </div>

@@ -236,3 +236,22 @@ main pane of host cards plus a details-and-control pane on the right:
   AC's is (both, one after the other, when both are stale; neither when the
   pending update is limited to a FC/CO/W instance) -- so it never restarts a
   process that's already current.
+- The "agent-coordinator" section has two further controls (Revision J). A
+  green "rebuild all" button sits at the top, enabled once one or more
+  connected hosts' LRs have a rebuild ready (`hostRebuildReady` in `App.tsx`,
+  the same condition RepoWatchPanel uses per host); clicking it sends
+  `lr-rebuild-app` to each of those hosts and no others, leaving any
+  already-up-to-date host untouched. Its accompanying auto-rebuild
+  toggle-selector sends `lr-set-auto-rebuild` to every connected host with a
+  watched dev-repo at once (not just the ones currently rebuild-ready, since
+  auto-rebuild is a standing setting), reading checked only once every
+  watched repo already has it on. A blue-or-orange "network update all"
+  button sits at the bottom, generalizing "host update all" to the whole
+  network: enabled once any connected host's own LR (`system.self.
+  update_available`, not its sub-apps') is stale, or AC itself is; clicking
+  it sends `lr-restart-app` to each stale, loader-managed host and
+  `ac-restart-app` once more if AC itself is both stale and loader-managed.
+- That section's own AC restart button was also relabeled from "restart
+  agent-coordinator"/"restart and update" to "restart AC"/"restart and update
+  AC", for consistency with "restart LR"/"restart and update LR" on the
+  control above it.

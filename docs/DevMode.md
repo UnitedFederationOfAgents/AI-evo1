@@ -185,9 +185,7 @@ flags/config say. LR uses this for its own `auto-rebuild` toggle (see
 "Dev-repo watcher" below) and its `auto-connect` connection to
 agent-coordinator: `reststate.go`'s `lrState` is attached to every restart
 announcement and re-applied — taking precedence over `--auto-connect`/
-`--ac-host`/`--ac-port` — before the replacement instance dials out. This
-covers only LR's own state today, nothing about the sub-applications it
-manages — see
+`--ac-host`/`--ac-port` — before the replacement instance dials out. See
 [`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
 Revision D.
 
@@ -245,6 +243,28 @@ turning orange, whenever `pollManagedVersions` has set that instance's
 here, just without a loader gating it. See
 [`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
 Revision H.
+
+LR's own **restart** — self's, from either `SIGHUP` or the system tab's
+control — now also carries its *directly launched* managed sub-applications
+through the restart rather than orphaning them: as its final act before
+announcing and exiting, it terminates every currently-running instance it
+launched itself (an `--auto-launch` entry or one started from the system
+tab), same terminate-and-wait as `restartManaged` above but for all of them
+at once (`terminateManagedForRestart` in `procman.go`). Which apps were
+running is captured into `lrState.ManagedApps` (auto-launch-style
+`"app"`/`"app:N"` tokens, see `runningManagedTokens`) *before* they're
+terminated, and rides along in the same `UFA_LOADER_STATE` payload as
+`auto-rebuild`/`auto-connect`; the replacement instance feeds it straight
+into `cfg.autoLaunch` (taking precedence over whatever `--auto-launch` it
+happens to be relaunched with, same as `auto-connect`), so its ordinary
+auto-launch path relaunches exactly the sub-apps that were running — no new
+code path, no UI change. This deliberately covers only LR-launched
+instances: a future "manage-on-connect" instance — a sub-application that
+merely connects to LR without LR having started it — isn't a child of LR's
+process at all, so a restart leaves it running rather than terminating a
+process it doesn't own; see
+[`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
+Revision I.
 
 ## Dev-repo watcher
 

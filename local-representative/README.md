@@ -35,14 +35,30 @@ loader-managed at all — the control greys itself out (and the backend
 refuses the request) when it isn't, since pressing it would otherwise just
 stop LR for good.
 
-Every restart also carries this LR's own live state forward — currently the
-`auto-rebuild` toggle and whether/where it was connected to
-`agent-coordinator` (`auto-connect`) — so the instance that comes back up
-matches what was live just before the restart rather than resetting to
-whatever `--auto-connect`/`--ac-host`/`--ac-port` it happens to be relaunched
-with (see [`docs/DevMode.md`](../docs/DevMode.md) "Loader" and
-`reststate.go`). This covers only LR's own state, nothing about the
-sub-applications it manages.
+Every restart also carries this LR's own live state forward — the
+`auto-rebuild` toggle, whether/where it was connected to `agent-coordinator`
+(`auto-connect`), and which of its own managed sub-applications were running
+(see below) — so the instance that comes back up matches what was live just
+before the restart rather than resetting to whatever
+`--auto-connect`/`--ac-host`/`--ac-port`/`--auto-launch` it happens to be
+relaunched with (see [`docs/DevMode.md`](../docs/DevMode.md) "Loader" and
+`reststate.go`).
+
+As its own final act before exiting, a restarting LR also terminates every
+managed sub-application it launched itself (an `--auto-launch` entry or one
+started from the system tab) — the `federation-command`/`condoccer` instances
+it directly parents would otherwise just be orphaned by its exit rather than
+coming back up alongside it. Terminating them first and relaunching them by
+name (rather than relying on the OS to somehow carry the old processes
+forward) is what makes this a real "restart" of the whole set: the new LR
+instance auto-launches fresh instances of exactly the apps that were running,
+in place of whatever `--auto-launch` it was otherwise given (see
+`terminateManagedForRestart`/`runningManagedTokens` in `procman.go`). This
+only applies to sub-applications LR itself launched — a future
+"manage-on-connect" instance that merely connects to LR without LR having
+started it is a separate, independent process that a restart leaves alone
+(and that instance's own heartbeat retry loop, not LR's exit, is what brings
+it back once LR is listening again).
 
 ## Flags
 

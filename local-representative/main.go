@@ -996,11 +996,18 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 // docs/DevMode.md), attaching this process's live state (see
 // lrState/currentState and Revision D of
 // condocs/initialDistributedDevelopmentImpls/Step3Prompt.md) for the
-// instance replacing it to pick back up, and exits 0. Callers are expected
-// to have already decided a restart is appropriate; this never returns.
+// instance replacing it to pick back up, and exits 0. As its own final act
+// it also terminates every LR-launched managed sub-app still running (see
+// terminateManagedForRestart) -- the state snapshot is taken first so the
+// announcement's ManagedApps reflects what was actually running rather than
+// racing the termination it triggers (see Step4Prompt.md Revision I).
+// Callers are expected to have already decided a restart is appropriate;
+// this never returns.
 func (s *Server) announceRestartAndExit(reason string) {
 	log.Printf("announcing a restart (%s) and exiting", reason)
-	if err := restartsignal.AnnounceState(os.Stdout, "local-representative", reason, s.currentState()); err != nil {
+	st := s.currentState()
+	s.terminateManagedForRestart()
+	if err := restartsignal.AnnounceState(os.Stdout, "local-representative", reason, st); err != nil {
 		log.Printf("restartsignal.AnnounceState: %v", err)
 	}
 	os.Exit(0)
@@ -1102,14 +1109,20 @@ func main() {
 
 	// A restart-carrying relaunch (see reststate.go and Revision D of
 	// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md) overrides
-	// the auto-connect settings just resolved above -- the live state as of
-	// the moment the prior instance asked to be restarted wins over whatever
-	// flags/config this launch happens to carry. prevState/havePrevState is
-	// also consulted below once repoWatch exists, for the auto-rebuild half.
+	// the auto-connect and auto-launch settings just resolved above -- the
+	// live state as of the moment the prior instance asked to be restarted
+	// wins over whatever flags/config this launch happens to carry, which is
+	// also how the LR-launched managed sub-apps that were running right
+	// before the restart (terminated as that instance's final act -- see
+	// terminateManagedForRestart) come back: prevState.ManagedApps feeds
+	// cfg.autoLaunch below, so the ordinary auto-launch path (further down)
+	// relaunches them -- Step4Prompt.md Revision I. prevState/havePrevState
+	// is also consulted below once repoWatch exists, for the auto-rebuild
+	// half.
 	prevState, havePrevState := loadPreviousState()
 	if havePrevState {
-		log.Printf("restart state: restoring auto-rebuild=%v auto-connect=%v (ac=%s:%s) from before the restart",
-			prevState.AutoRebuild, prevState.AutoConnect, prevState.ACHost, prevState.ACPort)
+		log.Printf("restart state: restoring auto-rebuild=%v auto-connect=%v (ac=%s:%s) managed-apps=%v from before the restart",
+			prevState.AutoRebuild, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps)
 		prevState.applyToConfig(&cfg)
 	}
 

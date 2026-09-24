@@ -12,9 +12,10 @@ import (
 // attaches to its restart announcement (see restartsignal.AnnounceState) for
 // the newly launched instance replacing it to read back (see
 // loadPreviousState) and apply on top of whatever flags/config it was
-// relaunched with. Deliberately covers only LR's own state -- nothing yet
-// for the sub-applications it manages -- per
-// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md Revision D.
+// relaunched with. Originally (per
+// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md Revision D)
+// covered only LR's own state; ManagedApps below extends it to the
+// sub-applications LR itself launches, per Step4Prompt.md Revision I.
 type lrState struct {
 	// AutoRebuild mirrors the dev-repo watcher's auto-rebuild toggle (see
 	// repowatch.go). Always false (a no-op to apply) when this LR wasn't
@@ -32,6 +33,17 @@ type lrState struct {
 	AutoConnect bool   `json:"auto_connect,omitempty"`
 	ACHost      string `json:"ac_host,omitempty"`
 	ACPort      string `json:"ac_port,omitempty"`
+
+	// ManagedApps is the auto-launch-style token list ("app" or "app:N", see
+	// parseAutoLaunchEntry) for every LR-launched managed sub-application
+	// instance still running at the moment a restart was requested (see
+	// runningManagedTokens). A restart terminates those instances as its own
+	// final act (see terminateManagedForRestart) before exiting, so the
+	// instance replacing this one relaunches them fresh -- see Revision I of
+	// Step4Prompt.md. Deliberately scoped to LR's own launched children only:
+	// a future "manage-on-connect" instance (not yet implemented) is neither
+	// terminated by a restart nor carried forward here.
+	ManagedApps []string `json:"managed_apps,omitempty"`
 }
 
 // currentState captures the live LR-specific state a restart should carry
@@ -46,6 +58,7 @@ func (s *Server) currentState() lrState {
 	if st.AutoConnect {
 		st.ACHost, st.ACPort = ac.Host, ac.Port
 	}
+	st.ManagedApps = s.runningManagedTokens()
 	return st
 }
 
@@ -66,13 +79,16 @@ func loadPreviousState() (st lrState, ok bool) {
 	return st, true
 }
 
-// applyToConfig overrides cfg's auto-connect settings with this restored
-// state -- the auto-rebuild half is applied separately once repoWatch
-// exists, since it isn't part of appConfig (see main). The live state takes
-// precedence over cfg's own values (from flags/config), which is why this
-// unconditionally overwrites AutoConnect rather than only filling gaps --
-// see Revision D ("the live state will take precedence over arguments where
-// applicable").
+// applyToConfig overrides cfg's auto-connect and auto-launch settings with
+// this restored state -- the auto-rebuild half is applied separately once
+// repoWatch exists, since it isn't part of appConfig (see main). The live
+// state takes precedence over cfg's own values (from flags/config), which is
+// why this unconditionally overwrites AutoConnect and autoLaunch rather than
+// only filling gaps -- see Revision D ("the live state will take precedence
+// over arguments where applicable") and Revision I (ManagedApps is what was
+// actually running when the restart was requested, which may differ from
+// whatever --auto-launch this instance happens to be relaunched with -- e.g.
+// an instance an operator had since terminated by hand shouldn't come back).
 func (st lrState) applyToConfig(cfg *appConfig) {
 	cfg.autoConnect = st.AutoConnect
 	if st.ACHost != "" {
@@ -81,4 +97,5 @@ func (st lrState) applyToConfig(cfg *appConfig) {
 	if st.ACPort != "" {
 		cfg.acPort = st.ACPort
 	}
+	cfg.autoLaunch = st.ManagedApps
 }

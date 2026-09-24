@@ -192,3 +192,20 @@ In practice, this means that LR will terminate the application before it itself 
 This only pertains to LR-launched managed sub-apps. In a subsequent increment we will introduce the concept of 'manage-on-connect' which will allow connecting sub-apps to appear in the process table. Restart will not automatically terminate these sub-app instances which are not children of the LR process (the LR-launched sub-apps would otherwise automatically die anyway, and this is the motivation for the restart behaviour for these particular instances)
 
 This behavioural change we are implementing now should not impact our UIs.
+
+
+prompt: [`bb1df3b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bb1df3b3baaf8730d8b8beb22f1559d90832aeb2) → reply: [`8f54374`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8f543744acc57347367b9d97f2a2a979e7937fd4)
+
+## Reply I
+
+Implemented Revision I: `announceRestartAndExit` (LR's shared final act for both operator-driven and `SIGHUP` restarts) now snapshots which of its own directly-launched managed sub-applications are running (`runningManagedTokens`), terminates all of them and waits for them to actually stop (`terminateManagedForRestart` in `procman.go`), then announces the restart carrying that snapshot forward as `lrState.ManagedApps`. The replacement instance feeds `ManagedApps` straight into `cfg.autoLaunch` (`applyToConfig` in `reststate.go`), so the existing auto-launch path relaunches exactly the sub-apps that were running — no new relaunch code path and no UI changes, matching the requirement. This is scoped to LR-launched children only (everything currently in `s.managed`), leaving room for a future "manage-on-connect" case to be excluded later. Added unit tests for the new helpers and the restart-state round trip, and updated `docs/DevMode.md`/`local-representative/README.md` to describe the behavior. Shell approval was unavailable this session, so this was verified via careful manual review (including brace/import/call-site checks) rather than `go build`/`go test`.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

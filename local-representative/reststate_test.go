@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -47,6 +48,34 @@ func TestCurrentStateCapturesACTarget(t *testing.T) {
 	}
 }
 
+// TestCurrentStateCapturesManagedApps verifies currentState's ManagedApps
+// snapshot mirrors runningManagedTokens (see Step4Prompt.md Revision I).
+func TestCurrentStateCapturesManagedApps(t *testing.T) {
+	const app = "test-reststate-managed"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: false,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+	if got := s.currentState(); len(got.ManagedApps) != 0 {
+		t.Fatalf("expected no ManagedApps with nothing running, got %v", got.ManagedApps)
+	}
+
+	id, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged: %v", err)
+	}
+	defer func() { _ = s.terminateManaged(id) }()
+
+	got := s.currentState()
+	if len(got.ManagedApps) != 1 || got.ManagedApps[0] != app {
+		t.Fatalf("expected ManagedApps=[%s], got %v", app, got.ManagedApps)
+	}
+}
+
 // TestLoadPreviousStateNoEnv verifies loadPreviousState reports ok=false on a
 // fresh launch (UFA_LOADER_STATE unset), as it will be for every launch not
 // coming out of an announced restart.
@@ -60,13 +89,16 @@ func TestLoadPreviousStateNoEnv(t *testing.T) {
 // UFA_LOADER_STATE carries, and that a malformed payload is rejected (ok=false)
 // rather than partially applied.
 func TestLoadPreviousStateRoundTrip(t *testing.T) {
-	t.Setenv("UFA_LOADER_STATE", `{"auto_rebuild":true,"auto_connect":true,"ac_host":"10.0.0.5","ac_port":"9000"}`)
+	t.Setenv("UFA_LOADER_STATE", `{"auto_rebuild":true,"auto_connect":true,"ac_host":"10.0.0.5","ac_port":"9000","managed_apps":["condoccer","federation-command:2"]}`)
 	st, ok := loadPreviousState()
 	if !ok {
 		t.Fatal("expected ok=true for a well-formed payload")
 	}
 	if !st.AutoRebuild || !st.AutoConnect || st.ACHost != "10.0.0.5" || st.ACPort != "9000" {
 		t.Fatalf("got %+v, want all fields populated from the environment", st)
+	}
+	if want := []string{"condoccer", "federation-command:2"}; strings.Join(st.ManagedApps, ",") != strings.Join(want, ",") {
+		t.Fatalf("got ManagedApps=%v, want %v", st.ManagedApps, want)
 	}
 
 	t.Setenv("UFA_LOADER_STATE", `not json`)
@@ -92,5 +124,24 @@ func TestApplyToConfigOverridesArguments(t *testing.T) {
 	}
 	if cfg.acHost != "10.0.0.5" || cfg.acPort != "9000" {
 		t.Fatalf("expected host/port left alone when the restored state carries none, got %+v", cfg)
+	}
+}
+
+// TestApplyToConfigOverridesAutoLaunch verifies the restored ManagedApps
+// snapshot wins over whatever --auto-launch cfg already carries -- both
+// towards relaunching what was actually running (even if that differs from
+// the configured set) and towards relaunching nothing when nothing was
+// running, per Step4Prompt.md Revision I.
+func TestApplyToConfigOverridesAutoLaunch(t *testing.T) {
+	cfg := appConfig{autoLaunch: []string{"condoccer"}}
+	lrState{ManagedApps: []string{"federation-command:2"}}.applyToConfig(&cfg)
+	if strings.Join(cfg.autoLaunch, ",") != "federation-command:2" {
+		t.Fatalf("expected restored ManagedApps to replace configured auto-launch, got %v", cfg.autoLaunch)
+	}
+
+	cfg = appConfig{autoLaunch: []string{"condoccer", "federation-command"}}
+	lrState{}.applyToConfig(&cfg)
+	if len(cfg.autoLaunch) != 0 {
+		t.Fatalf("expected an empty restored ManagedApps to clear configured auto-launch, got %v", cfg.autoLaunch)
 	}
 }

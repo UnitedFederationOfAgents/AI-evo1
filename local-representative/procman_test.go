@@ -699,3 +699,115 @@ func TestRecordLaunchFailure(t *testing.T) {
 		t.Fatalf("expected a failed entry for %q, got %+v", app, got)
 	}
 }
+
+// TestRunningManagedTokens verifies the auto-launch-style token snapshot
+// (see Step4Prompt.md Revision I) counts only running instances, groups them
+// by app, and omits ":1" for a lone instance -- mirroring what
+// parseAutoLaunchEntry accepts.
+func TestRunningManagedTokens(t *testing.T) {
+	const single, multi = "test-tokens-single", "test-tokens-multi"
+	for _, app := range []string{single, multi} {
+		managedApps[app] = launchSpec{
+			binName:   "sleep",
+			singleton: false,
+			buildArgs: func(s *Server) []string { return []string{"30"} },
+		}
+	}
+	defer delete(managedApps, single)
+	defer delete(managedApps, multi)
+
+	s := newServer("test-lr")
+	if got := s.runningManagedTokens(); len(got) != 0 {
+		t.Fatalf("expected no tokens with nothing running, got %v", got)
+	}
+
+	id1, err := s.launchManaged(single)
+	if err != nil {
+		t.Fatalf("launchManaged(%s): %v", single, err)
+	}
+	if _, err := s.launchManaged(multi); err != nil {
+		t.Fatalf("launchManaged(%s) #1: %v", multi, err)
+	}
+	if _, err := s.launchManaged(multi); err != nil {
+		t.Fatalf("launchManaged(%s) #2: %v", multi, err)
+	}
+
+	got := s.runningManagedTokens()
+	want := []string{multi + ":2", single}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("runningManagedTokens = %v, want %v (sorted by app name)", got, want)
+	}
+
+	// A terminated instance drops out of the snapshot once it has actually
+	// stopped.
+	if err := s.terminateManaged(id1); err != nil {
+		t.Fatalf("terminateManaged: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		found := false
+		for _, tok := range s.runningManagedTokens() {
+			if tok == single {
+				found = true
+			}
+		}
+		if !found {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := s.runningManagedTokens(); strings.Join(got, ",") != multi+":2" {
+		t.Fatalf("runningManagedTokens after terminating %s = %v, want only %s:2", single, got, multi)
+	}
+
+	s.procMu.Lock()
+	ids := make([]string, 0, len(s.managed))
+	for id := range s.managed {
+		ids = append(ids, id)
+	}
+	s.procMu.Unlock()
+	for _, id := range ids {
+		_ = s.terminateManaged(id)
+	}
+}
+
+// TestTerminateManagedForRestart verifies it stops every running LR-launched
+// managed instance and waits for them to actually exit, as LR's own final
+// act before a restart carries them forward to be relaunched (see
+// Step4Prompt.md Revision I).
+func TestTerminateManagedForRestart(t *testing.T) {
+	const app = "test-restart-all"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: false,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+
+	// A no-op with nothing running.
+	s.terminateManagedForRestart()
+
+	id1, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged #1: %v", err)
+	}
+	id2, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged #2: %v", err)
+	}
+
+	s.terminateManagedForRestart()
+
+	s.procMu.Lock()
+	p1, ok1 := s.managed[id1]
+	p2, ok2 := s.managed[id2]
+	s.procMu.Unlock()
+	if (ok1 && p1.state() == "running") || (ok2 && p2.state() == "running") {
+		t.Fatalf("expected both instances stopped after terminateManagedForRestart, got present=%v/%v", ok1, ok2)
+	}
+	if got := s.runningManagedTokens(); len(got) != 0 {
+		t.Fatalf("expected no running tokens after terminateManagedForRestart, got %v", got)
+	}
+}

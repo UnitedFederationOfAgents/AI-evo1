@@ -846,6 +846,92 @@ func (s *Server) restartManaged(target string) error {
 	return nil
 }
 
+// runningManagedTokens returns auto-launch-style tokens ("app" or "app:N",
+// see parseAutoLaunchEntry) for every currently-running LR-launched managed
+// instance, one token per app name, ordered by name. This is the snapshot a
+// restart attaches to its announcement (see lrState.ManagedApps in
+// reststate.go) so the instance replacing this one relaunches the same
+// sub-apps -- Step4Prompt.md Revision I. Every entry in s.managed today is
+// LR-launched (there is no "manage-on-connect" yet), so nothing is excluded
+// here on that basis.
+func (s *Server) runningManagedTokens() []string {
+	counts := map[string]int{}
+	s.procMu.Lock()
+	for _, p := range s.managed {
+		if p.state() == "running" {
+			counts[p.app]++
+		}
+	}
+	s.procMu.Unlock()
+
+	apps := make([]string, 0, len(counts))
+	for app := range counts {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+
+	tokens := make([]string, 0, len(apps))
+	for _, app := range apps {
+		if n := counts[app]; n == 1 {
+			tokens = append(tokens, app)
+		} else {
+			tokens = append(tokens, fmt.Sprintf("%s:%d", app, n))
+		}
+	}
+	return tokens
+}
+
+// terminateManagedForRestart terminates every currently-running LR-launched
+// managed instance and waits (bounded) for them to actually stop -- LR's own
+// last act before announcing a restart and exiting (see
+// announceRestartAndExit and Step4Prompt.md Revision I). Without this, those
+// instances would be orphaned by LR's exit rather than cleanly restarted
+// alongside it: the newly launched LR instance relaunches fresh ones from
+// the ManagedApps snapshot captured just before this runs (see
+// runningManagedTokens/currentState), so leaving the old ones running would
+// merely double them up. LR is exiting either way, so a termination failure
+// here is logged, not fatal.
+func (s *Server) terminateManagedForRestart() {
+	s.procMu.Lock()
+	ids := make([]string, 0, len(s.managed))
+	for id, p := range s.managed {
+		if p.state() == "running" {
+			ids = append(ids, id)
+		}
+	}
+	s.procMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+
+	log.Printf("restart: terminating %d LR-launched managed instance(s) before exit: %s", len(ids), strings.Join(ids, ", "))
+	for _, id := range ids {
+		if err := s.terminateManaged(id); err != nil {
+			log.Printf("restart: terminating %s: %v", id, err)
+		}
+	}
+
+	// terminateManaged's SIGTERM/SIGKILL escalation runs asynchronously (same
+	// pattern as restartManaged's wait loop above); give every instance a
+	// chance to actually stop before this process exits, rather than racing
+	// still-live children out from under the restart.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		stillRunning := 0
+		s.procMu.Lock()
+		for _, id := range ids {
+			if p, ok := s.managed[id]; ok && p.state() == "running" {
+				stillRunning++
+			}
+		}
+		s.procMu.Unlock()
+		if stillRunning == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // recordLaunchFailure keeps a failed launch visible on the system tab instead of
 // silently dropping it.
 func (s *Server) recordLaunchFailure(app string, instance int, id string, cause error) {

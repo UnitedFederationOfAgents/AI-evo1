@@ -628,7 +628,8 @@ function RepoWatchPanel({
 }) {
   if (!repoState?.watched) return null
 
-  const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : 'rebuild'
+  const locked = repoState.condoc_locked && !repoState.dirty
+  const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : locked ? 'condoc' : 'rebuild'
 
   return (
     <div className="sys-repo-panel">
@@ -645,6 +646,8 @@ function RepoWatchPanel({
           title={
             repoState.dirty
               ? 'uncommitted changes — commit or revert to enable rebuilding'
+              : locked
+              ? 'a condoc is mid-transition (.condoc lock file present) — rebuilding is held off until it settles'
               : repoState.rebuild_ready
               ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
               : 'nothing to rebuild since the last successful build'

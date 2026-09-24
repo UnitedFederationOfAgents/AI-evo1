@@ -964,16 +964,85 @@ func replaceIterationPlaceholder(sfPath, letter, header, content string) error {
 	return appendToFile(sfPath, "\n!HANDOFF!\n")
 }
 
+// ---- condoc lock file (see condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) ----
+//
+// condoccer maintains a '.condoc' file at the repo root while any condoc is
+// mid-transition. local-representative treats its mere presence as a signal
+// to always report "rebuild available" as false (see repowatch.go's
+// rebuildReadyLocked), so a dev-repo rebuild never lands out from under an
+// in-flight condoc handoff. The point is to prevent excessive rebuilds, not
+// to track exact repo state -- so the file is a dumb presence/absence lock,
+// not something condoccer ever reads back.
+
+// condocLockPath is the lock file's well-known location.
+func (s *Server) condocLockPath() string {
+	return filepath.Join(s.root, ".condoc")
+}
+
+// writeCondocLock creates or overwrites the lock file to record the most
+// recent condoc state transition.
+func (s *Server) writeCondocLock(action string) {
+	now := time.Now()
+	content := fmt.Sprintf("Condoccer %s at %s (%d)\n", action, now.Format(time.RFC1123), now.Unix())
+	if err := os.WriteFile(s.condocLockPath(), []byte(content), 0644); err != nil {
+		log.Printf("condoc lock: write failed: %v", err)
+	}
+}
+
+// removeCondocLock deletes the lock file, if present.
+func (s *Server) removeCondocLock() {
+	if err := os.Remove(s.condocLockPath()); err != nil && !os.IsNotExist(err) {
+		log.Printf("condoc lock: remove failed: %v", err)
+	}
+}
+
+// updateCondocLock reacts to one condoc's phase (possibly) having changed
+// since the last poll, creating/updating/removing the shared lock file per
+// Step5Prompt.md:
+//   - a condoc seen for the first time -- condoccer "begins working" on it --
+//     creates the lock
+//   - reaching "awaiting action" (an agent just completed its work) or
+//     "completed" removes the lock -- both are safe points for LR to rebuild
+//   - every other transition (re-)creates the lock, so it stays present for
+//     the duration of anything else in flight (e.g. an agent about to run,
+//     or having just been handed off to)
+func (s *Server) updateCondocLock(info CondocInfo, prev Phase, existed bool) {
+	switch {
+	case !existed:
+		if info.Phase == PhaseAwaitingAction || info.Phase == PhaseCompleted {
+			// Already sitting at a safe-to-rebuild point the first time we
+			// see it -- e.g. condoccer just (re)started mid-condoc. Nothing
+			// to lock until it actually transitions.
+			return
+		}
+		s.writeCondocLock(fmt.Sprintf("began work on %s", info.Name))
+	case prev == info.Phase:
+		// no transition
+	case info.Phase == PhaseAwaitingAction, info.Phase == PhaseCompleted:
+		s.removeCondocLock()
+	default:
+		s.writeCondocLock(fmt.Sprintf("advanced %s to %s", info.Name, info.Phase))
+	}
+}
+
 // watchLoop polls condoc files every second and pushes updates to subscribed clients.
 func (s *Server) watchLoop() {
 	var lastList []CondocInfo
 	lastContent := make(map[string]string) // relPath → last known content fingerprint
+	lastPhase := make(map[string]Phase)    // relPath → last known phase, for lock-file transitions
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		current, _ := findCondocs(s.root)
+
+		for _, info := range current {
+			prev, existed := lastPhase[info.Path]
+			s.updateCondocLock(info, prev, existed)
+			lastPhase[info.Path] = info.Phase
+		}
+
 		if !condocListEqual(lastList, current) {
 			lastList = current
 			s.broadcastList()

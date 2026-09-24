@@ -385,6 +385,38 @@ func TestRepoWatchAutoRebuildOffStaysDisarmed(t *testing.T) {
 	}
 }
 
+// TestRepoWatchCondocLockForcesRebuildNotReady verifies that a '.condoc'
+// lock file at the watched repo's root (see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) forces
+// rebuild_ready false even once HEAD has moved past builtHead on a clean
+// repo -- and that removing it lets rebuild_ready go true again without any
+// further git activity.
+func TestRepoWatchCondocLockForcesRebuildNotReady(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {})
+
+	commitChange(t, dir, "v2\n") // moves HEAD past builtHead
+	rw.pollAndMaybePull()
+	if !rw.snapshot().RebuildReady {
+		t.Fatalf("expected rebuild_ready once HEAD has moved past the watcher's starting point")
+	}
+
+	lockPath := filepath.Join(dir, ".condoc")
+	if err := os.WriteFile(lockPath, []byte("Condoccer advanced X to agent_running at ... (0)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if snap := rw.snapshot(); snap.RebuildReady || !snap.CondocLocked {
+		t.Fatalf("expected rebuild_ready=false and condoc_locked=true with the lock file present, got rebuild_ready=%v condoc_locked=%v", snap.RebuildReady, snap.CondocLocked)
+	}
+
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if snap := rw.snapshot(); !snap.RebuildReady || snap.CondocLocked {
+		t.Fatalf("expected rebuild_ready=true and condoc_locked=false once the lock file is removed, got rebuild_ready=%v condoc_locked=%v", snap.RebuildReady, snap.CondocLocked)
+	}
+}
+
 // TestServerRebuildControlsNoRepoWatched verifies the Server-level entry
 // points (the "rebuild-app"/"set-auto-rebuild" WebSocket messages and
 // "__system:rebuild"/"__system:auto-rebuild" both route through) are safe,

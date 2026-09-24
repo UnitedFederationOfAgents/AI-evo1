@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +38,15 @@ type RepoStateMsg struct {
 	RebuildReady bool   `json:"rebuild_ready"` // the rebuild button is active -- HEAD moved since the last successful rebuild, and the repo isn't dirty
 	Building     bool   `json:"building"`      // 'make deploy-dev-binaries' is running right now
 	AutoRebuild  bool   `json:"auto_rebuild"`
+
+	// CondocLocked mirrors condocLockPresent: true while condoccer's
+	// '.condoc' lock file sits at the repo root (see
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md), which
+	// forces RebuildReady false regardless of dirty/head below -- a condoc is
+	// mid-transition, so rebuilding now would be wasted or land at a bad
+	// moment. Reported separately so the UI can explain *why* rebuild is
+	// unavailable even when the repo looks otherwise ready.
+	CondocLocked bool `json:"condoc_locked,omitempty"`
 
 	// AutoRebuildPending/AutoRebuildSeconds describe the 90s auto-rebuild
 	// debounce timer (see autoRebuildDebounce): pending is true from the
@@ -103,10 +114,26 @@ func newRepoWatch(root string, notify func()) *repoWatch {
 // HEAD has moved since the last successful rebuild (or since the watcher
 // started, per newRepoWatch) and the repo isn't dirty. A dirty repo shows
 // "dirty" but is deliberately not selectable -- rebuilding would silently
-// bake in uncommitted, unreviewed changes; commit or revert first. Callers
-// must hold mu (read or write).
+// bake in uncommitted, unreviewed changes; commit or revert first. It is
+// also never selectable while condoccer's '.condoc' lock file is present
+// (see condocLockPresent), regardless of dirty/head -- per
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md, the point of
+// that file is to prevent excessive rebuilds while a condoc is
+// mid-transition. Callers must hold mu (read or write).
 func (w *repoWatch) rebuildReadyLocked() bool {
+	if w.condocLockPresent() {
+		return false
+	}
 	return !w.dirty && w.head != w.builtHead
+}
+
+// condocLockPresent reports whether condoccer's '.condoc' lock file (see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) currently sits
+// at the watched repo's root. condoccer owns this file's contents; LR only
+// ever checks for its presence.
+func (w *repoWatch) condocLockPresent() bool {
+	_, err := os.Stat(filepath.Join(w.root, ".condoc"))
+	return err == nil
 }
 
 func (w *repoWatch) snapshot() RepoStateMsg {
@@ -124,6 +151,7 @@ func (w *repoWatch) snapshot() RepoStateMsg {
 		AutoRebuild:  w.autoRebuild,
 		Head:         w.head,
 		LastError:    w.lastErr,
+		CondocLocked: w.condocLockPresent(),
 	}
 	if !w.autoRebuildDeadline.IsZero() {
 		msg.AutoRebuildPending = true

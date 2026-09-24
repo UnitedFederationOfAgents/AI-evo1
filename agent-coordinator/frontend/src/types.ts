@@ -122,6 +122,11 @@ export interface LRRepoStateMsg {
   auto_rebuild_seconds?: number
   head?: string
   last_error?: string
+  // True while condoccer's '.condoc' lock file sits at the repo root (see
+  // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- forces
+  // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
+  // is never rebuilt out from under.
+  condoc_locked?: boolean
 }
 
 export interface CondocInfo {

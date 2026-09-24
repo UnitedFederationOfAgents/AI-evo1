@@ -167,11 +167,10 @@ That's expected given the noted shell-approval limitation this session.
 Implemented Revision G: the "host update all" button now only sends a restart to whichever of the AC host's LR/AC is actually running a stale binary — `lr-restart-app` when `willUpdate` (that host's LR `update_available`) and/or `ac-restart-app` when `acWillUpdate` (AC's own `update_available`), independently, instead of unconditionally restarting both. Updated the button's tooltip to reflect each of the four cases (both stale, LR-only, AC-only, neither), and updated the surrounding code comment plus `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` to describe the new selective-restart behavior. Shell approval was again unavailable, so this was verified by manual review rather than `tsc`/`npm run build`.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+Now let's extend the per-host system tab's process table functionality for a moment.
 
+We want to make it so that any managed sub-application in that table has a 'restart' button available, this will terminate the current instance and launch a new one.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We also want to make it so that when a managed sub-application has a different binary built and is pending an update-on-restart that the control will switch to say 'restart and update'.

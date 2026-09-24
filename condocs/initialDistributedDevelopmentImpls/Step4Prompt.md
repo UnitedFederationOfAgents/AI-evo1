@@ -183,11 +183,12 @@ prompt: [`e192473`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e
 Implemented Revision H: each managed sub-application row in a host's system tab process table now gets its own "restart" button (`sys-btn-restart`), independent of the LR self-row's restart control — clicking it sends a new `lr-restart-managed-app` WebSocket message (`App.tsx`) through a new `__system:restart-managed <id>` command to that host's LR, where `restartManaged` (`procman.go`) terminates the running instance, waits for it to actually stop, and launches a fresh instance of the same app. The button reads "restart and update" and turns orange whenever that instance's existing `update_available` flag (from `pollManagedVersions`) is set, matching every other restart control's visual language, and is never gated on `loader_managed` since LR itself does the relaunch. Added backend tests (`TestRestartManaged`, `TestHandleSystemCommandRestartManaged`), widened the process table's actions column CSS to fit two buttons, and updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` accordingly. As with prior replies in this chain, shell approval was unavailable, so this was verified by careful manual review rather than `go build`/`tsc`.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+Now let's extend the restart behaviour of LR so that it effectively 'performs a restart' of LR-launched managed sub-apps when it is instructed to restart.
 
+In practice, this means that LR will terminate the application before it itself restarts, and then when the new instance of LR launches it will automatically relaunch new instances for each.
 
-## Human-Prompt
+This only pertains to LR-launched managed sub-apps. In a subsequent increment we will introduce the concept of 'manage-on-connect' which will allow connecting sub-apps to appear in the process table. Restart will not automatically terminate these sub-app instances which are not children of the LR process (the LR-launched sub-apps would otherwise automatically die anyway, and this is the motivation for the restart behaviour for these particular instances)
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This behavioural change we are implementing now should not impact our UIs.

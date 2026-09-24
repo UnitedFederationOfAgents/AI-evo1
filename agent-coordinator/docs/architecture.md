@@ -174,7 +174,12 @@ main pane of host cards plus a details-and-control pane on the right:
 - Each host card's FC/CO/W sub-application boxes turn green once that host's
   `lr-state` reports that service healthy (the same `services` list
   `LRView`'s health indicator reads); the LR/AC boxes keep their static
-  colors.
+  colors. A healthy box's border also turns green, matching the LR box,
+  *only* if that host's LR actually launched the application (it appears in
+  `system.managed`, per `subAppManaged` in `App.tsx`) -- a sub-application
+  that's merely connected without LR managing it (e.g. run manually and
+  pointed at LR's address) instead gets a green abbreviation with the border
+  left the same grey as an unlit box (Revision K).
 - Clicking a host card selects it (mutually exclusive, click again to
   deselect), which drives the details pane's Host/status/version/uptime
   readouts (version/uptime come from that host's `lr-system-state`, same as

@@ -1133,6 +1133,29 @@ function subAppOutOfDate(managed: ProcInfo[] | undefined, name: string): boolean
   return !!managed?.find(p => p.name === name)?.update_available
 }
 
+// subAppManaged reports whether `managed` lists `name` at all -- a
+// sub-application can be connected (see serviceHealthy) without LR having
+// launched it (e.g. run manually and pointed at LR's address), in which case
+// it never appears here. Drives the topology diagram's distinction (Step4Prompt.md
+// Revision K) between a managed connected box (green border, matching LR)
+// and a merely-connected one (green abbreviation, but the border stays the
+// same grey as an unlit box) -- LR itself is always "managed" by definition
+// so this only applies to FC/CO/W.
+function subAppManaged(managed: ProcInfo[] | undefined, name: string): boolean {
+  return !!managed?.find(p => p.name === name)
+}
+
+// subAppBoxClass builds an FC/CO/W box's className: connected-and-managed
+// gets the full green treatment (border + text, matching the LR box);
+// connected-but-unmanaged (see subAppManaged) gets only the green
+// abbreviation, leaving the border the same grey as an unlit box
+// (Step4Prompt.md Revision K). outdated layers its halo on top of either, and
+// never applies unless healthy is also true (see subAppOutOfDate).
+function subAppBoxClass(healthy: boolean, managed: boolean, outdated: boolean): string {
+  const healthClass = healthy ? (managed ? ' topo-node-box-healthy' : ' topo-node-box-unmanaged') : ''
+  return `topo-node-box${healthClass}${outdated ? ' topo-node-box-outdated' : ''}`
+}
+
 // hostRebuildReady reports whether this host's LR is watching a --dev-repo
 // whose "rebuild" control would be enabled right now (HEAD has moved past
 // the last successful build and the repo is clean) -- the same condition
@@ -1173,12 +1196,16 @@ function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolea
 // (agent-coordinator collapsed together with its own LR box -- there's no
 // separate self-only panel any more) is pinned to its own row above the
 // per-host cards, which are selectable and color their sub-application boxes
-// green once that host's LR reports them healthy. outOfDate draws a faint
-// orange halo around the whole card (dev mode only) without displacing the
-// grey-vs-blue selected indication -- see hostOutOfDate. devMode/managed
-// additionally draw that same halo around an individual FC/CO/W box's own
-// green border once it's connected but out of date (see subAppOutOfDate) --
-// LR/AC never get one; the card-level halo already implies it for LR.
+// green once that host's LR reports them healthy -- fully green (border and
+// abbreviation) once LR also launched it (see subAppManaged), or just the
+// abbreviation, with the border left the same grey as an unlit box, when it's
+// merely connected without LR managing it (Step4Prompt.md Revision K).
+// outOfDate draws a faint orange halo around the whole card (dev mode only)
+// without displacing the grey-vs-blue selected indication -- see
+// hostOutOfDate. devMode additionally draws that same halo around an
+// individual FC/CO/W box's own green border once it's connected but out of
+// date (see subAppOutOfDate) -- LR/AC never get one; the card-level halo
+// already implies it for LR.
 function TopologyNodeCard({
   label, status, isSelf, services, managed, devMode, selected, outOfDate, onClick,
 }: {
@@ -1195,6 +1222,9 @@ function TopologyNodeCard({
   const fcHealthy = serviceHealthy(services, 'federation-command')
   const coHealthy = serviceHealthy(services, 'condoccer')
   const wHealthy = serviceHealthy(services, 'worker')
+  const fcManaged = subAppManaged(managed, 'federation-command')
+  const coManaged = subAppManaged(managed, 'condoccer')
+  const wManaged = subAppManaged(managed, 'worker')
   const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
   const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
@@ -1217,15 +1247,15 @@ function TopologyNodeCard({
         </div>
         <div className="topo-node-row topo-node-row-bottom">
           <span
-            className={`topo-node-box${fcHealthy ? ' topo-node-box-healthy' : ''}${fcOutdated ? ' topo-node-box-outdated' : ''}`}
+            className={subAppBoxClass(fcHealthy, fcManaged, !!fcOutdated)}
             title={fcOutdated ? "federation-command is connected but running an older build than what's on disk" : undefined}
           >FC</span>
           <span
-            className={`topo-node-box${coHealthy ? ' topo-node-box-healthy' : ''}${coOutdated ? ' topo-node-box-outdated' : ''}`}
+            className={subAppBoxClass(coHealthy, coManaged, !!coOutdated)}
             title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
           >CO</span>
           <span
-            className={`topo-node-box${wHealthy ? ' topo-node-box-healthy' : ''}${wOutdated ? ' topo-node-box-outdated' : ''}`}
+            className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
           >W</span>
         </div>

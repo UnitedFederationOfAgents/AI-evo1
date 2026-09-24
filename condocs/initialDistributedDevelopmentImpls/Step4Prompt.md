@@ -228,3 +228,24 @@ Implemented Revision J: the global topology view's "AGENT-COORDINATOR" section o
 Next let's make one small tweak to the appearance on the topology view.
 
 If a sub-application is connected but not managed then we will have the abbreviation in the center of the block appear as green, but the outline of the block will be grey (the same grey as a sub-app block which is not illuminated).
+
+
+prompt: [`d26ae30`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d26ae30e513096a677376fbf203bb5edf0b52d8a) → reply: [`d9168d6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d9168d6992ff2a79b8fdb69afe44b44cd93b24ac)
+
+## Reply K
+
+This all looks correct and consistent with existing conventions. Shell command approval wasn't invoked for a build check in this session either, so this was verified via manual review of types/JSX/CSS balance, consistent with the pattern in prior revisions of this chain.
+
+## Summary
+
+Implemented Revision K: in the global topology view, a host card's FC/CO/W sub-application box now only gets the full green treatment (border + abbreviation) when that sub-app is both connected (`serviceHealthy`) *and* actually launched by that host's LR (`subAppManaged`, checking `system.managed`). A sub-app that's merely connected without LR managing it now shows a green abbreviation but keeps the border at the same grey as an unlit box, via a new `topo-node-box-unmanaged` CSS class and a `subAppBoxClass` helper in `App.tsx` that replaced the inline healthy/outdated class logic for all three boxes. Updated `agent-coordinator/docs/architecture.md`'s Global view section to describe the new managed-vs-unmanaged distinction.
+
+
+## <REPLACE-Revision|Retry> L
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

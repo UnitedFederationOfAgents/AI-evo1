@@ -223,11 +223,8 @@ This all reads correctly and is consistent with the code. The revision is comple
 Implemented Revision J: the global topology view's "AGENT-COORDINATOR" section of the Details & Control pane gained two new controls. A green **"rebuild all"** button (dev-mode only, with an accompanying network-wide auto-rebuild toggle) sits at the top, enabled once any connected host's LR has a rebuild ready — pressing it rebuilds only those hosts (`handleRebuildAll`/`handleSetAutoRebuildAll` in `App.tsx`, backed by a new `hostRebuildReady` helper factored out of `hostOutOfDate`). A blue-or-orange **"network update all"** button sits at the bottom, generalizing the existing "host update all" to every connected host's LR plus AC — restarting only whichever are actually stale and loader-managed. Also relabeled "restart agent-coordinator"/"restart and update" to **"restart AC"**/**"restart and update AC"** for consistency with "restart LR". Updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` accordingly. Shell approval remained unavailable this session (including for `npx tsc`/`git diff`), so this was verified via careful manual review of types and JSX/brace balance rather than a build.
 
 
-## <REPLACE-Revision|Retry> K
+## Revision K
 
-<REPLACE-PROMPT>
+Next let's make one small tweak to the appearance on the topology view.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+If a sub-application is connected but not managed then we will have the abbreviation in the center of the block appear as green, but the outline of the block will be grey (the same grey as a sub-app block which is not illuminated).

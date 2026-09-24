@@ -201,11 +201,12 @@ prompt: [`bb1df3b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b
 Implemented Revision I: `announceRestartAndExit` (LR's shared final act for both operator-driven and `SIGHUP` restarts) now snapshots which of its own directly-launched managed sub-applications are running (`runningManagedTokens`), terminates all of them and waits for them to actually stop (`terminateManagedForRestart` in `procman.go`), then announces the restart carrying that snapshot forward as `lrState.ManagedApps`. The replacement instance feeds `ManagedApps` straight into `cfg.autoLaunch` (`applyToConfig` in `reststate.go`), so the existing auto-launch path relaunches exactly the sub-apps that were running — no new relaunch code path and no UI changes, matching the requirement. This is scoped to LR-launched children only (everything currently in `s.managed`), leaving room for a future "manage-on-connect" case to be excluded later. Added unit tests for the new helpers and the restart-state round trip, and updated `docs/DevMode.md`/`local-representative/README.md` to describe the behavior. Shell approval was unavailable this session, so this was verified via careful manual review (including brace/import/call-site checks) rather than `go build`/`go test`.
 
 
-## <REPLACE-Revision|Retry> J
+## Revision J
 
-<REPLACE-PROMPT>
+Now let's add more controls to the 'AGENT-COORDINATOR' section of the Details & Control panel in global system tab topology view.
 
+The first control, at the top of the section, is a green 'rebuild all' control which will be available if one or more connected LRs are pending a rebuild-to-latest-version. Selecting this control will cause every applicable LR to rebuild (but not trigger this effect anywhere which is already up-to-date). This comes with the accompanying toggle-selector for auto-rebuild.
 
-## Human-Prompt
+The second control, at the bottom, is a blue-or-orange button 'network update all' -- this control has the same effect as a 'host update all' but for every connected LR as well as the AC host.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will also adjust the 'restart agent-coordinator' label to say 'restart AC' to be consistent with 'restart LR'.

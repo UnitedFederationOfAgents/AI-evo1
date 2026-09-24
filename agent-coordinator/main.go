@@ -722,6 +722,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				payload.HostID != "" && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__system:restart")
 			}
+		case "lr-restart-managed-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+				ID     string `json:"id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.ID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:restart-managed "+payload.ID)
+			}
 		case "lr-rebuild-app":
 			var payload struct {
 				HostID string `json:"host_id"`

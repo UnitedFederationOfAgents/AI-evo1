@@ -231,8 +231,20 @@ See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
 
 The same 5-second poll-and-compare exists for LR's managed instances (`federation-command`, `condoccer`), independent of `ufa-loader` -- see
-[`procman.go`](../local-representative/procman.go)'s `pollManagedVersions`. Instead of comparing an on-disk binary against the version compiled into the running process, it compares that on-disk binary's `--version` against whatever version the connected instance last reported (see "Versioning" below): a `terminate` + `launch` from LR's system tab is what "restart" is for self, so no loader is involved. This drives `agent-coordinator`'s global topology view, which draws an orange halo around a connected sub-application's green box once it's out of date this way — see
+[`procman.go`](../local-representative/procman.go)'s `pollManagedVersions`. Instead of comparing an on-disk binary against the version compiled into the running process, it compares that on-disk binary's `--version` against whatever version the connected instance last reported (see "Versioning" below): a `terminate` + `launch` from LR's system tab is what "restart" is for a managed instance, so no loader is involved. This drives `agent-coordinator`'s global topology view, which draws an orange halo around a connected sub-application's green box once it's out of date this way — see
 [`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md) Revision D.
+
+Each managed instance row on the per-host system tab's process table now has
+that button for real: **restart** (plain, always available, unlike self's
+which is disabled unless loader-managed) — `terminateManaged` followed by
+`launchManaged` for the same app (`restartManaged` in `procman.go`), delivered
+as `__system:restart-managed <id>` over the same representable command
+channel as `launch`/`terminate`. It reads **restart and update** instead,
+turning orange, whenever `pollManagedVersions` has set that instance's
+`update_available` — same visual language as every other restart control
+here, just without a loader gating it. See
+[`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
+Revision H.
 
 ## Dev-repo watcher
 

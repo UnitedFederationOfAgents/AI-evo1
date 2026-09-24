@@ -553,6 +553,104 @@ func TestHandleSystemCommand(t *testing.T) {
 	_ = s.terminateManaged(id)
 }
 
+// TestRestartManaged verifies restarting a managed singleton instance
+// terminates the old process and launches a fresh instance of the same
+// application, dropping the old entry rather than leaving a stale "exited"
+// row behind (see Step4Prompt.md Revision H).
+func TestRestartManaged(t *testing.T) {
+	const app = "test-restart"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: true,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+	id1, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged: %v", err)
+	}
+	s.procMu.Lock()
+	pid1 := s.managed[id1].pid
+	s.procMu.Unlock()
+
+	if err := s.restartManaged(id1); err != nil {
+		t.Fatalf("restartManaged: %v", err)
+	}
+
+	s.procMu.Lock()
+	_, stillPresent := s.managed[id1]
+	var id2 string
+	for id, p := range s.managed {
+		if p.app == app {
+			id2 = id
+		}
+	}
+	s.procMu.Unlock()
+	if stillPresent {
+		t.Fatal("old instance should have been dropped after restart")
+	}
+	if id2 == "" {
+		t.Fatal("expected a fresh instance of the app to be running after restart")
+	}
+	if id2 == id1 {
+		t.Fatal("restart should allocate a new instance id, not reuse the old one")
+	}
+
+	s.procMu.Lock()
+	p2 := s.managed[id2]
+	s.procMu.Unlock()
+	if p2.state() != "running" {
+		t.Fatalf("expected the restarted instance to be running, got %q", p2.state())
+	}
+	if p2.pid == pid1 {
+		t.Fatal("restarted instance should have a new pid")
+	}
+
+	_ = s.terminateManaged(id2)
+}
+
+// TestHandleSystemCommandRestartManaged drives "__system:restart-managed"
+// through handleSystemCommand, mirroring TestHandleSystemCommand.
+func TestHandleSystemCommandRestartManaged(t *testing.T) {
+	const app = "test-syscmd-restart"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: true,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+	id1, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged: %v", err)
+	}
+
+	s.handleSystemCommand("__system:restart-managed " + id1)
+
+	s.procMu.Lock()
+	_, stillPresent := s.managed[id1]
+	var id2 string
+	for id, p := range s.managed {
+		if p.app == app {
+			id2 = id
+		}
+	}
+	s.procMu.Unlock()
+	if stillPresent {
+		t.Fatal("remote restart-managed did not drop the old instance")
+	}
+	if id2 == "" {
+		t.Fatal("remote restart-managed did not launch a fresh instance")
+	}
+
+	// Missing arg is ignored without panicking.
+	s.handleSystemCommand("__system:restart-managed")
+	_ = s.terminateManaged(id2)
+}
+
 // TestLaunchManagedSingleton verifies a singleton app rejects a second launch
 // while an instance is running.
 func TestLaunchManagedSingleton(t *testing.T) {

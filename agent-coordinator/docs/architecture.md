@@ -44,13 +44,13 @@ Local-representative connects to AC using `representable.Client`. Messages:
 | LR → AC | `data` / `"fc-state"` | `FCStateMsg` — FC control mode |
 | LR → AC | `data` / `"ridealong-state"` | `RidealongStateMsg` |
 | LR → AC | `data` / `"condoc-state"` | `CondocStateMsg` |
-| LR → AC | `data` / `"system-state"` | `SystemStateMsg` — LR's system tab (self + managed apps); `ProcInfo` carries each process's `version`, and (self only) `loader_managed`/`update_available` for the restart control |
+| LR → AC | `data` / `"system-state"` | `SystemStateMsg` — LR's system tab (self + managed apps); `ProcInfo` carries each process's `version`, `update_available` (self and managed both drive a restart control; self's is additionally gated on `loader_managed`) |
 | LR → AC | `data` / `"repo-state"` | `RepoStateMsg` — LR's dev-repo watcher (`--dev-repo`, see [DevMode.md](../../docs/DevMode.md)); `watched: false` when that LR wasn't launched with `--dev-repo` |
 | LR → AC | `data` / `"condoccer-state"` | `CondoccerStateMsg` — condoc summary + condoccer's HTTP port, relayed from a managed condoccer |
 | LR → AC | `data` / `"lr-http"` | `LRHTTPMsg` — LR's dashboard HTTP port, so AC can reverse-proxy `/host/<id>/…` back to it |
 | LR → AC | `data` / `"files-state"` | `FilesStateMsg` — host-cache listing for the files tab; upload is relayed back down through AC's own `POST /host/<id>/api/files` route rather than this channel (see [DistributedExchange.md](../../docs/DistributedExchange.md)) |
 | LR → AC | `log` (cmd/output) | FC command echo / output forwarded upstream |
-| AC → LR | `command` | plain cmd or `__ridealong:action` → forwarded to FC; `__system:launch <app>` / `__system:terminate <id>` → LR's process manager; `__system:restart` / `__system:rebuild` / `__system:auto-rebuild <on\|off>` → LR's own restart control and dev-repo watcher (see [DevMode.md](../../docs/DevMode.md)) |
+| AC → LR | `command` | plain cmd or `__ridealong:action` → forwarded to FC; `__system:launch <app>` / `__system:terminate <id>` / `__system:restart-managed <id>` → LR's process manager; `__system:restart` / `__system:rebuild` / `__system:auto-rebuild <on\|off>` → LR's own restart control and dev-repo watcher (see [DevMode.md](../../docs/DevMode.md)) |
 
 ### condoccer in the chain
 
@@ -128,6 +128,7 @@ also covers the still-open Path 2 (LR-to-LR transfer brokered through AC).
 | `lr-ridealong-command` | `{ host_id, action }` | Ridealong action on host's FC |
 | `lr-launch-app` | `{ host_id, name }` | Launch a managed app on the host's LR |
 | `lr-terminate-app` | `{ host_id, id }` | Terminate/dismiss a managed instance on the host's LR |
+| `lr-restart-managed-app` | `{ host_id, id }` | Restart one managed instance on the host's LR: terminate it, then launch a fresh instance of the same app (see Step4Prompt.md Revision H) |
 | `lr-restart-app` | `{ host_id }` | Restart the host's LR itself (only takes effect if it's loader-managed) |
 | `lr-rebuild-app` | `{ host_id }` | Run `make deploy-dev-binaries` on the host's watched dev-repo |
 | `lr-set-auto-rebuild` | `{ host_id, enabled }` | Toggle the host's dev-repo watcher auto-rebuild flag |

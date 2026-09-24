@@ -174,3 +174,20 @@ Now let's extend the per-host system tab's process table functionality for a mom
 We want to make it so that any managed sub-application in that table has a 'restart' button available, this will terminate the current instance and launch a new one.
 
 We also want to make it so that when a managed sub-application has a different binary built and is pending an update-on-restart that the control will switch to say 'restart and update'.
+
+
+prompt: [`e192473`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e192473fd17f76b2e933d7b5f607cf13b9d00f37) → reply: [`02e9ea7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/02e9ea786952183dd903291ced5e13384aa309ae)
+
+## Reply H
+
+Implemented Revision H: each managed sub-application row in a host's system tab process table now gets its own "restart" button (`sys-btn-restart`), independent of the LR self-row's restart control — clicking it sends a new `lr-restart-managed-app` WebSocket message (`App.tsx`) through a new `__system:restart-managed <id>` command to that host's LR, where `restartManaged` (`procman.go`) terminates the running instance, waits for it to actually stop, and launches a fresh instance of the same app. The button reads "restart and update" and turns orange whenever that instance's existing `update_available` flag (from `pollManagedVersions`) is set, matching every other restart control's visual language, and is never gated on `loader_managed` since LR itself does the relaunch. Added backend tests (`TestRestartManaged`, `TestHandleSystemCommandRestartManaged`), widened the process table's actions column CSS to fit two buttons, and updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` accordingly. As with prior replies in this chain, shell approval was unavailable, so this was verified by careful manual review rather than `go build`/`tsc`.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

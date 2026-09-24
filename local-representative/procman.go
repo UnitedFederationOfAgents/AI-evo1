@@ -356,6 +356,7 @@ func (s *Server) broadcastSystemState() {
 //	__system:launch <app>
 //	__system:terminate <instance-id-or-app>
 //	__system:restart
+//	__system:restart-managed <instance-id-or-app>
 //	__system:rebuild
 //	__system:auto-rebuild <on|off>
 func (s *Server) handleSystemCommand(raw string) {
@@ -381,6 +382,14 @@ func (s *Server) handleSystemCommand(raw string) {
 		}
 	case "restart":
 		s.requestRestart("operator")
+	case "restart-managed":
+		if arg == "" {
+			log.Printf("system: remote restart-managed command missing target")
+			return
+		}
+		if err := s.restartManaged(arg); err != nil {
+			log.Printf("system: remote restart-managed %q failed: %v", arg, err)
+		}
 	case "rebuild":
 		s.requestRebuild("operator")
 	case "auto-rebuild":
@@ -785,6 +794,55 @@ func (s *Server) terminateManaged(target string) error {
 			}
 		}
 	}()
+	return nil
+}
+
+// restartManaged terminates a managed instance and, once it has actually
+// stopped, launches a fresh instance of the same application -- the system
+// tab's per-managed-row "restart"/"restart and update" control (see
+// Step4Prompt.md Revision H). Unlike self's "restart" (which just relies on
+// ufa-loader to relaunch LR), a managed sub-app has no loader watching it, so
+// LR does the terminate-then-launch itself. target is an instance id, or a
+// bare app name when only one instance is present.
+func (s *Server) restartManaged(target string) error {
+	s.procMu.Lock()
+	id := s.resolveInstanceLocked(target)
+	p := s.managed[id]
+	s.procMu.Unlock()
+	if p == nil {
+		return fmt.Errorf("%q is not managed by this local-representative", target)
+	}
+	app := p.app
+
+	if err := s.terminateManaged(id); err != nil {
+		return err
+	}
+
+	// terminateManaged's SIGTERM/SIGKILL escalation runs asynchronously, so
+	// wait for the instance to actually stop before launching its
+	// replacement -- otherwise a singleton app's launch would race the still
+	// -running old instance and be rejected as "already running".
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s.procMu.Lock()
+		cur, stillPresent := s.managed[id]
+		s.procMu.Unlock()
+		if !stillPresent || cur.state() != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Drop the now-stopped instance (mirrors the "dismiss" action) so the
+	// replacement doesn't sit alongside a stale exited row.
+	s.procMu.Lock()
+	delete(s.managed, id)
+	s.procMu.Unlock()
+	s.broadcastSystemState()
+
+	if _, err := s.launchManaged(app); err != nil {
+		return fmt.Errorf("restarted %s but relaunch failed: %w", app, err)
+	}
 	return nil
 }
 

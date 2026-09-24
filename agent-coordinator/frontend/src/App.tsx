@@ -69,6 +69,14 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-terminate-app', payload: { host_id: hostId, id } }))
   }, [])
 
+  // Restarts one managed sub-application instance on the given host's LR
+  // (terminate the running instance, then launch a fresh one of the same
+  // app) -- distinct from sendLRRestartApp, which restarts LR itself. See
+  // Step4Prompt.md Revision H.
+  const sendLRRestartManagedApp = useCallback((hostId: string, id: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-restart-managed-app', payload: { host_id: hostId, id } }))
+  }, [])
+
   // Restarts the selected host's local-representative itself (not
   // agent-coordinator) -- only expected to come back up when it's
   // loader-managed; see docs/DevMode.md "Loader".
@@ -279,7 +287,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
     acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
   }
 }
 
@@ -534,12 +542,13 @@ function formatUptime(startedAt: number, nowSec: number): string {
 }
 
 function SystemProcRow({
-  proc, nowSec, onTerminate, onRestart,
+  proc, nowSec, onTerminate, onRestart, onRestartManaged,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
   onRestart?: () => void
+  onRestartManaged?: (id: string) => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -565,6 +574,17 @@ function SystemProcRow({
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
       <span className="sys-col sys-col-detail" title={proc.detail}>{detail}</span>
       <span className="sys-col sys-col-actions">
+        {proc.managed && onRestartManaged && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            title={proc.update_available
+              ? 'a newer build has landed on disk — terminate this instance and launch a new one with it'
+              : 'terminate this instance and launch a fresh one of the same application'}
+            onClick={() => onRestartManaged(proc.instance_id)}
+          >
+            {proc.update_available ? 'restart and update' : 'restart'}
+          </button>
+        )}
         {proc.managed && onTerminate && (
           <button
             className="sys-btn sys-btn-terminate"
@@ -654,7 +674,7 @@ function RepoWatchPanel({
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRebuild, onSetAutoRebuild,
+  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -664,6 +684,7 @@ function SystemPanel({
   onLaunch: (hostId: string, name: string) => void
   onTerminate: (hostId: string, id: string) => void
   onRestart: (hostId: string) => void
+  onRestartManaged: (hostId: string, id: string) => void
   onRebuild: (hostId: string) => void
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
 }) {
@@ -719,6 +740,7 @@ function SystemPanel({
             proc={p}
             nowSec={nowSec}
             onTerminate={id => onTerminate(hostId, id)}
+            onRestartManaged={id => onRestartManaged(hostId, id)}
           />
         ))}
         {managed.length === 0 && (
@@ -1516,7 +1538,7 @@ function GlobalView({
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
-  sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles, activeTab, setActiveTab,
 }: {
   host: Host
   data: HostClientState
@@ -1525,6 +1547,7 @@ function LRView({
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
   sendLRRestartApp: (hostId: string) => void
+  sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList) => void
@@ -1590,6 +1613,7 @@ function LRView({
                 onLaunch={sendLRLaunchApp}
                 onTerminate={sendLRTerminateApp}
                 onRestart={sendLRRestartApp}
+                onRestartManaged={sendLRRestartManagedApp}
                 onRebuild={sendLRRebuildApp}
                 onSetAutoRebuild={sendLRSetAutoRebuild}
               />
@@ -1668,7 +1692,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
     acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
@@ -1755,6 +1779,7 @@ export default function App() {
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
               sendLRRestartApp={sendLRRestartApp}
+              sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               uploadFiles={uploadFiles}

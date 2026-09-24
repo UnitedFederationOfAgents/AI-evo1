@@ -97,6 +97,13 @@ For now we will populate dummy images in the main pane (these will later represe
 ```
 
 
+### Step 5 - <REPLACE-TITLE>
+
+```prompt
+<REPLACE-PROMPT>
+```
+
+
 ## Human-Prompt
 
-The flow of the condoc is now within the fourth step.
+Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the fifth step, or submit the '!COMPLETED!' directive to complete this condoc.

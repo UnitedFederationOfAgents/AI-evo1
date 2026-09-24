@@ -241,11 +241,6 @@ This all looks correct and consistent with existing conventions. Shell command a
 Implemented Revision K: in the global topology view, a host card's FC/CO/W sub-application box now only gets the full green treatment (border + abbreviation) when that sub-app is both connected (`serviceHealthy`) *and* actually launched by that host's LR (`subAppManaged`, checking `system.managed`). A sub-app that's merely connected without LR managing it now shows a green abbreviation but keeps the border at the same grey as an unlit box, via a new `topo-node-box-unmanaged` CSS class and a `subAppBoxClass` helper in `App.tsx` that replaced the inline healthy/outdated class logic for all three boxes. Updated `agent-coordinator/docs/architecture.md`'s Global view section to describe the new managed-vs-unmanaged distinction.
 
 
-## <REPLACE-Revision|Retry> L
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1790288703 (Thu Sep 24 10:25:03 PM UTC 2026).

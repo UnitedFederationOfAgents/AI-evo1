@@ -58,6 +58,13 @@ type ProcInfo struct {
 	// would pick it up. Drives the topology view's per-sub-app halo (see
 	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
 	UpdateAvailable bool `json:"update_available,omitempty"`
+
+	// AutoUpdate is only meaningful on Self: whether an available update
+	// (UpdateAvailable above) should trigger a restart on its own, without an
+	// operator pressing the "update and restart" control -- the system tab's
+	// "auto-update" checkbox (see selfversion.go and
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E).
+	AutoUpdate bool `json:"auto_update,omitempty"`
 }
 
 // VersionMsg is the payload of a representable "version" data message: sent
@@ -237,6 +244,7 @@ func (s *Server) systemState() SystemStateMsg {
 			LoaderManaged:   s.loaderManaged,
 			Version:         ufaversion.Version,
 			UpdateAvailable: s.selfVersion.available(),
+			AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		},
 		Managed: procs,
 	}
@@ -359,6 +367,7 @@ func (s *Server) broadcastSystemState() {
 //	__system:restart-managed <instance-id-or-app>
 //	__system:rebuild
 //	__system:auto-rebuild <on|off>
+//	__system:auto-update <on|off>
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -394,6 +403,8 @@ func (s *Server) handleSystemCommand(raw string) {
 		s.requestRebuild("operator")
 	case "auto-rebuild":
 		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
+	case "auto-update":
+		s.setAutoUpdate(arg == "on" || arg == "true" || arg == "1")
 	default:
 		log.Printf("system: ignoring unrecognised remote system command %q", raw)
 	}

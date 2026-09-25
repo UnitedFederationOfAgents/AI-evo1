@@ -95,6 +95,13 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
   }, [])
 
+  // Toggles whether the given host's LR restarts itself the instant an
+  // update becomes available, instead of waiting for the "restart and
+  // update LR" control -- see docs/DevMode.md "Loader".
+  const sendLRSetAutoUpdate = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-update', payload: { host_id: hostId, enabled } }))
+  }, [])
+
   // Restarts agent-coordinator itself (not any host's LR) -- only expected to
   // come back up when it's loader-managed; mirrors sendLRRestartApp but for
   // AC's own process, with no host to target (see Step4Prompt.md Revision E).
@@ -297,7 +304,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
     acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
   }
 }
 
@@ -561,13 +568,14 @@ function formatUptime(startedAt: number, nowSec: number): string {
 }
 
 function SystemProcRow({
-  proc, nowSec, onTerminate, onRestart, onRestartManaged,
+  proc, nowSec, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
   onRestart?: () => void
   onRestartManaged?: (id: string) => void
+  onSetAutoUpdate?: (enabled: boolean) => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -625,6 +633,22 @@ function SystemProcRow({
           >
             {proc.update_available ? 'update and restart' : 'restart'}
           </button>
+        )}
+        {!proc.managed && onSetAutoUpdate && (
+          <label
+            className="sys-auto-rebuild"
+            title={proc.loader_managed
+              ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+          >
+            <input
+              type="checkbox"
+              disabled={!proc.loader_managed}
+              checked={!!proc.auto_update}
+              onChange={e => onSetAutoUpdate(e.target.checked)}
+            />
+            auto-update
+          </label>
         )}
       </span>
     </div>
@@ -696,7 +720,7 @@ function RepoWatchPanel({
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild,
+  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -709,6 +733,7 @@ function SystemPanel({
   onRestartManaged: (hostId: string, id: string) => void
   onRebuild: (hostId: string) => void
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  onSetAutoUpdate: (hostId: string, enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
@@ -755,7 +780,12 @@ function SystemPanel({
           <span className="sys-col sys-col-detail">uptime</span>
           <span className="sys-col sys-col-actions" />
         </div>
-        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={() => onRestart(hostId)} />
+        <SystemProcRow
+          proc={state.self}
+          nowSec={nowSec}
+          onRestart={() => onRestart(hostId)}
+          onSetAutoUpdate={enabled => onSetAutoUpdate(hostId, enabled)}
+        />
         {managed.map(p => (
           <SystemProcRow
             key={p.instance_id}
@@ -1322,7 +1352,7 @@ function TopologyNodeCard({
 // selective-restart effect as "host update all" but generalized to every
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, sendACRestartApp,
 }: {
   hosts: Host[]
@@ -1332,6 +1362,7 @@ function GlobalTopologyPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
   sendACRestartApp: () => void
@@ -1402,6 +1433,18 @@ function GlobalTopologyPanel({
     restartableStaleHosts.forEach(h => sendLRRestartApp(h.id))
     if (acWillUpdate && acLoaderManaged) sendACRestartApp()
   }
+
+  // Accompanying auto-update toggle-selector, mirroring auto-rebuild's above:
+  // applies to every connected, loader-managed host at once (not just ones
+  // currently stale, since like auto-rebuild this is a standing setting, not
+  // a one-shot action) -- Step5Prompt.md Revision E. Deliberately scoped to
+  // hosts, same as "network update all" is scoped to *restartable* hosts
+  // plus AC handled separately by its own "restart AC" control above; this
+  // doesn't reach into AC's own restart at all.
+  const updatableHosts = devMode ? allHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed) : []
+  const allAutoUpdateOn = updatableHosts.length > 0 && updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update)
+  const handleSetAutoUpdateAll = (enabled: boolean) =>
+    updatableHosts.forEach(h => sendLRSetAutoUpdate(h.id, enabled))
 
   return (
     <div className="topo-panel">
@@ -1488,6 +1531,20 @@ function GlobalTopologyPanel({
             >
               {willUpdate ? 'restart and update LR' : 'restart LR'}
             </button>
+            <label
+              className="sys-auto-rebuild"
+              title={canRestart
+                ? 'restart that host\'s LR automatically the instant an update becomes available, instead of waiting for the button above'
+                : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            >
+              <input
+                type="checkbox"
+                disabled={!canRestart}
+                checked={!!selfProc?.auto_update}
+                onChange={e => selectedHostId && sendLRSetAutoUpdate(selectedHostId, e.target.checked)}
+              />
+              auto-update
+            </label>
           </div>
           {!selectedHostId && (
             <div className="topo-controls-hint">select a host to enable rebuild/restart controls</div>
@@ -1578,6 +1635,18 @@ function GlobalTopologyPanel({
               >
                 network update all
               </button>
+              <label
+                className="sys-auto-rebuild"
+                title="restart automatically, per host, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once (agent-coordinator's own restart above isn't included)"
+              >
+                <input
+                  type="checkbox"
+                  disabled={updatableHosts.length === 0}
+                  checked={allAutoUpdateOn}
+                  onChange={e => handleSetAutoUpdateAll(e.target.checked)}
+                />
+                auto-update
+              </label>
             </div>
           </div>
         )}
@@ -1587,7 +1656,7 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, sendACRestartApp,
 }: {
   hosts: Host[]
@@ -1597,6 +1666,7 @@ function GlobalSystemPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
   sendACRestartApp: () => void
@@ -1626,6 +1696,7 @@ function GlobalSystemPanel({
           sendLRRestartApp={sendLRRestartApp}
           sendLRRebuildApp={sendLRRebuildApp}
           sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          sendLRSetAutoUpdate={sendLRSetAutoUpdate}
           acLoaderManaged={acLoaderManaged}
           acUpdateAvailable={acUpdateAvailable}
           sendACRestartApp={sendACRestartApp}
@@ -1638,7 +1709,7 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, activeTab, setActiveTab,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
   acLoaderManaged, acUpdateAvailable, sendACRestartApp,
 }: {
   hosts: Host[]
@@ -1648,6 +1719,7 @@ function GlobalView({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   acLoaderManaged: boolean
@@ -1682,6 +1754,7 @@ function GlobalView({
             sendLRRestartApp={sendLRRestartApp}
             sendLRRebuildApp={sendLRRebuildApp}
             sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+            sendLRSetAutoUpdate={sendLRSetAutoUpdate}
             acLoaderManaged={acLoaderManaged}
             acUpdateAvailable={acUpdateAvailable}
             sendACRestartApp={sendACRestartApp}
@@ -1696,7 +1769,7 @@ function GlobalView({
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, uploadFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
 }: {
   host: Host
   data: HostClientState
@@ -1708,6 +1781,7 @@ function LRView({
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
@@ -1800,6 +1874,7 @@ function LRView({
                 onRestartManaged={sendLRRestartManagedApp}
                 onRebuild={sendLRRebuildApp}
                 onSetAutoRebuild={sendLRSetAutoRebuild}
+                onSetAutoUpdate={sendLRSetAutoUpdate}
               />
             )}
             {activeTab === 'files' && viewerFileId ? (
@@ -1878,7 +1953,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
     acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -1992,6 +2067,7 @@ export default function App() {
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               uploadFiles={uploadFiles}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
@@ -2005,6 +2081,7 @@ export default function App() {
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
               acLoaderManaged={acLoaderManaged}

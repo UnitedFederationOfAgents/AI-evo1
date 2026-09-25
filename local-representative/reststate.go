@@ -22,6 +22,14 @@ type lrState struct {
 	// watching a repo at all.
 	AutoRebuild bool `json:"auto_rebuild,omitempty"`
 
+	// AutoUpdate mirrors selfVersion's auto-update toggle (see
+	// selfversion.go and condocs/initialDistributedDevelopmentImpls/Step5Prompt.md
+	// Revision E) -- like AutoRebuild, this has to survive the very restart
+	// it may itself have just triggered, or it would reset to off on every
+	// update and never fire twice in a row. Always false (a no-op to apply)
+	// when this process isn't loader-managed.
+	AutoUpdate bool `json:"auto_update,omitempty"`
+
 	// AutoConnect is the persistent auto-connect toggle (see Revision I of
 	// Step3Prompt.md) -- a first-class state independent of any single
 	// connection attempt, so it carries forward whether this LR was armed to
@@ -53,6 +61,7 @@ func (s *Server) currentState() lrState {
 	if s.repoWatch != nil {
 		st.AutoRebuild = s.repoWatch.snapshot().AutoRebuild
 	}
+	st.AutoUpdate = s.selfVersion.autoUpdateEnabled()
 	ac := s.getACState()
 	st.AutoConnect = ac.AutoConnect
 	if st.AutoConnect {
@@ -80,8 +89,9 @@ func loadPreviousState() (st lrState, ok bool) {
 }
 
 // applyToConfig overrides cfg's auto-connect and auto-launch settings with
-// this restored state -- the auto-rebuild half is applied separately once
-// repoWatch exists, since it isn't part of appConfig (see main). The live
+// this restored state -- the auto-rebuild and auto-update halves are applied
+// separately once repoWatch/selfVersion exist, since neither is part of
+// appConfig (see main). The live
 // state takes precedence over cfg's own values (from flags/config), which is
 // why this unconditionally overwrites AutoConnect and autoLaunch rather than
 // only filling gaps -- see Revision D ("the live state will take precedence

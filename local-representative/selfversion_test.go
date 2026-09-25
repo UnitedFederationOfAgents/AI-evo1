@@ -77,4 +77,83 @@ func TestSelfVersionWatchNilSafe(t *testing.T) {
 	if w.available() {
 		t.Fatal("a nil watch should report no update available")
 	}
+	if w.autoUpdateEnabled() {
+		t.Fatal("a nil watch should report auto-update disabled")
+	}
+}
+
+// TestSelfVersionWatchAutoUpdateFiresOnPoll verifies that with auto-update on,
+// poll() fires restart the moment it notices an update landed -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+func TestSelfVersionWatchAutoUpdateFiresOnPoll(t *testing.T) {
+	bin := fakeVersionBin(t, "v2")
+
+	restarted := 0
+	w := &selfVersionWatch{binPath: bin, running: "v1", notify: func() {}, restart: func() { restarted++ }}
+	w.setAutoUpdate(true)
+	if restarted != 0 {
+		t.Fatalf("restart fired %d times before any update was available, want 0", restarted)
+	}
+
+	w.poll()
+	if !w.available() {
+		t.Fatal("expected an update to be available: on-disk v2 != running v1")
+	}
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after the update landed, want 1", restarted)
+	}
+
+	// A further unchanged poll must not fire restart again -- the process is
+	// expected to actually go down and come back up once restart() runs.
+	w.poll()
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after an unchanged poll, want still 1", restarted)
+	}
+}
+
+// TestSelfVersionWatchAutoUpdateFiresOnToggle verifies that turning
+// auto-update on while an update is already available fires restart right
+// away, rather than waiting for the next poll to notice nothing changed.
+func TestSelfVersionWatchAutoUpdateFiresOnToggle(t *testing.T) {
+	bin := fakeVersionBin(t, "v2")
+
+	restarted := 0
+	w := &selfVersionWatch{binPath: bin, running: "v1", notify: func() {}, restart: func() { restarted++ }}
+	w.poll()
+	if !w.available() {
+		t.Fatal("expected an update to be available: on-disk v2 != running v1")
+	}
+	if restarted != 0 {
+		t.Fatalf("restart fired %d times with auto-update still off, want 0", restarted)
+	}
+
+	w.setAutoUpdate(true)
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after turning auto-update on with an update already available, want 1", restarted)
+	}
+	if !w.autoUpdateEnabled() {
+		t.Fatal("expected auto-update to read enabled after setAutoUpdate(true)")
+	}
+
+	w.setAutoUpdate(false)
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after turning auto-update back off, want still 1", restarted)
+	}
+}
+
+// TestServerSetAutoUpdateNoSelfVersion verifies the Server-level entry points
+// (the "set-auto-update" WebSocket message and "__system:auto-update" both
+// route through Server.setAutoUpdate) are safe, logged no-ops when this LR
+// isn't loader-managed -- s.selfVersion is nil in that case, mirroring
+// TestServerRebuildControlsNoRepoWatched in repowatch_test.go.
+func TestServerSetAutoUpdateNoSelfVersion(t *testing.T) {
+	s := newServer("test-lr")
+
+	// Must not panic on a nil s.selfVersion.
+	s.setAutoUpdate(true)
+	s.handleSystemCommand("__system:auto-update on")
+
+	if s.systemState().Self.AutoUpdate {
+		t.Fatalf("expected AutoUpdate=false with no selfVersion to toggle")
+	}
 }

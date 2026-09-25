@@ -820,6 +820,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
 				s.setAutoRebuild(payload.Enabled)
 			}
+		case "set-auto-update":
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoUpdate(payload.Enabled)
+			}
 		}
 	}
 }
@@ -1117,12 +1124,12 @@ func main() {
 	// terminateManagedForRestart) come back: prevState.ManagedApps feeds
 	// cfg.autoLaunch below, so the ordinary auto-launch path (further down)
 	// relaunches them -- Step4Prompt.md Revision I. prevState/havePrevState
-	// is also consulted below once repoWatch exists, for the auto-rebuild
-	// half.
+	// is also consulted below once repoWatch/selfVersion exist, for the
+	// auto-rebuild and auto-update halves.
 	prevState, havePrevState := loadPreviousState()
 	if havePrevState {
-		log.Printf("restart state: restoring auto-rebuild=%v auto-connect=%v (ac=%s:%s) managed-apps=%v from before the restart",
-			prevState.AutoRebuild, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps)
+		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v from before the restart",
+			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps)
 		prevState.applyToConfig(&cfg)
 	}
 
@@ -1130,9 +1137,15 @@ func main() {
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
 		// Only worth polling for an on-disk update when a restart could
-		// actually pick it up -- see selfversion.go.
-		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSystemState)
+		// actually pick it up -- see selfversion.go. restart wires the
+		// "auto-update" toggle to the same requestRestart an operator's
+		// "update and restart" button drives, per
+		// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSystemState, func() { s.requestRestart("auto-update") })
 		if s.selfVersion != nil {
+			if havePrevState && prevState.AutoUpdate {
+				s.selfVersion.setAutoUpdate(true)
+			}
 			go s.selfVersion.watchLoop()
 		}
 	}

@@ -239,6 +239,30 @@ network: enabled once any connected host's own LR is stale, or AC itself is
 — pressing it restarts every stale, loader-managed host's LR, plus AC itself
 if it's stale and loader-managed too, in one click.
 
+Each of the **restart**/**update and restart** controls above — LR's own
+system tab, `agent-coordinator`'s per-host mirror, and the global topology
+view's "restart LR" control for whichever host is selected — has a
+neighboring **auto-update** checkbox (see
+[`condocs/initialDistributedDevelopmentImpls/Step5Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step5Prompt.md)
+Revision E): switching it on makes that one host's LR restart itself the
+moment `selfVersionWatch` next notices an update on disk — same effect as
+pressing the button by hand, just without waiting for an operator — or, if an
+update is already sitting there the instant the checkbox is ticked, right
+away rather than waiting for the next 5-second poll. It's a no-op (and stays
+unchecked and disabled) while that LR isn't loader-managed, same guard the
+restart control itself is disabled on, and is settable remotely via
+`__system:auto-update <on|off>` alongside `__system:auto-rebuild`. Like
+auto-rebuild and auto-connect, it's carried across the very restart it may
+have just triggered via `lrState.AutoUpdate` (`reststate.go`) — otherwise it
+would silently turn itself back off after firing once. The global topology
+view's "agent-coordinator" section additionally grows its own **auto-update**
+checkbox alongside **network update all**, mirroring **auto-rebuild**'s
+pairing with **rebuild all**: it sweeps every connected, loader-managed
+host's toggle at once rather than the single selected host, reads checked
+only once all of them already have it on, and — like the per-host toggle
+above it in this same view — never reaches into `agent-coordinator`'s own
+restart, which stays a manual, one-shot action via **restart AC**.
+
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.
 

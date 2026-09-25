@@ -758,6 +758,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
 			}
+		case "lr-set-auto-update":
+			var payload struct {
+				HostID  string `json:"host_id"`
+				Enabled bool   `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				state := "off"
+				if payload.Enabled {
+					state = "on"
+				}
+				s.reprServer.SendCommand(payload.HostID, "__system:auto-update "+state)
+			}
 		case "ac-restart-app":
 			// Restarts agent-coordinator itself, not any host's LR -- the
 			// global topology view's "restart agent-coordinator" control

@@ -64,6 +64,7 @@ export interface ProcInfo {
   loader_managed?: boolean // self only: launched by ufa-loader, so "restart" comes back up
   version?: string // this process's build version -- see docs/DevMode.md "Versioning". On self it's LR's own; on a managed instance it's whatever it last reported over representable, empty until it has
   update_available?: boolean // self only: the on-disk binary now answers --version differently than this running process -- see docs/DevMode.md "Loader"
+  auto_update?: boolean // self only: restart automatically the moment update_available goes true, instead of waiting for the "update and restart" button -- see docs/DevMode.md "Loader"
 }
 
 export interface SystemStateMsg {

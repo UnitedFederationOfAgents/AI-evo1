@@ -26,6 +26,27 @@ func TestCurrentStateCapturesAutoRebuild(t *testing.T) {
 	}
 }
 
+// TestCurrentStateCapturesAutoUpdate verifies currentState reflects
+// selfVersion's live auto-update toggle, and reports false when this LR
+// isn't loader-managed (selfVersion nil) at all -- see Step5Prompt.md
+// Revision E.
+func TestCurrentStateCapturesAutoUpdate(t *testing.T) {
+	s := newServer("test-lr")
+	if got := s.currentState(); got.AutoUpdate {
+		t.Fatalf("expected AutoUpdate=false with no selfVersion, got %+v", got)
+	}
+
+	s.selfVersion = &selfVersionWatch{notify: func() {}}
+	if got := s.currentState(); got.AutoUpdate {
+		t.Fatalf("expected AutoUpdate=false before toggling, got %+v", got)
+	}
+
+	s.selfVersion.setAutoUpdate(true)
+	if got := s.currentState(); !got.AutoUpdate {
+		t.Fatalf("expected AutoUpdate=true after toggling on, got %+v", got)
+	}
+}
+
 // TestCurrentStateCapturesACTarget verifies currentState reports
 // AutoConnect/ACHost/ACPort only while a connection is live or being
 // attempted, and clears the host/port once neither is true.
@@ -89,12 +110,12 @@ func TestLoadPreviousStateNoEnv(t *testing.T) {
 // UFA_LOADER_STATE carries, and that a malformed payload is rejected (ok=false)
 // rather than partially applied.
 func TestLoadPreviousStateRoundTrip(t *testing.T) {
-	t.Setenv("UFA_LOADER_STATE", `{"auto_rebuild":true,"auto_connect":true,"ac_host":"10.0.0.5","ac_port":"9000","managed_apps":["condoccer","federation-command:2"]}`)
+	t.Setenv("UFA_LOADER_STATE", `{"auto_rebuild":true,"auto_update":true,"auto_connect":true,"ac_host":"10.0.0.5","ac_port":"9000","managed_apps":["condoccer","federation-command:2"]}`)
 	st, ok := loadPreviousState()
 	if !ok {
 		t.Fatal("expected ok=true for a well-formed payload")
 	}
-	if !st.AutoRebuild || !st.AutoConnect || st.ACHost != "10.0.0.5" || st.ACPort != "9000" {
+	if !st.AutoRebuild || !st.AutoUpdate || !st.AutoConnect || st.ACHost != "10.0.0.5" || st.ACPort != "9000" {
 		t.Fatalf("got %+v, want all fields populated from the environment", st)
 	}
 	if want := []string{"condoccer", "federation-command:2"}; strings.Join(st.ManagedApps, ",") != strings.Join(want, ",") {

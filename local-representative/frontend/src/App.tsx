@@ -115,6 +115,15 @@ function useStatusWS() {
     }
   }, [])
 
+  // Toggles whether this LR restarts itself the instant an update becomes
+  // available, instead of waiting for the "update and restart" button --
+  // see docs/DevMode.md "Loader".
+  const setAutoUpdate = useCallback((enabled: boolean) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-update', payload: { enabled } }))
+    }
+  }, [])
+
   // File upload is a plain HTTP POST (not a websocket command) so the browser
   // can stream the multipart body directly to /api/files.
   const uploadFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -246,7 +255,7 @@ function useStatusWS() {
   return {
     connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
-    rebuildRepo, setAutoRebuild,
+    rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
 }
 
@@ -562,11 +571,13 @@ function SystemProcRow({
   nowSec,
   onTerminate,
   onRestart,
+  onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
   onRestart?: () => void
+  onSetAutoUpdate?: (enabled: boolean) => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -613,6 +624,22 @@ function SystemProcRow({
           >
             {proc.update_available ? 'update and restart' : 'restart'}
           </button>
+        )}
+        {!proc.managed && onSetAutoUpdate && (
+          <label
+            className="sys-auto-rebuild"
+            title={proc.loader_managed
+              ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+          >
+            <input
+              type="checkbox"
+              disabled={!proc.loader_managed}
+              checked={!!proc.auto_update}
+              onChange={e => onSetAutoUpdate(e.target.checked)}
+            />
+            auto-update
+          </label>
         )}
       </span>
     </div>
@@ -694,6 +721,7 @@ function SystemPanel({
   onRestart,
   onRebuild,
   onSetAutoRebuild,
+  onSetAutoUpdate,
 }: {
   state: SystemStateMsg | null
   fcState: string
@@ -703,6 +731,7 @@ function SystemPanel({
   onRestart: () => void
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSetAutoUpdate: (enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
@@ -741,7 +770,7 @@ function SystemPanel({
           <span className="sys-col sys-col-detail">uptime</span>
           <span className="sys-col sys-col-actions" />
         </div>
-        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} />
+        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} onSetAutoUpdate={onSetAutoUpdate} />
         {state.managed.map(p => (
           <SystemProcRow key={p.instance_id} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
         ))}
@@ -1145,7 +1174,7 @@ export default function App() {
     connected, services, fcState, fcLog,
     ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild,
+    launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
 
   const devMode = systemState?.self.dev_mode ?? false
@@ -1212,6 +1241,7 @@ export default function App() {
                 onRestart={restartApp}
                 onRebuild={rebuildRepo}
                 onSetAutoRebuild={setAutoRebuild}
+                onSetAutoUpdate={setAutoUpdate}
               />
             ) : activeTab === 'files' && viewerFileId ? (
               <FileViewer

@@ -331,6 +331,22 @@ func TestSystemStateSelfUpdateAvailable(t *testing.T) {
 	}
 }
 
+// TestSystemStateSelfAutoUpdate verifies systemState() surfaces the
+// self-version watcher's auto-update flag on Self the same way it surfaces
+// UpdateAvailable, again falling back to false on a nil watch -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+func TestSystemStateSelfAutoUpdate(t *testing.T) {
+	s := newServer("test-lr")
+	if s.systemState().Self.AutoUpdate {
+		t.Errorf("a fresh (non-loader-managed) server should report AutoUpdate=false")
+	}
+
+	s.selfVersion = &selfVersionWatch{autoUpdate: true}
+	if !s.systemState().Self.AutoUpdate {
+		t.Errorf("systemState() should surface a true selfVersion.autoUpdateEnabled()")
+	}
+}
+
 // TestManagedVersionInSystemState verifies a version reported over
 // representable's "version" data message (see setManagedVersion, wired up in
 // main.go's SetDataHandler) shows up on the matching managed instance's

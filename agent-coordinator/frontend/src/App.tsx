@@ -154,6 +154,16 @@ function useCoordinatorWS() {
             setSelfHostId(p.host_id || null)
             setACLoaderManaged(p.loader_managed)
             setACUpdateAvailable(p.update_available)
+            // A rebuild+restart is invisible to an already-open tab -- the
+            // reconnect above is the only signal it gets. Compare the
+            // server's own reported version against this bundle's
+            // build-time version and reload if they differ; skip under the
+            // Vite dev server, where HMR already keeps the tab current and
+            // the two are never expected to match (see
+            // condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
             break
           }
           case 'mode-mismatch': {

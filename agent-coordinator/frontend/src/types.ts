@@ -85,6 +85,7 @@ export interface SelfInfoMsg {
   host_id: string
   loader_managed: boolean
   update_available: boolean
+  version: string // this process's own build version -- see BrowserRefreshStrategy.md
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode

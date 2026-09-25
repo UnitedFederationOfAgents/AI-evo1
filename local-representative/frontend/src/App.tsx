@@ -197,9 +197,21 @@ function useStatusWS() {
           case 'ac-state':
             setAcState(msg.payload as ACStateMsg)
             break
-          case 'system-state':
-            setSystemState(msg.payload as SystemStateMsg)
+          case 'system-state': {
+            const payload = msg.payload as SystemStateMsg
+            setSystemState(payload)
+            // A rebuild+restart (see docs/DevMode.md, --dev-repo) is
+            // invisible to an already-open tab -- the reconnect above is the
+            // only signal it gets. Compare the server's own reported
+            // version against this bundle's build-time version and reload
+            // if they differ; skip under the Vite dev server, where HMR
+            // already keeps the tab current and the two are never expected
+            // to match (see BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && payload.self.version && payload.self.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
             break
+          }
           case 'repo-state':
             setRepoState(msg.payload as RepoStateMsg)
             break

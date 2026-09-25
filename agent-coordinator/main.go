@@ -380,11 +380,16 @@ func newServer() *Server {
 // off-node local-representatives -- driving the "restart agent-coordinator"
 // control added to the global topology view's Details & Control pane, see
 // condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision E.
+// Version is this process's own build version (ufaversion.Version), used by
+// the frontend to detect a rebuild+restart out from under an already-open
+// tab and reload itself -- see
+// condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md.
 type SelfInfoMsg struct {
 	DevMode         bool   `json:"dev_mode"`
 	HostID          string `json:"host_id"`
 	LoaderManaged   bool   `json:"loader_managed"`
 	UpdateAvailable bool   `json:"update_available"`
+	Version         string `json:"version"`
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode
@@ -429,6 +434,7 @@ func (s *Server) selfInfo() SelfInfoMsg {
 		HostID:          s.selfHostID,
 		LoaderManaged:   s.loaderManaged,
 		UpdateAvailable: s.selfVersion.available(),
+		Version:         ufaversion.Version,
 	}
 }
 

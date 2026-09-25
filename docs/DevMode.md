@@ -398,6 +398,39 @@ rides along in the `system-state` LR already forwards to `agent-coordinator`,
 so `agent-coordinator`'s per-host system tab shows the same version column
 without any protocol addition of its own.
 
+## Browser refresh
+
+The rebuild pipeline above already guarantees the *server* is serving fresh
+content the moment `make deploy-dev-binaries` and `ufa-loader`'s restart land
+— see "Dev-repo watcher" and "Loader". None of that touches a tab that was
+already open before the restart: it has old JS sitting in memory and has no
+reason to re-fetch anything on its own. Each frontend (`local-representative`,
+`agent-coordinator`, `condoccer`) closes that gap the same way, per
+[`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
+Step 5 Revision B (design writeup:
+[`BrowserRefreshStrategy.md`](../condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md)):
+
+- Each `vite.config.ts` bakes the same repo-wide version string
+  `scripts/compute-version.sh` produces into its bundle as `__APP_VERSION__`
+  (`define`), so frontend and backend built from the same commit always agree
+  bit-for-bit — no separate frontend build-id scheme.
+- Each server already discloses its own running `ufa-version.Version` to a
+  freshly-connected browser client — `local-representative` on `self.version`
+  within `system-state`, `agent-coordinator` and `condoccer` on `self-info`'s
+  `version` (see "Versioning" above).
+- Each frontend's WebSocket `onmessage` handler compares that reported
+  version against its own `__APP_VERSION__` every time it arrives and calls
+  `window.location.reload()` on a mismatch — no banner, no button, since
+  (unlike restarting a process) reloading a page isn't disruptive. A server
+  restart necessarily drops the WebSocket, so the reconnect that already
+  happens ~2s later re-triggers this check for free; a same-process
+  reconnect (laptop sleep/wake, wifi blip) reports the same version and does
+  nothing.
+- The check is skipped entirely under the Vite dev server
+  (`import.meta.env.DEV`): HMR already keeps that tab current, and the Go
+  server it proxies to is typically run unlinked (`go run .`, version `dev`)
+  so the two are never expected to agree there.
+
 ## Future features
 
 The following are **recorded here as the plan, not implemented yet** — later

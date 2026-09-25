@@ -62,3 +62,20 @@ Implemented the browser-refresh strategy from `BrowserRefreshStrategy.md` across
 Let's implement a browser pickup strategy to ensure our browser view stays where it should be.
 
 See 'condocs/initialDistributedDevelopmentImpls/BrowserPickupStrategy.md' for the strategy.
+
+
+prompt: [`682cbad`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/682cbadc41fa1ddb3fd417d6fef714e3c0988c67) → reply: [`d69a136`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d69a13678343f34af4c344ba784511862c962054)
+
+## Reply C
+
+I implemented the browser pickup strategy from `BrowserPickupStrategy.md` across all three frontends. Condoccer (Layer 1) now mirrors its nav state (condoc/step/iteration/diff/file/hunk selection) into `location.hash` via `history.replaceState`, re-seeds that state on mount, catches up subscriptions/diff fetches once the WebSocket connects, and falls back to the condoc list if a hash-restored condoc turns out to be stale. Local-representative and agent-coordinator (Layer 2) now capture condoccer's iframe hash via `hashchange` and bake it back into the iframe `src` on remount, and persist their own active tab (agent-coordinator also persists the selected host) — all via `sessionStorage`. I also documented the mechanism in `docs/DevMode.md` alongside the existing "Browser refresh" section. As before, `go`/`npm`/`tsc` are denied in this environment, so I verified correctness via careful manual read-through rather than a build.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

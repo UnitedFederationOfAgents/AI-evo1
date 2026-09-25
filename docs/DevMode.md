@@ -431,6 +431,41 @@ Step 5 Revision B (design writeup:
   server it proxies to is typically run unlinked (`go run .`, version `dev`)
   so the two are never expected to agree there.
 
+## Browser pickup
+
+A reload — whether triggered by the mismatch check above or done by hand —
+used to always drop the viewer back at the condoc list, even if they'd been
+looking at one particular step/iteration/diff. Per
+[`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
+Step 5 Revision C (design writeup:
+[`BrowserPickupStrategy.md`](../condocs/initialDistributedDevelopmentImpls/BrowserPickupStrategy.md)),
+each frontend now resumes on the same view instead:
+
+- **`condoccer` (Layer 1)**: its nav state (selected condoc/step/iteration,
+  and any open diff/file/hunk) is mirrored into `location.hash` with
+  `history.replaceState` — never `pushState`, so this is a pure resume
+  mechanism and doesn't grow browser history — and re-parsed to seed that
+  same state on mount. A URL *fragment* is used rather than a real path
+  because `condoccer/vite.config.ts` sets `base: './'` so its assets resolve
+  correctly whether served at `/`, `/condoccer/`, or
+  `/host/<id>/condoccer/`; a fragment never reaches the server, so the
+  SPA-fallback handler keeps serving `index.html` unchanged regardless of
+  where in a condoc the hash points. Once the WebSocket is open, a hash-seeded
+  condoc/diff is (re-)subscribed/fetched exactly as a click would; if the
+  server reports an error before any state ever loaded (the condoc named in
+  the hash was renamed/reverted/deleted since), condoccer falls back to the
+  condoc list and the stale hash is cleared the same way.
+- **`local-representative` and `agent-coordinator` (Layer 2)**: condoccer is
+  always embedded via a same-origin iframe with a hardcoded `src`, so its own
+  Layer 1 resume can't survive a reload of the *outer* page — the iframe just
+  remounts at the bare `src`. Both dashboards capture the iframe's
+  `hashchange` events and bake the last-seen hash back into the iframe's
+  `src`, and separately remember their own active tab (`agent-coordinator`
+  also remembers the selected host) — all via `sessionStorage`, not
+  `localStorage`: it survives a reload, stays scoped per browser tab (so two
+  tabs open on different condocs/hosts don't clobber each other), and clears
+  once the tab actually closes rather than pinning stale state forever.
+
 ## Future features
 
 The following are **recorded here as the plan, not implemented yet** — later

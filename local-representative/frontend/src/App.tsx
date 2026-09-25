@@ -1109,10 +1109,38 @@ function FileViewer({
   )
 }
 
+// Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
+// stays scoped per-tab (so two LR tabs on different condocs don't clobber
+// each other), and clears when the tab actually closes rather than pinning
+// stale state forever -- the right lifetime for "resume where I was".
+function initialTab(): Tab {
+  const stored = sessionStorage.getItem('lr-active-tab')
+  return (TABS as readonly string[]).includes(stored ?? '') ? (stored as Tab) : 'federation-command'
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('federation-command')
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab)
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
+  // so condoccer's own hash-based resume (Layer 1) never survives a refresh
+  // of this outer page on its own -- the iframe just remounts at the bare
+  // `/condoccer/`. Capture the iframe's hash as it navigates and bake it
+  // back into `src` so a refresh here hands condoccer back its resume point.
+  const [condoccerHash, setCondoccerHash] = useState(() => sessionStorage.getItem('lr-condoccer-hash') ?? '')
+  const condoccerFrameRef = useRef<HTMLIFrameElement>(null)
+
+  const handleCondoccerLoad = () => {
+    const win = condoccerFrameRef.current?.contentWindow
+    if (!win) return
+    const capture = () => {
+      setCondoccerHash(win.location.hash)
+      sessionStorage.setItem('lr-condoccer-hash', win.location.hash)
+    }
+    win.addEventListener('hashchange', capture)
+    capture() // in case condoccer already restored a hash before this attached
+  }
   const {
     connected, services, fcState, fcLog,
     ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
@@ -1133,6 +1161,10 @@ export default function App() {
   const viewerFile = activeTab === 'files' && viewerFileId
     ? filesState?.files.find(f => f.id === viewerFileId) ?? null
     : null
+
+  useEffect(() => {
+    sessionStorage.setItem('lr-active-tab', activeTab)
+  }, [activeTab])
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
@@ -1226,9 +1258,11 @@ export default function App() {
                 {activeTab === 'condoccer' && (
                   getStatus('condoccer') === 'healthy' ? (
                     <iframe
+                      ref={condoccerFrameRef}
                       className="condoccer-frame"
-                      src="/condoccer/"
+                      src={`/condoccer/${condoccerHash}`}
                       title="condoccer"
+                      onLoad={handleCondoccerLoad}
                     />
                   ) : (
                     <div className="service-empty">

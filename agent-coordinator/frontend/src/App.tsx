@@ -353,6 +353,15 @@ const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
 const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
+// Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
+// stays scoped per-tab, and clears when the tab actually closes rather than
+// pinning stale state forever -- the right lifetime for "resume where I was".
+function initialACTab(): LRTab {
+  const stored = sessionStorage.getItem('ac-active-tab')
+  return (LR_TABS as readonly string[]).includes(stored ?? '') ? (stored as LRTab) : 'system'
+}
+
 function FCCommandPanel({
   hostId, fcState, fcLog, sendLRCommand,
 }: {
@@ -1708,6 +1717,32 @@ function LRView({
   const lrState = data.lrState
   const active = lrState?.active ?? false
 
+  // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
+  // so condoccer's own hash-based resume (Layer 1 of the browser pickup
+  // strategy) never survives a refresh of this outer page on its own -- the
+  // iframe just remounts at the bare `/host/<id>/condoccer/`. Capture the
+  // iframe's hash as it navigates and bake it back into `src` so a refresh
+  // here hands condoccer back its resume point. Keyed per host so switching
+  // between hosts (this component isn't remounted on host change) doesn't
+  // leak one host's condoc position into another's iframe.
+  const [condoccerHash, setCondoccerHash] = useState(() => sessionStorage.getItem(`ac-condoccer-hash:${host.id}`) ?? '')
+  const condoccerFrameRef = useRef<HTMLIFrameElement>(null)
+
+  useEffect(() => {
+    setCondoccerHash(sessionStorage.getItem(`ac-condoccer-hash:${host.id}`) ?? '')
+  }, [host.id])
+
+  const handleCondoccerLoad = () => {
+    const win = condoccerFrameRef.current?.contentWindow
+    if (!win) return
+    const capture = () => {
+      setCondoccerHash(win.location.hash)
+      sessionStorage.setItem(`ac-condoccer-hash:${host.id}`, win.location.hash)
+    }
+    win.addEventListener('hashchange', capture)
+    capture() // in case condoccer already restored a hash before this attached
+  }
+
   const getServiceStatus = (name: string): string => {
     if (!active) return 'unknown'
     return lrState?.services?.find((s: ServiceStatus) => s.name === name)?.status ?? 'unknown'
@@ -1808,9 +1843,11 @@ function LRView({
             {activeTab === 'condoccer' && active && (
               data.condoccer ? (
                 <iframe
+                  ref={condoccerFrameRef}
                   className="condoccer-frame"
-                  src={`/host/${host.id}/condoccer/`}
+                  src={`/host/${host.id}/condoccer/${condoccerHash}`}
                   title={`condoccer on ${host.label}`}
+                  onLoad={handleCondoccerLoad}
                 />
               ) : (
                 <div className="service-empty">
@@ -1844,11 +1881,15 @@ export default function App() {
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendACRestartApp,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
-  const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
+  // refresh lands back on the same host -- if that host id no longer
+  // exists, `selectedHost` below just comes back null and we fall through
+  // to the global view, same as picking an unknown host any other way.
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(() => sessionStorage.getItem('ac-selected-host'))
   // Shared across the global view and any host's view, so switching between
   // them (selecting/deselecting a host) keeps whichever tab was active
   // instead of resetting it.
-  const [activeTab, setActiveTab] = useState<LRTab>('system')
+  const [activeTab, setActiveTab] = useState<LRTab>(initialACTab)
   // Mobile nav drawer: the host sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css), same treatment as condoccer's
   // sidebar. Desktop layout is untouched -- this state has no visible effect
@@ -1869,6 +1910,26 @@ export default function App() {
   }
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+
+  useEffect(() => {
+    if (selectedHostId) sessionStorage.setItem('ac-selected-host', selectedHostId)
+    else sessionStorage.removeItem('ac-selected-host')
+  }, [selectedHostId])
+
+  useEffect(() => {
+    sessionStorage.setItem('ac-active-tab', activeTab)
+  }, [activeTab])
+
+  // A host id restored from sessionStorage was never sent via
+  // handleSelectHost's own selectHost() call -- issue it here exactly once,
+  // now that the websocket is actually up.
+  const hashSelectHostDone = useRef(false)
+  useEffect(() => {
+    if (connected && selectedHostId && !hashSelectHostDone.current) {
+      hashSelectHostDone.current = true
+      selectHost(selectedHostId)
+    }
+  }, [connected, selectedHostId, selectHost])
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>

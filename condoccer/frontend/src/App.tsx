@@ -209,6 +209,132 @@ function useCondocWS() {
 
 type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' | 'file-diff'
 
+// ---- URL-hash resume (browser pickup strategy) ----
+//
+// The nav state above lives only in useState, so a refresh used to always
+// land back on the condoc list. We mirror it into `location.hash` (never a
+// real path -- see condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md for why: condoccer's `base: './'` asset
+// resolution depends on the served directory never changing) so a refresh,
+// or an LR/AC iframe remount replaying a captured hash, can resume straight
+// to the same condoc/step/iteration/diff pane.
+//
+// Formats:
+//   #/condoc/<enc(path)>
+//   #/condoc/<enc(path)>/step/<num>[/iter/<id>]
+//   #/condoc/<enc(path)>/step/<num>/substep[/iter/<id>]
+//   #/condoc/<enc(path)>/step/<num>[/substep]/files/<from>..<to>[/file/<enc(file)>[/hunk/<idx>]]
+
+interface NavHashState {
+  navLevel: NavLevel
+  condocPath: string | null
+  stepNum: number | null
+  iterId: string | null
+  substepIterId: string | null
+  diffReturnLevel: 'step' | 'substep'
+  diffFromCommit: string | null
+  diffToCommit: string | null
+  selectedDiffFile: string | null
+  selectedDiffHunkIdx: number | null
+}
+
+function hashFromNav(s: NavHashState): string {
+  if (s.navLevel === 'condoc-list' || !s.condocPath) return ''
+  let h = `#/condoc/${encodeURIComponent(s.condocPath)}`
+  if (s.navLevel === 'condoc' || s.stepNum === null) return h
+
+  h += `/step/${s.stepNum}`
+  if (s.navLevel === 'step') {
+    return s.iterId ? `${h}/iter/${s.iterId}` : h
+  }
+  if (s.navLevel === 'substep') {
+    h += '/substep'
+    return s.substepIterId ? `${h}/iter/${s.substepIterId}` : h
+  }
+  if (s.navLevel === 'files-changed' || s.navLevel === 'file-diff') {
+    if (s.diffReturnLevel === 'substep') h += '/substep'
+    if (s.diffFromCommit === null) return h
+    h += `/files/${s.diffFromCommit}..${s.diffToCommit ?? ''}`
+    if (s.navLevel === 'file-diff' && s.selectedDiffFile) {
+      h += `/file/${encodeURIComponent(s.selectedDiffFile)}`
+      if (s.selectedDiffHunkIdx !== null) h += `/hunk/${s.selectedDiffHunkIdx}`
+    }
+  }
+  return h
+}
+
+function emptyNavHashState(): NavHashState {
+  return {
+    navLevel: 'condoc-list',
+    condocPath: null,
+    stepNum: null,
+    iterId: null,
+    substepIterId: null,
+    diffReturnLevel: 'step',
+    diffFromCommit: null,
+    diffToCommit: null,
+    selectedDiffFile: null,
+    selectedDiffHunkIdx: null,
+  }
+}
+
+function navFromHash(hash: string): NavHashState {
+  const result = emptyNavHashState()
+  const trimmed = hash.replace(/^#\/?/, '')
+  if (!trimmed) return result
+
+  const parts = trimmed.split('/')
+  let i = 0
+  if (parts[i] !== 'condoc' || !parts[i + 1]) return result
+  result.condocPath = decodeURIComponent(parts[i + 1])
+  result.navLevel = 'condoc'
+  i += 2
+
+  if (parts[i] !== 'step' || !parts[i + 1]) return result
+  const stepNum = parseInt(parts[i + 1], 10)
+  if (Number.isNaN(stepNum)) return result
+  result.stepNum = stepNum
+  result.navLevel = 'step'
+  i += 2
+
+  let inSubstep = false
+  if (parts[i] === 'substep') {
+    inSubstep = true
+    result.navLevel = 'substep'
+    result.diffReturnLevel = 'substep'
+    i += 1
+  }
+
+  if (parts[i] === 'iter' && parts[i + 1]) {
+    if (inSubstep) result.substepIterId = parts[i + 1]
+    else result.iterId = parts[i + 1]
+    return result
+  }
+
+  if (parts[i] === 'files' && parts[i + 1]) {
+    const range = parts[i + 1]
+    const sep = range.indexOf('..')
+    if (sep < 0) return result
+    result.diffFromCommit = range.slice(0, sep)
+    result.diffToCommit = range.slice(sep + 2)
+    result.navLevel = 'files-changed'
+    i += 2
+
+    if (parts[i] === 'file' && parts[i + 1]) {
+      result.selectedDiffFile = decodeURIComponent(parts[i + 1])
+      result.navLevel = 'file-diff'
+      i += 2
+
+      if (parts[i] === 'hunk' && parts[i + 1]) {
+        const hunkIdx = parseInt(parts[i + 1], 10)
+        if (!Number.isNaN(hunkIdx)) result.selectedDiffHunkIdx = hunkIdx
+      }
+    }
+  }
+
+  return result
+}
+
 // ---- Phase helpers ----
 
 const PHASE_LABELS: Record<Phase, string> = {
@@ -1595,16 +1721,21 @@ export default function App() {
     setFileDiffHunks,
   } = useCondocWS()
 
-  const [navLevel, setNavLevel] = useState<NavLevel>('condoc-list')
-  const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(null)
-  const [selectedStepNum, setSelectedStepNum] = useState<number | null>(null)
-  const [selectedIterId, setSelectedIterId] = useState<string | null>(null)
-  const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(null)
-  const [diffFromCommit, setDiffFromCommit] = useState<string | null>(null)
-  const [diffToCommit, setDiffToCommit] = useState<string | null>(null)
-  const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(null)
-  const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(null)
-  const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>('step')
+  // Seed nav state from the URL hash on mount so a refresh (or an LR/AC
+  // iframe remount replaying a captured hash) resumes where it left off --
+  // ref so this only ever runs once, not on every render.
+  const initialNav = useRef(navFromHash(window.location.hash)).current
+
+  const [navLevel, setNavLevel] = useState<NavLevel>(initialNav.navLevel)
+  const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(initialNav.condocPath)
+  const [selectedStepNum, setSelectedStepNum] = useState<number | null>(initialNav.stepNum)
+  const [selectedIterId, setSelectedIterId] = useState<string | null>(initialNav.iterId)
+  const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(initialNav.substepIterId)
+  const [diffFromCommit, setDiffFromCommit] = useState<string | null>(initialNav.diffFromCommit)
+  const [diffToCommit, setDiffToCommit] = useState<string | null>(initialNav.diffToCommit)
+  const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(initialNav.selectedDiffFile)
+  const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(initialNav.selectedDiffHunkIdx)
+  const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>(initialNav.diffReturnLevel)
 
   // Mobile nav drawer: the sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css). Desktop layout is untouched —
@@ -1727,6 +1858,78 @@ export default function App() {
       }
     }
   }
+
+  // Mirror nav state into the URL hash with replaceState -- not pushState,
+  // so this stays a pure resume mechanism and doesn't add a history entry
+  // per click (back-button support could be a deliberate follow-up).
+  useEffect(() => {
+    const hash = hashFromNav({
+      navLevel,
+      condocPath: selectedCondocPath,
+      stepNum: selectedStepNum,
+      iterId: selectedIterId,
+      substepIterId: selectedSubstepIterId,
+      diffReturnLevel,
+      diffFromCommit,
+      diffToCommit,
+      selectedDiffFile,
+      selectedDiffHunkIdx,
+    })
+    if (hash === window.location.hash || (hash === '' && window.location.hash === '')) return
+    const url = hash || window.location.pathname + window.location.search
+    history.replaceState(null, '', url)
+  }, [
+    navLevel, selectedCondocPath, selectedStepNum, selectedIterId, selectedSubstepIterId,
+    diffReturnLevel, diffFromCommit, diffToCommit, selectedDiffFile, selectedDiffHunkIdx,
+  ])
+
+  // Catch up once connected: state seeded from the hash at mount was never
+  // triggered by a click, so (re-)issue exactly the requests a click would
+  // have made -- keyed off the frozen `initialNav` snapshot, not the live
+  // state, so this can't also fire (redundantly, alongside the handlers'
+  // own calls) the first time a normal click sets the same state later.
+  const hashSubscribeDone = useRef(false)
+  useEffect(() => {
+    if (connected && initialNav.condocPath && !hashSubscribeDone.current) {
+      hashSubscribeDone.current = true
+      subscribe(initialNav.condocPath)
+    }
+  }, [connected, initialNav.condocPath, subscribe])
+
+  const hashDiffCatchupDone = useRef(false)
+  useEffect(() => {
+    if (connected && initialNav.diffFromCommit !== null && !hashDiffCatchupDone.current) {
+      hashDiffCatchupDone.current = true
+      getDiff(initialNav.diffFromCommit, initialNav.diffToCommit ?? '')
+    }
+  }, [connected, initialNav.diffFromCommit, initialNav.diffToCommit, getDiff])
+
+  const hashFileDiffCatchupDone = useRef(false)
+  useEffect(() => {
+    if (connected && initialNav.diffFromCommit !== null && initialNav.selectedDiffFile && !hashFileDiffCatchupDone.current) {
+      hashFileDiffCatchupDone.current = true
+      getFileDiff(initialNav.diffFromCommit, initialNav.diffToCommit ?? '', initialNav.selectedDiffFile)
+    }
+  }, [connected, initialNav.diffFromCommit, initialNav.diffToCommit, initialNav.selectedDiffFile, getFileDiff])
+
+  // Staleness: a hash can point at a condoc that's since been renamed,
+  // reverted away, or deleted. If we're anywhere but the list and never got
+  // a subscribe response before an error came in, fall back to the list
+  // (which also clears the now-stale hash via the effect above) instead of
+  // sitting on a dead deep link.
+  useEffect(() => {
+    if (error && activeState === null && navLevel !== 'condoc-list') {
+      setNavLevel('condoc-list')
+      setSelectedCondocPath(null)
+      setSelectedStepNum(null)
+      setSelectedIterId(null)
+      setSelectedSubstepIterId(null)
+      setDiffFromCommit(null)
+      setDiffToCommit(null)
+      setSelectedDiffFile(null)
+      setSelectedDiffHunkIdx(null)
+    }
+  }, [error, activeState, navLevel])
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>

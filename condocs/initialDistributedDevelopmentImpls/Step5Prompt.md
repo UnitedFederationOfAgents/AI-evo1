@@ -39,11 +39,8 @@ prompt: [`b24617a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b
 I removed the `/.condoc` entry (and its explanatory comment) from the root `.gitignore` so the lock file will now be tracked and committed like any other file, letting nodes following the branch see the condoc state. I confirmed there were no other gitignore entries or stray comments elsewhere in the repo (condoccer, local-representative, spec doc) claiming the file is never committed, so no other changes were needed.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's implement a browser refresh strategy to ensure our browser view is not accidentally out of date.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+See 'condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md' for the strategy.

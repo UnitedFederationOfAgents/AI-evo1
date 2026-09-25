@@ -78,3 +78,22 @@ Let's revisit the '.condoc' lockfile process again briefly.
 Currently we have a bug where the .condoc file is being deleted AFTER the commit, so the repo state is dirty.
 
 We must delete this file immediately before we perform the commit upon completion of the agent's work.
+
+
+prompt: [`6966bfc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6966bfc9a5bfdd1db37573805b5d6453104ac3c3) → reply: [`e2b5dfb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e2b5dfbf10f050787918ee29074998517fd105a4)
+
+## Reply D
+
+I already have the diff in context from the Edit — no need for further tool confirmation. The change is a small, self-contained addition (`_ = os.Remove(filepath.Join(cs.repoRoot, ".condoc"))` plus a comment) in `handleCondocAgentDone`, and both `os` and `path/filepath` were already imported, so this should compile cleanly (build tools remain denied in this environment, consistent with prior replies, so I verified via read-through).
+
+Fixed the dirty-repo bug: I traced the ordering issue to a cross-process gap — `condoccer` only removes `.condoc` when its 1-second poll later notices a condoc reached `awaiting_action`, by which point `federation-command`'s `handleCondocAgentDone` (in `federation-command/condoc.go`) had already run `git add . && git commit && git push` for the agent's reply, so the lock file's removal was left as an uncommitted, unstaged deletion. I fixed it by having `handleCondocAgentDone` itself `os.Remove` the `.condoc` file immediately before building/running that commit sequence, so the deletion is captured by the same `git add .` and lands in the same commit as the agent's reply, keeping the repo clean at that commit boundary.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

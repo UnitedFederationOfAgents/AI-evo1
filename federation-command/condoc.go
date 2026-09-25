@@ -1846,6 +1846,15 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 	cs.statusMsg = "committing agent reply…"
 	m.blinker.SetState(BlinkerCondoc)
 
+	// Remove condoccer's '.condoc' lock file (if present) immediately, before staging
+	// and committing below, so its removal lands in the same commit as the agent's
+	// reply rather than as an uncommitted deletion left dangling in the working tree.
+	// condoccer would otherwise only notice the awaiting_action transition -- and
+	// remove the file itself -- on its next poll, well after this commit has already
+	// landed, leaving the repo dirty. (See
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md, Revision D.)
+	_ = os.Remove(filepath.Join(cs.repoRoot, ".condoc"))
+
 	// Build a descriptive commit message indicating step/substep, iteration type and letter.
 	var commitMsg string
 	if cs.substepFile != "" {

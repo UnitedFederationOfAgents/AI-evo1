@@ -1889,7 +1889,17 @@ export default function App() {
     })
     if (hash === window.location.hash || (hash === '' && window.location.hash === '')) return
     const url = hash || window.location.pathname + window.location.search
+    const oldURL = window.location.href
     history.replaceState(null, '', url)
+    // history.replaceState never fires a 'hashchange' event (unlike setting
+    // location.hash directly), so an embedder that resumes condoccer's nav
+    // state by listening for that event on this window -- e.g. agent-
+    // coordinator's iframe, see BrowserPickupStrategy.md -- would otherwise
+    // only ever see the hash as of the iframe's initial load and never learn
+    // about later in-app navigation, sending a subsequent AC-page reload
+    // back to that stale spot instead of wherever the user actually was.
+    // Dispatch one by hand so same-origin listeners stay in sync.
+    window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: window.location.href }))
   }, [
     navLevel, selectedCondocPath, selectedStepNum, selectedIterId, selectedSubstepIterId,
     diffReturnLevel, diffFromCommit, diffToCommit, selectedDiffFile, selectedDiffHunkIdx,

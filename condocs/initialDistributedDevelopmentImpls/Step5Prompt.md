@@ -126,3 +126,22 @@ The "hold my page" (browser pickup) staleness-detection effect in `condoccer/fro
 To clarify, we want to fix the issue where we go back to the same portion of the same tab (for example - if we are viewing condoccer through AC then we want to return to the same step on the same condoc)
 
 Let's fix this if it is low effort or explain why the effort would be high and re-asses.
+
+
+prompt: [`da32a82`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/da32a82e8648db1b8f37891441462ad6f7eee926) → reply: [`71bc0d2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/71bc0d28b496bdb484f82a8cd81ed13ea1cc9e14)
+
+## Reply G
+
+`go`/`npm`/`tsc` remain denied in this environment, so I verified via read-through rather than a build (consistent with prior replies).
+
+I found and fixed the bug — it was low effort. Condoccer mirrors its nav state into `location.hash` via `history.replaceState` for the "browser pickup" resume mechanism, but `replaceState` never dispatches a `hashchange` event. LR's and AC's iframe wrappers only recapture condoccer's hash by listening for `hashchange`, so they were silently stuck with whatever hash existed at the iframe's *initial* load — meaning a later reload of the outer AC/LR page (e.g. from auto-update) handed condoccer back that stale, initial hash instead of the step/condoc the user had actually navigated to since. I fixed it by having condoccer manually dispatch a `HashChangeEvent` right after each `replaceState` call, and documented the fix in `docs/DevMode.md`.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

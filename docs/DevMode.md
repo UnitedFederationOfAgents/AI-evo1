@@ -493,6 +493,13 @@ each frontend now resumes on the same view instead:
   `localStorage`: it survives a reload, stays scoped per browser tab (so two
   tabs open on different condocs/hosts don't clobber each other), and clears
   once the tab actually closes rather than pinning stale state forever.
+  `history.replaceState` never fires a `hashchange` event on its own (unlike
+  assigning `location.hash` directly), so condoccer dispatches one by hand
+  right after each `replaceState` call — otherwise the embedder's listener
+  would only ever see the hash as of the iframe's initial load, and a later
+  reload of the *outer* page (e.g. `agent-coordinator`'s own auto-update
+  reload) would hand the iframe back that stale, initial hash instead of
+  wherever the viewer had actually navigated to since (Step 5 Revision G).
 
 ## Future features
 

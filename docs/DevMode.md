@@ -476,9 +476,13 @@ each frontend now resumes on the same view instead:
   SPA-fallback handler keeps serving `index.html` unchanged regardless of
   where in a condoc the hash points. Once the WebSocket is open, a hash-seeded
   condoc/diff is (re-)subscribed/fetched exactly as a click would; if the
-  server reports an error before any state ever loaded (the condoc named in
-  the hash was renamed/reverted/deleted since), condoccer falls back to the
-  condoc list and the stale hash is cleared the same way.
+  *server* explicitly rejects the subscribe before any state ever loaded
+  (the condoc named in the hash was renamed/reverted/deleted since),
+  condoccer falls back to the condoc list and the stale hash is cleared the
+  same way. This is deliberately keyed off the server's own rejection, not
+  any transport-level WebSocket hiccup — a reconnect flaking while a host is
+  still coming back up (e.g. mid auto-update restart) must not be mistaken
+  for staleness and bounce the viewer off a perfectly valid deep link.
 - **`local-representative` and `agent-coordinator` (Layer 2)**: condoccer is
   always embedded via a same-origin iframe with a hardcoded `src`, so its own
   Layer 1 resume can't survive a reload of the *outer* page — the iframe just

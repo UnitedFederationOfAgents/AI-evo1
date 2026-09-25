@@ -18,6 +18,13 @@ function useCondocWS() {
   const [condocs, setCondocs] = useState<CondocInfo[]>([])
   const [activeState, setActiveState] = useState<CondocState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Distinct from `error`: only true when the *server* explicitly rejected a
+  // subscribe (path renamed/reverted-away/deleted). `error` also gets set by
+  // transport-level hiccups (ws.onerror's generic "retrying" message), which
+  // fire routinely during a reconnect -- e.g. every restart triggered by the
+  // browser-refresh/auto-update mechanisms, while the server is still coming
+  // back up. Only a genuine server rejection should be treated as staleness.
+  const [subscribeError, setSubscribeError] = useState(false)
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
@@ -39,6 +46,7 @@ function useCondocWS() {
   const subscribe = useCallback(
     (path: string) => {
       subscribedRef.current = path
+      setSubscribeError(false)
       send('subscribe', { path })
     },
     [send],
@@ -129,9 +137,11 @@ function useCondocWS() {
             setCondocs(p.condocs ?? [])
           } else if (msg.type === 'condoc') {
             setActiveState(msg.payload as CondocState)
+            setSubscribeError(false)
           } else if (msg.type === 'error') {
             const p = msg.payload as { message: string }
             setError(p.message)
+            setSubscribeError(true)
           } else if (msg.type === 'repr-status') {
             const p = msg.payload as ReprStatusMsg
             setReprStatus(p.status)
@@ -179,6 +189,7 @@ function useCondocWS() {
     condocs,
     activeState,
     error,
+    subscribeError,
     subscribe,
     sendAction,
     setError,
@@ -1696,6 +1707,7 @@ export default function App() {
     condocs,
     activeState,
     error,
+    subscribeError,
     subscribe,
     sendAction,
     setError,
@@ -1914,11 +1926,20 @@ export default function App() {
 
   // Staleness: a hash can point at a condoc that's since been renamed,
   // reverted away, or deleted. If we're anywhere but the list and never got
-  // a subscribe response before an error came in, fall back to the list
-  // (which also clears the now-stale hash via the effect above) instead of
-  // sitting on a dead deep link.
+  // a subscribe response before the *server* explicitly rejected it, fall
+  // back to the list (which also clears the now-stale hash via the effect
+  // above) instead of sitting on a dead deep link.
+  //
+  // This deliberately checks `subscribeError`, not the generic `error` --
+  // `error` also gets set by transport-level ws.onerror hiccups, which fire
+  // routinely while reconnecting (e.g. every restart the browser-refresh and
+  // auto-update mechanisms trigger, while the server is still coming back
+  // up). Falling back on that would kick a perfectly-valid hash-restored
+  // condoc back to the list the moment a restart's reconnect flaked, which
+  // is exactly the "brought back to the main page" regression this guards
+  // against.
   useEffect(() => {
-    if (error && activeState === null && navLevel !== 'condoc-list') {
+    if (subscribeError && activeState === null && navLevel !== 'condoc-list') {
       setNavLevel('condoc-list')
       setSelectedCondocPath(null)
       setSelectedStepNum(null)
@@ -1929,7 +1950,7 @@ export default function App() {
       setSelectedDiffFile(null)
       setSelectedDiffHunkIdx(null)
     }
-  }, [error, activeState, navLevel])
+  }, [subscribeError, activeState, navLevel])
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>

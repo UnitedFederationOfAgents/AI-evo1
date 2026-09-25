@@ -110,3 +110,22 @@ Added an "auto-update" toggle (Step5Prompt.md Revision E) that automatically res
 Let's revisit the "hold my page" functionality we implemented recently.
 
 When we have the auto-restart-auto-refresh occur we are brought back to the main page for condoccer when looking at the AC UI. Let's either tweak that to make a fix if the problem is small or respond with why the rework would be extensive before continuing.
+
+
+prompt: [`0b7c82b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0b7c82b9a2c11683f42025d57ef75bc931aff8ba) → reply: [`8455131`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8455131d8029549659d6ba529c80907ca04255dd)
+
+## Reply F
+
+I found and fixed the bug — it was small, no rework needed.
+
+The "hold my page" (browser pickup) staleness-detection effect in `condoccer/frontend/src/App.tsx` was keyed off the generic `error` state, which gets set both by genuine server-side subscribe rejections *and* by routine `ws.onerror` transport hiccups during reconnect. Since every auto-restart/auto-refresh cycle causes exactly that kind of reconnect flakiness while the host is still coming back up (with `activeState` still null right after the reload), the effect was misfiring and treating a perfectly valid deep link as stale, bouncing condoccer back to the main list. I split this into a new `subscribeError` flag that's only set by an actual server-reported error message (not transport errors) and updated the staleness effect to key off that instead, plus tightened the corresponding `docs/DevMode.md` explanation. `npm`/`tsc` remain denied in this environment, so I verified via read-through.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

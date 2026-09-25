@@ -71,11 +71,10 @@ prompt: [`682cbad`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6
 I implemented the browser pickup strategy from `BrowserPickupStrategy.md` across all three frontends. Condoccer (Layer 1) now mirrors its nav state (condoc/step/iteration/diff/file/hunk selection) into `location.hash` via `history.replaceState`, re-seeds that state on mount, catches up subscriptions/diff fetches once the WebSocket connects, and falls back to the condoc list if a hash-restored condoc turns out to be stale. Local-representative and agent-coordinator (Layer 2) now capture condoccer's iframe hash via `hashchange` and bake it back into the iframe `src` on remount, and persist their own active tab (agent-coordinator also persists the selected host) — all via `sessionStorage`. I also documented the mechanism in `docs/DevMode.md` alongside the existing "Browser refresh" section. As before, `go`/`npm`/`tsc` are denied in this environment, so I verified correctness via careful manual read-through rather than a build.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's revisit the '.condoc' lockfile process again briefly.
 
+Currently we have a bug where the .condoc file is being deleted AFTER the commit, so the repo state is dirty.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We must delete this file immediately before we perform the commit upon completion of the agent's work.

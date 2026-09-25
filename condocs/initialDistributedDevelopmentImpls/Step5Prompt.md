@@ -105,11 +105,8 @@ The review agent found no compile-breaking, deadlock, nil-pointer, or prop-threa
 Added an "auto-update" toggle (Step5Prompt.md Revision E) that automatically restarts a loader-managed LR once an on-disk update is detected, wired into three UI locations: local-representative's own system tab, agent-coordinator's per-host mirror, and agent-coordinator's global topology view (both the per-selected-host "rebuild & restart controls" and an aggregate toggle in the "agent-coordinator controls" section sweeping every connected loader-managed host — deliberately not touching agent-coordinator's own restart). Implementation spans `selfVersionWatch`'s new `autoUpdate`/`restart` fields (mirroring the existing auto-rebuild pattern, including firing immediately if an update is already available when toggled on), persistence of the flag across the very restart it triggers via `lrState`, new `set-auto-update`/`__system:auto-update` message plumbing through both Go backends, and full prop-threading through both React frontends, plus new unit tests and a `docs/DevMode.md` write-up. `go`/`npm` remain denied in this environment, so correctness was verified by careful read-through plus an independent subagent review rather than a build.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Let's revisit the "hold my page" functionality we implemented recently.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When we have the auto-restart-auto-refresh occur we are brought back to the main page for condoccer when looking at the AC UI. Let's either tweak that to make a fix if the problem is small or respond with why the rework would be extensive before continuing.

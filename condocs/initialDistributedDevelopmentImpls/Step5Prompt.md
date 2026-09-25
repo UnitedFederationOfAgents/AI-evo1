@@ -121,11 +121,8 @@ I found and fixed the bug — it was small, no rework needed.
 The "hold my page" (browser pickup) staleness-detection effect in `condoccer/frontend/src/App.tsx` was keyed off the generic `error` state, which gets set both by genuine server-side subscribe rejections *and* by routine `ws.onerror` transport hiccups during reconnect. Since every auto-restart/auto-refresh cycle causes exactly that kind of reconnect flakiness while the host is still coming back up (with `activeState` still null right after the reload), the effect was misfiring and treating a perfectly valid deep link as stale, bouncing condoccer back to the main list. I split this into a new `subscribeError` flag that's only set by an actual server-reported error message (not transport errors) and updated the staleness effect to key off that instead, plus tightened the corresponding `docs/DevMode.md` explanation. `npm`/`tsc` remain denied in this environment, so I verified via read-through.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+To clarify, we want to fix the issue where we go back to the same portion of the same tab (for example - if we are viewing condoccer through AC then we want to return to the same step on the same condoc)
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix this if it is low effort or explain why the effort would be high and re-asses.

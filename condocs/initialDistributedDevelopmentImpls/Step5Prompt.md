@@ -30,3 +30,20 @@ I've implemented Step 5's `.condoc` lock-file mechanism end-to-end. On the condo
 Let's make sure that the .condoc file is not .gitignored - we need nodes following the branch to be aware of the state.
 
 When the condoc is completed the file will be removed, so we do not expect to find them reaching 'main'.
+
+
+prompt: [`b24617a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b24617abc22975e49437758218b539b3a9d27543) → reply: [`b2ca4f1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b2ca4f1fd58fbaa5ecdcb6daf77da3a204e97576)
+
+## Reply A
+
+I removed the `/.condoc` entry (and its explanatory comment) from the root `.gitignore` so the lock file will now be tracked and committed like any other file, letting nodes following the branch see the condoc state. I confirmed there were no other gitignore entries or stray comments elsewhere in the repo (condoccer, local-representative, spec doc) claiming the file is never committed, so no other changes were needed.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

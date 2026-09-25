@@ -34,8 +34,3 @@ go.work.sum
 ignored-scratch/
 ignored-scratch/**
 !ignored-scratch/.gitkeep
-
-# condoccer's runtime lock file (see
-# condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- never
-# committed, just a presence/absence signal at the repo root.
-/.condoc

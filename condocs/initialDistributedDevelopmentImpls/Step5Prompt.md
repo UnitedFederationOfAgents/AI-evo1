@@ -199,11 +199,8 @@ This all reads correctly and consistently. The implementation is complete.
 Implemented Step 5 Revision J: added a click-to-select drill-down (`SystemProcDetails`, styled to mirror the topology view's `.topo-details` pane) on each process row of agent-coordinator's per-host system tab, showing the process's current and pending build version — a new `pending_version` field threaded through LR's `ProcInfo`/`systemState()`, AC's mirrored `ProcInfo`, and the frontend types/CSS. I also found and fixed the "spurious out-of-date" bug: `federation-command` alone prints its `--version` output name-prefixed (`"federation-command <version>"`) instead of the bare string every other sub-app uses, so local-representative's `pollManagedVersions` string comparison could never match even on identical builds; rather than change FC's human-facing output (and break its `-v` flag plus two existing tests asserting that prefix), I fixed the comparison itself to strip the app's binary-name prefix before comparing. Added unit tests for both the prefix-stripping fix and the new pending-version plumbing, and documented everything in `docs/DevMode.md`. `go build`/`go test`/`gofmt` remain denied in this environment, so I verified via careful read-through as with prior revisions.
 
 
-## <REPLACE-Revision|Retry> K
+## Revision K
 
-<REPLACE-PROMPT>
+We have a bug where we cannot select the auto-update toggle.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix that - we expect to see the checkbox checked when we select it (corresponding to the state being active).

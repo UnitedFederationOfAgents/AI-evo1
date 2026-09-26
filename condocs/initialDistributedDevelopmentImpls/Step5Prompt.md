@@ -267,11 +267,8 @@ prompt: [`dd830a0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d
 I found the bug: Revision M's nav arrows already render in the correct position (left of the connection dot) in both `local-representative` and `agent-coordinator`, but their inactive-state color was `#444`, which has almost no contrast against the `#252526` tab-bar background — making them effectively invisible. I bumped `.nav-arrow-btn`'s base color to `#666` (matching the header's existing muted-grey palette used by `.app-title`) in both apps' `index.css`, keeping the existing `#ccc` for the illuminated/active state so availability is still clearly signaled by contrast, and documented the fix in `docs/DevMode.md`'s "Screen history" section. `npm`/`tsc` remain denied in this environment, so I verified via read-through of the JSX (position was already correct) and CSS cascade rather than a build.
 
 
-## <REPLACE-Revision|Retry> O
+## Revision O
 
-<REPLACE-PROMPT>
+Both the trough and the navigation arrows are working on local-representative but non-functional on agent-coordinator.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix them for AC to make them behave the same way as LR.

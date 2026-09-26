@@ -247,6 +247,32 @@ body {
 .conn-dot-ok  { background: #4ec94e; }
 .conn-dot-err { background: #cc4444; }
 
+/* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
+   right corner alongside the connection dot. */
+.nav-arrows {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.nav-arrow-btn {
+  background: none;
+  border: none;
+  color: #444;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.nav-arrow-btn.nav-arrow-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.nav-arrow-btn.nav-arrow-active:hover { background: #333; }
+
 /* ---- Main pane ---- */
 
 .main-pane {

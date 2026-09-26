@@ -240,3 +240,24 @@ Let's take a moment to add another control - in the upper right corner of AC and
 We will add forward-and-back navigation arrows. These will take us forward and back through the screens we have navigated for the last N steps. They will only be illuminated when that direction is available.
 
 We will start with a pragmatic value for N.
+
+
+prompt: [`29188d1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/29188d1b3bb56120dabd307d642beabd3c9df096) → reply: [`779fa01`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/779fa013ecb60db57b30bb0368398cb6d9edb79a)
+
+## Reply M
+
+This matches the intended scope of Revision M exactly — no unrelated files touched. The implementation is complete.
+
+## Summary
+
+Implemented Step 5 Revision M's forward/back navigation arrows in the upper-right corner of both `local-representative` and `agent-coordinator`. Each app now has a small in-app `useScreenHistory` stack (independent of real browser history, consistent with the existing `replaceState`-only browser-pickup design) capped at a pragmatic `NAV_HISTORY_MAX = 20` recent screens: for `local-representative` a "screen" is the active tab, and for `agent-coordinator` it's the (selected host or global, active tab) pair. A `NavArrows` component renders `←`/`→` buttons next to the connection dot, illuminated only when that direction has history available, with clicking replaying the recorded screen without pushing a new entry. Documented the mechanism in a new "Screen history" section of `docs/DevMode.md` alongside the existing "Browser pickup" writeup. As with all prior revisions, `go`/`npm`/`tsc` are denied in this environment, so I verified correctness via careful read-through.
+
+
+## <REPLACE-Revision|Retry> N
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

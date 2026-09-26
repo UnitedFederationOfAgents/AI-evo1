@@ -4,6 +4,11 @@ import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg,
 const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
+// Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
+// Step5Prompt.md Revision M): how many recently-visited tabs we keep around
+// for back/forward. A pragmatic starting value -- see useScreenHistory below.
+const NAV_HISTORY_MAX = 20
+
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
@@ -1229,6 +1234,80 @@ function initialTab(): Tab {
   return (TABS as readonly string[]).includes(stored ?? '') ? (stored as Tab) : 'federation-command'
 }
 
+// Small forward/back stack over the app's top-level navigation state
+// (Step5Prompt.md Revision M). Deliberately independent of the real browser
+// history -- this app never calls pushState (see BrowserPickupStrategy.md on
+// why nav already relies on replaceState/sessionStorage instead), so this is
+// purely an in-app "last N screens" stack, not a wrapper around back/forward
+// button clicks. `max` caps how many screens are remembered.
+function useScreenHistory<T>(
+  screen: T,
+  isEqual: (a: T, b: T) => boolean,
+  applyScreen: (screen: T) => void,
+  max: number,
+) {
+  const [hist, setHist] = useState(() => ({ stack: [screen], index: 0 }))
+
+  useEffect(() => {
+    setHist(prev => {
+      if (isEqual(prev.stack[prev.index], screen)) return prev // e.g. applyScreen just navigated us here
+      let stack = [...prev.stack.slice(0, prev.index + 1), screen]
+      let index = stack.length - 1
+      if (stack.length > max) {
+        const drop = stack.length - max
+        stack = stack.slice(drop)
+        index -= drop
+      }
+      return { stack, index }
+    })
+  }, [screen])
+
+  const canBack = hist.index > 0
+  const canForward = hist.index < hist.stack.length - 1
+
+  const back = () => {
+    if (!canBack) return
+    applyScreen(hist.stack[hist.index - 1])
+    setHist(prev => (prev.index <= 0 ? prev : { ...prev, index: prev.index - 1 }))
+  }
+
+  const forward = () => {
+    if (!canForward) return
+    applyScreen(hist.stack[hist.index + 1])
+    setHist(prev => (prev.index >= prev.stack.length - 1 ? prev : { ...prev, index: prev.index + 1 }))
+  }
+
+  return { canBack, canForward, back, forward }
+}
+
+function NavArrows({ canBack, canForward, onBack, onForward }: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <span className="nav-arrows">
+      <button
+        className={`nav-arrow-btn${canBack ? ' nav-arrow-active' : ''}`}
+        onClick={onBack}
+        disabled={!canBack}
+        title={canBack ? 'back' : 'no earlier screen'}
+      >
+        ←
+      </button>
+      <button
+        className={`nav-arrow-btn${canForward ? ' nav-arrow-active' : ''}`}
+        onClick={onForward}
+        disabled={!canForward}
+        title={canForward ? 'forward' : 'no later screen'}
+      >
+        →
+      </button>
+    </span>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab)
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
@@ -1276,6 +1355,13 @@ export default function App() {
     sessionStorage.setItem('lr-active-tab', activeTab)
   }, [activeTab])
 
+  const goToTab = (tab: Tab) => {
+    setActiveTab(tab)
+    setSelectedFileId(null)
+    setViewerFileId(null)
+  }
+  const nav = useScreenHistory(activeTab, (a, b) => a === b, goToTab, NAV_HISTORY_MAX)
+
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
       {mismatches.length > 0 && (
@@ -1297,12 +1383,13 @@ export default function App() {
             <button
               key={tab}
               className={`tab${activeTab === tab ? ' tab-active' : ''}`}
-              onClick={() => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
+              onClick={() => goToTab(tab)}
             >
               {tab}
             </button>
           ))}
         </div>
+        <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}
           title={connected ? 'connected' : 'disconnected'}

@@ -563,6 +563,39 @@ each frontend now resumes on the same view instead:
   reload) would hand the iframe back that stale, initial hash instead of
   wherever the viewer had actually navigated to since (Step 5 Revision G).
 
+## Screen history
+
+Per [`InitialDistributedDevelopment`](../condocs/InitialDistributedDevelopment.md)
+Step 5 Revision M, both `local-representative` and `agent-coordinator` show a
+pair of forward/back nav arrows in the upper right corner of their header, next
+to the connection dot. They step through a small in-app stack of recently
+visited "screens" — up to `NAV_HISTORY_MAX` (currently 20, a pragmatic
+starting value) — and are only illuminated (clickable) in the direction that's
+actually available.
+
+This is a from-scratch, in-app history stack (`useScreenHistory` in each
+`App.tsx`), not a wrapper around the real browser back/forward buttons: this
+app deliberately never calls `history.pushState` (see "Browser pickup" above —
+`replaceState` was chosen specifically to avoid growing browser history), so
+there's no native forward/back to hook into. A "screen" is scoped to each
+app's own top-level navigation state, not every nested selection:
+
+- **`local-representative`**: a screen is the active tab (`federation-command`
+  / `condoccer` / `worker` / `system` / `files`).
+- **`agent-coordinator`**: a screen is the pair (selected host, or global; active
+  tab), since those two together are what `agent-coordinator` otherwise
+  persists via `sessionStorage` for browser-pickup purposes.
+
+Navigating normally (clicking a tab, picking a host) truncates any forward
+history beyond the current point and pushes the new screen, same as browser
+history; clicking a nav arrow replays a previously-visited screen without
+pushing a new entry. Deeper drill-down state — `files`' selected file/open
+viewer, or condoccer's own internal step/iteration/diff position — isn't part
+of the stack; it resets to that tab's default the same way it already does on
+an ordinary tab switch. Widening the stack to cover those finer-grained moves
+is possible but was left for a later revision, per the prompt's own "start
+with a pragmatic value for N."
+
 ## Future features
 
 The following are **recorded here as the plan, not implemented yet** — later

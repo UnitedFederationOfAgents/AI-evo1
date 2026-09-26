@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
@@ -367,6 +367,86 @@ type LRTab = typeof LR_TABS[number]
 function initialACTab(): LRTab {
   const stored = sessionStorage.getItem('ac-active-tab')
   return (LR_TABS as readonly string[]).includes(stored ?? '') ? (stored as LRTab) : 'system'
+}
+
+// Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
+// Step5Prompt.md Revision M): how many recently-visited (host, tab) screens
+// we keep around for back/forward. A pragmatic starting value -- see
+// useScreenHistory below.
+const NAV_HISTORY_MAX = 20
+
+// Small forward/back stack over the app's top-level navigation state
+// (Step5Prompt.md Revision M). Deliberately independent of the real browser
+// history -- this app never calls pushState (see BrowserPickupStrategy.md on
+// why nav already relies on replaceState/sessionStorage instead), so this is
+// purely an in-app "last N screens" stack, not a wrapper around back/forward
+// button clicks. `max` caps how many screens are remembered.
+function useScreenHistory<T>(
+  screen: T,
+  isEqual: (a: T, b: T) => boolean,
+  applyScreen: (screen: T) => void,
+  max: number,
+) {
+  const [hist, setHist] = useState(() => ({ stack: [screen], index: 0 }))
+
+  useEffect(() => {
+    setHist(prev => {
+      if (isEqual(prev.stack[prev.index], screen)) return prev // e.g. applyScreen just navigated us here
+      let stack = [...prev.stack.slice(0, prev.index + 1), screen]
+      let index = stack.length - 1
+      if (stack.length > max) {
+        const drop = stack.length - max
+        stack = stack.slice(drop)
+        index -= drop
+      }
+      return { stack, index }
+    })
+  }, [screen])
+
+  const canBack = hist.index > 0
+  const canForward = hist.index < hist.stack.length - 1
+
+  const back = () => {
+    if (!canBack) return
+    applyScreen(hist.stack[hist.index - 1])
+    setHist(prev => (prev.index <= 0 ? prev : { ...prev, index: prev.index - 1 }))
+  }
+
+  const forward = () => {
+    if (!canForward) return
+    applyScreen(hist.stack[hist.index + 1])
+    setHist(prev => (prev.index >= prev.stack.length - 1 ? prev : { ...prev, index: prev.index + 1 }))
+  }
+
+  return { canBack, canForward, back, forward }
+}
+
+function NavArrows({ canBack, canForward, onBack, onForward }: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <span className="nav-arrows">
+      <button
+        className={`nav-arrow-btn${canBack ? ' nav-arrow-active' : ''}`}
+        onClick={onBack}
+        disabled={!canBack}
+        title={canBack ? 'back' : 'no earlier screen'}
+      >
+        ←
+      </button>
+      <button
+        className={`nav-arrow-btn${canForward ? ' nav-arrow-active' : ''}`}
+        onClick={onForward}
+        disabled={!canForward}
+        title={canForward ? 'forward' : 'no later screen'}
+      >
+        →
+      </button>
+    </span>
+  )
 }
 
 function FCCommandPanel({
@@ -2173,6 +2253,27 @@ export default function App() {
     sessionStorage.setItem('ac-active-tab', activeTab)
   }, [activeTab])
 
+  // Forward/back nav arrows (Step5Prompt.md Revision M) track the pair of
+  // top-level navigation choices -- which host (or global) and which tab --
+  // as a single "screen".
+  const navScreen = useMemo(() => ({ hostId: selectedHostId, tab: activeTab }), [selectedHostId, activeTab])
+  const applyNavScreen = (s: { hostId: string | null; tab: LRTab }) => {
+    // Only re-issue the host (de)selection -- with its selectHost() resubscribe
+    // -- when the host actually changes, so navigating between tabs on the
+    // same host doesn't needlessly resubscribe on every back/forward step.
+    if (s.hostId !== selectedHostId) {
+      if (s.hostId) handleSelectHost(s.hostId)
+      else handleSelectGlobal()
+    }
+    setActiveTab(s.tab)
+  }
+  const nav = useScreenHistory(
+    navScreen,
+    (a, b) => a.hostId === b.hostId && a.tab === b.tab,
+    applyNavScreen,
+    NAV_HISTORY_MAX,
+  )
+
   // A host id restored from sessionStorage was never sent via
   // handleSelectHost's own selectHost() call -- issue it here exactly once,
   // now that the websocket is actually up.
@@ -2194,6 +2295,7 @@ export default function App() {
       )}
       <div className="app-header">
         <span className="app-title">agent-coordinator</span>
+        <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}
           title={connected ? 'connected' : 'disconnected'}

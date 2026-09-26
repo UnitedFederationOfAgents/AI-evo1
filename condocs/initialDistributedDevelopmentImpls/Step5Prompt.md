@@ -282,11 +282,8 @@ Background tasks still running after 600s; terminating. Set CLAUDE_CODE_PRINT_BG
 I've launched a background investigation agent to identify why the trough and nav arrows don't function on agent-coordinator (while they work fine on local-representative). I'll review its findings and implement the fix once it reports back.
 
 
-## <REPLACE-Revision|Retry> P
+## Revision P
 
-<REPLACE-PROMPT>
+Both the trough and the navigation arrows are working on local-representative but non-functional on agent-coordinator.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix them for AC to make them behave the same way as LR.

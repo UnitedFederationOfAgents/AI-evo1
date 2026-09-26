@@ -854,7 +854,12 @@ body {
     align-items: center;
     justify-content: center;
     position: fixed;
-    top: 10px;
+    /* Below .app-header (40px) -- condoccer's original off-canvas-drawer
+       pattern this was copied from has no such header to clear, but AC's
+       does (app-title/nav arrows/conn-dot), so top: 10px here used to sit
+       right on top of it, occluding and swallowing clicks meant for the
+       nav arrows (Step5Prompt.md Revision O/P). */
+    top: 48px;
     z-index: 101;
     width: 38px;
     height: 38px;
@@ -906,7 +911,7 @@ body {
   }
 
   .app-body {
-    padding-top: 48px;
+    padding-top: 92px; /* clears the header (40px) plus the 48px-positioned toggle/back button */
   }
 
   .host-item {

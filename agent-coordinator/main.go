@@ -232,6 +232,7 @@ type RepoStateMsg struct {
 	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
 	Head               string `json:"head,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
+	CondocLocked       bool   `json:"condoc_locked,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -297,6 +298,7 @@ type LRRepoStateMsg struct {
 	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
 	Head               string `json:"head,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
+	CondocLocked       bool   `json:"condoc_locked,omitempty"`
 }
 
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
@@ -606,6 +608,7 @@ func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
 		AutoRebuildSeconds: r.AutoRebuildSeconds,
 		Head:               r.Head,
 		LastError:          r.LastError,
+		CondocLocked:       r.CondocLocked,
 	}
 }
 

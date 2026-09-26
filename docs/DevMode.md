@@ -423,6 +423,28 @@ It's only ever shown for a host whose LR is actually watching a repo
 shows it, so the trigger stays dev-mode-only regardless of which dashboard
 it's driven from.
 
+Revision O/P: investigating a report that the trough and the nav arrows
+(see "Screen history" below) were non-functional on `agent-coordinator` while
+working on `local-representative` turned up two real, `agent-coordinator`-only
+bugs, both now fixed. First, its own `RepoStateMsg`/`LRRepoStateMsg` structs
+(and the `repoStateMsg()` mapper between them) had fallen out of sync with
+local-representative's and were missing the `condoc_locked` field entirely,
+so `json.Unmarshal` silently dropped it and the repo-watch panel's "condoc"
+label could never surface there — the same class of bug as Revision K's
+missing `AutoUpdate` field. Second, and the actual cause of the nav arrows
+looking dead: `agent-coordinator`'s mobile off-canvas-drawer toggle
+(`.mobile-nav-toggle`/`.mobile-back-btn`) was copied from condoccer's pattern,
+which has no header to clear, and from local-representative, which has no
+such toggle at all — so nobody had noticed that at viewport widths under
+760px it sits `position: fixed; top: 10px`, right on top of `agent-coordinator`'s
+own `.app-header` (nav arrows + connection dot), swallowing clicks meant for
+them. It now sits below the header (`top: 48px`, with `.app-body`'s
+reserved padding grown to match) instead of on top of it. The trough itself
+traced out clean end-to-end (LR's rebuild failure → `repo-state` relay →
+`agent-coordinator`'s backend → `lr-repo-state` broadcast → the `Trough`
+component) with no defect found; its collapsed line is legitimately disabled
+until a rebuild actually fails on that host, on both dashboards alike.
+
 ```bash
 ./local-representative --dev-repo   # from inside a checkout of this repo
 ```

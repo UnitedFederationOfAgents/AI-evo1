@@ -258,3 +258,20 @@ Implemented Step 5 Revision M's forward/back navigation arrows in the upper-righ
 We have loaded the current version but there do not appear to be any arrows.
 
 Let's make sure the arrows are visible, to the left of the 'connecter dot' on AC and LR. They will use the same grey pallet as the rest of the outline and illumination will indicate availability.
+
+
+prompt: [`dd830a0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/dd830a013eef0ba9868e1471467337ae025da985) → reply: [`e681e85`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e681e855ea688033fe4e9ac35fa911549681d2d2)
+
+## Reply N
+
+I found the bug: Revision M's nav arrows already render in the correct position (left of the connection dot) in both `local-representative` and `agent-coordinator`, but their inactive-state color was `#444`, which has almost no contrast against the `#252526` tab-bar background — making them effectively invisible. I bumped `.nav-arrow-btn`'s base color to `#666` (matching the header's existing muted-grey palette used by `.app-title`) in both apps' `index.css`, keeping the existing `#ccc` for the illuminated/active state so availability is still clearly signaled by contrast, and documented the fix in `docs/DevMode.md`'s "Screen history" section. `npm`/`tsc` remain denied in this environment, so I verified via read-through of the JSX (position was already correct) and CSS cascade rather than a build.
+
+
+## <REPLACE-Revision|Retry> O
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

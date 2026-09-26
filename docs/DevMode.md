@@ -596,6 +596,14 @@ an ordinary tab switch. Widening the stack to cover those finer-grained moves
 is possible but was left for a later revision, per the prompt's own "start
 with a pragmatic value for N."
 
+The arrows sit to the left of the connection dot and use the same grey
+palette as the rest of the header outline — `#666` when unavailable, `#ccc`
+(matching `.tab:hover`/`.tab-active`) when illuminated. The original
+Revision M styling used `#444` for the unavailable state, which had almost
+no contrast against the `#252526` tab-bar background and made the arrows
+effectively invisible; Revision N raised that to `#666` so they're always
+visible, with illumination still conveying availability (Step 5 Revision N).
+
 ## Future features
 
 The following are **recorded here as the plan, not implemented yet** — later

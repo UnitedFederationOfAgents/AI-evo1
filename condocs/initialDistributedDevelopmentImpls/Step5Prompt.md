@@ -177,11 +177,12 @@ This all reads correctly and consistently. The implementation is complete.
 Implemented Step 5 Revision I: `make deploy-dev-binaries` now creates a gitignored `.building` lock file at the repo root the instant the target starts and removes it only once fully done. `local-representative`'s dev-repo watcher (`repowatch.go`) now derives its "building" state from this lock file's presence via a new `buildLockPresent()`/`maybeFinishBuild()` pair (seeded at construction too, so a build already running when LR starts is picked up correctly) rather than solely from its own `make` invocation returning, and once the lock disappears it keeps reporting "building…" for an additional 30-second `buildCompletionGrace` before actually clearing, to help settle any lingering race conditions. Updated the two existing rebuild tests to match the new behavior, added tests for the lock-file/grace-period mechanics, and documented the change in `docs/DevMode.md`. `go build`/`gofmt` remain denied in this environment, so I verified via careful read-through as with prior revisions.
 
 
-## <REPLACE-Revision|Retry> J
+## Revision J
 
-<REPLACE-PROMPT>
+We now have a bug where FC reports as 'out of date' when it appears to be up to date.
 
+We see this on the global system and per-host system tabs.
 
-## Human-Prompt
+Let's add an ability to highlight the process row in the per-host system tab which brings up a drill-down display for the process. Let's indicate both the current and pending version of a sub-app instance in this display.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also fix the 'spurious out-of-date' error in FC if the fix is obvious, or respond with why it is not obvious.

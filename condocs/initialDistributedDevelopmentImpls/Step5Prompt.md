@@ -144,3 +144,24 @@ Let's revisit the condoc lockfile problem.
 We still have the issue where the .condoc is left dirty as deleted in the git state.
 
 Let's fix it or explain why it is so difficult so we can re-assess.
+
+
+prompt: [`f664589`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f6645899db4a6c0467ebe97ecdb397ee3368602e) → reply: [`e5c8800`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e5c88003a75bed0ffd42b71c7fe9bcb1c9a194e1)
+
+## Reply H
+
+I found the root cause and fixed it — it wasn't the same bug Revision D patched, but a sibling of it that D's fix hadn't covered.
+
+Revision D only made `handleCondocAgentDone` (the post-agent-reply commit) proactively delete `.condoc` before its own commit. But three other commit sequences also land a condoc at "awaiting action" or "completed" — `condocCompleteSubstep`, `condocCompleteCondoc`, and the final commit in the revert flow (`runCondocRevertGitSequence`) — and none of them removed the lock file first. Each was still relying on condoccer's independent ~1s poll to notice the transition and delete the file itself, which races against (and typically loses to) federation-command's own commit, leaving `.condoc`'s deletion dangling as an uncommitted change in the working tree — exactly the dirty-as-deleted state seen in the repo's recent manual fix-up commits (most plausibly `condocCompleteCondoc`'s "condoc: completed" commit, since nothing commits again afterward to sweep it up).
+
+I extracted the existing removal logic into a shared `removeCondocLockFile(repoRoot)` helper and called it at all three previously-missing sites (plus the original, now deduplicated), and added a small unit test for the helper in `federation-command/condoc_test.go`. `go build`/`go test` remain denied here, so this was verified by read-through as with prior revisions.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

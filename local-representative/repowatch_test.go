@@ -135,7 +135,9 @@ func TestRepoWatchPollAndMaybePull(t *testing.T) {
 
 // TestRepoWatchRebuildSuccessClearsRebuildReady verifies a successful
 // 'make deploy-dev-binaries' run records the built HEAD, clears
-// rebuild_ready (a clean repo has nothing left to rebuild), and notifies.
+// rebuild_ready (a clean repo has nothing left to rebuild), and notifies --
+// and that building stays true until the buildCompletionGrace elapses
+// (Revision I), only then clearing.
 func TestRepoWatchRebuildSuccessClearsRebuildReady(t *testing.T) {
 	dir := initTestRepo(t, "true")
 	var notified int32
@@ -152,14 +154,27 @@ func TestRepoWatchRebuildSuccessClearsRebuildReady(t *testing.T) {
 
 	rw.rebuild()
 	snap := rw.snapshot()
-	if snap.Building {
-		t.Errorf("expected building=false once rebuild() returns")
+	if !snap.Building {
+		t.Errorf("expected building=true immediately after rebuild() returns -- the completion grace hasn't elapsed yet")
 	}
 	if snap.LastError != "" {
 		t.Errorf("expected no error, got %q", snap.LastError)
 	}
 	if snap.RebuildReady {
 		t.Errorf("expected rebuild_ready=false immediately after a clean successful build")
+	}
+
+	// Simulate the completion grace having elapsed, rather than waiting the
+	// full 30s for real.
+	rw.mu.Lock()
+	rw.buildDoneDeadline = time.Now().Add(-time.Second)
+	rw.mu.Unlock()
+	rw.opMu.Lock()
+	rw.maybeFinishBuild()
+	rw.opMu.Unlock()
+
+	if snap = rw.snapshot(); snap.Building {
+		t.Errorf("expected building=false once the completion grace elapses")
 	}
 	if got := atomic.LoadInt32(&notified); got < 2 {
 		t.Errorf("expected at least 2 notify() calls (build start + end), got %d", got)
@@ -168,15 +183,16 @@ func TestRepoWatchRebuildSuccessClearsRebuildReady(t *testing.T) {
 
 // TestRepoWatchRebuildFailureRecordsError verifies a failing
 // 'make deploy-dev-binaries' is recorded in LastError rather than being
-// treated as success.
+// treated as success, and still leaves building true pending the completion
+// grace (Revision I) rather than clearing it outright.
 func TestRepoWatchRebuildFailureRecordsError(t *testing.T) {
 	dir := initTestRepo(t, "exit 1")
 	rw := newRepoWatch(dir, func() {})
 
 	rw.rebuild()
 	snap := rw.snapshot()
-	if snap.Building {
-		t.Errorf("expected building=false once rebuild() returns")
+	if !snap.Building {
+		t.Errorf("expected building=true immediately after rebuild() returns -- the completion grace hasn't elapsed yet")
 	}
 	if snap.LastError == "" {
 		t.Errorf("expected a recorded error for a failing build")
@@ -414,6 +430,76 @@ func TestRepoWatchCondocLockForcesRebuildNotReady(t *testing.T) {
 	}
 	if snap := rw.snapshot(); !snap.RebuildReady || snap.CondocLocked {
 		t.Fatalf("expected rebuild_ready=true and condoc_locked=false once the lock file is removed, got rebuild_ready=%v condoc_locked=%v", snap.RebuildReady, snap.CondocLocked)
+	}
+}
+
+// TestRepoWatchBuildLockDefersCompletionWhilePresent verifies that
+// maybeFinishBuild leaves (or sets) building=true and never arms the
+// completion grace while 'make deploy-dev-binaries's own '.building' lock
+// file is present -- and that removing it arms the grace, which only then
+// counts down to building=false (Revision I).
+func TestRepoWatchBuildLockDefersCompletionWhilePresent(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	rw := newRepoWatch(dir, func() {})
+
+	lockPath := filepath.Join(dir, ".building")
+	if err := os.WriteFile(lockPath, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rw.opMu.Lock()
+	changed := rw.maybeFinishBuild()
+	rw.opMu.Unlock()
+	if !changed {
+		t.Errorf("expected maybeFinishBuild to report a change picking up a lock file it didn't itself create")
+	}
+	if !rw.snapshot().Building {
+		t.Fatalf("expected building=true while the '.building' lock file is present")
+	}
+
+	rw.opMu.Lock()
+	changed = rw.maybeFinishBuild()
+	rw.opMu.Unlock()
+	if changed {
+		t.Errorf("expected no further change while the lock file remains present")
+	}
+
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	rw.opMu.Lock()
+	if changed := rw.maybeFinishBuild(); !changed {
+		t.Errorf("expected arming the completion grace to report a change once the lock file disappears")
+	}
+	rw.opMu.Unlock()
+	if !rw.snapshot().Building {
+		t.Errorf("expected building to stay true during the completion grace")
+	}
+
+	rw.mu.Lock()
+	rw.buildDoneDeadline = time.Now().Add(-time.Second)
+	rw.mu.Unlock()
+	rw.opMu.Lock()
+	rw.maybeFinishBuild()
+	rw.opMu.Unlock()
+	if rw.snapshot().Building {
+		t.Errorf("expected building=false once the completion grace elapses")
+	}
+}
+
+// TestRepoWatchNewRepoWatchSeedsBuildingFromLockFile verifies that a
+// '.building' lock file already sitting at the repo root when the watcher
+// starts (e.g. a build that outlived an LR restart) is reflected as
+// building=true right away, per Revision I.
+func TestRepoWatchNewRepoWatchSeedsBuildingFromLockFile(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	if err := os.WriteFile(filepath.Join(dir, ".building"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rw := newRepoWatch(dir, func() {})
+	if !rw.snapshot().Building {
+		t.Errorf("expected building=true when a '.building' lock file already exists at construction")
 	}
 }
 

@@ -45,7 +45,16 @@ check-dev-deps:
 	@./scripts/install-dev-deps.sh --check
 
 # Clean dev bin dir and deploy all binaries there
+#
+# '.building' (repo root, gitignored) is a lock file for this target itself
+# -- created the moment the target starts, removed only once it's fully
+# done. See condocs/initialDistributedDevelopmentImpls/Step5Prompt.md
+# Revision I: local-representative's dev-repo watcher now detects rebuild
+# completion off this file's presence rather than solely off this recipe's
+# own exit, so it also correctly reflects a build already running (e.g.
+# started just before an LR restart) or one kicked off by hand outside LR.
 deploy-dev-binaries: check-dev-deps
+	@touch .building
 	@echo "Cleaning $(DEV_BIN_DIR)..."
 	rm -rf $(DEV_BIN_DIR)
 	mkdir -p $(DEV_BIN_DIR)
@@ -58,3 +67,4 @@ deploy-dev-binaries: check-dev-deps
 	@echo ""
 	@echo "=== All binaries deployed to $(DEV_BIN_DIR) ==="
 	@ls -la $(DEV_BIN_DIR)
+	@rm -f .building

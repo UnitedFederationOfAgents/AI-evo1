@@ -34,3 +34,10 @@ go.work.sum
 ignored-scratch/
 ignored-scratch/**
 !ignored-scratch/.gitkeep
+
+# 'make deploy-dev-binaries' lock file (see
+# condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision I) --
+# unlike '.condoc', this one is purely a local, ephemeral marker with
+# nothing for other nodes following the branch to learn from, so it stays
+# gitignored.
+/.building

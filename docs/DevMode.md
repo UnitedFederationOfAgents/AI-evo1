@@ -354,6 +354,21 @@ auto-rebuild — goes through one mutex, so **the check-and-rebuild process is
 single-threaded**: nothing here ever runs concurrently with itself, per the
 prompt.
 
+`make deploy-dev-binaries` itself creates and removes a `.building` lock
+file at the repo root — gitignored, unlike condoccer's `.condoc` lock file
+(committed so nodes following the branch can see condoc state), since
+`.building` is a purely local, ephemeral marker with nothing for other
+nodes to learn from (see
+[`condocs/initialDistributedDevelopmentImpls/Step5Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step5Prompt.md)
+Revision I). The watcher detects rebuild completion off this file's
+presence rather than solely off its own `make` invocation returning, so a
+build already running when LR starts (e.g. one that outlived an auto-update
+restart) or one kicked off by hand outside LR is picked up correctly too.
+Once the lock file disappears, the button keeps reading **building…** for
+an additional 30-second settling period before actually clearing — "to help
+eliminate race conditions" against anything still settling on disk right as
+the lock is removed.
+
 LR forwards its watcher snapshot up to `agent-coordinator` as `repo-state`,
 and `agent-coordinator`'s own per-host system tab renders the identical
 rebuild/dirty/auto-rebuild panel from it — the **rebuild** button and

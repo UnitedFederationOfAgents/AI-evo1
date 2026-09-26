@@ -27,6 +27,15 @@ const repoWatchPollInterval = 5 * time.Second
 // landing.
 const autoRebuildDebounce = 90 * time.Second
 
+// buildCompletionGrace is how long repoWatch keeps reporting a build as
+// still running after it notices 'make deploy-dev-binaries's own
+// '.building' lock file (see buildLockPresent) has disappeared, per
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision I --
+// "to help eliminate race conditions" against anything that might still be
+// settling (a slow/networked filesystem, a binary still being renamed into
+// place) right as the recipe's own cleanup step removes the lock.
+const buildCompletionGrace = 30 * time.Second
+
 // RepoStateMsg is the "repo-state" WebSocket payload: local-representative's
 // current view of the git repo it is watching for rebuild-worthy changes.
 // Sent as a zero value (Watched: false) when this LR wasn't launched with
@@ -36,8 +45,13 @@ type RepoStateMsg struct {
 	Root         string `json:"root,omitempty"`
 	Dirty        bool   `json:"dirty"`         // uncommitted staged or unstaged changes relative to HEAD
 	RebuildReady bool   `json:"rebuild_ready"` // the rebuild button is active -- HEAD moved since the last successful rebuild, and the repo isn't dirty
-	Building     bool   `json:"building"`      // 'make deploy-dev-binaries' is running right now
-	AutoRebuild  bool   `json:"auto_rebuild"`
+	// Building is true while 'make deploy-dev-binaries' is running -- i.e.
+	// while its own '.building' lock file sits at the repo root -- and for
+	// an additional buildCompletionGrace afterward, per
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision I.
+	// See buildLockPresent/maybeFinishBuild.
+	Building    bool `json:"building"`
+	AutoRebuild bool `json:"auto_rebuild"`
 
 	// CondocLocked mirrors condocLockPresent: true while condoccer's
 	// '.condoc' lock file sits at the repo root (see
@@ -92,6 +106,13 @@ type repoWatch struct {
 	// comparing it to the current head and bumps the deadline back out.
 	autoRebuildDeadline  time.Time
 	autoRebuildArmedHead string
+
+	// buildDoneDeadline tracks the buildCompletionGrace countdown
+	// (Revision I): zero means either no build is running, or one is but its
+	// '.building' lock file is still present. Armed the moment
+	// maybeFinishBuild first notices the lock file has disappeared; building
+	// only actually clears once this deadline passes.
+	buildDoneDeadline time.Time
 }
 
 func newRepoWatch(root string, notify func()) *repoWatch {
@@ -107,6 +128,11 @@ func newRepoWatch(root string, notify func()) *repoWatch {
 		w.head = head
 		w.builtHead = head
 	}
+	// Seed building from the '.building' lock file itself (Revision I), so a
+	// build already running when LR (re)starts -- e.g. one that outlived an
+	// auto-update restart, or one kicked off by hand -- is reflected right
+	// away instead of only once its own goroutine happens to notice.
+	w.building = w.buildLockPresent()
 	return w
 }
 
@@ -133,6 +159,16 @@ func (w *repoWatch) rebuildReadyLocked() bool {
 // ever checks for its presence.
 func (w *repoWatch) condocLockPresent() bool {
 	_, err := os.Stat(filepath.Join(w.root, ".condoc"))
+	return err == nil
+}
+
+// buildLockPresent reports whether 'make deploy-dev-binaries's own
+// '.building' lock file currently sits at the watched repo's root -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision I. The
+// Makefile recipe itself creates and removes this file (unlike '.condoc',
+// which condoccer owns); LR only ever checks for its presence.
+func (w *repoWatch) buildLockPresent() bool {
+	_, err := os.Stat(filepath.Join(w.root, ".building"))
 	return err == nil
 }
 
@@ -239,11 +275,15 @@ func (w *repoWatch) pollAndMaybePull() bool {
 }
 
 // rebuild runs 'make deploy-dev-binaries' at the repo root. Callers must
-// hold opMu.
+// hold opMu. Note that w.building isn't cleared here even once the command
+// returns -- the recipe's own '.building' lock file (see buildLockPresent)
+// is the source of truth for that, via maybeFinishBuild, plus the
+// buildCompletionGrace settling period that follows it (Revision I).
 func (w *repoWatch) rebuild() {
 	w.mu.Lock()
 	w.building = true
 	w.lastErr = ""
+	w.buildDoneDeadline = time.Time{} // a fresh build supersedes any prior grace countdown
 	w.mu.Unlock()
 	w.notify()
 
@@ -258,7 +298,6 @@ func (w *repoWatch) rebuild() {
 	head, headErr := w.headSHA()
 
 	w.mu.Lock()
-	w.building = false
 	if buildErr != nil {
 		w.lastErr = fmt.Sprintf("%v: %s", buildErr, strings.TrimSpace(string(out)))
 		log.Printf("dev-repo: rebuild failed: %s", w.lastErr)
@@ -275,7 +314,55 @@ func (w *repoWatch) rebuild() {
 		w.head = head
 	}
 	w.mu.Unlock()
+	// Check right away rather than waiting for the next poll tick -- the
+	// recipe's own 'rm -f .building' has almost always already run by the
+	// time cmd.CombinedOutput() above returns, so this typically arms the
+	// completion grace immediately.
+	w.maybeFinishBuild()
 	w.notify()
+}
+
+// maybeFinishBuild clears w.building once 'make deploy-dev-binaries's own
+// '.building' lock file (see buildLockPresent) has been gone for a full
+// buildCompletionGrace -- per
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision I.
+// While the lock file is present, building is left true (or set true, if
+// something -- e.g. a manually-run build -- created it independently of
+// this watcher) and any pending grace countdown is disarmed, since the
+// build is (still, or again) actually running. Callers must hold opMu (same
+// as pollAndMaybePull/maybeAutoRebuild/rebuild). Returns true if the
+// reported state changed, so the watch loop should notify.
+func (w *repoWatch) maybeFinishBuild() bool {
+	locked := w.buildLockPresent()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if locked {
+		wasArmed := !w.buildDoneDeadline.IsZero()
+		w.buildDoneDeadline = time.Time{}
+		changed := wasArmed || !w.building
+		w.building = true
+		return changed
+	}
+
+	if !w.building {
+		return false
+	}
+
+	now := time.Now()
+	if w.buildDoneDeadline.IsZero() {
+		// The lock file just disappeared -- start the settling period rather
+		// than clearing building immediately.
+		w.buildDoneDeadline = now.Add(buildCompletionGrace)
+		return true
+	}
+	if now.Before(w.buildDoneDeadline) {
+		return false // still settling
+	}
+	w.building = false
+	w.buildDoneDeadline = time.Time{}
+	return true
 }
 
 // maybeAutoRebuild manages the 90s auto-rebuild debounce timer
@@ -329,6 +416,9 @@ func (w *repoWatch) watchLoop() {
 	for range ticker.C {
 		w.opMu.Lock()
 		changed := w.pollAndMaybePull()
+		if w.maybeFinishBuild() {
+			changed = true
+		}
 		if w.maybeAutoRebuild() {
 			changed = true
 		}

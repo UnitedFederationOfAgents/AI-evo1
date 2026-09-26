@@ -233,11 +233,10 @@ All changes look complete and consistent. This completes Revision L.
 Implemented Step 5 Revision L's two asks. First, fixed `make deploy-dev-binaries` losing dev binaries during auto-rebuild: it now builds every sub-project into a scratch staging directory (`/AI-evo1-dev/bin.new`) and only swaps it into the real `/AI-evo1-dev/bin` once every sub-project has deployed successfully (via a `DEV_BIN_DIR` override on each `deploy-dev-binary` sub-make invocation), so a build failing or getting killed partway through — previously wiping the real bin dir up front — now leaves the last-known-good binaries untouched; a failed build also now cleans up its `.building` lock and staging dir instead of leaving the lock stuck forever. Second, added a "trough" — a collapsed single-line notification bar that expands into a scrollable session log — to the bottom of the system tab in both local-representative and agent-coordinator (per-host and global-aggregated-across-hosts variants), currently fed by rebuild failures (`RepoStateMsg.last_error`) but written generically for future notification sources. Documented both changes in `docs/DevMode.md`. `go build`/`make`/`npm`/`tsc` remain denied in this environment, so I verified via careful read-through as with prior revisions.
 
 
-## <REPLACE-Revision|Retry> M
+## Revision M
 
-<REPLACE-PROMPT>
+Let's take a moment to add another control - in the upper right corner of AC and LR.
 
+We will add forward-and-back navigation arrows. These will take us forward and back through the screens we have navigated for the last N steps. They will only be illuminated when that direction is available.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will start with a pragmatic value for N.

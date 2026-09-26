@@ -409,6 +409,46 @@ func TestPollManagedVersionsDetectsDrift(t *testing.T) {
 	}
 }
 
+// TestPollManagedVersionsStripsFCPrefix verifies pollManagedVersions doesn't
+// spuriously flag federation-command as having an update available just
+// because it prints its friendlier, name-prefixed "federation-command
+// <version>" for --version instead of the bare string every other managed
+// app answers with (and self-reports over representable, i.e.
+// runningVersion) -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision J.
+func TestPollManagedVersionsStripsFCPrefix(t *testing.T) {
+	s := newServer("test-lr")
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+	s.binOverrides["federation-command"] = fakeVersionBin(t, "federation-command v1")
+	s.setManagedVersion("federation-command", "v1")
+
+	s.pollManagedVersions()
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("prefixed on-disk output matching the reported version should not read as an update available")
+	}
+	if pv := s.managedPendingVersionFor("federation-command"); pv != "" {
+		t.Errorf("managedPendingVersionFor = %q, want empty when no update is available", pv)
+	}
+
+	// A genuine drift (this time behind the same prefix) should still be
+	// caught, with the prefix stripped from the surfaced pending version.
+	s.binOverrides["federation-command"] = fakeVersionBin(t, "federation-command v2")
+	s.pollManagedVersions()
+	if !s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("expected an update to be available: on-disk v2 != reported v1")
+	}
+	if pv := s.managedPendingVersionFor("federation-command"); pv != "v2" {
+		t.Errorf("managedPendingVersionFor = %q, want %q (prefix stripped)", pv, "v2")
+	}
+	if st := s.systemState(); len(st.Managed) != 1 || st.Managed[0].PendingVersion != "v2" {
+		t.Errorf("systemState() should surface the stripped pending version, got %+v", st.Managed)
+	}
+}
+
 // TestPollManagedVersionsSkipsUnreported verifies pollManagedVersions neither
 // panics nor shells out for an app that has never reported a running version
 // (nothing to compare against yet).

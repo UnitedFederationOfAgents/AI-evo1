@@ -223,6 +223,16 @@ type Server struct {
 	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
 	managedUpdateAvailable map[string]bool
 
+	// managedPendingVersion mirrors managedUpdateAvailable but holds the
+	// actual on-disk version string observed by pollManagedVersions (after
+	// stripping any app-specific "--version" prefix, e.g.
+	// federation-command's), rather than just a boolean -- so the system
+	// tab's drill-down can show what version a rebuild/relaunch would pick
+	// up, not merely that one is available. Guarded by versionMu alongside
+	// the two maps above. Empty until pollManagedVersions has run at least
+	// once for that app.
+	managedPendingVersion map[string]string
+
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
@@ -248,6 +258,7 @@ func newServer(lrName string) *Server {
 		modeMismatches:         make(map[string]ModeMismatchMsg),
 		managedVersions:        make(map[string]string),
 		managedUpdateAvailable: make(map[string]bool),
+		managedPendingVersion:  make(map[string]string),
 	}
 }
 

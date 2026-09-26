@@ -195,6 +195,11 @@ type ProcInfo struct {
 	// see local-representative/procman.go's pollManagedVersions and
 	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D.
 	UpdateAvailable bool `json:"update_available,omitempty"`
+
+	// PendingVersion is the on-disk version UpdateAvailable refers to -- see
+	// local-representative/procman.go's ProcInfo. Empty whenever
+	// UpdateAvailable is false.
+	PendingVersion string `json:"pending_version,omitempty"`
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.

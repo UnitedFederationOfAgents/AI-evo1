@@ -186,3 +186,24 @@ We see this on the global system and per-host system tabs.
 Let's add an ability to highlight the process row in the per-host system tab which brings up a drill-down display for the process. Let's indicate both the current and pending version of a sub-app instance in this display.
 
 Let's also fix the 'spurious out-of-date' error in FC if the fix is obvious, or respond with why it is not obvious.
+
+
+prompt: [`f088354`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f08835477b600ce5ac23efc112676ea312bda56f) → reply: [`5cb29d4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5cb29d4faf993f9434c4347c62744d797f518b92)
+
+## Reply J
+
+This all reads correctly and consistently. The implementation is complete.
+
+## Summary
+
+Implemented Step 5 Revision J: added a click-to-select drill-down (`SystemProcDetails`, styled to mirror the topology view's `.topo-details` pane) on each process row of agent-coordinator's per-host system tab, showing the process's current and pending build version — a new `pending_version` field threaded through LR's `ProcInfo`/`systemState()`, AC's mirrored `ProcInfo`, and the frontend types/CSS. I also found and fixed the "spurious out-of-date" bug: `federation-command` alone prints its `--version` output name-prefixed (`"federation-command <version>"`) instead of the bare string every other sub-app uses, so local-representative's `pollManagedVersions` string comparison could never match even on identical builds; rather than change FC's human-facing output (and break its `-v` flag plus two existing tests asserting that prefix), I fixed the comparison itself to strip the app's binary-name prefix before comparing. Added unit tests for both the prefix-stripping fix and the new pending-version plumbing, and documented everything in `docs/DevMode.md`. `go build`/`go test`/`gofmt` remain denied in this environment, so I verified via careful read-through as with prior revisions.
+
+
+## <REPLACE-Revision|Retry> K
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

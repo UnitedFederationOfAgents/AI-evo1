@@ -270,6 +270,32 @@ The same 5-second poll-and-compare exists for LR's managed instances (`federatio
 [`procman.go`](../local-representative/procman.go)'s `pollManagedVersions`. Instead of comparing an on-disk binary against the version compiled into the running process, it compares that on-disk binary's `--version` against whatever version the connected instance last reported (see "Versioning" below): a `terminate` + `launch` from LR's system tab is what "restart" is for a managed instance, so no loader is involved. This drives `agent-coordinator`'s global topology view, which draws an orange halo around a connected sub-application's green box once it's out of date this way — see
 [`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md) Revision D.
 
+That comparison was spuriously true for `federation-command` alone: every
+other sub-application answers `--version` with the bare version string
+(`ufaversion.HandleVersionFlag`, matching what it self-reports over
+representable's "version" message), but `federation-command` hand-rolls its
+own `--version`/`-v` handling and prints a friendlier, name-prefixed
+`"federation-command <version>"` for a human at a terminal — so the string
+comparison in `pollManagedVersions` never matched even when the two sides
+were the same build, permanently flagging FC as having an update available
+on both the global topology and per-host system tab. Rather than drop that
+human-facing prefix (and the `-v` short flag, which only FC supports, and
+which two of FC's own tests assert on), `pollManagedVersions` now strips a
+leading `"<binName> "` off the on-disk `--version` output before comparing —
+see [`condocs/initialDistributedDevelopmentImpls/Step5Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step5Prompt.md)
+Revision J.
+
+Clicking a row on the per-host system tab's process table (LR itself or a
+managed instance) now opens a small drill-down panel underneath the table
+with that process's current (`version`) and pending (`pending_version`)
+build version — the latter being exactly the on-disk string
+`pollManagedVersions`/`selfversion.go`'s poll most recently observed,
+surfaced for the first time rather than collapsed into the boolean
+`update_available` alone. It reads "up to date" once `update_available` is
+false, and clicking the same row again (or a different one) closes/switches
+the panel, same toggle-select behavior as the topology view's host cards —
+see Step5Prompt.md Revision J above.
+
 Each managed instance row on the per-host system tab's process table now has
 that button for real: **restart** (plain, always available, unlike self's
 which is disabled unless loader-managed) — `terminateManaged` followed by
@@ -435,7 +461,10 @@ see the "Loader" section above.
 Every version tag on LR's system tab (its own and each managed instance's)
 rides along in the `system-state` LR already forwards to `agent-coordinator`,
 so `agent-coordinator`'s per-host system tab shows the same version column
-without any protocol addition of its own.
+without any protocol addition of its own. `ProcInfo`'s `pending_version`
+field (Step5Prompt.md Revision J, see "Loader" above) rides the same
+message: the one addition needed to also surface a process's *pending*
+version, not just whether one is available.
 
 ## Browser refresh
 

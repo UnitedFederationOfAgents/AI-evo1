@@ -59,6 +59,15 @@ type ProcInfo struct {
 	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
 	UpdateAvailable bool `json:"update_available,omitempty"`
 
+	// PendingVersion is the on-disk version that UpdateAvailable refers to --
+	// i.e. what Version would become after a restart (Self) or a
+	// terminate+relaunch (a managed instance) picked up the update. Empty
+	// until the corresponding poll (selfversion.go / pollManagedVersions) has
+	// run at least once, and always empty when UpdateAvailable is false.
+	// Drives the system tab's per-process drill-down (see
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision J).
+	PendingVersion string `json:"pending_version,omitempty"`
+
 	// AutoUpdate is only meaningful on Self: whether an available update
 	// (UpdateAvailable above) should trigger a restart on its own, without an
 	// operator pressing the "update and restart" control -- the system tab's
@@ -223,6 +232,7 @@ func (s *Server) systemState() SystemStateMsg {
 		info.DevMode = s.devMode
 		info.Version = s.managedVersion(p.app)
 		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
+		info.PendingVersion = s.managedPendingVersionFor(p.app)
 		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
@@ -244,6 +254,7 @@ func (s *Server) systemState() SystemStateMsg {
 			LoaderManaged:   s.loaderManaged,
 			Version:         ufaversion.Version,
 			UpdateAvailable: s.selfVersion.available(),
+			PendingVersion:  s.selfVersion.pending(),
 			AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		},
 		Managed: procs,
@@ -285,6 +296,20 @@ func (s *Server) managedUpdateAvailableFor(name string) bool {
 	return s.managedUpdateAvailable[name]
 }
 
+// managedPendingVersionFor returns the on-disk version that would replace
+// the named application's currently-reported version on its next relaunch,
+// or "" if no update is available (or none has been observed yet) --
+// mirrors managedUpdateAvailableFor's guard so callers don't need to check
+// both.
+func (s *Server) managedPendingVersionFor(name string) string {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	if !s.managedUpdateAvailable[name] {
+		return ""
+	}
+	return s.managedPendingVersion[name]
+}
+
 // pollManagedVersions re-derives managedUpdateAvailable for every managed
 // application that has reported a running version at least once, by
 // resolving that application's binary the same way launchManaged would and
@@ -321,9 +346,19 @@ func (s *Server) pollManagedVersions() {
 			log.Printf("managed-version: %s --version failed: %v", bin, err)
 			continue
 		}
-		updated := strings.TrimSpace(string(out)) != runningVersion
+		// Most managed apps answer "--version" with the bare version string
+		// (ufaversion.HandleVersionFlag), matching what they self-report over
+		// representable's "version" message (runningVersion, above) -- but
+		// federation-command hand-rolls its own --version handling and prints
+		// "federation-command <version>" instead, for a friendlier terminal
+		// experience. Strip that app-name prefix before comparing so FC isn't
+		// permanently flagged as having a pending update.
+		onDisk := strings.TrimSpace(string(out))
+		onDisk = strings.TrimPrefix(onDisk, spec.binName+" ")
+		updated := onDisk != runningVersion
 
 		s.versionMu.Lock()
+		s.managedPendingVersion[name] = onDisk
 		if s.managedUpdateAvailable[name] != updated {
 			s.managedUpdateAvailable[name] = updated
 			changed = true

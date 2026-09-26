@@ -567,11 +567,20 @@ function formatUptime(startedAt: number, nowSec: number): string {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
 }
 
+// procRowKey identifies a system-tab row for selection/drill-down purposes:
+// managed instances are unique by instance_id, but self has none (it's a
+// singleton row), so it gets a fixed sentinel instead.
+function procRowKey(proc: ProcInfo): string {
+  return proc.managed ? proc.instance_id : '__self__'
+}
+
 function SystemProcRow({
-  proc, nowSec, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
+  proc, nowSec, selected, onSelect, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
+  selected?: boolean
+  onSelect?: () => void
   onTerminate?: (id: string) => void
   onRestart?: () => void
   onRestartManaged?: (id: string) => void
@@ -586,7 +595,11 @@ function SystemProcRow({
     : proc.name
 
   return (
-    <div className={`sys-row sys-row-${proc.status}`}>
+    <div
+      className={`sys-row sys-row-${proc.status}${onSelect ? ' sys-row-clickable' : ''}${selected ? ' sys-row-selected' : ''}`}
+      onClick={onSelect}
+      title={onSelect ? 'click for version details' : undefined}
+    >
       <span className="sys-col sys-col-name">
         <span className="sys-col-name-main">
           {label}
@@ -607,7 +620,7 @@ function SystemProcRow({
             title={proc.update_available
               ? 'a newer build has landed on disk — terminate this instance and launch a new one with it'
               : 'terminate this instance and launch a fresh one of the same application'}
-            onClick={() => onRestartManaged(proc.instance_id)}
+            onClick={e => { e.stopPropagation(); onRestartManaged(proc.instance_id) }}
           >
             {proc.update_available ? 'restart and update' : 'restart'}
           </button>
@@ -615,7 +628,7 @@ function SystemProcRow({
         {proc.managed && onTerminate && (
           <button
             className="sys-btn sys-btn-terminate"
-            onClick={() => onTerminate(proc.instance_id)}
+            onClick={e => { e.stopPropagation(); onTerminate(proc.instance_id) }}
           >
             {proc.status === 'running' ? 'terminate' : 'dismiss'}
           </button>
@@ -629,7 +642,7 @@ function SystemProcRow({
                 ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
                 : 'terminate this LR so ufa-loader relaunches it with the identical config')
               : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
-            onClick={onRestart}
+            onClick={e => { e.stopPropagation(); onRestart() }}
           >
             {proc.update_available ? 'update and restart' : 'restart'}
           </button>
@@ -640,6 +653,7 @@ function SystemProcRow({
             title={proc.loader_managed
               ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
               : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={e => e.stopPropagation()}
           >
             <input
               type="checkbox"
@@ -651,6 +665,44 @@ function SystemProcRow({
           </label>
         )}
       </span>
+    </div>
+  )
+}
+
+// SystemProcDetails is the drill-down shown below the table when a process
+// row is clicked (see procRowKey/SystemPanel) -- Step5Prompt.md Revision J.
+// Mirrors the topology view's .topo-details readout-row convention
+// (App.tsx's per-host "Details & Control" pane).
+function SystemProcDetails({ proc, nowSec }: { proc: ProcInfo; nowSec: number }) {
+  const label = proc.managed && proc.instance > 0 ? `${proc.name} #${proc.instance}` : proc.name
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  return (
+    <div className="sys-details">
+      <div className="sys-details-header">{label}</div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">status</span>
+        <span className="sys-readout-value">
+          {proc.status}{proc.status === 'running' ? ` (${detail} uptime)` : ` (${detail})`}
+          {proc.detail && ` — ${proc.detail}`}
+        </span>
+      </div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">current version</span>
+        <span className="sys-readout-value">
+          {proc.version || <span className="sys-readout-placeholder">not yet reported</span>}
+        </span>
+      </div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">pending version</span>
+        <span className="sys-readout-value">
+          {!proc.update_available
+            ? <span className="sys-readout-placeholder">up to date</span>
+            : proc.pending_version || <span className="sys-readout-placeholder">update available (version unknown)</span>}
+        </span>
+      </div>
     </div>
   )
 }
@@ -736,6 +788,10 @@ function SystemPanel({
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  // Which process row's drill-down is open, keyed by procRowKey -- cleared
+  // whenever that row disappears (e.g. a terminated instance is dismissed)
+  // rather than left pointing at a stale selection.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -758,6 +814,10 @@ function SystemPanel({
     fcState === 'remote-control' ? 'remote'
     : fcState === 'local-control' ? 'local'
     : 'not connected'
+
+  const selectedProc = selectedKey === null
+    ? undefined
+    : [state.self, ...managed].find(p => procRowKey(p) === selectedKey)
 
   return (
     <div className="sys-panel">
@@ -783,6 +843,8 @@ function SystemPanel({
         <SystemProcRow
           proc={state.self}
           nowSec={nowSec}
+          selected={selectedKey === procRowKey(state.self)}
+          onSelect={() => setSelectedKey(k => k === procRowKey(state.self) ? null : procRowKey(state.self))}
           onRestart={() => onRestart(hostId)}
           onSetAutoUpdate={enabled => onSetAutoUpdate(hostId, enabled)}
         />
@@ -791,6 +853,8 @@ function SystemPanel({
             key={p.instance_id}
             proc={p}
             nowSec={nowSec}
+            selected={selectedKey === procRowKey(p)}
+            onSelect={() => setSelectedKey(k => k === procRowKey(p) ? null : procRowKey(p))}
             onTerminate={id => onTerminate(hostId, id)}
             onRestartManaged={id => onRestartManaged(hostId, id)}
           />
@@ -799,6 +863,7 @@ function SystemPanel({
           <div className="sys-row sys-row-none">no managed applications</div>
         )}
       </div>
+      {selectedProc && <SystemProcDetails proc={selectedProc} nowSec={nowSec} />}
 
       <div className="sys-launch">
         <span className="sys-launch-label">launch</span>

@@ -44,6 +44,7 @@ type selfVersionWatch struct {
 
 	mu              sync.RWMutex
 	updateAvailable bool
+	pendingVersion  string // last on-disk "--version" answer that triggered updateAvailable; "" if none
 	autoUpdate      bool
 }
 
@@ -71,11 +72,13 @@ func (w *selfVersionWatch) poll() {
 		log.Printf("self-version: %s --version failed: %v", w.binPath, err)
 		return
 	}
-	updated := strings.TrimSpace(string(out)) != w.running
+	onDisk := strings.TrimSpace(string(out))
+	updated := onDisk != w.running
 
 	w.mu.Lock()
 	changed := w.updateAvailable != updated
 	w.updateAvailable = updated
+	w.pendingVersion = onDisk
 	shouldRestart := updated && w.autoUpdate
 	w.mu.Unlock()
 
@@ -97,6 +100,21 @@ func (w *selfVersionWatch) available() bool {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.updateAvailable
+}
+
+// pending returns the on-disk version that would replace running on the
+// next restart, or "" if no update is available (or none has been observed
+// yet). Safe to call on a nil watch, mirroring available().
+func (w *selfVersionWatch) pending() string {
+	if w == nil {
+		return ""
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	if !w.updateAvailable {
+		return ""
+	}
+	return w.pendingVersion
 }
 
 // setAutoUpdate toggles whether an available update should trigger a restart

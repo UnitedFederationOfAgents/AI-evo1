@@ -80,6 +80,33 @@ func TestSelfVersionWatchNilSafe(t *testing.T) {
 	if w.autoUpdateEnabled() {
 		t.Fatal("a nil watch should report auto-update disabled")
 	}
+	if p := w.pending(); p != "" {
+		t.Fatalf("a nil watch's pending() = %q, want empty", p)
+	}
+}
+
+// TestSelfVersionWatchPollPending verifies poll() surfaces the observed
+// on-disk version via pending() exactly while an update is available, and
+// that it goes back to empty once running catches up -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision J.
+func TestSelfVersionWatchPollPending(t *testing.T) {
+	bin := fakeVersionBin(t, "v2")
+	w := &selfVersionWatch{binPath: bin, running: "v1", notify: func() {}}
+
+	if p := w.pending(); p != "" {
+		t.Fatalf("pending() before any poll = %q, want empty", p)
+	}
+
+	w.poll()
+	if p := w.pending(); p != "v2" {
+		t.Fatalf("pending() after poll = %q, want %q", p, "v2")
+	}
+
+	w.running = "v2"
+	w.poll()
+	if p := w.pending(); p != "" {
+		t.Fatalf("pending() once running catches up = %q, want empty", p)
+	}
 }
 
 // TestSelfVersionWatchAutoUpdateFiresOnPoll verifies that with auto-update on,

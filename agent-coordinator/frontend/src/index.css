@@ -621,6 +621,12 @@ body {
 .sys-row-head { background: #252526; color: #666; text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; font-weight: 600; }
 .sys-row-none { display: block; color: #666; font-style: italic; padding: 10px 12px; }
 .sys-row-failed { background: #241717; }
+/* Process rows are clickable to open the version drill-down below the table
+   (see SystemProcDetails/procRowKey) -- Step5Prompt.md Revision J. */
+.sys-row-clickable { cursor: pointer; }
+.sys-row-clickable:hover { background: #262626; }
+.sys-row-selected { background: #16324a; }
+.sys-row-selected:hover { background: #1a3a56; }
 .sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sys-col-name { color: #d4d4d4; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow: visible; white-space: normal; }
 .sys-col-name-main { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -643,6 +649,24 @@ body {
    .sys-btn-rebuild-dirty's "worth your attention" treatment. */
 .sys-btn-restart-update { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
 .sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
+/* Version drill-down for a selected process row (SystemProcDetails) --
+   mirrors .topo-details/.topo-readout-* from the global topology view's
+   per-host "Details & Control" pane, scaled down to sit under the table. */
+.sys-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+.sys-details-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-readout-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-readout-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-readout-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-readout-placeholder { color: #555; font-style: italic; }
+
 .sys-launch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
 .sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }

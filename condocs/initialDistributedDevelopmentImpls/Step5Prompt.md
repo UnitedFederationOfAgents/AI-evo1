@@ -213,11 +213,10 @@ prompt: [`063f507`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0
 Found and fixed the bug: agent-coordinator's own `ProcInfo` struct (in `main.go`, used to decode LR's `system-state` payload over representable) never had an `AutoUpdate` field, even though local-representative's `ProcInfo` and both frontends' TypeScript types do. Since Go's `json.Unmarshal` silently drops unknown fields, every LR-hosted "auto-update" checkbox routed through agent-coordinator (per-host system tab, and both toggles in the global topology view) always got re-broadcast to the browser as `auto_update: false`/absent regardless of the real state, so it could never render as checked. I added the missing `AutoUpdate bool \`json:"auto_update,omitempty"\`` field to that struct and a regression test (`procinfo_test.go`) asserting the field round-trips through JSON decode/encode. `go build`/`go test` remain denied in this environment, so I verified via read-through as with prior revisions.
 
 
-## <REPLACE-Revision|Retry> L
+## Revision L
 
-<REPLACE-PROMPT>
+We have an issue with auto-rebuild where we end up losing our dev binaries from the path.
 
+Let's attempt to resolve this by making it so that the binaries are first build in a tempdir, and upon success are swapped into place.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also introduce a 'trough' in the system tab -- an expandable-and-then-scrollable single line at the bottom of the main pane where we can print errors or notifications when things happen like a failure during rebuild.

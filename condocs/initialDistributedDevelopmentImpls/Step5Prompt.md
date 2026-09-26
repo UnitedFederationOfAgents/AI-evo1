@@ -137,11 +137,10 @@ prompt: [`da32a82`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d
 I found and fixed the bug — it was low effort. Condoccer mirrors its nav state into `location.hash` via `history.replaceState` for the "browser pickup" resume mechanism, but `replaceState` never dispatches a `hashchange` event. LR's and AC's iframe wrappers only recapture condoccer's hash by listening for `hashchange`, so they were silently stuck with whatever hash existed at the iframe's *initial* load — meaning a later reload of the outer AC/LR page (e.g. from auto-update) handed condoccer back that stale, initial hash instead of the step/condoc the user had actually navigated to since. I fixed it by having condoccer manually dispatch a `HashChangeEvent` right after each `replaceState` call, and documented the fix in `docs/DevMode.md`.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+Let's revisit the condoc lockfile problem.
 
+We still have the issue where the .condoc is left dirty as deleted in the git state.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix it or explain why it is so difficult so we can re-assess.

@@ -157,11 +157,10 @@ Revision D only made `handleCondocAgentDone` (the post-agent-reply commit) proac
 I extracted the existing removal logic into a shared `removeCondocLockFile(repoRoot)` helper and called it at all three previously-missing sites (plus the original, now deduplicated), and added a small unit test for the helper in `federation-command/condoc_test.go`. `go build`/`go test` remain denied here, so this was verified by read-through as with prior revisions.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+Now let's add a lockfile for the 'make deploy-dev-binaries' process.
 
+We WILL gitignore this file. We'll call it '.building' and place it at the root of the repo. We will create it upon call and remove it when the call is complete.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When we are detecting rebuild completion we will now trigger off of this file's presence, and we will introduce an additional 30 second delay upon completion to help eliminate race conditions.

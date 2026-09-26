@@ -200,6 +200,15 @@ type ProcInfo struct {
 	// local-representative/procman.go's ProcInfo. Empty whenever
 	// UpdateAvailable is false.
 	PendingVersion string `json:"pending_version,omitempty"`
+
+	// AutoUpdate is only meaningful on Self: whether that local-representative
+	// restarts itself automatically the instant UpdateAvailable goes true --
+	// see local-representative/selfversion.go and
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+	// Without this field, decoding LR's system-state payload into this struct
+	// silently dropped the flag, so the frontend's "auto-update" checkbox
+	// could never render as checked (Revision K).
+	AutoUpdate bool `json:"auto_update,omitempty"`
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.

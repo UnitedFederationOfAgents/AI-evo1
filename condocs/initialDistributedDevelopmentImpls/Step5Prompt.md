@@ -204,3 +204,20 @@ Implemented Step 5 Revision J: added a click-to-select drill-down (`SystemProcDe
 We have a bug where we cannot select the auto-update toggle.
 
 Let's fix that - we expect to see the checkbox checked when we select it (corresponding to the state being active).
+
+
+prompt: [`063f507`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/063f5073128838a4048b9f71080bbb10084e98e1) → reply: [`6c7afb1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6c7afb18e6d35e1ce562ae9ebc4623a4183ff295)
+
+## Reply K
+
+Found and fixed the bug: agent-coordinator's own `ProcInfo` struct (in `main.go`, used to decode LR's `system-state` payload over representable) never had an `AutoUpdate` field, even though local-representative's `ProcInfo` and both frontends' TypeScript types do. Since Go's `json.Unmarshal` silently drops unknown fields, every LR-hosted "auto-update" checkbox routed through agent-coordinator (per-host system tab, and both toggles in the global topology view) always got re-broadcast to the browser as `auto_update: false`/absent regardless of the real state, so it could never render as checked. I added the missing `AutoUpdate bool \`json:"auto_update,omitempty"\`` field to that struct and a regression test (`procinfo_test.go`) asserting the field round-trips through JSON decode/encode. `go build`/`go test` remain denied in this environment, so I verified via read-through as with prior revisions.
+
+
+## <REPLACE-Revision|Retry> L
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

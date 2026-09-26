@@ -395,6 +395,24 @@ an additional 30-second settling period before actually clearing — "to help
 eliminate race conditions" against anything still settling on disk right as
 the lock is removed.
 
+`make deploy-dev-binaries` builds every sub-project's binary into a
+scratch staging directory (`/AI-evo1-dev/bin.new`) and only swaps it into
+the real dev bin dir (`/AI-evo1-dev/bin`) once every sub-project has
+deployed successfully — it never wipes the real dev bin dir up front the
+way it used to (Revision L). A failed or interrupted build (a compile
+error partway through the sub-project loop, or the recipe getting killed
+outright) now simply leaves the previous, still-working dev bin dir
+untouched instead of leaving it half-emptied for `ufa-loader` to relaunch
+from.
+
+If a rebuild does fail, the **system tab**'s "trough" — a collapsed single
+line at the bottom of the panel that expands into a scrollable log on
+click — records it (Revision L). It's a live, session-scoped notification
+log fed by `RepoStateMsg.last_error`; agent-coordinator's per-host system
+tab mirrors it the same way it mirrors the rest of that panel, and its
+global system tab aggregates every connected host's failures into one
+trough, each entry tagged with the host it came from.
+
 LR forwards its watcher snapshot up to `agent-coordinator` as `repo-state`,
 and `agent-coordinator`'s own per-host system tab renders the identical
 rebuild/dirty/auto-rebuild panel from it — the **rebuild** button and

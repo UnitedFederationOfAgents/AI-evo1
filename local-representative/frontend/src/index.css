@@ -962,6 +962,72 @@ body {
   white-space: nowrap;
 }
 
+/* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
+
+.sys-trough {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #111;
+}
+
+.sys-trough-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-family: inherit;
+  font-size: 11px;
+  color: #aaa;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sys-trough-line:disabled { cursor: default; color: #666; }
+
+.sys-trough-chevron { flex-shrink: 0; color: #666; }
+
+.sys-trough-ts { flex-shrink: 0; color: #666; }
+
+.sys-trough-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sys-trough-empty { font-style: italic; color: #666; }
+
+.sys-trough-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #888;
+  background: #252526;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.sys-trough-list {
+  max-height: 160px;
+  overflow-y: auto;
+  border-top: 1px solid #2a2a2a;
+}
+
+.sys-trough-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #c96e6e;
+  border-bottom: 1px solid #202020;
+}
+
+.sys-trough-entry:last-child { border-bottom: none; }
+
 .sys-launch {
   display: flex;
   align-items: center;

@@ -220,3 +220,24 @@ We have an issue with auto-rebuild where we end up losing our dev binaries from 
 Let's attempt to resolve this by making it so that the binaries are first build in a tempdir, and upon success are swapped into place.
 
 Let's also introduce a 'trough' in the system tab -- an expandable-and-then-scrollable single line at the bottom of the main pane where we can print errors or notifications when things happen like a failure during rebuild.
+
+
+prompt: [`ca1e781`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ca1e781de8c48b01ccb0aa2bf8ba72bbc9cb6976) → reply: [`4372434`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4372434eae27cf625bbf5fa04cff9af66baf19d2)
+
+## Reply L
+
+All changes look complete and consistent. This completes Revision L.
+
+## Summary
+
+Implemented Step 5 Revision L's two asks. First, fixed `make deploy-dev-binaries` losing dev binaries during auto-rebuild: it now builds every sub-project into a scratch staging directory (`/AI-evo1-dev/bin.new`) and only swaps it into the real `/AI-evo1-dev/bin` once every sub-project has deployed successfully (via a `DEV_BIN_DIR` override on each `deploy-dev-binary` sub-make invocation), so a build failing or getting killed partway through — previously wiping the real bin dir up front — now leaves the last-known-good binaries untouched; a failed build also now cleans up its `.building` lock and staging dir instead of leaving the lock stuck forever. Second, added a "trough" — a collapsed single-line notification bar that expands into a scrollable session log — to the bottom of the system tab in both local-representative and agent-coordinator (per-host and global-aggregated-across-hosts variants), currently fed by rebuild failures (`RepoStateMsg.last_error`) but written generically for future notification sources. Documented both changes in `docs/DevMode.md`. `go build`/`make`/`npm`/`tsc` remain denied in this environment, so I verified via careful read-through as with prior revisions.
+
+
+## <REPLACE-Revision|Retry> M
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

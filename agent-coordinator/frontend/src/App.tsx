@@ -707,6 +707,115 @@ function SystemProcDetails({ proc, nowSec }: { proc: ProcInfo; nowSec: number })
   )
 }
 
+// TroughEntry is one line in a system tab's "trough" (see Trough below) --
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision L.
+interface TroughEntry {
+  id: number
+  ts: number // Date.now(), when the notification was recorded
+  text: string
+}
+
+// TROUGH_MAX_ENTRIES caps how much history a trough keeps -- it's a live,
+// session-scoped notification log (not persisted; a refresh starts it fresh),
+// not an audit trail, so old entries are simply dropped off the front.
+const TROUGH_MAX_ENTRIES = 50
+
+let troughIdSeq = 0
+
+// useTrough appends a new trough entry each time `error` changes to a new,
+// non-empty value -- right now that's only ever LRRepoStateMsg.last_error
+// after a failed rebuild, per the prompt's "print errors or notifications
+// when things happen like a failure during rebuild", but the trough itself
+// is generic (any future error/notification source can feed it the same
+// way). Used by the per-host system tab; see useAggregateTrough for the
+// global system tab's multi-host equivalent.
+function useTrough(error: string | undefined): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (error && error !== lastSeen.current) {
+      setEntries(prev => [
+        ...prev.slice(-(TROUGH_MAX_ENTRIES - 1)),
+        { id: ++troughIdSeq, ts: Date.now(), text: `rebuild failed — ${error}` },
+      ])
+    }
+    lastSeen.current = error
+  }, [error])
+
+  return entries
+}
+
+// useAggregateTrough is useTrough generalized across every connected host, for
+// the global system tab: each host's own rebuild failure is recorded once,
+// tagged with that host's label, keyed independently so one host's repeated
+// failures don't mask another's.
+function useAggregateTrough(hosts: Host[], hostData: Record<string, HostClientState>): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<Record<string, string | undefined>>({})
+
+  useEffect(() => {
+    setEntries(prev => {
+      let next = prev
+      for (const h of hosts) {
+        const error = hostData[h.id]?.repo?.last_error
+        if (error && error !== lastSeen.current[h.id]) {
+          next = [
+            ...next.slice(-(TROUGH_MAX_ENTRIES - 1)),
+            { id: ++troughIdSeq, ts: Date.now(), text: `${h.label}: rebuild failed — ${error}` },
+          ]
+        }
+        lastSeen.current[h.id] = error
+      }
+      return next
+    })
+  }, [hosts, hostData])
+
+  return entries
+}
+
+// Trough is "an expandable-and-then-scrollable single line at the bottom of
+// the main pane where we can print errors or notifications when things
+// happen" (Step5Prompt.md Revision L). Collapsed, it's just the most recent
+// entry on one line; clicking it expands into a scrollable list of
+// everything recorded this session, newest first.
+function Trough({ entries }: { entries: TroughEntry[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const latest = entries[entries.length - 1]
+
+  return (
+    <div className={`sys-trough${expanded ? ' sys-trough-expanded' : ''}`}>
+      <button
+        className="sys-trough-line"
+        onClick={() => setExpanded(e => !e)}
+        disabled={entries.length === 0}
+        title={entries.length === 0 ? 'no notifications yet' : expanded ? 'collapse' : 'expand for full history'}
+      >
+        <span className="sys-trough-chevron">{expanded ? '▾' : '▸'}</span>
+        {latest ? (
+          <>
+            <span className="sys-trough-ts">{new Date(latest.ts).toLocaleTimeString()}</span>
+            <span className="sys-trough-text">{latest.text}</span>
+          </>
+        ) : (
+          <span className="sys-trough-empty">no notifications</span>
+        )}
+        {entries.length > 1 && <span className="sys-trough-count">{entries.length}</span>}
+      </button>
+      {expanded && (
+        <div className="sys-trough-list">
+          {entries.slice().reverse().map(e => (
+            <div key={e.id} className="sys-trough-entry">
+              <span className="sys-trough-ts">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className="sys-trough-text">{e.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // RepoWatchPanel mirrors local-representative's own dev-repo watcher widget
 // (--dev-repo, see docs/DevMode.md): the rebuild button turns orange and
 // reads "dirty" while the watched repo has uncommitted changes -- but stays
@@ -792,6 +901,7 @@ function SystemPanel({
   // whenever that row disappears (e.g. a terminated instance is dismissed)
   // rather than left pointing at a stale selection.
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const troughEntries = useTrough(repoState?.last_error)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -883,6 +993,7 @@ function SystemPanel({
           )
         })}
       </div>
+      <Trough entries={troughEntries} />
     </div>
   )
 }
@@ -1737,6 +1848,7 @@ function GlobalSystemPanel({
   sendACRestartApp: () => void
 }) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
+  const troughEntries = useAggregateTrough(hosts, hostData)
   return (
     <div className="global-sys-panel">
       <div className="tab-bar tab-bar-nested">
@@ -1769,6 +1881,7 @@ function GlobalSystemPanel({
       ) : (
         <div className="service-empty">not yet implemented</div>
       )}
+      <Trough entries={troughEntries} />
     </div>
   )
 }

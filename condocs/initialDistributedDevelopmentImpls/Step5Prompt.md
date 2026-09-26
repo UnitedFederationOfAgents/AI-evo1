@@ -253,11 +253,8 @@ This matches the intended scope of Revision M exactly — no unrelated files tou
 Implemented Step 5 Revision M's forward/back navigation arrows in the upper-right corner of both `local-representative` and `agent-coordinator`. Each app now has a small in-app `useScreenHistory` stack (independent of real browser history, consistent with the existing `replaceState`-only browser-pickup design) capped at a pragmatic `NAV_HISTORY_MAX = 20` recent screens: for `local-representative` a "screen" is the active tab, and for `agent-coordinator` it's the (selected host or global, active tab) pair. A `NavArrows` component renders `←`/`→` buttons next to the connection dot, illuminated only when that direction has history available, with clicking replaying the recorded screen without pushing a new entry. Documented the mechanism in a new "Screen history" section of `docs/DevMode.md` alongside the existing "Browser pickup" writeup. As with all prior revisions, `go`/`npm`/`tsc` are denied in this environment, so I verified correctness via careful read-through.
 
 
-## <REPLACE-Revision|Retry> N
+## Revision N
 
-<REPLACE-PROMPT>
+We have loaded the current version but there do not appear to be any arrows.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make sure the arrows are visible, to the left of the 'connecter dot' on AC and LR. They will use the same grey pallet as the rest of the outline and illumination will indicate availability.

@@ -131,12 +131,14 @@ Changes:
 
 No other `fetch`/URL builder in the file had this bug — everything else already used `basePath()`. As with prior revisions, `tsc`/`npm build` are denied in this environment, so this was verified by read-through rather than compiling; there's no existing frontend test harness in condoccer to add a regression test to.
 
+## Resource 3 -- MobileTest
 
-## <REPLACE-Revision|Retry> E
+Upload from mobile to test.
 
-<REPLACE-PROMPT>
+- [17905265231357489352231913029618.jpg](55fcf5de_17905265231357489352231913029618.jpg)
 
+## Revision E
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In our next invocation let's do two things:
+- Let's add a little yellow dot in the top-right hand corner of the 'files' tab picker if any files are highlighted. If we double-click this dot it takes us to the location of the first highlighted file (right host, right file).
+- Let's respond with an explanation of what we see in the resource 'MOBILETEST'

@@ -1762,7 +1762,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                     if (resourceName.trim()) form.append('name', resourceName.trim())
                     form.append('description', resourceDescription.trim())
                     for (const f of uploadFiles) form.append('file', f)
-                    const resp = await fetch('/api/upload-resource', { method: 'POST', body: form })
+                    const resp = await fetch(`${basePath()}/api/upload-resource`, { method: 'POST', body: form })
                     if (!resp.ok) {
                       setUploadError(await resp.text())
                       return

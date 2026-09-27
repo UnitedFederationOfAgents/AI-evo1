@@ -100,6 +100,21 @@ reachable only by a browser connected directly to that LR — into
   sources mid-upload) until Cancel or a successful submission clears it. The
   same `.condoc`-lock discipline as "Highlighted" applies, asserted before
   the first uploaded byte lands in the Impls folder.
+- **Revision D of Step5SubstepRPrompt.md fixes "Upload" breaking under a
+  reverse-proxy prefix.** The upload `fetch` was built from an
+  origin-absolute `/api/upload-resource`, unlike every other request this UI
+  makes (the WebSocket URL, `GET /api/resource/...`), which all derive their
+  target from `basePath()` — the path condoccer's own document was actually
+  served under. Viewed directly that prefix is empty, so the bug was
+  invisible; viewed through local-representative's `/condoccer/` proxy or,
+  worse, agent-coordinator's `/host/<id>/condoccer/` iframe, the absolute
+  path instead lands on the *outer* server's unrelated catch-all route,
+  which answers with its own frontend's `index.html` (200 OK) rather than
+  ever reaching condoccer — read as a silent success by the dialog even
+  though nothing was uploaded. Depending on the upload's size and timing,
+  browsers may instead abort the still-in-flight request body once that
+  premature response arrives, surfacing as a `TypeError: Failed to fetch`.
+  The fix routes the request through `basePath()` like everything else.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

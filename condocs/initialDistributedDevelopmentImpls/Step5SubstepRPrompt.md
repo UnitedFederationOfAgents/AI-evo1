@@ -117,3 +117,26 @@ An image of the 'failed to fetch' issue.
 Let's take another look at the 'upload' condoc resource addition path - when we attempt it from the mobile interface we get a silent failure, when we attempt it from the laptop interface we get the 'failed to fetch' error we can see in the 'OutputDebugFailedToFetch' image.
 
 Let's fix this.
+
+
+prompt: [`29a0d24`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/29a0d24740b2a9d171fffda447aad824b8abc072) → reply: [`4cca121`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4cca1219e6ce44a5e4ef27f7099c2e5b63e732af)
+
+## Reply D
+
+Root cause found and fixed: the "Upload" resource submit handler built its request with an origin-absolute `fetch('/api/upload-resource', ...)` instead of going through `basePath()` like every other request in this file (the WebSocket URL, `GET /api/resource/...`). That's invisible when condoccer is viewed directly, but when viewed through a reverse-proxy prefix — local-representative's `/condoccer/` or, worse, agent-coordinator's nested `/host/<id>/condoccer/` iframe (the laptop's path in the screenshot) — the absolute path instead lands on the *outer* server's unrelated catch-all, which answers 200 with its own `index.html` rather than ever reaching condoccer. Small uploads get silently "accepted" and do nothing (the mobile symptom); larger ones can trip the browser into aborting the still-uploading body once that premature response lands, surfacing as `TypeError: Failed to fetch` (the laptop symptom).
+
+Changes:
+- `condoccer/frontend/src/App.tsx`: route the upload fetch through `` `${basePath()}/api/upload-resource` `` instead of the hardcoded absolute path.
+- `docs/DistributedExchange.md`: documented the bug and fix under a new Revision D bullet.
+
+No other `fetch`/URL builder in the file had this bug — everything else already used `basePath()`. As with prior revisions, `tsc`/`npm build` are denied in this environment, so this was verified by read-through rather than compiling; there's no existing frontend test harness in condoccer to add a regression test to.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

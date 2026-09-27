@@ -2307,7 +2307,7 @@ export default function App() {
   // each host's own file order.
   const firstHighlighted = useMemo(() => {
     for (const host of hosts) {
-      const hit = hostData[host.id]?.files?.files.find(f => f.highlighted)
+      const hit = hostData[host.id]?.files?.files?.find(f => f.highlighted)
       if (hit) return { hostId: host.id, fileId: hit.id }
     }
     return null

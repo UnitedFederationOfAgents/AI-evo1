@@ -89,7 +89,7 @@ export type ServerMsg =
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
 
 export interface ActionRequest {
-  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit'
+  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit' | 'add_resource'
   path: string
   content?: string
   letter?: string
@@ -98,4 +98,5 @@ export interface ActionRequest {
   revertStep?: number
   revertIter?: string
   revertSubIter?: string
+  resourceType?: 'highlighted' // for add_resource action; only option so far
 }

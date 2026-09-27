@@ -32,3 +32,27 @@ On the condoccer side the resource-inclusion will work as follows:
   - There will be a section of text inserted into the condoc which links to the resource file
   - The resource-and-description block will be inserted ABOVE the '## <REPLACE-Revision|Retry> A' line, creating a new '## Resouce (N)' block with proper spacing
   - The '.condoc' lock will be asserted here because we do not want to rebuild upon inclusion of condoc resources
+
+
+prompt: [`048e0a1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/048e0a102d36bfd3bf27cc188a3cc49942471043) → reply: [`9daabef`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9daabefa6a037bb4b615e5aa784f673a2a9d4e81)
+
+## Reply A
+
+Good — the substep prompt file itself wasn't touched, and `.condoc` remains an untracked artifact from the harness, not something I wrote. All changes are in place.
+
+I implemented Revision A across the stack:
+
+- **`representable` package**: `Server` gained an opt-in `SetHTTPPort`, disclosed to every connecting client via the existing "hello" message; `Client` gained `PeerHTTPPort()` to read it back. **local-representative** now calls `SetHTTPPort` with its own dashboard port, so condoccer (which only dialed LR's representable port) can now reach LR's HTTP file API directly.
+- **condoccer backend** (`condoccer/resources.go`, new): a new `add_resource` action pulls every currently-highlighted file from LR's `GET /api/files`/`GET /api/files/<id>` (already ungated, so it works through AC's proxy unmodified too), copies them into the condoc's `<name>Impls` folder, and inserts a `## Resource (N)` block linking to them directly above the pending `## <REPLACE-Revision|Retry>` placeholder — asserting the `.condoc` lock for the whole copy+edit so LR's dev-repo watcher can't rebuild mid-operation.
+- **condoccer frontend**: `ActionPanel` (shared by step and substep views) gained an "Add Resources…" button opening a form with the "Highlighted" source option and a description field, sending the new action over the existing WebSocket.
+- Added Go tests for the markdown insertion/numbering logic, the HTTP fetch-and-copy path (via `httptest`), and the new `representable` HTTPPort disclosure; updated `docs/DistributedExchange.md` and `docs/CurrentPersistentFiles.md` to describe the mechanism. As before, `go build`/`go test` are denied in this environment, so I verified correctness by careful read-through rather than compiling.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

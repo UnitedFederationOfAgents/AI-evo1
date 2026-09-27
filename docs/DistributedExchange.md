@@ -53,6 +53,25 @@ reachable only by a browser connected directly to that LR — into
   through AC's transparent proxy unmodified. This increment only implements
   the marking itself: a first step toward flagging files at the LR/AC level
   for cross-system functionality condoccer will build on later.
+- **Revision A wires up that cross-system functionality for condoccer**:
+  condoccer's "Add Resources" action (available on any step/substep while
+  it's `awaiting_action`) pulls every currently-highlighted file straight
+  from local-representative and copies it into the condoc's `Impls` folder,
+  inserting a `## Resource (N)` block that links to each copy. condoccer
+  already maintains a `representable.Client` connection to LR (see
+  `condoccer/repr.go`) purely for status/commands, which knows LR's dial
+  host but not its separate HTTP dashboard port — so `representable.Server`
+  gained an opt-in `SetHTTPPort`, disclosed to every connecting client in its
+  existing "hello" message (`representable.Client.PeerHTTPPort`).
+  local-representative sets it to its own `-port`; condoccer resolves
+  `http://<lr-host>:<lr-http-port>/api/files` (and `/api/files/<id>?download=1`
+  per highlighted file) directly against it — the same ungated endpoints AC's
+  transparent proxy already passes through, so nothing new was needed on the
+  AC side. The `.condoc` lock is asserted for the duration of the copy+edit
+  (see `condoccer/resources.go`), since — unlike every other condoccer
+  action — inserting a resource block doesn't itself change the condoc's
+  phase, so nothing else would otherwise stop local-representative's
+  dev-repo watcher from rebuilding mid-operation.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

@@ -75,7 +75,7 @@ type wsMsg struct {
 
 // ActionRequest is sent by the client when the user clicks an action button.
 type ActionRequest struct {
-	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert, resubmit
+	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert, resubmit, add_resource
 	Path          string `json:"path"`          // condoc path (relative to repo root)
 	Content       string `json:"content,omitempty"`
 	Letter        string `json:"letter,omitempty"`
@@ -84,6 +84,7 @@ type ActionRequest struct {
 	RevertStep    int    `json:"revertStep,omitempty"`    // for revert action
 	RevertIter    string `json:"revertIter,omitempty"`    // for revert action (optional iteration letter)
 	RevertSubIter string `json:"revertSubIter,omitempty"` // for revert action (optional substep iter letter)
+	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" (only option so far)
 }
 
 // CondocMeta holds the parsed condoc-yaml fields.
@@ -130,6 +131,8 @@ var (
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 	commitHashRe         = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
+	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource \((\d+)\)`)
+	placeholderLineRe    = regexp.MustCompile(`(?m)^## <REPLACE-Revision\|Retry> [A-Z]\s*$`)
 )
 
 // DiffHunk represents a single @@ hunk in a unified diff.
@@ -815,6 +818,9 @@ func (s *Server) performAction(action ActionRequest) error {
 		}
 		// Write revert directive to the active condoc file so the handler sees it.
 		return appendToFile(activeFile, "\n"+directive+"\n")
+
+	case "add_resource":
+		return s.addResource(absPath, info, action)
 
 	case "resubmit":
 		// Stage and commit any outstanding working-tree changes so that the

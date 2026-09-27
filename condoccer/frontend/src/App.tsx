@@ -1280,7 +1280,7 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
 
 // ---- Action panel (for step or substep view) ----
 
-type ActionMode = null | 'revision' | 'retry' | 'revert' | 'substep'
+type ActionMode = null | 'revision' | 'retry' | 'revert' | 'substep' | 'add_resource'
 
 interface ActionPanelProps {
   state: CondocState
@@ -1295,6 +1295,8 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [fromSel, setFromSel] = useState('start')
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
+  const [resourceType, setResourceType] = useState<'highlighted'>('highlighted')
+  const [resourceDescription, setResourceDescription] = useState('')
 
   useEffect(() => {
     setMode(null)
@@ -1302,6 +1304,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setFromSel('start')
     setRevertIter('')
     setSubstepTitle('')
+    setResourceDescription('')
   }, [info.path, info.stepNum, info.substepLetter])
 
   if (info.phase === 'agent_running') {
@@ -1368,6 +1371,9 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           )}
           <button className="btn-danger" onClick={() => setMode('revert')}>
             Revert↩
+          </button>
+          <button className="btn-secondary" onClick={() => setMode('add_resource')}>
+            Add Resources…
           </button>
         </div>
       )}
@@ -1516,6 +1522,42 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               }}
             >
               Confirm Revert ↩
+            </button>
+            <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {mode === 'add_resource' && (
+        <div className="action-form">
+          <div className="action-form-title">Add Resources</div>
+          <div className="action-form-row">
+            <span className="action-form-label">Source:</span>
+            <select value={resourceType} onChange={(e) => setResourceType(e.target.value as 'highlighted')}>
+              <option value="highlighted">Highlighted</option>
+            </select>
+          </div>
+          <textarea
+            placeholder="Describe why these resources are included…"
+            value={resourceDescription}
+            onChange={(e) => setResourceDescription(e.target.value)}
+            rows={3}
+          />
+          <div className="action-row">
+            <button
+              className="btn-primary"
+              onClick={() => {
+                onAction({
+                  action: 'add_resource',
+                  path: info.path,
+                  resourceType,
+                  content: resourceDescription.trim(),
+                })
+                setMode(null)
+                setResourceDescription('')
+              }}
+            >
+              Add Resources →
             </button>
             <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
           </div>

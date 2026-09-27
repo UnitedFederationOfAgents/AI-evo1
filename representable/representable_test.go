@@ -163,6 +163,46 @@ func TestModeMatchAllowsFullTraffic(t *testing.T) {
 	}
 }
 
+// TestServerDisclosesHTTPPort is an end-to-end (real TCP loopback) check
+// that a server's SetHTTPPort is disclosed to a connecting client via
+// "hello", and that a server which never calls it discloses an empty port
+// rather than a stale or zero-value one (see Step5SubstepRPrompt.md,
+// Revision A).
+func TestServerDisclosesHTTPPort(t *testing.T) {
+	s, addr := newTestServer(t, ModeOps)
+	s.SetHTTPPort("8081")
+
+	c, err := Connect(addr, "client", ModeOps, time.Second)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	waitFor(t, func() bool { return c.PeerHTTPPort() != "" }, "client never learned the server's HTTP port")
+	if got := c.PeerHTTPPort(); got != "8081" {
+		t.Errorf("PeerHTTPPort = %q, want %q", got, "8081")
+	}
+}
+
+// TestServerNoHTTPPortDisclosesEmpty verifies a server that never calls
+// SetHTTPPort discloses an empty HTTPPort, so a client can tell "no HTTP
+// dashboard" apart from "haven't heard yet" only by also checking it hasn't
+// connected -- not by a sentinel value.
+func TestServerNoHTTPPortDisclosesEmpty(t *testing.T) {
+	_, addr := newTestServer(t, ModeOps)
+
+	c, err := Connect(addr, "client", ModeOps, time.Second)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer c.Close()
+
+	waitFor(t, func() bool { return c.ModeMismatch() || c.PeerMode() == ModeOps }, "client never received hello")
+	if got := c.PeerHTTPPort(); got != "" {
+		t.Errorf("PeerHTTPPort = %q, want empty", got)
+	}
+}
+
 // TestModeMismatchRefusesEverythingButHealth is an end-to-end (real TCP
 // loopback) check of the core dev/ops contract (see docs/DevMode.md): a
 // mismatched pair still exchanges heartbeats, but state/log/data traffic is

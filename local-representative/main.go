@@ -1203,6 +1203,12 @@ func main() {
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
+	// Disclose our own HTTP port to every connecting client (federation-command,
+	// condoccer, ...) so a sub-app that only knows our representable dial
+	// address can still reach our HTTP API directly -- see
+	// condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md,
+	// Revision A.
+	reprSrv.SetHTTPPort(s.httpPort)
 	s.reprServer = reprSrv
 
 	// Track FC control mode changes and forward log entries to browser clients.

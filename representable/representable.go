@@ -54,6 +54,13 @@ type ServerMsg struct {
 	Type string `json:"type"`          // "command" or "hello"
 	Cmd  string `json:"cmd,omitempty"` // for type="command"
 	Mode string `json:"mode,omitempty"` // for type="hello": the server's dev-mode status (ModeDev or ModeOps)
+	// HTTPPort is, for type="hello", the server's own HTTP dashboard port, if
+	// it has one (local-representative does; not every representable.Server
+	// caller sets one -- see Server.SetHTTPPort). It lets a client that only
+	// knows the representable dial address (e.g. condoccer, connecting to
+	// local-representative purely for status/command purposes) also reach
+	// the server's HTTP API directly, without a second flag to keep in sync.
+	HTTPPort string `json:"http_port,omitempty"`
 }
 
 // Client connects to local-representative and sends periodic heartbeats.
@@ -68,10 +75,11 @@ type Client struct {
 	handlerMu    sync.Mutex
 	cmdHandler   func(string)
 
-	modeMu           sync.RWMutex
-	peerMode         string // the server's mode, learned from its "hello" message
-	mismatched       bool   // true once peerMode is known and differs from mode
-	mismatchHandler  func(mismatched bool, peerMode string)
+	modeMu          sync.RWMutex
+	peerMode        string // the server's mode, learned from its "hello" message
+	mismatched      bool   // true once peerMode is known and differs from mode
+	mismatchHandler func(mismatched bool, peerMode string)
+	peerHTTPPort    string // the server's own HTTP port, learned from its "hello" message (empty if it didn't disclose one)
 }
 
 // Connect dials addr (TCP) with the given timeout and returns a running
@@ -166,6 +174,14 @@ func (c *Client) PeerMode() string {
 	return c.peerMode
 }
 
+// PeerHTTPPort returns the server's disclosed HTTP port, or "" before its
+// "hello" arrives or if the server didn't set one (see Server.SetHTTPPort).
+func (c *Client) PeerHTTPPort() string {
+	c.modeMu.RLock()
+	defer c.modeMu.RUnlock()
+	return c.peerHTTPPort
+}
+
 // noteServerMode records the server's disclosed mode and reports (via the
 // registered handler, if any) when the mismatch verdict changes.
 func (c *Client) noteServerMode(peerMode string) {
@@ -213,6 +229,9 @@ func (c *Client) readLoop() {
 		switch sm.Type {
 		case "hello":
 			c.noteServerMode(sm.Mode)
+			c.modeMu.Lock()
+			c.peerHTTPPort = sm.HTTPPort
+			c.modeMu.Unlock()
 		case "command":
 			if sm.Cmd == "" || c.ModeMismatch() {
 				// A mismatched peer gets nothing beyond the heartbeat/hello
@@ -318,6 +337,7 @@ func (cs *connState) getMode() (peerMode string, mismatched bool) {
 type Server struct {
 	ln             net.Listener
 	mode           string // this server's own dev-mode status (ModeDev or ModeOps)
+	httpPort       string // this server's own HTTP dashboard port, if any -- see SetHTTPPort
 	mu             sync.RWMutex
 	states         map[string]*connState
 	onState        func(name, state string)                          // called on state change or disconnect
@@ -342,6 +362,17 @@ func NewServer(addr, mode string) (*Server, error) {
 	}
 	go s.acceptLoop()
 	return s, nil
+}
+
+// SetHTTPPort records this server's own HTTP dashboard port, disclosed to
+// every client on connect via the "hello" message (see ServerMsg.HTTPPort).
+// Not every representable.Server has an HTTP dashboard of its own to
+// disclose, so this is opt-in -- leave it unset and hello's HTTPPort field
+// stays empty.
+func (s *Server) SetHTTPPort(port string) {
+	s.mu.Lock()
+	s.httpPort = port
+	s.mu.Unlock()
 }
 
 // SetStateChangeHandler registers fn to be called when a client changes state or disconnects.
@@ -486,9 +517,14 @@ func (s *Server) handleConn(conn net.Conn) {
 			clientName = m.From
 			cs = s.getOrCreate(clientName)
 			cs.setConn(conn)
-			// Disclose our own mode right away so the client can flag a
-			// mismatch before it has sent anything beyond this first message.
-			json.NewEncoder(conn).Encode(ServerMsg{Type: "hello", Mode: s.mode}) //nolint:errcheck — best-effort
+			// Disclose our own mode (and HTTP port, if any) right away so the
+			// client can flag a mismatch -- and reach our HTTP API directly,
+			// if it has one -- before it has sent anything beyond this first
+			// message.
+			s.mu.RLock()
+			httpPort := s.httpPort
+			s.mu.RUnlock()
+			json.NewEncoder(conn).Encode(ServerMsg{Type: "hello", Mode: s.mode, HTTPPort: httpPort}) //nolint:errcheck — best-effort
 		}
 		if m.Mode != "" {
 			if changed := cs.setMode(m.Mode, s.mode); changed {

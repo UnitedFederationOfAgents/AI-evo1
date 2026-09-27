@@ -83,9 +83,11 @@ file (the same host/head id it uses to identify itself to agent-coordinator
 exchange spans more than one host. `highlighted` is a plain operator-set
 toggle rewritten by the files tab's "highlight" button — independent of
 held/expires_at, it marks a file at the LR/AC level (yellow ring around its
-grid box) in preparation for future cross-system functionality; this
-increment only implements the marking itself (see
-[`condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md`](../condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md)).
+grid box) for cross-system functionality; condoccer's "Add Resources" action
+is the first consumer, pulling every currently-highlighted file into a
+condoc's `Impls` folder (see
+[`condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md`](../condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md)
+and [`docs/DistributedExchange.md`](DistributedExchange.md)).
 Uploads whose claimed filename starts with `.manifest_` are refused; the
 sweep removes a manifest alongside its data file (and cleans up an orphaned
 manifest whose data file is already gone). A "persist" press moves the

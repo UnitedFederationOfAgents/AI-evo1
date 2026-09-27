@@ -300,11 +300,6 @@ That covers everything (the new test file is untracked, shown separately). This 
 I traced the trough/nav-arrows data path end-to-end (LR's `repo-state` → agent-coordinator's backend relay → `lr-repo-state` broadcast → the `Trough`/`NavArrows`/`useScreenHistory` React code) and found it structurally identical to local-representative's in every place I checked, so the trough's "non-functional" look is most likely just its legitimately-disabled empty state (no rebuild has failed on that host yet) — not a defect. I did find and fix two real, agent-coordinator-only bugs from that same audit: (1) at viewport widths under 760px, AC's mobile drawer-toggle button (a pattern copied from condoccer, which has no header, and partly from local-representative, which has no such toggle at all) sat `position: fixed; top: 10px` directly on top of AC's own header — occluding and swallowing clicks meant for the nav arrows — now moved below the header; and (2) AC's Go-side `RepoStateMsg`/`LRRepoStateMsg` structs were missing the `condoc_locked` field present in local-representative's version and in the frontend's own TypeScript types (the same class of bug as Revision K's missing `AutoUpdate` field), so the repo-watch panel's "condoc" label could never surface through AC. Added a regression test (`repostate_test.go`) and documented both fixes in `docs/DevMode.md`. `go`/`npm`/`tsc` remain denied in this environment, so I verified via careful read-through as with prior revisions.
 
 
-## <REPLACE-Revision|Retry> Q
+## Revision Q
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's take another pass - the top bar has nothing between 'AGENT-COORDINATOR' and the green connected dot. Let's correct that.

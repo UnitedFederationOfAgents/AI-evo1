@@ -115,11 +115,18 @@ body {
 .conn-dot-err { background: #cc4444; }
 
 /* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
-   right corner alongside the connection dot. */
+   right corner alongside the connection dot. Unlike local-representative's
+   tab-bar, this app's header has nothing else in the middle, so the arrows
+   used to read as an empty gap between the title and the connection dot
+   (Step5Prompt.md Revision Q) -- the bordered pill below gives the control
+   group a visible presence of its own regardless of active/inactive state. */
 .nav-arrows {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 0 2px;
 }
 
 .nav-arrow-btn {

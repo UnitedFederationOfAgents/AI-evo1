@@ -445,6 +445,19 @@ traced out clean end-to-end (LR's rebuild failure → `repo-state` relay →
 component) with no defect found; its collapsed line is legitimately disabled
 until a rebuild actually fails on that host, on both dashboards alike.
 
+Revision Q: the mobile-drawer occlusion above only ever hid the arrows below
+760px, but the report was that desktop viewports of `agent-coordinator` look
+like there's *nothing* between the `AGENT-COORDINATOR` title and the
+connection dot at all. Unlike `local-representative`, whose header has a row
+of visible tab buttons filling that space, `agent-coordinator`'s header has
+nothing between the (flex-grown, so mostly blank) title and the two small,
+grey, often-disabled arrow glyphs -- with no bordered/backgrounded affordance
+of their own, they were easy to read as empty background rather than a
+control. `.nav-arrows` now has its own subtle bordered pill (matching the
+app's existing dark-theme control-grouping style), so the arrow pair reads as
+a distinct, always-visible control regardless of viewport width or whether
+either direction is currently enabled.
+
 ```bash
 ./local-representative --dev-repo   # from inside a checkout of this repo
 ```

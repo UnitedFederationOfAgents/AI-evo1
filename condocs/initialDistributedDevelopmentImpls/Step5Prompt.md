@@ -303,3 +303,22 @@ I traced the trough/nav-arrows data path end-to-end (LR's `repo-state` → agent
 ## Revision Q
 
 Let's take another pass - the top bar has nothing between 'AGENT-COORDINATOR' and the green connected dot. Let's correct that.
+
+
+prompt: [`98578e8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/98578e87f53e21293d2c02bd59f914f34aa62e49) → reply: [`f9dd754`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f9dd754f2cd5c0dfc33e884eee2f504e2c100245)
+
+## Reply Q
+
+This is a CSS-only, scoped fix confined to `agent-coordinator`. Good to summarize.
+
+I traced the reported empty space in agent-coordinator's top bar to its `.nav-arrows` control: the forward/back arrows were already present and functional there (per Revision O/P's investigation), but unlike local-representative's header — which has visible tab buttons filling that middle region — agent-coordinator's header has nothing else next to the small, grey, often-disabled arrow glyphs, so they read as blank background rather than a control. I gave `.nav-arrows` its own subtle bordered pill in `agent-coordinator/frontend/src/index.css` so the arrow pair is always visibly present as a distinct control regardless of viewport or enabled state, and documented the reasoning in `docs/DevMode.md`.
+
+
+## <REPLACE-Revision|Retry> R
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

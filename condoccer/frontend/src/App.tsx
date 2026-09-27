@@ -1437,9 +1437,16 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [fromSel, setFromSel] = useState('start')
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
-  const [resourceType, setResourceType] = useState<'highlighted'>('highlighted')
+  const [resourceType, setResourceType] = useState<'highlighted' | 'upload'>('highlighted')
   const [resourceName, setResourceName] = useState('')
   const [resourceDescription, setResourceDescription] = useState('')
+  // "Upload" source (Revision C): the up-arrow button locks in the file
+  // selection the moment a file is chosen, so the operator can't switch back
+  // to "Highlighted" mid-flight -- only Cancel or Submit clears it.
+  const [uploadFiles, setUploadFiles] = useState<File[]>([])
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  const uploadInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     setMode(null)
@@ -1449,6 +1456,9 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setSubstepTitle('')
     setResourceName('')
     setResourceDescription('')
+    setResourceType('highlighted')
+    setUploadFiles([])
+    setUploadError('')
   }, [info.path, info.stepNum, info.substepLetter])
 
   if (info.phase === 'agent_running') {
@@ -1677,9 +1687,49 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           <div className="action-form-title">Add Resources</div>
           <div className="action-form-row">
             <span className="action-form-label">Source:</span>
-            <select value={resourceType} onChange={(e) => setResourceType(e.target.value as 'highlighted')}>
+            <select
+              value={resourceType}
+              disabled={resourceType === 'upload' && uploadFiles.length > 0}
+              onChange={(e) => {
+                setResourceType(e.target.value as 'highlighted' | 'upload')
+                setUploadFiles([])
+                setUploadError('')
+              }}
+            >
               <option value="highlighted">Highlighted</option>
+              <option value="upload">Upload</option>
             </select>
+            {resourceType === 'upload' && (
+              <>
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      setUploadFiles(Array.from(e.target.files))
+                      setUploadError('')
+                    }
+                    e.target.value = ''
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn-secondary resource-upload-btn"
+                  title="Choose file(s) to upload"
+                  disabled={uploadFiles.length > 0}
+                  onClick={() => uploadInputRef.current?.click()}
+                >
+                  ⬆
+                </button>
+                {uploadFiles.length > 0 && (
+                  <span className="resource-upload-filenames">
+                    {uploadFiles.map((f) => f.name).join(', ')}
+                  </span>
+                )}
+              </>
+            )}
           </div>
           <input
             className="step-form-input"
@@ -1694,10 +1744,41 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
             onChange={(e) => setResourceDescription(e.target.value)}
             rows={3}
           />
+          {uploadError && (
+            <div className="action-status resource-upload-error">{uploadError}</div>
+          )}
           <div className="action-row">
             <button
               className="btn-primary"
-              onClick={() => {
+              disabled={(resourceType === 'upload' && uploadFiles.length === 0) || uploading}
+              onClick={async () => {
+                if (resourceType === 'upload') {
+                  if (uploadFiles.length === 0) return
+                  setUploading(true)
+                  setUploadError('')
+                  try {
+                    const form = new FormData()
+                    form.append('path', info.path)
+                    if (resourceName.trim()) form.append('name', resourceName.trim())
+                    form.append('description', resourceDescription.trim())
+                    for (const f of uploadFiles) form.append('file', f)
+                    const resp = await fetch('/api/upload-resource', { method: 'POST', body: form })
+                    if (!resp.ok) {
+                      setUploadError(await resp.text())
+                      return
+                    }
+                    setMode(null)
+                    setResourceType('highlighted')
+                    setUploadFiles([])
+                    setResourceName('')
+                    setResourceDescription('')
+                  } catch (err) {
+                    setUploadError(String(err))
+                  } finally {
+                    setUploading(false)
+                  }
+                  return
+                }
                 onAction({
                   action: 'add_resource',
                   path: info.path,
@@ -1710,9 +1791,19 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                 setResourceDescription('')
               }}
             >
-              Add Resources →
+              {uploading ? 'Uploading…' : 'Add Resources →'}
             </button>
-            <button className="btn-secondary" onClick={() => setMode(null)}>Cancel</button>
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                setMode(null)
+                setResourceType('highlighted')
+                setUploadFiles([])
+                setUploadError('')
+              }}
+            >
+              Cancel
+            </button>
           </div>
         </div>
       )}

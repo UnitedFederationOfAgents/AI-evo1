@@ -94,3 +94,24 @@ A resource to test the functionality with names.
 Now in addition to the 'highlighted' option let's add an 'upload' option, which makes available an 'up arrow button' to trigger the process (thus locking in the selection until cancel or submission).
 
 This upload dioalog functions the same way as the 'files' dialog but only puts the file directly into the condoc resource location.
+
+
+prompt: [`c4f247a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c4f247a73ab73518a3d9c63db89a62c2bf2cc6c8) → reply: [`946fc26`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/946fc2623168612265b7cee0336d2cf5876a0f32)
+
+## Reply C
+
+Everything is wired up correctly. Implementation is complete.
+
+## Summary
+
+Implemented Revision C of Step5SubstepR: added an "Upload" source alongside "Highlighted" to condoccer's "Add Resources" dialog. Selecting "Upload" reveals an up-arrow button that opens the browser's file picker; once file(s) are chosen the Source dropdown locks (disabled) until Cancel or a successful submit clears it. Submitting posts a plain multipart `POST /api/upload-resource` — the same shape as local-representative's own files-dialog upload — straight to a new condoccer backend handler that saves the bytes directly into the condoc's `Impls` folder (bypassing LR's host-cache entirely) under a collision-free id, then inserts the usual `## Resource N` block, all under the same `.condoc` lock discipline as the existing "Highlighted" flow. Added Go unit tests for the new handler (success, bad method, missing file, bad path, filename collision-safety, sanitization) and documented the new upload path in `docs/DistributedExchange.md`. As with all prior revisions, `go build`/`go test`/`npm build` are denied in this environment, so this was verified by careful read-through rather than compiling.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

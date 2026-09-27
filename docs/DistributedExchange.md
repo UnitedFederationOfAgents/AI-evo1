@@ -87,6 +87,19 @@ reachable only by a browser connected directly to that LR — into
   lets the scroll pane render an image or text resource inline instead of
   showing its raw markdown link text; clicking an image opens a full-size
   overlay. Anything else falls back to a plain download link.
+- **Revision C of Step5SubstepRPrompt.md adds a second "Add Resources"
+  source: "Upload".** Unlike "Highlighted" (pulls files off
+  local-representative over the representable connection), "Upload" is a
+  plain multipart `POST /api/upload-resource` straight from the browser — the
+  same shape as local-representative's own files-dialog upload — except the
+  bytes land directly in the condoc's `Impls` folder instead of LR's
+  host-cache; no highlighting, no representable connection, and no
+  host-cache TTL sweep are involved. The dialog's "Source" dropdown gained
+  the option, revealing an "up arrow" button that opens the browser's file
+  picker; choosing a file locks the dropdown (an operator can't switch
+  sources mid-upload) until Cancel or a successful submission clears it. The
+  same `.condoc`-lock discipline as "Highlighted" applies, asserted before
+  the first uploaded byte lands in the Impls folder.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

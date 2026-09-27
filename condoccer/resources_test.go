@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -278,5 +280,210 @@ func TestHandleResourceFile(t *testing.T) {
 	s.handleResourceFile(rec3, req3)
 	if rec3.Code != http.StatusNotFound {
 		t.Errorf("path-traversal filename: status = %d, want 404", rec3.Code)
+	}
+}
+
+// newUploadResourceFixture lays out the minimal condoc a test can point
+// handleUploadResource at: a main file with one step, and that step's file
+// awaiting action (a "## Human-Prompt" section and a pending
+// "## <REPLACE-Revision|Retry> A" placeholder), mirroring the shape
+// detectPhase and insertResourceBlock expect.
+func newUploadResourceFixture(t *testing.T) (root, mainRelPath, stepPath string) {
+	t.Helper()
+	root = t.TempDir()
+	condocDir := filepath.Join(root, "condocs")
+	if err := os.MkdirAll(condocDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	mainPath := filepath.Join(condocDir, "X.md")
+	if err := os.WriteFile(mainPath, []byte("# X\n\n### Step 1 - Do it\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	implDirPath := filepath.Join(condocDir, "xImpls")
+	if err := os.MkdirAll(implDirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stepPath = filepath.Join(implDirPath, "Step1Prompt.md")
+	stepContent := "## Human-Prompt\n\n## Reply\n\nDone.\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"
+	if err := os.WriteFile(stepPath, []byte(stepContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return root, "condocs/X.md", stepPath
+}
+
+// newUploadResourceRequest builds a multipart POST /api/upload-resource
+// request carrying one file plus the given form fields.
+func newUploadResourceRequest(t *testing.T, path, name, description, filename, fileContent string) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range map[string]string{"path": path, "name": name, "description": description} {
+		if v == "" {
+			continue
+		}
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if filename != "" {
+		fw, err := mw.CreateFormFile("file", filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte(fileContent)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/upload-resource", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return req
+}
+
+// TestHandleUploadResource verifies the "Upload" source of "Add Resources"
+// (Revision C): a plain multipart POST with a real file body lands straight
+// in the condoc's Impls folder and gets linked into a "## Resource N" block,
+// without ever going through local-representative or its host-cache.
+func TestHandleUploadResource(t *testing.T) {
+	root, mainRelPath, stepPath := newUploadResourceFixture(t)
+	s := newServer(root)
+
+	req := newUploadResourceRequest(t, mainRelPath, "Screenshots", "why this matters", "note.txt", "hello upload")
+	rec := httptest.NewRecorder()
+	s.handleUploadResource(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	got, err := os.ReadFile(stepPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(got)
+	if !strings.Contains(content, "## Resource 1 -- Screenshots") {
+		t.Errorf("expected resource heading, got:\n%s", content)
+	}
+	if !strings.Contains(content, "why this matters") {
+		t.Errorf("expected description, got:\n%s", content)
+	}
+
+	implDirPath := filepath.Dir(stepPath)
+	entries, err := os.ReadDir(implDirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uploaded string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), "_note.txt") {
+			uploaded = e.Name()
+		}
+	}
+	if uploaded == "" {
+		t.Fatal("expected uploaded file to land in the Impls folder")
+	}
+	b, err := os.ReadFile(filepath.Join(implDirPath, uploaded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "hello upload" {
+		t.Errorf("uploaded content = %q, want %q", b, "hello upload")
+	}
+	if !strings.Contains(content, uploaded) {
+		t.Errorf("expected resource block to link %q, got:\n%s", uploaded, content)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, ".condoc")); !os.IsNotExist(err) {
+		t.Error("expected .condoc lock to be removed once the upload completes")
+	}
+}
+
+// TestHandleUploadResourceRejectsNonPost verifies only POST is accepted.
+func TestHandleUploadResourceRejectsNonPost(t *testing.T) {
+	s := newServer(t.TempDir())
+	req := httptest.NewRequest(http.MethodGet, "/api/upload-resource", nil)
+	rec := httptest.NewRecorder()
+	s.handleUploadResource(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestHandleUploadResourceRequiresFile verifies a request with no "file"
+// part is rejected before touching the filesystem.
+func TestHandleUploadResourceRequiresFile(t *testing.T) {
+	root, mainRelPath, _ := newUploadResourceFixture(t)
+	s := newServer(root)
+
+	req := newUploadResourceRequest(t, mainRelPath, "", "", "", "")
+	rec := httptest.NewRecorder()
+	s.handleUploadResource(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleUploadResourceRejectsBadPath verifies an empty or path-traversal
+// "path" field is rejected rather than resolved against the repo root.
+func TestHandleUploadResourceRejectsBadPath(t *testing.T) {
+	root, _, _ := newUploadResourceFixture(t)
+	s := newServer(root)
+
+	for _, badPath := range []string{"", "../../etc/passwd", "/etc/passwd"} {
+		req := newUploadResourceRequest(t, badPath, "", "", "note.txt", "x")
+		rec := httptest.NewRecorder()
+		s.handleUploadResource(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("path=%q: status = %d, want 400", badPath, rec.Code)
+		}
+	}
+}
+
+// TestSaveUploadedResourceCollisionFree verifies two uploads sharing a
+// filename land on disk as distinct entries, each keeping the original name
+// for its resourceLink.Name.
+func TestSaveUploadedResourceCollisionFree(t *testing.T) {
+	destDir := t.TempDir()
+	req1 := newUploadResourceRequest(t, "condocs/X.md", "", "", "dup.txt", "one")
+	if err := req1.ParseMultipartForm(32 << 20); err != nil {
+		t.Fatal(err)
+	}
+	req2 := newUploadResourceRequest(t, "condocs/X.md", "", "", "dup.txt", "two")
+	if err := req2.ParseMultipartForm(32 << 20); err != nil {
+		t.Fatal(err)
+	}
+
+	link1, err := saveUploadedResource(req1.MultipartForm.File["file"][0], destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link2, err := saveUploadedResource(req2.MultipartForm.File["file"][0], destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link1.Filename == link2.Filename {
+		t.Fatalf("expected distinct on-disk filenames, got %q twice", link1.Filename)
+	}
+	if link1.Name != "dup.txt" || link2.Name != "dup.txt" {
+		t.Errorf("expected both links to keep the original name, got %q and %q", link1.Name, link2.Name)
+	}
+}
+
+// TestSanitizeFilename verifies directory components are stripped so an
+// upload's claimed filename can't escape the Impls folder.
+func TestSanitizeFilename(t *testing.T) {
+	cases := map[string]string{
+		"note.txt":              "note.txt",
+		"../../etc/passwd":      "passwd",
+		"..\\..\\windows\\x.txt": "x.txt",
+		"":                      "file",
+		".":                     "file",
+		"..":                    "file",
+	}
+	for in, want := range cases {
+		if got := sanitizeFilename(in); got != want {
+			t.Errorf("sanitizeFilename(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

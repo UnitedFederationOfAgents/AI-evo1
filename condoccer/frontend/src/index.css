@@ -714,6 +714,26 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* ---- Add Resources: "Upload" source (Revision C) ---- */
+
+.resource-upload-btn {
+  font-size: 14px;
+  padding: 3px 9px;
+  line-height: 1;
+}
+
+.resource-upload-filenames {
+  font-size: 11px;
+  color: #aaa;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-upload-error {
+  color: #e05050;
+}
+
 /* ---- Error bar ---- */
 
 .error-bar {

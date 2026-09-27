@@ -1,15 +1,20 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ---- "Add Resources" (see Revision A of
@@ -30,6 +35,22 @@ type resourceLink struct {
 	Filename string // on-disk filename inside the Impls folder (the link target); the host-cache's own <8-hex>_<name> id, kept as-is to stay collision-free
 }
 
+// resourceTargetFile returns the step/substep file that receives a
+// "## Resource N" block for the condoc described by info -- the same active
+// file "revision"/"retry" target. Shared by addResource ("Highlighted"
+// source) and handleUploadResource ("Upload" source, Revision C) so both
+// "Add Resources" flows agree on where a block lands.
+func resourceTargetFile(root string, info CondocInfo) (string, error) {
+	switch {
+	case info.SubstepFile != "":
+		return filepath.Join(root, info.SubstepFile), nil
+	case info.StepFile != "":
+		return filepath.Join(root, info.StepFile), nil
+	default:
+		return "", fmt.Errorf("no active step or substep file")
+	}
+}
+
 // addResource implements the "add_resource" action: resolves the active
 // step/substep file the same way "revision"/"retry" do, pulls every
 // highlighted file from local-representative into the condoc's Impls folder,
@@ -43,14 +64,9 @@ func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequ
 		return fmt.Errorf("unknown resource type: %q", action.ResourceType)
 	}
 
-	var targetFile string
-	switch {
-	case info.SubstepFile != "":
-		targetFile = filepath.Join(s.root, info.SubstepFile)
-	case info.StepFile != "":
-		targetFile = filepath.Join(s.root, info.StepFile)
-	default:
-		return fmt.Errorf("no active step or substep file")
+	targetFile, err := resourceTargetFile(s.root, info)
+	if err != nil {
+		return err
 	}
 
 	// Assert the lock before the copy even starts, not just around the
@@ -157,6 +173,143 @@ func downloadFile(base, id, destDir string) error {
 	defer out.Close()
 	_, err = io.Copy(out, resp.Body)
 	return err
+}
+
+// ---- "Upload" source of Add Resources (Revision C) ----
+//
+// A second way to bring a file into a condoc's scope, alongside pulling
+// local-representative's currently-highlighted files: a plain multipart
+// upload straight from the browser, the same shape as local-representative's
+// own files dialog (see local-representative/files.go's handleFileUpload),
+// except the bytes land directly in the condoc's Impls folder instead of
+// LR's host-cache -- no highlighting, no representable connection, no
+// host-cache TTL sweep involved.
+
+// maxResourceUploadSize caps a single "Upload" add-resource request,
+// mirroring local-representative's own upload cap.
+const maxResourceUploadSize = 64 << 20 // 64MiB
+
+// handleUploadResource implements POST /api/upload-resource: multipart
+// fields "path" (condoc's main file, relative to the repo root, same as
+// handleResourceFile's "condoc" query param), optional "name"/"description",
+// and one or more "file" parts. It resolves the active step/substep file the
+// same way addResource does, asserts the .condoc lock for the same reason
+// (writing into the Impls folder is itself a working-tree change
+// local-representative's dev-repo watcher could notice), saves each
+// uploaded file under a collision-free id, and inserts the resulting
+// "## Resource N" block.
+func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxResourceUploadSize)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "invalid upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	condocRel := r.FormValue("path")
+	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+		http.Error(w, "invalid condoc path", http.StatusBadRequest)
+		return
+	}
+	headers := r.MultipartForm.File["file"]
+	if len(headers) == 0 {
+		http.Error(w, `no file provided (expected multipart field "file")`, http.StatusBadRequest)
+		return
+	}
+
+	absPath := filepath.Join(s.root, filepath.FromSlash(condocRel))
+	info, err := detectPhase(s.root, absPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	targetFile, err := resourceTargetFile(s.root, info)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+
+	// Same lock discipline as addResource: assert it before the first
+	// uploaded byte lands in the Impls folder, not just around the markdown
+	// edit.
+	s.writeCondocLock(fmt.Sprintf("uploading resources into %s", info.Name))
+	defer s.removeCondocLock()
+
+	destDir := implDir(absPath)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	links := make([]resourceLink, 0, len(headers))
+	for _, fh := range headers {
+		link, err := saveUploadedResource(fh, destDir)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("saving %s: %v", fh.Filename, err), http.StatusInternalServerError)
+			return
+		}
+		links = append(links, link)
+	}
+
+	if err := insertResourceBlock(targetFile, r.FormValue("name"), r.FormValue("description"), links); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// saveUploadedResource writes one multipart file straight into a condoc's
+// Impls folder under a collision-free "<8-hex>_<name>" filename -- the same
+// on-disk shape fetchHighlightedFilesFrom keeps for files copied from
+// local-representative's host-cache (see resourceLink.Filename) -- so both
+// "Add Resources" sources land the same way.
+func saveUploadedResource(fh *multipart.FileHeader, destDir string) (resourceLink, error) {
+	src, err := fh.Open()
+	if err != nil {
+		return resourceLink{}, err
+	}
+	defer src.Close()
+
+	name := sanitizeFilename(fh.Filename)
+	id := randomID() + "_" + name
+	dst, err := os.OpenFile(filepath.Join(destDir, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return resourceLink{}, err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		os.Remove(filepath.Join(destDir, id))
+		return resourceLink{}, err
+	}
+	return resourceLink{Name: name, Filename: id}, nil
+}
+
+// sanitizeFilename strips directory components so an upload can't escape the
+// Impls folder via its claimed filename (mirrors local-representative's
+// files.go helper of the same name).
+func sanitizeFilename(name string) string {
+	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	if name == "" || name == "." || name == ".." || name == string(filepath.Separator) {
+		name = "file"
+	}
+	return name
+}
+
+// randomID returns an 8-hex-character prefix used to make an uploaded
+// resource's on-disk filename collision-free (mirrors local-representative's
+// files.go helper of the same name).
+func randomID() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(b)
 }
 
 // nextResourceNum returns the next "## Resource N" number for a step or

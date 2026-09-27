@@ -1135,6 +1135,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/api/resource/", s.handleResourceFile)
+	mux.HandleFunc("/api/upload-resource", s.handleUploadResource)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.

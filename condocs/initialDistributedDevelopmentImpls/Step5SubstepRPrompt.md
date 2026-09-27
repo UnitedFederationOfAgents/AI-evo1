@@ -83,12 +83,14 @@ Implemented Revision B of Step5SubstepR across condoccer's Go backend and React 
 - **Frontend**: the sidebar now shows each resource as its own selectable entry (`Resource N` or `Resource N | <name>`) rather than as unstyled trailing text under the Reply; the scroll pane renders a resource block's linked image or text file inline (fetching/showing text, `<img>` for images, plain download link otherwise), and clicking an image opens a full-size overlay to "enter" it.
 - Updated Go tests (`resources_test.go`) for the new heading format/signature and added coverage for the name suffix, `parseIterations`' resource handling, and the new file-serving route (including path-traversal rejection); updated `docs/DistributedExchange.md` to describe the new behavior. `go build`/`go test`/`npm build` remain denied in this environment, so this was verified by careful read-through rather than compiling.
 
+## Resource 1 -- NameTest
 
-## <REPLACE-Revision|Retry> C
+A resource to test the functionality with names.
 
-<REPLACE-PROMPT>
+- [ImportantDatesRIR.png](7ebf7f7a_ImportantDatesRIR.png)
 
+## Revision C
 
-## Human-Prompt
+Now in addition to the 'highlighted' option let's add an 'upload' option, which makes available an 'up arrow button' to trigger the process (thus locking in the selection until cancel or submission).
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This upload dioalog functions the same way as the 'files' dialog but only puts the file directly into the condoc resource location.

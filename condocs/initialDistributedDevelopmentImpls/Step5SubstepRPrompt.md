@@ -142,3 +142,30 @@ Upload from mobile to test.
 In our next invocation let's do two things:
 - Let's add a little yellow dot in the top-right hand corner of the 'files' tab picker if any files are highlighted. If we double-click this dot it takes us to the location of the first highlighted file (right host, right file).
 - Let's respond with an explanation of what we see in the resource 'MOBILETEST'
+
+
+prompt: [`98d8f1e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/98d8f1e5611751d42bcef1901cd45a83fec2fc04) → reply: [`82cb434`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/82cb4346e5bcb0ba8e5a57fb529f861ca543b2b1)
+
+## Reply E
+
+Everything is consistent and complete. All changes are staged for the condoc handler (no commit made, per instructions).
+
+## Summary
+
+Implemented Revision E of Step5SubstepR:
+
+1. **Yellow highlight-dot indicator on the "files" tab picker** in both local-representative and agent-coordinator dashboards: a small `#d7c22b` dot appears in the tab button's corner whenever any file is highlighted (`FileInfo.highlighted`). Double-clicking the dot jumps straight to that file's detail view. In agent-coordinator the check spans *every* known host (not just the currently selected one), so the dot lights up from the global view or an unrelated host's view too; double-clicking there selects the right host and opens the right file via a one-shot "pending target" handoff from the top-level `App` component into whichever host view ends up rendered. Documented in `docs/DistributedExchange.md`.
+
+2. **Explanation of Resource "MobileTest"**: it's a phone photo of a laptop screen showing condoccer's own UI — the Substep R sidebar/scroll-pane mid-review of "Reply C" (upload feature summary) with "Resource 2 | OutputDebugFailedToFetch" visible below it. It has no bearing on the highlighting feature itself; it was captured purely to exercise the mobile upload path fixed in Revision D, and its successful appearance in the condoc confirms that fix worked.
+
+As with prior revisions, `tsc`/`npm build` are denied in this environment (attempted and blocked), so this was verified by careful read-through; there's still no frontend test harness in either app to add regression coverage to.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

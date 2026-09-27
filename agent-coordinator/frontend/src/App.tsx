@@ -1989,7 +1989,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp, hasHighlighted, onGoToHighlighted,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2004,6 +2004,8 @@ function GlobalView({
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
   sendACRestartApp: () => void
+  hasHighlighted: boolean
+  onGoToHighlighted: () => void
 }) {
   return (
     <div className="lr-view">
@@ -2019,6 +2021,14 @@ function GlobalView({
               onClick={() => setActiveTab(t)}
             >
               {t}
+              {t === 'files' && hasHighlighted && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); onGoToHighlighted() }}
+                />
+              )}
             </button>
           ))}
         </div>
@@ -2049,6 +2059,7 @@ function GlobalView({
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
   sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
+  hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
   data: HostClientState
@@ -2064,11 +2075,26 @@ function LRView({
   uploadFiles: (hostId: string, files: FileList) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
+  hasHighlighted: boolean
+  onGoToHighlighted: () => void
+  pendingFileTarget: { hostId: string; fileId: string } | null
+  onConsumePendingFileTarget: () => void
 }) {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
+
+  // Consume the global "go to first highlighted file" handoff (Step5SubstepR
+  // Revision E) once this is the host it was aimed at -- App() has already
+  // selected this host and switched to the files tab by the time this fires.
+  useEffect(() => {
+    if (pendingFileTarget && pendingFileTarget.hostId === host.id) {
+      setSelectedFileId(null)
+      setViewerFileId(pendingFileTarget.fileId)
+      onConsumePendingFileTarget()
+    }
+  }, [pendingFileTarget, host.id, onConsumePendingFileTarget])
 
   // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
   // so condoccer's own hash-based resume (Layer 1 of the browser pickup
@@ -2126,6 +2152,14 @@ function LRView({
               onClick={() => { setActiveTab(svc); setSelectedFileId(null); setViewerFileId(null) }}
             >
               {svc}
+              {svc === 'files' && hasHighlighted && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); onGoToHighlighted() }}
+                />
+              )}
             </button>
           ))}
         </div>
@@ -2265,6 +2299,30 @@ export default function App() {
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
 
+  // Files tab picker's highlighted-file indicator (Step5SubstepR Revision E).
+  // Computed across every known host -- not just whichever one is currently
+  // selected -- so the dot lights up on the global view, or while looking at
+  // an unrelated host, and double-clicking it can jump to the right host
+  // *and* the right file. "First" follows the host sidebar's own order, then
+  // each host's own file order.
+  const firstHighlighted = useMemo(() => {
+    for (const host of hosts) {
+      const hit = hostData[host.id]?.files?.files.find(f => f.highlighted)
+      if (hit) return { hostId: host.id, fileId: hit.id }
+    }
+    return null
+  }, [hosts, hostData])
+  // One-shot handoff to whichever LRView ends up rendered for the target
+  // host, telling it to open that file's viewer -- cleared once consumed.
+  const [pendingFileTarget, setPendingFileTarget] = useState<{ hostId: string; fileId: string } | null>(null)
+
+  const goToFirstHighlighted = () => {
+    if (!firstHighlighted) return
+    setPendingFileTarget(firstHighlighted)
+    if (firstHighlighted.hostId !== selectedHostId) handleSelectHost(firstHighlighted.hostId)
+    setActiveTab('files')
+  }
+
   useEffect(() => {
     if (selectedHostId) sessionStorage.setItem('ac-selected-host', selectedHostId)
     else sessionStorage.removeItem('ac-selected-host')
@@ -2372,6 +2430,10 @@ export default function App() {
               uploadFiles={uploadFiles}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
+              hasHighlighted={!!firstHighlighted}
+              onGoToHighlighted={goToFirstHighlighted}
+              pendingFileTarget={pendingFileTarget}
+              onConsumePendingFileTarget={() => setPendingFileTarget(null)}
             />
           ) : (
             <GlobalView
@@ -2388,6 +2450,8 @@ export default function App() {
               acLoaderManaged={acLoaderManaged}
               acUpdateAvailable={acUpdateAvailable}
               sendACRestartApp={sendACRestartApp}
+              hasHighlighted={!!firstHighlighted}
+              onGoToHighlighted={goToFirstHighlighted}
             />
           )}
         </div>

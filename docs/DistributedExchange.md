@@ -115,6 +115,17 @@ reachable only by a browser connected directly to that LR — into
   browsers may instead abort the still-in-flight request body once that
   premature response arrives, surfacing as a `TypeError: Failed to fetch`.
   The fix routes the request through `basePath()` like everything else.
+- **Revision E of Step5SubstepRPrompt.md adds a highlighted-file indicator to
+  the "files" tab picker** in both local-representative's and
+  agent-coordinator's dashboards — a small yellow dot in the tab button's
+  corner, shown whenever any file (`FileInfo.highlighted`) is highlighted.
+  Double-clicking the dot jumps straight to the first highlighted file's
+  detail view. In agent-coordinator this is computed across every known
+  host, not just whichever one is currently selected, so the dot lights up
+  from the global view or while looking at an unrelated host; double-
+  clicking it there selects the right host *and* opens the right file — a
+  one-shot handoff from the top-level app component to whichever host view
+  ends up rendered.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

@@ -216,6 +216,7 @@ body {
 }
 
 .tab {
+  position: relative;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -234,6 +235,19 @@ body {
 .tab-active {
   color: #d4d4d4;
   border-bottom-color: #007acc;
+}
+
+/* Files tab picker's "something is highlighted" indicator (Step5SubstepR
+   Revision E). Double-clicking it jumps to the first highlighted file. */
+.tab-highlight-dot {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d7c22b;
+  cursor: pointer;
 }
 
 .conn-dot {

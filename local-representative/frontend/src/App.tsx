@@ -1372,6 +1372,12 @@ export default function App() {
     ? filesState?.files.find(f => f.id === viewerFileId) ?? null
     : null
 
+  // Files tab picker gets a yellow dot (Step5SubstepR Revision E) whenever a
+  // file is highlighted, so highlighting something is discoverable without
+  // having to keep the files tab open. Double-clicking the dot jumps
+  // straight to whichever file was highlighted first.
+  const firstHighlightedFile = filesState?.files.find(f => f.highlighted) ?? null
+
   useEffect(() => {
     sessionStorage.setItem('lr-active-tab', activeTab)
   }, [activeTab])
@@ -1380,6 +1386,13 @@ export default function App() {
     setActiveTab(tab)
     setSelectedFileId(null)
     setViewerFileId(null)
+  }
+
+  const goToFirstHighlighted = () => {
+    if (!firstHighlightedFile) return
+    setActiveTab('files')
+    setSelectedFileId(null)
+    setViewerFileId(firstHighlightedFile.id)
   }
   const nav = useScreenHistory(activeTab, (a, b) => a === b, goToTab, NAV_HISTORY_MAX)
 
@@ -1407,6 +1420,14 @@ export default function App() {
               onClick={() => goToTab(tab)}
             >
               {tab}
+              {tab === 'files' && firstHighlightedFile && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); goToFirstHighlighted() }}
+                />
+              )}
             </button>
           ))}
         </div>

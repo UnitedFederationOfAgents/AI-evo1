@@ -47,12 +47,23 @@ I implemented Revision A across the stack:
 - **condoccer frontend**: `ActionPanel` (shared by step and substep views) gained an "Add Resources…" button opening a form with the "Highlighted" source option and a description field, sending the new action over the existing WebSocket.
 - Added Go tests for the markdown insertion/numbering logic, the HTTP fetch-and-copy path (via `httptest`), and the new `representable` HTTPPort disclosure; updated `docs/DistributedExchange.md` and `docs/CurrentPersistentFiles.md` to describe the mechanism. As before, `go build`/`go test` are denied in this environment, so I verified correctness by careful read-through rather than compiling.
 
+## Resource (1)
 
-## <REPLACE-Revision|Retry> B
+Adding image to test function.
 
-<REPLACE-PROMPT>
+- [WhatToBringRIR.png](511389ff_WhatToBringRIR.png)
 
+## Resource (2)
 
-## Human-Prompt
+Image for feedback.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+- [17905212973273447673759362634131.jpg](539d4508_17905212973273447673759362634131.jpg)
+
+## Revision B
+
+Let's look at 'Resource (2)' for context -- we want to make a few more improvements:
+- In the input for the resources we want an optional 'name' field -- this will change the block title to ## Resource N -- <name> if present
+- We want to remove the parenthesis ()
+- We don't want to see this block in the condoc viewer as an extension of the 'Reply' -- we want to see a sidebar selection of '[Resource N | <name>]'
+- If the resource is text or an image we want to see it rendered in our scroll pane of revisions/replies/etc
+- We want to be able to enter the image to view it if applicable

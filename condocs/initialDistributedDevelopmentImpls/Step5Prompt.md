@@ -314,11 +314,11 @@ This is a CSS-only, scoped fix confined to `agent-coordinator`. Good to summariz
 I traced the reported empty space in agent-coordinator's top bar to its `.nav-arrows` control: the forward/back arrows were already present and functional there (per Revision O/P's investigation), but unlike local-representative's header — which has visible tab buttons filling that middle region — agent-coordinator's header has nothing else next to the small, grey, often-disabled arrow glyphs, so they read as blank background rather than a control. I gave `.nav-arrows` its own subtle bordered pill in `agent-coordinator/frontend/src/index.css` so the arrow pair is always visibly present as a distinct control regardless of viewport or enabled state, and documented the reasoning in `docs/DevMode.md`.
 
 
-## <REPLACE-Revision|Retry> R
+## Substep R - Add file-inclusion capabilities to condoccer
 
-<REPLACE-PROMPT>
+[Step 5 Substep R](Step5SubstepRPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep R is now active. Interact with the substep file (Step5SubstepRPrompt.md).

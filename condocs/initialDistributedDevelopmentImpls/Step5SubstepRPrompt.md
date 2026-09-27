@@ -106,12 +106,14 @@ Everything is wired up correctly. Implementation is complete.
 
 Implemented Revision C of Step5SubstepR: added an "Upload" source alongside "Highlighted" to condoccer's "Add Resources" dialog. Selecting "Upload" reveals an up-arrow button that opens the browser's file picker; once file(s) are chosen the Source dropdown locks (disabled) until Cancel or a successful submit clears it. Submitting posts a plain multipart `POST /api/upload-resource` — the same shape as local-representative's own files-dialog upload — straight to a new condoccer backend handler that saves the bytes directly into the condoc's `Impls` folder (bypassing LR's host-cache entirely) under a collision-free id, then inserts the usual `## Resource N` block, all under the same `.condoc` lock discipline as the existing "Highlighted" flow. Added Go unit tests for the new handler (success, bad method, missing file, bad path, filename collision-safety, sanitization) and documented the new upload path in `docs/DistributedExchange.md`. As with all prior revisions, `go build`/`go test`/`npm build` are denied in this environment, so this was verified by careful read-through rather than compiling.
 
+## Resource 2 -- OutputDebugFailedToFetch
 
-## <REPLACE-Revision|Retry> D
+An image of the 'failed to fetch' issue.
 
-<REPLACE-PROMPT>
+- [17905259793535945819475468053433.jpg](3bd94ec5_17905259793535945819475468053433.jpg)
 
+## Revision D
 
-## Human-Prompt
+Let's take another look at the 'upload' condoc resource addition path - when we attempt it from the mobile interface we get a silent failure, when we attempt it from the laptop interface we get the 'failed to fetch' error we can see in the 'OutputDebugFailedToFetch' image.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix this.

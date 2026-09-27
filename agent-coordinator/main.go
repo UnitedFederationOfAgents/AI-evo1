@@ -149,6 +149,14 @@ type FileInfo struct {
 	State      string `json:"state"`
 	UploadedAt int64  `json:"uploaded_at"`
 	ExpiresAt  int64  `json:"expires_at"`
+
+	// Highlighted mirrors local-representative's FileInfo.Highlighted -- see
+	// local-representative/files.go. Without this field, decoding LR's
+	// files-state payload into this struct would silently drop the flag (the
+	// same class of bug as ProcInfo.AutoUpdate, Revision K), so the
+	// file-details dialog's "highlight" toggle could never render as active
+	// when viewed through agent-coordinator.
+	Highlighted bool `json:"highlighted"`
 }
 
 // FilesStateMsg matches the files-state payload sent from LR over representable.

@@ -1173,6 +1173,12 @@ body {
   background: #14283a;
 }
 
+/* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
+   independent of (and layered outside) the active-selection border above. */
+.files-item-highlighted {
+  box-shadow: 0 0 0 2px #d7c22b;
+}
+
 .file-icon {
   display: inline-flex;
   width: 28px;
@@ -1326,6 +1332,30 @@ body {
 
 .file-detail-hold:hover { background: #5a4e2e; border-color: #c4b04e; }
 .file-detail-hold:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-highlight {
+  flex: 1;
+  background: #2a2a1a;
+  border: 1px solid #5a5a2e;
+  border-radius: 3px;
+  color: #999;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-highlight:hover { background: #3a3a2a; border-color: #7a7a4e; }
+.file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-highlight-active {
+  background: #3a341a;
+  border-color: #d7c22b;
+  color: #d7c22b;
+}
+
+.file-detail-highlight-active:hover { background: #5a4e2e; }
 
 .file-detail-delete {
   flex: 1;

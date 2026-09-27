@@ -1176,6 +1176,13 @@ function filePersistUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/persist`
 }
 
+// fileHighlightUrl backs the file-details dialog's "highlight" toggle,
+// through the same transparent proxy as hold/persist/delete above -- see
+// local-representative/files.go's handleFileHighlight.
+function fileHighlightUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/highlight`
+}
+
 function fileDeleteUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
 }
@@ -1229,7 +1236,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -1285,6 +1292,10 @@ function FileDetailPane({
     void runAction(url, 'POST')
   }
 
+  const handleHighlight = () => {
+    void runAction(fileHighlightUrl(hostId, file.id), 'POST')
+  }
+
   const handleDelete = () => {
     if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
     void runAction(fileDeleteUrl(hostId, file.id), 'DELETE').then(ok => { if (ok) onClose() })
@@ -1328,6 +1339,16 @@ function FileDetailPane({
         <a className="file-detail-download" href={fileDownloadUrl(hostId, file.id)} download={file.name}>
           download
         </a>
+      </div>
+      <div className="file-detail-actions">
+        <button
+          className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
+          onClick={handleHighlight}
+          disabled={busy}
+          title="Mark this file at the LR/AC level"
+        >
+          {file.highlighted ? 'unhighlight' : 'highlight'}
+        </button>
       </div>
       <div className="file-detail-actions">
         {file.state !== 'persisted' && (

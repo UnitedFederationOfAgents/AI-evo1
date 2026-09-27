@@ -469,6 +469,65 @@ func TestHandleFileItemUnknownAction(t *testing.T) {
 	}
 }
 
+// TestHandleFileHighlight covers the file-details dialog's "highlight"
+// toggle end to end through handleFileItem's routing: it's a pure flip, so
+// pressing it twice returns the file to unhighlighted, and it doesn't
+// disturb the file's cache state.
+func TestHandleFileHighlight(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "hello.txt", []byte("hello"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/highlight", nil)
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("highlight: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	files := s.listFiles()
+	if len(files) != 1 || !files[0].Highlighted || files[0].State != "cached" {
+		t.Fatalf("listFiles() after highlight = %+v, want one highlighted, still-\"cached\" file", files)
+	}
+
+	// Pressing it again toggles it back off.
+	s.handleFileItem(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/highlight", nil))
+	files = s.listFiles()
+	if len(files) != 1 || files[0].Highlighted {
+		t.Fatalf("listFiles() after second highlight = %+v, want unhighlighted", files)
+	}
+}
+
+// TestHandleFileHighlightUnknownID verifies highlighting an id that isn't in
+// the host-cache or host-store 404s instead of fabricating an entry.
+func TestHandleFileHighlightUnknownID(t *testing.T) {
+	s := newTestFileServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/files/nope/highlight", nil)
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("highlight unknown id: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestHighlightSurvivesHoldAndPersist verifies a file's highlight marking
+// isn't dropped by the hold/persist rewrites that also touch its manifest
+// sidecar.
+func TestHighlightSurvivesHoldAndPersist(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "hello.txt", []byte("hello"))
+
+	s.handleFileItem(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/highlight", nil))
+	s.handleFileItem(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/hold", nil))
+	if files := s.listFiles(); len(files) != 1 || !files[0].Highlighted || files[0].State != "held" {
+		t.Fatalf("listFiles() after highlight+hold = %+v, want highlighted, \"held\"", files)
+	}
+
+	s.handleFileItem(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/persist", nil))
+	if files := s.listFiles(); len(files) != 1 || !files[0].Highlighted || files[0].State != "persisted" {
+		t.Fatalf("listFiles() after highlight+hold+persist = %+v, want highlighted, \"persisted\"", files)
+	}
+}
+
 // TestSweepHeldFileSurvivesPastFileCacheTTL verifies a held file is not swept
 // just because it's older than the plain fileCacheTTL -- its manifest's own
 // (later) expires_at governs instead.

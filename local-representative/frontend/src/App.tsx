@@ -983,6 +983,13 @@ function filePersistUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}/persist`
 }
 
+// fileHighlightUrl backs the file-details dialog's "highlight" toggle (POST,
+// no body -- see local-representative/files.go's handleFileHighlight). A
+// plain flip, independent of hold/persist state -- see FileInfo.highlighted.
+function fileHighlightUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/highlight`
+}
+
 function fileDeleteUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}`
 }
@@ -1039,7 +1046,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -1096,6 +1103,10 @@ function FileDetailPane({
     void runAction(url, 'POST')
   }
 
+  const handleHighlight = () => {
+    void runAction(fileHighlightUrl(file.id), 'POST')
+  }
+
   const handleDelete = () => {
     if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
     void runAction(fileDeleteUrl(file.id), 'DELETE').then(ok => { if (ok) onClose() })
@@ -1143,6 +1154,16 @@ function FileDetailPane({
         >
           download
         </a>
+      </div>
+      <div className="file-detail-actions">
+        <button
+          className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
+          onClick={handleHighlight}
+          disabled={busy}
+          title="Mark this file at the LR/AC level"
+        >
+          {file.highlighted ? 'unhighlight' : 'highlight'}
+        </button>
       </div>
       <div className="file-detail-actions">
         {file.state !== 'persisted' && (

@@ -45,6 +45,14 @@ reachable only by a browser connected directly to that LR — into
   transparent `/host/<id>/*` proxy unmodified, same as a direct LR client —
   no dedicated AC-owned relay route was needed for them, unlike Path 1's
   upload relay.
+- **Step5SubstepRPrompt.md added `POST /api/files/<id>/highlight`**: a plain
+  toggle on a file's `highlighted` marking (independent of `state`), shown in
+  the same file-details dialog alongside enter/hold/persist/download and
+  rendered as a yellow ring around a highlighted file's grid box. It's the
+  same style of action as Revision C's — ungated on `proxiedHeader`, passes
+  through AC's transparent proxy unmodified. This increment only implements
+  the marking itself: a first step toward flagging files at the LR/AC level
+  for cross-system functionality condoccer will build on later.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

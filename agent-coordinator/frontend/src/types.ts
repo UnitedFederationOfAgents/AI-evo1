@@ -157,6 +157,7 @@ export interface FileInfo {
   state: string // "cached" | "held" | "persisted" -- selects the icon's color
   uploaded_at: number // unix seconds
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
+  highlighted: boolean // plain operator-set toggle, independent of state
 }
 
 export interface LRFilesMsg {

@@ -10,13 +10,14 @@ import (
 	"testing"
 )
 
-// TestNextResourceNum verifies the "## Resource (N)" numbering picks up
-// after the highest one already present, starting from 1 in an empty file.
+// TestNextResourceNum verifies the "## Resource N" numbering picks up
+// after the highest one already present, starting from 1 in an empty file,
+// whether or not a block carries a " -- <name>" suffix (Revision B).
 func TestNextResourceNum(t *testing.T) {
 	if got := nextResourceNum(""); got != 1 {
 		t.Errorf("empty content: got %d, want 1", got)
 	}
-	content := "## Resource (1)\n\nfoo\n\n## Resource (3)\n\nbar\n"
+	content := "## Resource 1\n\nfoo\n\n## Resource 3 -- Screenshots\n\nbar\n"
 	if got := nextResourceNum(content); got != 4 {
 		t.Errorf("got %d, want 4", got)
 	}
@@ -34,7 +35,7 @@ func TestInsertResourceBlockAboveDPlaceholder(t *testing.T) {
 	}
 
 	links := []resourceLink{{Name: "report.pdf", Filename: "abcd1234_report.pdf"}}
-	if err := insertResourceBlock(path, "why these matter", links); err != nil {
+	if err := insertResourceBlock(path, "", "why these matter", links); err != nil {
 		t.Fatalf("insertResourceBlock: %v", err)
 	}
 
@@ -45,9 +46,28 @@ func TestInsertResourceBlockAboveDPlaceholder(t *testing.T) {
 	content := string(got)
 
 	want := "# Prompt\n\nDo the thing.\n\n## Reply\n\nDone.\n\n" +
-		"## Resource (1)\n\nwhy these matter\n\n- [report.pdf](abcd1234_report.pdf)\n\n" +
+		"## Resource 1\n\nwhy these matter\n\n- [report.pdf](abcd1234_report.pdf)\n\n" +
 		"## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"
 	if content != want {
+		t.Errorf("content mismatch:\ngot:\n%s\nwant:\n%s", content, want)
+	}
+}
+
+// TestInsertResourceBlockWithName verifies a non-empty name is appended to
+// the heading as "## Resource N -- <name>" (Revision B).
+func TestInsertResourceBlockWithName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "Step1Prompt.md")
+	original := "## Reply\n\nDone.\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"
+	os.WriteFile(path, []byte(original), 0644)
+
+	links := []resourceLink{{Name: "x.txt", Filename: "id_x.txt"}}
+	if err := insertResourceBlock(path, "  Screenshots  ", "", links); err != nil {
+		t.Fatalf("insertResourceBlock: %v", err)
+	}
+	content, _ := os.ReadFile(path)
+	want := "## Reply\n\nDone.\n\n## Resource 1 -- Screenshots\n\n- [x.txt](id_x.txt)\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"
+	if string(content) != want {
 		t.Errorf("content mismatch:\ngot:\n%s\nwant:\n%s", content, want)
 	}
 }
@@ -61,14 +81,14 @@ func TestInsertResourceBlockNoDescription(t *testing.T) {
 	os.WriteFile(path, []byte(original), 0644)
 
 	links := []resourceLink{{Name: "x.txt", Filename: "id_x.txt"}}
-	if err := insertResourceBlock(path, "   ", links); err != nil {
+	if err := insertResourceBlock(path, "", "   ", links); err != nil {
 		t.Fatalf("insertResourceBlock: %v", err)
 	}
 	content, _ := os.ReadFile(path)
-	if strings.Contains(string(content), "## Resource (1)\n\n\n") {
+	if strings.Contains(string(content), "## Resource 1\n\n\n") {
 		t.Errorf("expected no blank-description gap, got:\n%s", content)
 	}
-	want := "## Reply\n\nDone.\n\n## Resource (1)\n\n- [x.txt](id_x.txt)\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"
+	want := "## Reply\n\nDone.\n\n## Resource 1\n\n- [x.txt](id_x.txt)\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"
 	if string(content) != want {
 		t.Errorf("content mismatch:\ngot:\n%s\nwant:\n%s", content, want)
 	}
@@ -81,7 +101,7 @@ func TestInsertResourceBlockNoPlaceholder(t *testing.T) {
 	path := filepath.Join(dir, "Step1Prompt.md")
 	os.WriteFile(path, []byte("# Prompt\n\n## Reply\n\nDone.\n"), 0644)
 
-	err := insertResourceBlock(path, "", []resourceLink{{Name: "x", Filename: "y"}})
+	err := insertResourceBlock(path, "", "", []resourceLink{{Name: "x", Filename: "y"}})
 	if err == nil {
 		t.Fatal("expected an error when no placeholder is present")
 	}
@@ -179,5 +199,84 @@ func TestAddResourceUnknownType(t *testing.T) {
 	err := s.addResource(filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "bogus"})
 	if err == nil {
 		t.Fatal("expected an error for an unknown resource type")
+	}
+}
+
+// TestParseIterationsResource verifies "## Resource N[ -- <name>]" headings
+// get their own Iteration entry (Revision B) -- interleaved by position with
+// Reply/Revision/Retry/Substep, rather than folded into whichever section
+// precedes them.
+func TestParseIterationsResource(t *testing.T) {
+	content := "## Reply\n\nDone.\n\n" +
+		"## Resource 1\n\nWhy this matters.\n\n- [a.png](aaa_a.png)\n\n" +
+		"## Revision A\n\nDo more.\n\n" +
+		"## Resource 2 -- Screenshots\n\n- [b.png](bbb_b.png)\n"
+
+	got := parseIterations(content)
+	want := []Iteration{
+		{ID: "reply-initial", Label: "Reply", Type: "reply"},
+		{ID: "resource-1", Label: "Resource 1", Type: "resource"},
+		{ID: "revision-A", Label: "Revision A", Type: "revision"},
+		{ID: "resource-2", Label: "Resource 2 | Screenshots", Type: "resource"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d iterations, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("iteration %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestHandleResourceFile verifies the /api/resource/<filename>?condoc=<path>
+// route serves a resource file's raw bytes out of the right condoc's Impls
+// folder, 404s on path-traversal attempts, and honors ?download=1 like
+// local-representative's equivalent file route.
+func TestHandleResourceFile(t *testing.T) {
+	root := t.TempDir()
+	implDirPath := filepath.Join(root, "condocs", "xImpls")
+	if err := os.MkdirAll(implDirPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(implDirPath, "aaa_a.png"), []byte("pngbytes"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(root)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/resource/aaa_a.png?condoc=condocs/X.md", nil)
+	s.handleResourceFile(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "pngbytes" {
+		t.Errorf("body = %q, want %q", rec.Body.String(), "pngbytes")
+	}
+	if got := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "inline;") {
+		t.Errorf("Content-Disposition = %q, want inline by default", got)
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/resource/aaa_a.png?condoc=condocs/X.md&download=1", nil)
+	s.handleResourceFile(rec2, req2)
+	if got := rec2.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "attachment;") {
+		t.Errorf("Content-Disposition = %q, want attachment with ?download=1", got)
+	}
+
+	for _, badCondoc := range []string{"", "../../etc/passwd", "/etc/passwd"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/resource/aaa_a.png?condoc="+badCondoc, nil)
+		s.handleResourceFile(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("condoc=%q: status = %d, want 404", badCondoc, rec.Code)
+		}
+	}
+
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodGet, "/api/resource/../secret?condoc=condocs/X.md", nil)
+	s.handleResourceFile(rec3, req3)
+	if rec3.Code != http.StatusNotFound {
+		t.Errorf("path-traversal filename: status = %d, want 404", rec3.Code)
 	}
 }

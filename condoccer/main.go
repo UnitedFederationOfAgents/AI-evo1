@@ -85,6 +85,7 @@ type ActionRequest struct {
 	RevertIter    string `json:"revertIter,omitempty"`    // for revert action (optional iteration letter)
 	RevertSubIter string `json:"revertSubIter,omitempty"` // for revert action (optional substep iter letter)
 	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" (only option so far)
+	ResourceName  string `json:"resourceName,omitempty"`  // for add_resource action: optional display name -> "## Resource N -- <name>"
 }
 
 // CondocMeta holds the parsed condoc-yaml fields.
@@ -107,7 +108,7 @@ type StepSummary struct {
 type Iteration struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	Type  string `json:"type"` // "reply", "revision", "retry", "substep"
+	Type  string `json:"type"` // "reply", "revision", "retry", "substep", "resource"
 	From  string `json:"from,omitempty"`
 }
 
@@ -131,7 +132,7 @@ var (
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 	commitHashRe         = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
-	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource \((\d+)\)`)
+	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource (\d+)(?: -- (.+))?\s*$`)
 	placeholderLineRe    = regexp.MustCompile(`(?m)^## <REPLACE-Revision\|Retry> [A-Z]\s*$`)
 )
 
@@ -334,8 +335,8 @@ func parseSteps(content string) []StepSummary {
 	return steps
 }
 
-// parseIterations extracts the ordered list of reply/revision/retry/substep sections from a step file.
-// Results are ordered by their position in the file so substeps appear in context with other iterations.
+// parseIterations extracts the ordered list of reply/revision/retry/substep/resource sections from a step file.
+// Results are ordered by their position in the file so substeps and resources appear in context with other iterations.
 func parseIterations(stepContent string) []Iteration {
 	type candidate struct {
 		pos  int
@@ -385,6 +386,27 @@ func parseIterations(stepContent string) []Iteration {
 				Label: "Substep " + letter + " — " + title,
 				Type:  "substep",
 			},
+		})
+	}
+
+	// Parse Resource headings and interleave them by position too -- Revision B
+	// of Step5SubstepRPrompt.md gives each "## Resource N[ -- <name>]" block its
+	// own sidebar entry (previously it had no heading of its own here, so its
+	// body just read as an unstyled tail of whichever Reply/Revision preceded
+	// it -- see parseStepSections on the frontend for the client-side mirror).
+	for _, idx := range resourceHeadingRe.FindAllStringSubmatchIndex(stepContent, -1) {
+		num := stepContent[idx[2]:idx[3]]
+		name := ""
+		if idx[4] >= 0 {
+			name = strings.TrimSpace(stepContent[idx[4]:idx[5]])
+		}
+		label := "Resource " + num
+		if name != "" {
+			label += " | " + name
+		}
+		candidates = append(candidates, candidate{
+			pos:  idx[0],
+			iter: Iteration{ID: "resource-" + num, Label: label, Type: "resource"},
 		})
 	}
 
@@ -1112,6 +1134,7 @@ func condocListEqual(a, b []CondocInfo) bool {
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/resource/", s.handleResourceFile)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.

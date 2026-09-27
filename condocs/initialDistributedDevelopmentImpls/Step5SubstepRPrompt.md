@@ -67,3 +67,28 @@ Let's look at 'Resource (2)' for context -- we want to make a few more improveme
 - We don't want to see this block in the condoc viewer as an extension of the 'Reply' -- we want to see a sidebar selection of '[Resource N | <name>]'
 - If the resource is text or an image we want to see it rendered in our scroll pane of revisions/replies/etc
 - We want to be able to enter the image to view it if applicable
+
+
+prompt: [`e667966`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e6679667788e6e759357750e237f46944f804f1d) → reply: [`caaf821`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/caaf82169b51add51089275c92a10e75a0fbe343)
+
+## Reply B
+
+Implementation complete. No commit was made, per instructions, leaving that to the condoc handler.
+
+## Summary
+
+Implemented Revision B of Step5SubstepR across condoccer's Go backend and React frontend:
+
+- **Backend**: dropped the `## Resource (N)` parens in favor of `## Resource N`, with an optional `-- <name>` suffix from a new name field on the "Add Resources" dialog; `parseIterations` now cuts each `## Resource N` heading out as its own `Iteration` (type `"resource"`) instead of folding its body into the preceding Reply/Revision section; added a new `GET /api/resource/<filename>?condoc=<path>[&download=1]` route (condoccer's first HTTP route besides `/ws` and its embedded frontend) to serve a resource file's raw bytes out of the condoc's Impls folder.
+- **Frontend**: the sidebar now shows each resource as its own selectable entry (`Resource N` or `Resource N | <name>`) rather than as unstyled trailing text under the Reply; the scroll pane renders a resource block's linked image or text file inline (fetching/showing text, `<img>` for images, plain download link otherwise), and clicking an image opens a full-size overlay to "enter" it.
+- Updated Go tests (`resources_test.go`) for the new heading format/signature and added coverage for the name suffix, `parseIterations`' resource handling, and the new file-serving route (including path-traversal rejection); updated `docs/DistributedExchange.md` to describe the new behavior. `go build`/`go test`/`npm build` remain denied in this environment, so this was verified by careful read-through rather than compiling.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

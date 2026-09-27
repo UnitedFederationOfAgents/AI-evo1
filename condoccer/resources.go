@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -16,11 +17,13 @@ import (
 //
 // The condoccer half of bringing local-representative's highlighted files
 // into a condoc's scope: pull every currently-highlighted file from LR, copy
-// it into the condoc's Impls folder, and insert a "## Resource (N)" block
-// linking to it into the active step/substep file.
+// it into the condoc's Impls folder, and insert a "## Resource N" block
+// linking to it into the active step/substep file. (Revision B dropped the
+// original "## Resource (N)" parens and added an optional " -- <name>"
+// suffix; see insertResourceBlock.)
 
 // resourceLink is one file copied into a condoc's Impls folder by an
-// add_resource action, carried through to the inserted "## Resource (N)"
+// add_resource action, carried through to the inserted "## Resource N"
 // block's link.
 type resourceLink struct {
 	Name     string // original filename, for the link text
@@ -30,7 +33,7 @@ type resourceLink struct {
 // addResource implements the "add_resource" action: resolves the active
 // step/substep file the same way "revision"/"retry" do, pulls every
 // highlighted file from local-representative into the condoc's Impls folder,
-// and inserts a "## Resource (N)" block linking to them just above the
+// and inserts a "## Resource N" block linking to them just above the
 // pending revision/retry placeholder. The .condoc lock is asserted for the
 // duration -- unlike an ordinary phase transition, this doesn't change
 // info.Phase, so nothing else would otherwise stop local-representative's
@@ -65,7 +68,7 @@ func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequ
 		return fmt.Errorf("no highlighted files on local-representative")
 	}
 
-	return insertResourceBlock(targetFile, action.Content, links)
+	return insertResourceBlock(targetFile, action.ResourceName, action.Content, links)
 }
 
 // fetchHighlightedFiles asks local-representative (over the same connection
@@ -156,7 +159,7 @@ func downloadFile(base, id, destDir string) error {
 	return err
 }
 
-// nextResourceNum returns the next "## Resource (N)" number for a step or
+// nextResourceNum returns the next "## Resource N" number for a step or
 // substep file's content, based on the highest N already present (0 if none).
 func nextResourceNum(content string) int {
 	n := 0
@@ -170,12 +173,14 @@ func nextResourceNum(content string) int {
 	return n + 1
 }
 
-// insertResourceBlock inserts a new "## Resource (N)" block -- the optional
+// insertResourceBlock inserts a new "## Resource N" block -- optionally
+// "## Resource N -- <name>" when a display name is given (Revision B; also
+// where the original "## Resource (N)" parens were dropped) -- the optional
 // description followed by a link per file in links -- immediately above the
 // file's pending "## <REPLACE-Revision|Retry> X" placeholder (see
 // replaceIterationPlaceholder), with blank-line spacing matching the rest of
 // a step/substep file's sections.
-func insertResourceBlock(path, description string, links []resourceLink) error {
+func insertResourceBlock(path, name, description string, links []resourceLink) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -188,8 +193,12 @@ func insertResourceBlock(path, description string, links []resourceLink) error {
 	}
 
 	n := nextResourceNum(content)
+	heading := fmt.Sprintf("## Resource %d", n)
+	if nm := strings.TrimSpace(name); nm != "" {
+		heading += " -- " + nm
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Resource (%d)\n\n", n)
+	fmt.Fprintf(&b, "%s\n\n", heading)
 	if desc := strings.TrimSpace(description); desc != "" {
 		fmt.Fprintf(&b, "%s\n\n", desc)
 	}
@@ -202,4 +211,72 @@ func insertResourceBlock(path, description string, links []resourceLink) error {
 	after := content[loc[0]:]
 	newContent := before + "\n\n" + b.String() + after
 	return os.WriteFile(path, []byte(newContent), 0644)
+}
+
+// handleResourceFile serves one file's raw bytes out of a condoc's Impls
+// folder: GET /api/resource/<filename>?condoc=<mainPath>[&download=1]. This
+// is what lets the frontend render a "## Resource N" block's linked image or
+// text file inline, and offer a full-size view for images -- condoccer
+// otherwise serves nothing but its own embedded frontend and /ws (see
+// setupRoutes). It's reverse-proxied the same way as the rest of condoccer's
+// UI (local-representative's proxyToCondoccer, agent-coordinator's
+// equivalent), so this works unmodified whether reached directly or through
+// either proxy.
+//
+// condoc identifies which condoc's Impls folder to look in by its main file's
+// path relative to the repo root (CondocInfo.Path, already known to the
+// frontend) rather than the Impls folder itself, so a client can't be tricked
+// into asking for an arbitrary directory. filename must be a single path
+// segment (mirrors local-representative's handleFileRaw); condoc must resolve
+// within the repo root.
+func (s *Server) handleResourceFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	filename := strings.TrimPrefix(r.URL.Path, "/api/resource/")
+	if filename == "" || strings.Contains(filename, "/") || strings.HasPrefix(filename, ".") {
+		http.NotFound(w, r)
+		return
+	}
+	condocRel := r.URL.Query().Get("condoc")
+	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+		http.NotFound(w, r)
+		return
+	}
+
+	dir := implDir(filepath.Join(s.root, filepath.FromSlash(condocRel)))
+	f, err := os.Open(filepath.Join(dir, filename))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+
+	disposition := "inline"
+	if r.URL.Query().Get("download") != "" {
+		disposition = "attachment"
+	}
+	w.Header().Set("Content-Disposition", disposition+`; filename="`+dispositionFilename(filename)+`"`)
+	ctype := mime.TypeByExtension(filepath.Ext(filename))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ctype)
+	http.ServeContent(w, r, filename, info.ModTime(), f)
+}
+
+// dispositionFilename makes a filename safe to embed inside a
+// Content-Disposition header value (mirrors local-representative's files.go
+// helper of the same name).
+func dispositionFilename(name string) string {
+	name = strings.ReplaceAll(name, "\r", "")
+	name = strings.ReplaceAll(name, "\n", "")
+	name = strings.ReplaceAll(name, `"`, "'")
+	return name
 }

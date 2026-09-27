@@ -222,6 +222,7 @@ body {
 .iter-revision { background: #d9a800; }
 .iter-retry   { background: #e07020; }
 .iter-substep { background: #9d55cc; }
+.iter-resource { background: #3bbfae; }
 
 /* ---- Badges ---- */
 
@@ -484,6 +485,7 @@ body {
 .iter-section-revision .iter-section-label { color: #d9a800; }
 .iter-section-retry   .iter-section-label { color: #e07020; }
 .iter-section-substep .iter-section-label { color: #9d55cc; }
+.iter-section-resource .iter-section-label { color: #3bbfae; }
 
 .iter-section-content {
   font-size: 12px;
@@ -492,6 +494,82 @@ body {
   word-break: break-word;
   line-height: 1.6;
 }
+
+/* ---- Resource sections (Revision B of Step5SubstepRPrompt.md): a
+   "## Resource N" block's description plus its linked files rendered inline
+   -- an image or text preview where the file kind allows it, a plain
+   download link otherwise -- rather than as raw markdown link text. ---- */
+
+.resource-section-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.resource-description {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.resource-image {
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 4px;
+  border: 1px solid #3c3c3c;
+  cursor: zoom-in;
+  object-fit: contain;
+}
+
+.resource-text-preview {
+  max-height: 240px;
+  overflow: auto;
+  background: #161616;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 11px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.resource-file-link {
+  color: #4da6ff;
+  font-size: 12px;
+}
+
+.resource-image-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  cursor: zoom-out;
+}
+
+.resource-image-overlay img {
+  max-width: 90vw;
+  max-height: 85vh;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.resource-image-overlay-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: #2a2a2e;
+  border: 1px solid #555;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 3px;
+  font-family: inherit;
+}
+.resource-image-overlay-close:hover { border-color: #9d55cc; }
 
 /* ---- Action panel ---- */
 

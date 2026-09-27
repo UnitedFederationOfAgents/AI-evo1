@@ -25,6 +25,11 @@ export default defineConfig({
         target: 'ws://localhost:8080',
         ws: true,
       },
+      // /api/resource/... (Revision B of Step5SubstepRPrompt.md) serves a
+      // condoc's "## Resource N" block's linked files inline.
+      '/api': {
+        target: 'http://localhost:8080',
+      },
     },
   },
   build: {

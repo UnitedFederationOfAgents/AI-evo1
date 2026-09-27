@@ -57,7 +57,7 @@ reachable only by a browser connected directly to that LR — into
   condoccer's "Add Resources" action (available on any step/substep while
   it's `awaiting_action`) pulls every currently-highlighted file straight
   from local-representative and copies it into the condoc's `Impls` folder,
-  inserting a `## Resource (N)` block that links to each copy. condoccer
+  inserting a `## Resource N` block that links to each copy. condoccer
   already maintains a `representable.Client` connection to LR (see
   `condoccer/repr.go`) purely for status/commands, which knows LR's dial
   host but not its separate HTTP dashboard port — so `representable.Server`
@@ -72,6 +72,21 @@ reachable only by a browser connected directly to that LR — into
   action — inserting a resource block doesn't itself change the condoc's
   phase, so nothing else would otherwise stop local-representative's
   dev-repo watcher from rebuilding mid-operation.
+- **Revision B of Step5SubstepRPrompt.md makes a resource block a first-class
+  citizen of the condoc viewer**, rather than unstyled text tacked onto
+  whichever Reply/Revision preceded it. The heading dropped its parens
+  (`## Resource N`, not `## Resource (N)`) and gained an optional
+  `-- <name>` suffix from a new "name" field on the "Add Resources" dialog;
+  condoccer's markdown parser (`parseIterations` server-side,
+  `parseStepSections` client-side) now cuts a `## Resource N` heading out as
+  its own `Iteration`/section rather than folding its body into the
+  preceding one, so it gets its own sidebar entry (`Resource N` or
+  `Resource N | <name>`) instead of appearing as a tail of the Reply. A new
+  `GET /api/resource/<filename>?condoc=<path>[&download=1]` route — the only
+  HTTP route condoccer serves besides its own embedded frontend and `/ws` —
+  lets the scroll pane render an image or text resource inline instead of
+  showing its raw markdown link text; clicking an image opens a full-size
+  overlay. Anything else falls back to a plain download link.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

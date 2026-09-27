@@ -32,7 +32,7 @@ export interface StepSummary {
 export interface Iteration {
   id: string
   label: string
-  type: 'reply' | 'revision' | 'retry' | 'substep'
+  type: 'reply' | 'revision' | 'retry' | 'substep' | 'resource'
   from?: string
 }
 
@@ -99,4 +99,5 @@ export interface ActionRequest {
   revertIter?: string
   revertSubIter?: string
   resourceType?: 'highlighted' // for add_resource action; only option so far
+  resourceName?: string // for add_resource action: optional display name -> "## Resource N -- <name>"
 }

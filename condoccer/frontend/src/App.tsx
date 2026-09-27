@@ -362,12 +362,18 @@ function PhaseBadge({ phase }: { phase: Phase }) {
 
 // ---- Step section parser ----
 
+interface ResourceLink {
+  name: string
+  filename: string
+}
+
 interface StepSection {
   id: string
   label: string
-  kind: 'prompt' | 'reply' | 'revision' | 'retry' | 'substep'
+  kind: 'prompt' | 'reply' | 'revision' | 'retry' | 'substep' | 'resource'
   content: string
   substepLetter?: string
+  resourceLinks?: ResourceLink[]
 }
 
 const COMMIT_LINK_RE = /^\[`[a-f0-9]+`\]\([^)]+\)\s*$/gm
@@ -398,20 +404,31 @@ function parseStepSections(content: string): StepSection[] {
     letter: string
     from: string
     substepTitle: string
+    resourceNum: string
+    resourceName: string
     fullMatch: string
   }
   const headings: Heading[] = []
   const reMain = /^## (Reply|Revision|Retry|Human-Prompt)(?: ([A-Z]))?(?: \(from (\w+)\))?/gm
   const reSubstep = /^## Substep ([A-Z]) - (.+)/gm
+  // "## Resource N" or "## Resource N -- <name>" (Revision B; the original
+  // "## Resource (N)" parens were dropped) -- given its own heading here so
+  // it gets cut out as its own section below, rather than reading as an
+  // unstyled tail of whichever Reply/Revision precedes it.
+  const reResource = /^## Resource (\d+)(?: -- (.+))?/gm
   reMain.lastIndex = 0
   reSubstep.lastIndex = 0
+  reResource.lastIndex = 0
 
   let m: RegExpExecArray | null
   while ((m = reMain.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', substepTitle: '', fullMatch: m[0] })
+    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', substepTitle: '', resourceNum: '', resourceName: '', fullMatch: m[0] })
   }
   while ((m = reSubstep.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), fullMatch: m[0] })
+    headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), resourceNum: '', resourceName: '', fullMatch: m[0] })
+  }
+  while ((m = reResource.exec(content)) !== null) {
+    headings.push({ index: m.index, kind: 'Resource', letter: '', from: '', substepTitle: '', resourceNum: m[1], resourceName: (m[2] ?? '').trim(), fullMatch: m[0] })
   }
   headings.sort((a, b) => a.index - b.index)
 
@@ -430,6 +447,8 @@ function parseStepSections(content: string): StepSection[] {
 
     let id: string, label: string, kind: StepSection['kind']
     let substepLetter: string | undefined
+    let resourceLinks: ResourceLink[] | undefined
+    let sectionContent = cleaned
 
     if (h.kind === 'Reply') {
       id = h.letter ? `reply-${h.letter}` : 'reply-initial'
@@ -443,6 +462,17 @@ function parseStepSections(content: string): StepSection[] {
       id = `retry-${h.letter}`
       label = h.from ? `Retry ${h.letter} (from ${h.from})` : `Retry ${h.letter}`
       kind = 'retry'
+    } else if (h.kind === 'Resource') {
+      id = `resource-${h.resourceNum}`
+      label = h.resourceName ? `Resource ${h.resourceNum} | ${h.resourceName}` : `Resource ${h.resourceNum}`
+      kind = 'resource'
+      resourceLinks = []
+      const linkLineRe = /^- \[(.+?)\]\((.+?)\)\s*$/gm
+      let lm: RegExpExecArray | null
+      while ((lm = linkLineRe.exec(cleaned)) !== null) {
+        resourceLinks.push({ name: lm[1], filename: lm[2] })
+      }
+      sectionContent = cleaned.replace(linkLineRe, '').trim()
     } else {
       // Substep
       id = `substep-${h.letter}`
@@ -451,7 +481,7 @@ function parseStepSections(content: string): StepSection[] {
       substepLetter = h.letter
     }
 
-    sections.push({ id, label, kind, content: cleaned, substepLetter })
+    sections.push({ id, label, kind, content: sectionContent, substepLetter, resourceLinks })
   }
 
   return sections
@@ -461,6 +491,118 @@ function sectionsToIterations(sections: StepSection[]): Iteration[] {
   return sections
     .filter((s) => s.kind !== 'prompt')
     .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
+}
+
+// ---- Resource rendering (Revision B of Step5SubstepRPrompt.md) ----
+//
+// "## Resource N" blocks link to files condoccer copied into the condoc's
+// Impls folder (see condoccer/resources.go's addResource). basePath() mirrors
+// the WebSocket hook's own path-prefix derivation so /api/resource/... also
+// resolves correctly when this UI is reverse-proxied under a path prefix
+// (/condoccer/ via local-representative, /host/<id>/condoccer/ via AC).
+function basePath(): string {
+  const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+  return dir.endsWith('/') ? dir.slice(0, -1) : dir
+}
+
+function resourceUrl(condocPath: string, filename: string, opts?: { download?: boolean }): string {
+  const params = new URLSearchParams({ condoc: condocPath })
+  if (opts?.download) params.set('download', '1')
+  return `${basePath()}/api/resource/${encodeURIComponent(filename)}?${params.toString()}`
+}
+
+// RESOURCE_TEXT_EXTENSIONS / RESOURCE_IMAGE_EXTENSIONS mirror
+// local-representative's files.go classifyKind -- condoccer has no code
+// shared with LR's frontend, so this small classification table is
+// duplicated rather than imported.
+const RESOURCE_TEXT_EXTENSIONS = new Set([
+  '.txt', '.md', '.log', '.csv', '.json', '.yaml', '.yml', '.go', '.py',
+  '.js', '.ts', '.tsx', '.jsx', '.html', '.css', '.sh', '.xml', '.ini',
+  '.toml', '.conf',
+])
+const RESOURCE_IMAGE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
+])
+
+function classifyResourceKind(filename: string): 'text' | 'image' | 'other' {
+  const dot = filename.lastIndexOf('.')
+  const ext = dot >= 0 ? filename.slice(dot).toLowerCase() : ''
+  if (RESOURCE_TEXT_EXTENSIONS.has(ext)) return 'text'
+  if (RESOURCE_IMAGE_EXTENSIONS.has(ext)) return 'image'
+  return 'other'
+}
+
+// ResourceTextPreview fetches a text resource's raw content once and renders
+// it inline; failures (e.g. the file was since removed from the Impls
+// folder) just leave nothing rendered rather than an error block.
+function ResourceTextPreview({ url }: { url: string }) {
+  const [text, setText] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setText(null)
+    fetch(url)
+      .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
+      .then((t) => { if (!cancelled) setText(t) })
+      .catch(() => { if (!cancelled) setText(null) })
+    return () => { cancelled = true }
+  }, [url])
+  if (text === null) return null
+  return <pre className="resource-text-preview">{text}</pre>
+}
+
+// ResourceSectionBody renders a "## Resource N" section's body: its
+// description text, then each linked file rendered inline when it's an image
+// or text file (anything else falls back to a plain download link). Clicking
+// an image "enters" it -- a full-size overlay, since there's nowhere in
+// condoccer's hash-based nav model that makes sense as a dedicated page for
+// it the way local-representative/agent-coordinator's FileViewer does.
+function ResourceSectionBody({ sec, condocPath }: { sec: StepSection; condocPath: string }) {
+  const [viewing, setViewing] = useState<{ url: string; name: string } | null>(null)
+
+  return (
+    <div className="iter-section-content resource-section-content">
+      {sec.content && <div className="resource-description">{sec.content}</div>}
+      {(sec.resourceLinks ?? []).map((link) => {
+        const kind = classifyResourceKind(link.filename)
+        const url = resourceUrl(condocPath, link.filename)
+        if (kind === 'image') {
+          return (
+            <img
+              key={link.filename}
+              className="resource-image"
+              src={url}
+              alt={link.name}
+              title="Click to view full size"
+              onClick={() => setViewing({ url, name: link.name })}
+            />
+          )
+        }
+        if (kind === 'text') {
+          return <ResourceTextPreview key={link.filename} url={url} />
+        }
+        return (
+          <a key={link.filename} className="resource-file-link" href={resourceUrl(condocPath, link.filename, { download: true })}>
+            {link.name}
+          </a>
+        )
+      })}
+      {viewing && (
+        <div className="resource-image-overlay" onClick={() => setViewing(null)}>
+          <img src={viewing.url} alt={viewing.name} />
+          <button className="resource-image-overlay-close" onClick={() => setViewing(null)}>× Close</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// sectionBody renders a parsed section's content: the raw-text default for
+// every kind but 'resource', which gets ResourceSectionBody's inline
+// image/text rendering instead (see Revision B of Step5SubstepRPrompt.md).
+function sectionBody(sec: StepSection, condocPath: string) {
+  return sec.kind === 'resource'
+    ? <ResourceSectionBody sec={sec} condocPath={condocPath} />
+    : <div className="iter-section-content">{sec.content}</div>
 }
 
 function parseCommitRanges(content: string): Map<string, CommitRange> {
@@ -1296,6 +1438,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
   const [resourceType, setResourceType] = useState<'highlighted'>('highlighted')
+  const [resourceName, setResourceName] = useState('')
   const [resourceDescription, setResourceDescription] = useState('')
 
   useEffect(() => {
@@ -1304,6 +1447,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setFromSel('start')
     setRevertIter('')
     setSubstepTitle('')
+    setResourceName('')
     setResourceDescription('')
   }, [info.path, info.stepNum, info.substepLetter])
 
@@ -1537,6 +1681,13 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               <option value="highlighted">Highlighted</option>
             </select>
           </div>
+          <input
+            className="step-form-input"
+            type="text"
+            placeholder="Name (optional) — e.g. Screenshots…"
+            value={resourceName}
+            onChange={(e) => setResourceName(e.target.value)}
+          />
           <textarea
             placeholder="Describe why these resources are included…"
             value={resourceDescription}
@@ -1551,9 +1702,11 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                   action: 'add_resource',
                   path: info.path,
                   resourceType,
+                  resourceName: resourceName.trim() || undefined,
                   content: resourceDescription.trim(),
                 })
                 setMode(null)
+                setResourceName('')
                 setResourceDescription('')
               }}
             >
@@ -1612,7 +1765,7 @@ function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDe
             ref={(el) => { sectionRefs.current[sec.id] = el }}
           >
             <div className="iter-section-label">{sec.label}</div>
-            <div className="iter-section-content">{sec.content}</div>
+            {sectionBody(sec, state.info.path)}
           </div>
         ))}
       </div>
@@ -1675,7 +1828,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                       </button>
                     </div>
                   ) : (
-                    <div className="iter-section-content">{sec.content}</div>
+                    sectionBody(sec, state.info.path)
                   )}
                 </div>
               ))
@@ -1732,7 +1885,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                 </button>
               )}
             </div>
-            <div className="iter-section-content">{sec.content}</div>
+            {sectionBody(sec, state.info.path)}
           </div>
         ))}
       </div>

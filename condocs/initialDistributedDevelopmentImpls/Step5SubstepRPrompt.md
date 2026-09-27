@@ -20,11 +20,15 @@ All changes are in place across both apps' Go backends, TypeScript types, React 
 Implemented Step 5 Substep R: added a "highlighting" toggle to the files capability's existing enter/hold/persist/download menu, in both local-representative and agent-coordinator. A file's `Highlighted` state is a plain, state-independent flag persisted in its `.manifest_<id>.yaml` sidecar (survives hold/persist rewrites and LR restarts), toggled via a new `POST /api/files/<id>/highlight` endpoint (ungated on `proxiedHeader`, same as hold/persist/delete, so it passes through AC's transparent proxy unmodified). The file-details dialog gained a "highlight"/"unhighlight" button, and a highlighted file's grid box now shows a yellow ring (`box-shadow`) in both frontends. I mirrored the new `Highlighted`/`highlighted` field into AC's Go `FileInfo` struct and both apps' TypeScript types (avoiding the Revision K class of silently-dropped-field bug), added Go unit tests in `local-representative/files_test.go` and a JSON round-trip regression test in `agent-coordinator/files_test.go`, and documented the mechanism in `docs/CurrentPersistentFiles.md` and `docs/DistributedExchange.md`. As with all prior revisions, `go build`/`go test` are denied in this environment, so I verified correctness via careful read-through.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Next we will implement both the condoccer mechanism to add a resource into a condoc and also the AC/LR facilitated mechanism to bring highlighted files into the context of other sub-apps that can use them via the SUBAPP<-->LR<-->AC connection.
 
-
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+On the condoccer side the resource-inclusion will work as follows:
+- A new button will be available within steps and substeps called 'Add Resources'
+- The button will bring up a sub-dialog which for now will only have the additional option 'Highlighted' as well as a description field
+- When 'Add Resources'-->'Highlighted' is selected condoccer will bring the highlighted files into the scope of the condoc
+  - The files will be copied into the <condoc>Impls folder
+  - There will be a section of text inserted into the condoc which links to the resource file
+  - The resource-and-description block will be inserted ABOVE the '## <REPLACE-Revision|Retry> A' line, creating a new '## Resouce (N)' block with proper spacing
+  - The '.condoc' lock will be asserted here because we do not want to rebuild upon inclusion of condoc resources

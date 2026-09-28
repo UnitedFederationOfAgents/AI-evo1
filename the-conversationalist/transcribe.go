@@ -84,7 +84,22 @@ func (s *Server) startTranscription(c *wsClient) {
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		cancel()
+		log.Printf("transcribe: loading AWS config: %v", err)
 		s.sendToClient(c, "error", fmt.Sprintf("loading AWS config: %v", err))
+		return
+	}
+	// LoadDefaultConfig does not error when no region is found anywhere in
+	// its chain (env/shared config/instance role) -- it just leaves
+	// cfg.Region empty and defers the failure to the first call that needs
+	// one, which then fails deep inside endpoint/signing resolution with a
+	// cryptic SDK error. Credentials (AWS_ACCESS_KEY_ID/SECRET) being set
+	// does not imply a region is too, so check explicitly and fail with an
+	// actionable message instead.
+	if cfg.Region == "" {
+		cancel()
+		const msg = "no AWS region configured: set AWS_REGION (or AWS_DEFAULT_REGION) in the environment, add a region to the shared AWS config, or start with --aws-region"
+		log.Printf("transcribe: %s", msg)
+		s.sendToClient(c, "error", "starting AWS Transcribe: "+msg)
 		return
 	}
 
@@ -96,6 +111,7 @@ func (s *Server) startTranscription(c *wsClient) {
 	})
 	if err != nil {
 		cancel()
+		log.Printf("transcribe: starting AWS Transcribe (region %q): %v", cfg.Region, err)
 		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: %v", err))
 		return
 	}

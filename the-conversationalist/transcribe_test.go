@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -125,6 +127,47 @@ func TestSaveTranscriptNoReprConnection(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected a save-result message to be queued")
+	}
+}
+
+// TestStartTranscriptionNoRegion verifies startTranscription fails fast with
+// an actionable message (Revision F) when the AWS SDK's region-resolution
+// chain (env/shared config/instance role) comes up empty, rather than
+// reaching AWS and surfacing a cryptic endpoint/signing error -- this is the
+// state credentials-only env vars (AWS_ACCESS_KEY_ID/SECRET, no
+// AWS_REGION/AWS_DEFAULT_REGION) leave the SDK in.
+func TestStartTranscriptionNoRegion(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "does-not-exist")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_CONFIG_FILE", empty)
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", empty)
+	t.Setenv("HOME", t.TempDir())
+
+	s := newServer()
+	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
+	s.startTranscription(c)
+
+	select {
+	case raw := <-c.send:
+		var m wsMsg
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if m.Type != "error" {
+			t.Fatalf("expected an error message, got %q", m.Type)
+		}
+		var payload string
+		json.Unmarshal(m.Payload, &payload)
+		if !strings.Contains(payload, "no AWS region configured") {
+			t.Errorf("error message = %q, want it to mention the missing region", payload)
+		}
+	default:
+		t.Fatal("expected an error message to be queued")
+	}
+	if c.transcribe != nil {
+		t.Error("expected no session to be left running after a region-resolution failure")
 	}
 }
 

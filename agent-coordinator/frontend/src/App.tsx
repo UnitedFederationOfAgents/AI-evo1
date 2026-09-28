@@ -52,6 +52,7 @@ function useCoordinatorWS() {
   const [acLoaderManaged, setACLoaderManaged] = useState(false)
   const [acUpdateAvailable, setACUpdateAvailable] = useState(false)
   const [acAutoUpdate, setACAutoUpdate] = useState(false)
+  const [acStartedAt, setACStartedAt] = useState(0)
   // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
@@ -175,6 +176,7 @@ function useCoordinatorWS() {
             setACLoaderManaged(p.loader_managed)
             setACUpdateAvailable(p.update_available)
             setACAutoUpdate(p.auto_update)
+            setACStartedAt(p.started_at)
             // A rebuild+restart is invisible to an already-open tab -- the
             // reconnect above is the only signal it gets. Compare the
             // server's own reported version against this bundle's
@@ -332,7 +334,7 @@ function useCoordinatorWS() {
 
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
-    acLoaderManaged, acUpdateAvailable, acAutoUpdate,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
@@ -1685,7 +1687,7 @@ function TopologyNodeCard({
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1698,6 +1700,7 @@ function GlobalTopologyPanel({
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
   acAutoUpdate: boolean
+  acStartedAt: number
   sendACRestartApp: () => void
   sendACSetAutoUpdate: (enabled: boolean) => void
 }) {
@@ -1832,13 +1835,13 @@ function GlobalTopologyPanel({
           </span>
         </div>
         <div className="topo-readout-row">
-          <span className="topo-readout-label">version</span>
+          <span className="topo-readout-label">LR version</span>
           <span className={`topo-readout-value${selfProc?.version ? '' : ' topo-readout-placeholder'}`}>
             {selfProc?.version ?? '—'}
           </span>
         </div>
         <div className="topo-readout-row">
-          <span className="topo-readout-label">uptime</span>
+          <span className="topo-readout-label">LR uptime</span>
           <span className={`topo-readout-value${selfProc ? '' : ' topo-readout-placeholder'}`}>
             {selfProc ? formatUptime(selfProc.started_at, nowSec) : '—'}
           </span>
@@ -1891,6 +1894,12 @@ function GlobalTopologyPanel({
         {isSelfSelected && (
           <div className="topo-ac-controls">
             <div className="topo-controls-label">agent-coordinator</div>
+            <div className="topo-readout-row">
+              <span className="topo-readout-label">AC uptime</span>
+              <span className={`topo-readout-value${acStartedAt ? '' : ' topo-readout-placeholder'}`}>
+                {acStartedAt ? formatUptime(acStartedAt, nowSec) : '—'}
+              </span>
+            </div>
             {devMode && (
               <div className="topo-controls-buttons">
                 <button
@@ -1983,7 +1992,7 @@ function GlobalTopologyPanel({
                   checked={allAutoUpdateOn}
                   onChange={e => handleSetAutoUpdateAll(e.target.checked)}
                 />
-                auto-update
+                auto-update-all
               </label>
             </div>
           </div>
@@ -1995,7 +2004,7 @@ function GlobalTopologyPanel({
 
 function GlobalSystemPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2008,6 +2017,7 @@ function GlobalSystemPanel({
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
   acAutoUpdate: boolean
+  acStartedAt: number
   sendACRestartApp: () => void
   sendACSetAutoUpdate: (enabled: boolean) => void
 }) {
@@ -2041,6 +2051,7 @@ function GlobalSystemPanel({
           acLoaderManaged={acLoaderManaged}
           acUpdateAvailable={acUpdateAvailable}
           acAutoUpdate={acAutoUpdate}
+          acStartedAt={acStartedAt}
           sendACRestartApp={sendACRestartApp}
           sendACSetAutoUpdate={sendACSetAutoUpdate}
         />
@@ -2054,7 +2065,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2069,6 +2080,7 @@ function GlobalView({
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
   acAutoUpdate: boolean
+  acStartedAt: number
   sendACRestartApp: () => void
   sendACSetAutoUpdate: (enabled: boolean) => void
   hasHighlighted: boolean
@@ -2114,6 +2126,7 @@ function GlobalView({
             acLoaderManaged={acLoaderManaged}
             acUpdateAvailable={acUpdateAvailable}
             acAutoUpdate={acAutoUpdate}
+            acStartedAt={acStartedAt}
             sendACRestartApp={sendACRestartApp}
             sendACSetAutoUpdate={sendACSetAutoUpdate}
           />
@@ -2418,7 +2431,7 @@ function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: 
 export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
-    acLoaderManaged, acUpdateAvailable, acAutoUpdate,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
@@ -2629,6 +2642,7 @@ export default function App() {
               acLoaderManaged={acLoaderManaged}
               acUpdateAvailable={acUpdateAvailable}
               acAutoUpdate={acAutoUpdate}
+              acStartedAt={acStartedAt}
               sendACRestartApp={sendACRestartApp}
               sendACSetAutoUpdate={sendACSetAutoUpdate}
               hasHighlighted={!!firstHighlighted}

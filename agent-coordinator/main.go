@@ -389,8 +389,9 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
-	devMode    bool   // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
-	selfHostID string // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
+	devMode    bool      // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
+	selfHostID string    // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
+	startedAt  time.Time // when this agent-coordinator process started -- see SelfInfoMsg.StartedAt
 
 	// loaderManaged is true when this process was launched by ufa-loader (see
 	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart
@@ -421,6 +422,7 @@ func newServer() *Server {
 		clients:        make(map[*wsClient]bool),
 		hostStates:     make(map[string]*hostState),
 		modeMismatches: make(map[string]ModeMismatchMsg),
+		startedAt:      time.Now(),
 	}
 }
 
@@ -457,6 +459,7 @@ type SelfInfoMsg struct {
 	UpdateAvailable bool   `json:"update_available"`
 	AutoUpdate      bool   `json:"auto_update"`
 	Version         string `json:"version"`
+	StartedAt       int64  `json:"started_at"` // unix seconds this process started -- see ProcInfo.StartedAt for LR's equivalent
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode
@@ -503,6 +506,7 @@ func (s *Server) selfInfo() SelfInfoMsg {
 		UpdateAvailable: s.selfVersion.available(),
 		AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		Version:         ufaversion.Version,
+		StartedAt:       s.startedAt.Unix(),
 	}
 }
 

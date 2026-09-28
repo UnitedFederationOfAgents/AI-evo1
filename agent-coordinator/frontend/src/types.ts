@@ -95,6 +95,7 @@ export interface SelfInfoMsg {
   // Revision D).
   auto_update: boolean
   version: string // this process's own build version -- see BrowserRefreshStrategy.md
+  started_at: number // unix seconds this process started -- mirrors ProcInfo's same-named field for AC's own uptime readout
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode

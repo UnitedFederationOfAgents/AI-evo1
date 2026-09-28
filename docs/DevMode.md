@@ -261,8 +261,8 @@ restart control itself is disabled on, and is settable remotely via
 auto-rebuild and auto-connect, it's carried across the very restart it may
 have just triggered via `lrState.AutoUpdate` (`reststate.go`) — otherwise it
 would silently turn itself back off after firing once. The global topology
-view's "agent-coordinator" section additionally grows its own **auto-update**
-checkbox alongside **network update all**, mirroring **auto-rebuild**'s
+view's "agent-coordinator" section additionally grows its own
+**auto-update-all** checkbox alongside **network update all**, mirroring **auto-rebuild**'s
 pairing with **rebuild all**: it sweeps every connected, loader-managed
 host's toggle at once rather than the single selected host, and — unlike
 **rebuild all**'s neighboring checkbox — also arms `agent-coordinator`'s own

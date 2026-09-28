@@ -77,11 +77,14 @@ Both bugs traced back to real, fixable gaps in condoccer/federation-command's co
 **Bug 2 (spurious rebuild):** completing a substep (`condocCompleteSubstep`) was treated identically to any other "awaiting action" transition and unlocked `.condoc`, even though it's pure bookkeeping — no fresh agent-produced code lands in that commit, and the step is almost always about to receive more work. Per the lock's original spec ("removed specifically after an agent completes work"), this shouldn't unlock. Fixed by having `detectPhase`/`updateCondocLock` recognize when a step's most recent event is a substep heading (not a Reply/Revision/Retry) and withhold the unlock in that case, and removed federation-command's now-redundant (and race-prone) `removeCondocLockFile` call at that commit site. Added Go tests for both; `go`/`npm`/`tsc` remain blocked in this sandbox (confirmed by a denied `go build`), so I verified via careful read-through as with prior revisions — recommend `make -C condoccer build` and `make -C federation-command build` before merging.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's look at ignored-scratch/AI-sandboxing/agent-scribe.
 
+We will use identical techniques but with our own technologies and we will replicate into The Conversationalist:
+- The 'start transcription' button
+- The 'save to file' button -- but now this will save it into our 'files' area (identically to how an 'upload' would bring a file there)
 
-## Human-Prompt
+We will not worry about authX for this increment as we will be revisiting that soon and we can use host-level controls for now.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When this increment is complete we expect to be able to press the 'Start Transcription' button and have the client submit audio which is returned to a file through AWS transcribe.

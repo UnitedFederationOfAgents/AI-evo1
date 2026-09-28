@@ -64,3 +64,24 @@ Applied the same full-pane treatment to agent-coordinator's per-host view that l
 We have completed the substep to add feedback improvements to the system, but in doing so we discovered two bugs:
 - The substep text is deleted
 - We trigger a rebuild (likely by removing the .condoc lockfile -- we should not do this)
+
+
+prompt: [`c1b3d27`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c1b3d27141db25caca30010ccde00146ef78928a) → reply: [`8380629`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/83806290445a4e97ccb1cac1755e0a93312494d1)
+
+## Reply C
+
+Both bugs traced back to real, fixable gaps in condoccer/federation-command's condoc machinery:
+
+**Bug 1 (substep text vanishing):** `condoccer`'s `SubstepContent`/`SubstepIterations` were only ever populated for a *currently active* substep (`info.SubstepFile != ""`); the moment a substep completes and control returns to the step, `detectPhase` correctly clears that field, but nothing preserved the completed substep's own history anywhere else — so entering it from the step view showed a blank pane even though nothing was deleted on disk. Fixed by adding a `CompletedSubstepContents` map (mirroring the existing `CompletedStepContents` pattern for old steps) that `getCondocState` populates from each non-active substep file, and threading a `selectedSubstepLetter` through the frontend so `Sidebar`/`SubstepDetailView` fall back to it (read-only) instead of the now-empty active-substep fields.
+
+**Bug 2 (spurious rebuild):** completing a substep (`condocCompleteSubstep`) was treated identically to any other "awaiting action" transition and unlocked `.condoc`, even though it's pure bookkeeping — no fresh agent-produced code lands in that commit, and the step is almost always about to receive more work. Per the lock's original spec ("removed specifically after an agent completes work"), this shouldn't unlock. Fixed by having `detectPhase`/`updateCondocLock` recognize when a step's most recent event is a substep heading (not a Reply/Revision/Retry) and withhold the unlock in that case, and removed federation-command's now-redundant (and race-prone) `removeCondocLockFile` call at that commit site. Added Go tests for both; `go`/`npm`/`tsc` remain blocked in this sandbox (confirmed by a denied `go build`), so I verified via careful read-through as with prior revisions — recommend `make -C condoccer build` and `make -C federation-command build` before merging.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

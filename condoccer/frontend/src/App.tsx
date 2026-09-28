@@ -493,6 +493,28 @@ function sectionsToIterations(sections: StepSection[]): Iteration[] {
     .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
 }
 
+// resolveSubstepView picks which substep's content/iterations to show:
+// state.substepContent/substepIterations are only ever populated for the
+// *currently active* substep (info.substepLetter), so viewing an already-
+// completed one (letter !== the active one, or there's no active one at
+// all) instead falls back to completedSubstepContents and parses it
+// client-side the same way a completed step's raw content is (see
+// StepDetailView's non-active branch) -- otherwise the pane would just go
+// blank the moment a substep finished. Falls back to the active substep when
+// letter is null (e.g. right after entering via the sidebar's "→" button).
+function resolveSubstepView(
+  state: CondocState,
+  letter: string | null,
+): { letter: string; isActive: boolean; content: string; iterations: Iteration[] } {
+  const activeLetter = state.info.substepLetter ?? ''
+  const resolvedLetter = letter ?? activeLetter
+  if (resolvedLetter !== '' && resolvedLetter === activeLetter) {
+    return { letter: resolvedLetter, isActive: true, content: state.substepContent ?? '', iterations: state.substepIterations ?? [] }
+  }
+  const content = state.completedSubstepContents?.[resolvedLetter] ?? ''
+  return { letter: resolvedLetter, isActive: false, content, iterations: content ? sectionsToIterations(parseStepSections(content)) : [] }
+}
+
 // ---- Resource rendering (Revision B of Step5SubstepRPrompt.md) ----
 //
 // "## Resource N" blocks link to files condoccer copied into the condoc's
@@ -884,6 +906,7 @@ interface SidebarProps {
   selectedCondocPath: string | null
   selectedStepNum: number | null
   selectedIterId: string | null
+  selectedSubstepLetter: string | null
   selectedSubstepIterId: string | null
   diffFiles: string[]
   diffFilesLoaded: boolean
@@ -917,6 +940,7 @@ function Sidebar({
   selectedCondocPath,
   selectedStepNum,
   selectedIterId,
+  selectedSubstepLetter,
   selectedSubstepIterId,
   diffFiles,
   diffFilesLoaded,
@@ -1073,9 +1097,8 @@ function Sidebar({
   }
 
   if (navLevel === 'substep' && activeState) {
-    const substepIterations: Iteration[] = activeState.substepIterations ?? []
-    const substepLetter = activeState.info.substepLetter ?? ''
-    const substepCommitRanges = parseCommitRanges(activeState.substepContent ?? '')
+    const { letter: substepLetter, content: substepContent, iterations: substepIterations } = resolveSubstepView(activeState, selectedSubstepLetter)
+    const substepCommitRanges = parseCommitRanges(substepContent)
 
     return (
       <div className="sidebar">
@@ -1117,7 +1140,7 @@ function Sidebar({
 
   if (navLevel === 'files-changed') {
     const upLabel = diffReturnLevel === 'substep'
-      ? `↑ Substep ${activeState?.info.substepLetter ?? ''}`
+      ? `↑ Substep ${selectedSubstepLetter ?? activeState?.info.substepLetter ?? ''}`
       : `↑ Step ${selectedStepNum ?? ''}`
 
     return (
@@ -1815,14 +1838,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
 
 interface SubstepDetailViewProps {
   state: CondocState
+  substepLetter: string
   selectedSubstepIterId: string | null
   onAction: (action: ActionRequest) => void
 }
 
-function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDetailViewProps) {
+function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onAction }: SubstepDetailViewProps) {
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
-  const substepLetter = state.info.substepLetter ?? ''
-  const content = state.substepContent ?? ''
+  const { isActive, content } = resolveSubstepView(state, substepLetter)
 
   useEffect(() => {
     if (selectedSubstepIterId && sectionRefs.current[selectedSubstepIterId]) {
@@ -1831,6 +1854,35 @@ function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDe
   }, [selectedSubstepIterId])
 
   const sections = parseStepSections(content)
+
+  // A completed substep is read-only: the action buttons (revision/retry/
+  // revert/complete) act on whichever substep condoccer currently considers
+  // active, which this one no longer is -- see resolveSubstepView.
+  if (!isActive) {
+    return (
+      <div className="detail-view">
+        <div className="detail-header">
+          <h2>Substep {substepLetter}</h2>
+          <PhaseBadge phase="completed" />
+        </div>
+        <div className="detail-body">
+          {sections.map((sec) => (
+            <div
+              key={sec.id}
+              className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+              ref={(el) => { sectionRefs.current[sec.id] = el }}
+            >
+              <div className="iter-section-label">{sec.label}</div>
+              {sectionBody(sec, state.info.path)}
+            </div>
+          ))}
+          <div className="action-panel">
+            <div className="action-status" style={{ color: '#4ec94e' }}>✓ Substep completed.</div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="detail-view">
@@ -2028,6 +2080,11 @@ export default function App() {
   const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(initialNav.condocPath)
   const [selectedStepNum, setSelectedStepNum] = useState<number | null>(initialNav.stepNum)
   const [selectedIterId, setSelectedIterId] = useState<string | null>(initialNav.iterId)
+  // Which substep letter is being viewed -- distinct from
+  // activeState.info.substepLetter (the currently *active* one), since
+  // entering an already-completed substep via the step's sidebar/detail view
+  // still needs to know which one to look up in completedSubstepContents.
+  const [selectedSubstepLetter, setSelectedSubstepLetter] = useState<string | null>(null)
   const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(initialNav.substepIterId)
   const [diffFromCommit, setDiffFromCommit] = useState<string | null>(initialNav.diffFromCommit)
   const [diffToCommit, setDiffToCommit] = useState<string | null>(initialNav.diffToCommit)
@@ -2044,6 +2101,7 @@ export default function App() {
     setSelectedCondocPath(path)
     setSelectedStepNum(null)
     setSelectedIterId(null)
+    setSelectedSubstepLetter(null)
     setSelectedSubstepIterId(null)
     setNavLevel('condoc')
     subscribe(path)
@@ -2053,6 +2111,7 @@ export default function App() {
   const handleSelectStep = (num: number) => {
     setSelectedStepNum(num)
     setSelectedIterId(null)
+    setSelectedSubstepLetter(null)
     setSelectedSubstepIterId(null)
     setNavLevel('step')
   }
@@ -2061,7 +2120,8 @@ export default function App() {
     setSelectedIterId(id)
   }
 
-  const handleEnterSubstep = (_substepLetter: string) => {
+  const handleEnterSubstep = (substepLetter: string) => {
+    setSelectedSubstepLetter(substepLetter)
     setSelectedSubstepIterId(null)
     setNavLevel('substep')
   }
@@ -2115,6 +2175,7 @@ export default function App() {
       setSelectedDiffHunkIdx(null)
     } else if (navLevel === 'substep') {
       setNavLevel('step')
+      setSelectedSubstepLetter(null)
       setSelectedSubstepIterId(null)
     } else if (navLevel === 'step') {
       setNavLevel('condoc')
@@ -2138,6 +2199,7 @@ export default function App() {
       if (navLevel === 'substep') {
         // After completing a substep, go back to the step view.
         setNavLevel('step')
+        setSelectedSubstepLetter(null)
         setSelectedSubstepIterId(null)
       } else if (navLevel === 'step') {
         setNavLevel('condoc')
@@ -2148,6 +2210,7 @@ export default function App() {
       // After reverting, go up a level — the federation-command will reset state.
       if (navLevel === 'substep') {
         setNavLevel('step')
+        setSelectedSubstepLetter(null)
         setSelectedSubstepIterId(null)
       } else if (navLevel === 'step') {
         setNavLevel('condoc')
@@ -2300,6 +2363,7 @@ export default function App() {
           selectedCondocPath={selectedCondocPath}
           selectedStepNum={selectedStepNum}
           selectedIterId={selectedIterId}
+          selectedSubstepLetter={selectedSubstepLetter}
           selectedSubstepIterId={selectedSubstepIterId}
           diffFiles={diffFiles}
           diffFilesLoaded={diffFilesLoaded}
@@ -2371,6 +2435,7 @@ export default function App() {
         {navLevel === 'substep' && activeState && (
           <SubstepDetailView
             state={activeState}
+            substepLetter={selectedSubstepLetter ?? activeState.info.substepLetter ?? ''}
             selectedSubstepIterId={selectedSubstepIterId}
             onAction={handleAction}
           />

@@ -49,6 +49,12 @@ export interface CondocState {
   steps: StepSummary[]
   iterations: Iteration[]
   completedStepContents?: Record<number, string>
+  // completedSubstepContents holds the full raw content of every substep of
+  // the active step other than the one currently active (keyed by substep
+  // letter), so a substep's whole history stays viewable once it completes
+  // and control returns to the step -- see substepContent/substepIterations,
+  // which are only ever populated for a *currently active* substep.
+  completedSubstepContents?: Record<string, string>
 }
 
 export type ReprStatus = 'disconnected' | 'connecting' | 'connected'

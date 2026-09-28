@@ -107,11 +107,16 @@ That's the pre-existing `ProcInfo` (AC's mirror of LR's own struct), unrelated t
 Implemented Revision E: renamed the agent-coordinator section's own auto-update checkbox label from "auto-update" to "auto-update-all" in the global topology view (`agent-coordinator/frontend/src/App.tsx`, plus a matching doc update in `docs/DevMode.md`), leaving the per-host LR auto-update checkbox and all underlying logic untouched. Relabeled the global system pane's "version"/"uptime" readouts to "LR VERSION"/"LR UPTIME" (they already reflected LR's own process), and added a new "AC UPTIME" readout by threading a new `started_at` field through AC's backend (`Server.startedAt`, `SelfInfoMsg.StartedAt`) and frontend (`types.ts`, `acStartedAt` state/props) down to the topology panel, mirroring LR's existing uptime pattern.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Now that we have a good auto-capture system we will also add a convenient markup system.
 
+Whenever we have a file in our files tab which is an image we will be able to click a 'markup' button - this will bring us to a dialog where we have a colour pallet, a click-drag arrow drawing tool, a click-drag rectangle tool, and a text tool.
 
-## Human-Prompt
+When we use these tools it will leave a file 'marked up' (bright orange border) and we can re-enter the markup dialog to keep editing.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In the mark-up dialog we also get controls for 'cancel', 'commit', and 'copy'. These will cancel, edit the markups into the image file directly, or create a file duplicate with the markups included.
+
+When the markup is ongoing it will be persisted in '/host-agent-files/exchange/host-cache/' alongside the image file '<imagefile>' in a file named '.markup_<imagefile>.jpg' and that name will be disallowed from upload.
+
+We will also change the 'enter ->' control to be simply 'view'.

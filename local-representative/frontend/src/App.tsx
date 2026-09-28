@@ -4,6 +4,16 @@ import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg,
 const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
+// Tabs whose content is another app's own UI, embedded via same-origin
+// iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1Prompt.md Revision A: "nested UI" tabs). These skip the service-name
+// heading and health-indicator every other tab gets and instead get a full
+// tab pane for the iframe plus a slim status bar under the tab bar, so the
+// embedded app's own UI (including its own "DEV MODE" border, when that
+// sub-app runs in dev mode) fills the space instead of floating in a
+// padded, header-topped box.
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo'])
+
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
 // Step5Prompt.md Revision M): how many recently-visited tabs we keep around
 // for back/forward. A pragmatic starting value -- see useScreenHistory below.
@@ -1362,6 +1372,7 @@ export default function App() {
 
   const devMode = systemState?.self.dev_mode ?? false
   const mismatches = Object.values(modeMismatches)
+  const isEmbedTab = EMBED_TABS.has(activeTab)
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -1439,108 +1450,103 @@ export default function App() {
           title={connected ? 'connected' : 'disconnected'}
         />
       </div>
-      <div className="main-pane">
-        <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
-          <div className="service-view">
-            <div className="service-name">{activeTab}</div>
-            {activeTab === 'system' ? (
-              <SystemPanel
-                state={systemState}
-                fcState={fcState}
-                repoState={repoState}
-                onLaunch={launchApp}
-                onTerminate={terminateApp}
-                onRestart={restartApp}
-                onRebuild={rebuildRepo}
-                onSetAutoRebuild={setAutoRebuild}
-                onSetAutoUpdate={setAutoUpdate}
+      {isEmbedTab && (
+        <div className={`embed-status-bar health-${getStatus(activeTab)}`}>
+          <span className="health-dot" />
+          <span className="health-label">{activeTab} — {getStatus(activeTab)}</span>
+        </div>
+      )}
+      <div className={`main-pane${isEmbedTab ? ' main-pane-embed' : ''}`}>
+        {isEmbedTab ? (
+          getStatus(activeTab) === 'healthy' ? (
+            activeTab === 'condoccer' ? (
+              <iframe
+                ref={condoccerFrameRef}
+                className="embed-frame"
+                src={`/condoccer/${condoccerHash}`}
+                title="condoccer"
+                onLoad={handleCondoccerLoad}
               />
-            ) : activeTab === 'files' && viewerFileId ? (
-              <FileViewer
-                fileId={viewerFileId}
-                file={viewerFile}
-                onBack={() => setViewerFileId(null)}
-              />
-            ) : activeTab === 'files' ? (
-              <FilesPanel
-                state={filesState}
-                selectedId={selectedFileId}
-                onSelect={setSelectedFileId}
-                onEnter={setViewerFileId}
-                onUpload={uploadFiles}
-              />
+            ) : activeTab === 'sessions' ? (
+              <iframe className="embed-frame" src="/sessions/" title="sessions" />
             ) : (
-              <>
-                <div className={`health-indicator health-${getStatus(activeTab)}`}>
-                  <span className="health-dot" />
-                  <span className="health-label">{getStatus(activeTab)}</span>
-                </div>
-                {activeTab === 'federation-command' && (
-                  <>
-                    {ridealongState && (
-                      <RidealongPanel
-                        state={ridealongState}
+              <iframe className="embed-frame" src="/convo/" title="convo" />
+            )
+          ) : (
+            <div className="service-empty service-empty-embed">
+              {activeTab} is not running on this host — launch it from the system tab
+            </div>
+          )
+        ) : (
+          <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+            <div className="service-view">
+              <div className="service-name">{activeTab}</div>
+              {activeTab === 'system' ? (
+                <SystemPanel
+                  state={systemState}
+                  fcState={fcState}
+                  repoState={repoState}
+                  onLaunch={launchApp}
+                  onTerminate={terminateApp}
+                  onRestart={restartApp}
+                  onRebuild={rebuildRepo}
+                  onSetAutoRebuild={setAutoRebuild}
+                  onSetAutoUpdate={setAutoUpdate}
+                />
+              ) : activeTab === 'files' && viewerFileId ? (
+                <FileViewer
+                  fileId={viewerFileId}
+                  file={viewerFile}
+                  onBack={() => setViewerFileId(null)}
+                />
+              ) : activeTab === 'files' ? (
+                <FilesPanel
+                  state={filesState}
+                  selectedId={selectedFileId}
+                  onSelect={setSelectedFileId}
+                  onEnter={setViewerFileId}
+                  onUpload={uploadFiles}
+                />
+              ) : (
+                <>
+                  <div className={`health-indicator health-${getStatus(activeTab)}`}>
+                    <span className="health-dot" />
+                    <span className="health-label">{getStatus(activeTab)}</span>
+                  </div>
+                  {activeTab === 'federation-command' && (
+                    <>
+                      {ridealongState && (
+                        <RidealongPanel
+                          state={ridealongState}
+                          fcState={fcState}
+                          sendRidealongCommand={sendRidealongCommand}
+                        />
+                      )}
+                      {condocState && !ridealongState && (
+                        <CondocPanel
+                          state={condocState}
+                          fcState={fcState}
+                        />
+                      )}
+                      <FCCommandPanel
                         fcState={fcState}
-                        sendRidealongCommand={sendRidealongCommand}
+                        fcLog={fcLog}
+                        sendCommand={sendCommand}
                       />
-                    )}
-                    {condocState && !ridealongState && (
-                      <CondocPanel
-                        state={condocState}
-                        fcState={fcState}
-                      />
-                    )}
-                    <FCCommandPanel
-                      fcState={fcState}
-                      fcLog={fcLog}
-                      sendCommand={sendCommand}
-                    />
-                  </>
-                )}
-                {activeTab === 'condoccer' && (
-                  getStatus('condoccer') === 'healthy' ? (
-                    <iframe
-                      ref={condoccerFrameRef}
-                      className="condoccer-frame"
-                      src={`/condoccer/${condoccerHash}`}
-                      title="condoccer"
-                      onLoad={handleCondoccerLoad}
-                    />
-                  ) : (
-                    <div className="service-empty">
-                      condoccer is not running on this host — launch it from the system tab
-                    </div>
-                  )
-                )}
-                {activeTab === 'sessions' && (
-                  getStatus('sessions') === 'healthy' ? (
-                    <iframe className="condoccer-frame" src="/sessions/" title="sessions" />
-                  ) : (
-                    <div className="service-empty">
-                      sessions is not running on this host — launch it from the system tab
-                    </div>
-                  )
-                )}
-                {activeTab === 'convo' && (
-                  getStatus('convo') === 'healthy' ? (
-                    <iframe className="condoccer-frame" src="/convo/" title="convo" />
-                  ) : (
-                    <div className="service-empty">
-                      convo is not running on this host — launch it from the system tab
-                    </div>
-                  )
-                )}
-              </>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+            {selectedFile && (
+              <FileDetailPane
+                file={selectedFile}
+                onClose={() => setSelectedFileId(null)}
+                onEnter={setViewerFileId}
+              />
             )}
           </div>
-          {selectedFile && (
-            <FileDetailPane
-              file={selectedFile}
-              onClose={() => setSelectedFileId(null)}
-              onEnter={setViewerFileId}
-            />
-          )}
-        </div>
+        )}
       </div>
     </div>
   )

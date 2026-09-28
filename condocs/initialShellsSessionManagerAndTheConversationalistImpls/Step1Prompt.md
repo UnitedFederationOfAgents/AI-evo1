@@ -31,3 +31,20 @@ If there were good reasons to have the nested UI take a much larger portion of t
 We prefer to implement full-pane if this is feasible. (With minimal additional changes)
 
 We may want to keep a single slim bar under the tabs bar for status, since we do want to retain the 'meta-status' without flowing it back into the sub-app's UI. This would be acceptable as long as it was not overly generous.
+
+
+prompt: [`636efba`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/636efba3f80c33b3af9d241782ddb00cbbb9a60a) → reply: [`28f3737`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/28f3737d9de1df591854f50eb507ed3a7f5fa0d3)
+
+## Reply A
+
+Done. For the three embedded-app tabs (`condoccer`, `sessions`, `convo`), I removed the padded header treatment (`service-name` heading, 40px pane padding, 16px stacked gaps) and made the iframe flex to fill the entire tab pane, while keeping a slim (24px) status bar directly under the tab bar showing the tab name and health so meta-status doesn't disappear. Other tabs (`federation-command`, `system`, `files`, `worker`) are untouched. This was feasible as a full-pane change with minimal additional code (one `EMBED_TABS` set, a restructured conditional render, and a few new/adjusted CSS rules in `index.css`), so I implemented that directly rather than a 99%-partial variant.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

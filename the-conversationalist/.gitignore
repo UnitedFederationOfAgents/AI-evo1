@@ -1,0 +1,8 @@
+# Binary
+the-conversationalist
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/

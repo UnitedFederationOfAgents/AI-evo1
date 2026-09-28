@@ -1,7 +1,7 @@
 .PHONY: test test-all build-all clean-all deploy-dev-binaries check-dev-deps
 
 # Sub-projects in this directory
-SUBPROJECTS = ufa-configurable ufa-version ufa-loader clauditable clod ambiguous-agent federation-command dungeon-keeper condoccer local-representative agent-coordinator
+SUBPROJECTS = ufa-configurable ufa-version ufa-loader clauditable clod ambiguous-agent federation-command dungeon-keeper condoccer session-manager the-conversationalist local-representative agent-coordinator
 
 DEV_BIN_DIR=/AI-evo1-dev/bin
 # Staging dir binaries are actually built into -- a sibling of DEV_BIN_DIR so

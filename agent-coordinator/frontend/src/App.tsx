@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg,
 } from './types'
 
@@ -10,6 +10,8 @@ import type {
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'federation-command', multi: true },
   { name: 'condoccer', multi: false },
+  { name: 'sessions', multi: false },
+  { name: 'convo', multi: false },
 ]
 
 interface LogEntry {
@@ -26,6 +28,8 @@ interface HostClientState {
   system?: LRSystemStateMsg
   repo?: LRRepoStateMsg
   condoccer?: LRCondoccerMsg
+  sessions?: LRSessionsMsg
+  convo?: LRConvoMsg
   files?: LRFilesMsg
 }
 
@@ -277,6 +281,22 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-sessions-state': {
+            const p = msg.payload as LRSessionsMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), sessions: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-convo-state': {
+            const p = msg.payload as LRConvoMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), convo: p.available ? p : undefined },
+            }))
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
@@ -351,7 +371,7 @@ function HostSidebar({
   )
 }
 
-const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
+const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'] as const
 // "system" and "files" sit to the right of the service tabs, mirroring
 // local-representative's own dashboard: they drive/view that LR's process
 // management and host-cache from the coordinator. Upload on this files tab is
@@ -1516,7 +1536,7 @@ function hostOutOfDate(data: HostClientState | undefined): boolean {
 function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
   const services = data?.lrState?.services
   const managed = data?.system?.managed
-  return ['federation-command', 'condoccer', 'worker'].some(
+  return ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'].some(
     name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
   )
 }
@@ -1550,12 +1570,18 @@ function TopologyNodeCard({
 }) {
   const fcHealthy = serviceHealthy(services, 'federation-command')
   const coHealthy = serviceHealthy(services, 'condoccer')
+  const tcHealthy = serviceHealthy(services, 'convo')
+  const smHealthy = serviceHealthy(services, 'sessions')
   const wHealthy = serviceHealthy(services, 'worker')
   const fcManaged = subAppManaged(managed, 'federation-command')
   const coManaged = subAppManaged(managed, 'condoccer')
+  const tcManaged = subAppManaged(managed, 'convo')
+  const smManaged = subAppManaged(managed, 'sessions')
   const wManaged = subAppManaged(managed, 'worker')
   const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
   const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
+  const tcOutdated = devMode && tcHealthy && subAppOutOfDate(managed, 'convo')
+  const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
 
   return (
@@ -1583,6 +1609,14 @@ function TopologyNodeCard({
             className={subAppBoxClass(coHealthy, coManaged, !!coOutdated)}
             title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
           >CO</span>
+          <span
+            className={subAppBoxClass(tcHealthy, tcManaged, !!tcOutdated)}
+            title={tcOutdated ? "convo is connected but running an older build than what's on disk" : undefined}
+          >TC</span>
+          <span
+            className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
+            title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
+          >SM</span>
           <span
             className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
@@ -2240,6 +2274,24 @@ function LRView({
               ) : (
                 <div className="service-empty">
                   condoccer is not running on this host — launch it from the system tab
+                </div>
+              )
+            )}
+            {activeTab === 'sessions' && active && (
+              data.sessions ? (
+                <iframe className="condoccer-frame" src={`/host/${host.id}/sessions/`} title={`sessions on ${host.label}`} />
+              ) : (
+                <div className="service-empty">
+                  sessions is not running on this host — launch it from the system tab
+                </div>
+              )
+            )}
+            {activeTab === 'convo' && active && (
+              data.convo ? (
+                <iframe className="condoccer-frame" src={`/host/${host.id}/convo/`} title={`convo on ${host.label}`} />
+              ) : (
+                <div className="service-empty">
+                  convo is not running on this host — launch it from the system tab
                 </div>
               )
             )}

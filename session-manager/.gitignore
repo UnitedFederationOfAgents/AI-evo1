@@ -1,0 +1,8 @@
+# Binary
+session-manager
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/

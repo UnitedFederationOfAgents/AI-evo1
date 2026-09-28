@@ -149,6 +149,16 @@ export interface LRCondoccerMsg {
   condocs?: CondocInfo[]
 }
 
+export interface LRSessionsMsg {
+  host_id: string
+  available: boolean
+}
+
+export interface LRConvoMsg {
+  host_id: string
+  available: boolean
+}
+
 export interface FileInfo {
   id: string
   name: string

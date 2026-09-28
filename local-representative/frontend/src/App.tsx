@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg } from './types'
 
-const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
+const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
@@ -14,6 +14,8 @@ const NAV_HISTORY_MAX = 20
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'federation-command', multi: true },
   { name: 'condoccer', multi: false },
+  { name: 'sessions', multi: false },
+  { name: 'convo', multi: false },
 ]
 
 interface LogEntry {
@@ -1507,6 +1509,24 @@ export default function App() {
                   ) : (
                     <div className="service-empty">
                       condoccer is not running on this host — launch it from the system tab
+                    </div>
+                  )
+                )}
+                {activeTab === 'sessions' && (
+                  getStatus('sessions') === 'healthy' ? (
+                    <iframe className="condoccer-frame" src="/sessions/" title="sessions" />
+                  ) : (
+                    <div className="service-empty">
+                      sessions is not running on this host — launch it from the system tab
+                    </div>
+                  )
+                )}
+                {activeTab === 'convo' && (
+                  getStatus('convo') === 'healthy' ? (
+                    <iframe className="condoccer-frame" src="/convo/" title="convo" />
+                  ) : (
+                    <div className="service-empty">
+                      convo is not running on this host — launch it from the system tab
                     </div>
                   )
                 )}

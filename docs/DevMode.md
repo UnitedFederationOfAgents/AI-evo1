@@ -1,7 +1,8 @@
 # Dev Mode
 
 How the persistent sub-applications (`federation-command`, `local-representative`,
-`agent-coordinator`, `condoccer`, `dungeon-keeper`) distinguish an instance
+`agent-coordinator`, `condoccer`, `session-manager`, `the-conversationalist`,
+`dungeon-keeper`) distinguish an instance
 running from an in-progress development branch from one running an
 operations build, per [`condocs/InitialDistributedDevelopment.md`](../condocs/InitialDistributedDevelopment.md)
 Step 1. This is the foundation the rest of that condoc's steps build on; see
@@ -15,14 +16,17 @@ add one. It's set with a `--dev-mode` flag:
 | App | Flag | Cascades to |
 | --- | --- | --- |
 | `federation-command` | `--dev-mode` (also `FC_DEV_MODE=1` / config key `dev-mode`) | — |
-| `local-representative` | `--dev-mode` (also config key `dev-mode`) | every `federation-command` / `condoccer` it launches |
+| `local-representative` | `--dev-mode` (also config key `dev-mode`) | every `federation-command` / `condoccer` / `session-manager` / `the-conversationalist` it launches |
 | `local-representative` | `--dev-repo` (also config key `dev-repo`) | implies `--dev-mode`; also watches the launch working directory's git repo — see "Dev-repo watcher" below |
 | `agent-coordinator` | `--dev-mode` | — |
 | `condoccer` | `--dev-mode` | — |
+| `session-manager` | `--dev-mode` | — |
+| `the-conversationalist` | `--dev-mode` | — |
 | `dungeon-keeper` | `dungeon-keeper watch --dev-mode` | — |
 
 **This is a different flag from the pre-existing `--dev`** that
-`local-representative`, `agent-coordinator`, and `condoccer` already had —
+`local-representative`, `agent-coordinator`, `condoccer`, `session-manager`,
+and `the-conversationalist` already had —
 that one just skips serving the embedded frontend build so a `vite` dev
 server can be pointed at the backend instead. The two are unrelated and both
 can be set at once; `--dev-mode` is the SDLC concept this document covers.
@@ -31,15 +35,17 @@ can be set at once; `--dev-mode` is the SDLC concept this document covers.
 `appConfig.devMode` follow the same config-file / environment-variable / CLI
 precedence as every other flag those two already load through
 [`ufa-configurable`](../ufa-configurable/README.md) (CLI beats env beats
-config file). `agent-coordinator`, `condoccer`, and `dungeon-keeper` take a
+config file). `agent-coordinator`, `condoccer`, `session-manager`,
+`the-conversationalist`, and `dungeon-keeper` take a
 plain flag with no config-file binding, matching how they handle their other
 flags today.
 
 ## Cascading from local-representative
 
 Per the prompt's requirement, launching `local-representative` with
-`--dev-mode` launches every instance it manages — `federation-command` and
-`condoccer`, see `managedApps` in `local-representative/procman.go` — with
+`--dev-mode` launches every instance it manages — `federation-command`,
+`condoccer`, `session-manager` (tab: "sessions"), and `the-conversationalist`
+(tab: "convo"), see `managedApps` in `local-representative/procman.go` — with
 `--dev-mode` too (and, for `federation-command`, the belt-and-braces
 `FC_DEV_MODE=1` environment variable, mirroring how `--auto-connect` /
 `FC_AUTO_CONNECT` already survive a terminal wrapper mangling argv). There is

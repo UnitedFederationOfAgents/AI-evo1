@@ -80,6 +80,8 @@ it back once LR is listening again).
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
 | `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
+| `--sessions-port` | `sessions-port` | `8085` | HTTP port a managed `session-manager` serves on; its UI is reverse-proxied at `/sessions/` |
+| `--convo-port` | `convo-port` | `8086` | HTTP port a managed `the-conversationalist` serves on; its UI is reverse-proxied at `/convo/` |
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
 | `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
 

@@ -16,6 +16,8 @@ Agent Coordinator is a hierarchically organized network coordination service. It
 | local-representative | 8081 | HTTP/WebSocket (browser) |
 | local-representative | 8082 | TCP (sub-application connections) |
 | condoccer          | 8080 | HTTP/WebSocket |
+| session-manager (tab: "sessions") | 8085 | HTTP/WebSocket |
+| the-conversationalist (tab: "convo") | 8086 | HTTP/WebSocket |
 
 ## Component Relationships
 
@@ -47,6 +49,8 @@ Local-representative connects to AC using `representable.Client`. Messages:
 | LR → AC | `data` / `"system-state"` | `SystemStateMsg` — LR's system tab (self + managed apps); `ProcInfo` carries each process's `version`, `update_available` (self and managed both drive a restart control; self's is additionally gated on `loader_managed`) |
 | LR → AC | `data` / `"repo-state"` | `RepoStateMsg` — LR's dev-repo watcher (`--dev-repo`, see [DevMode.md](../../docs/DevMode.md)); `watched: false` when that LR wasn't launched with `--dev-repo` |
 | LR → AC | `data` / `"condoccer-state"` | `CondoccerStateMsg` — condoc summary + condoccer's HTTP port, relayed from a managed condoccer |
+| LR → AC | `data` / `"sessions-state"` | `SessionsStateMsg` — session-manager's HTTP port, relayed from a managed session-manager (tab: "sessions"); mirrors `condoccer-state`, minimal shell for now — see [InitialShellsSessionManagerAndTheConversationalist.md](../../condocs/InitialShellsSessionManagerAndTheConversationalist.md) |
+| LR → AC | `data` / `"convo-state"` | `ConvoStateMsg` — the-conversationalist's HTTP port, relayed from a managed the-conversationalist (tab: "convo"); mirrors `condoccer-state`, minimal shell for now |
 | LR → AC | `data` / `"lr-http"` | `LRHTTPMsg` — LR's dashboard HTTP port, so AC can reverse-proxy `/host/<id>/…` back to it |
 | LR → AC | `data` / `"files-state"` | `FilesStateMsg` — host-cache listing for the files tab; upload is relayed back down through AC's own `POST /host/<id>/api/files` route rather than this channel (see [DistributedExchange.md](../../docs/DistributedExchange.md)) |
 | LR → AC | `log` (cmd/output) | FC command echo / output forwarded upstream |
@@ -117,6 +121,8 @@ also covers the still-open Path 2 (LR-to-LR transfer brokered through AC).
 | `lr-system-state` | `{ host_id, active, self, managed[] }` | Host's system tab (LR process + managed apps) |
 | `lr-repo-state` | `{ host_id, watched, dirty, rebuild_ready, building, auto_rebuild, ...fields }` | Host's dev-repo watcher state (`--dev-repo`); `watched: false` when not watching a repo or not connected |
 | `lr-condoccer-state` | `{ host_id, available, root?, condocs[]? }` | Host's condoc summary; `available` gates the forwarded `/host/<id>/condoccer/` iframe |
+| `lr-sessions-state` | `{ host_id, available }` | Host's session-manager availability; gates the forwarded `/host/<id>/sessions/` iframe (tab: "sessions") |
+| `lr-convo-state` | `{ host_id, available }` | Host's the-conversationalist availability; gates the forwarded `/host/<id>/convo/` iframe (tab: "convo") |
 | `lr-files-state` | `{ host_id, active, files[]? }` | Host's files tab listing; upload goes over `POST /host/<id>/api/files`, not this channel |
 
 ### Client → Server

@@ -559,13 +559,15 @@ body {
   border: 1px solid #3c3c3c;
   border-radius: 6px;
   padding: 12px 14px;
-  width: 180px;
+  /* Wide enough for the bottom row's five sub-app boxes (FC/CO/TC/SM/W) at
+     .topo-node-box's min-width + .topo-node-row's gap without wrapping. */
+  width: 208px;
 }
 
 /* Self (agent-coordinator collapsed with its own LR) always leads, on its
    own row -- flex-basis: 100% forces every card after it in .topo-main's
    wrap onto the next line. */
-.topo-node-self { flex-basis: 100%; width: auto; max-width: 180px; }
+.topo-node-self { flex-basis: 100%; width: auto; max-width: 208px; }
 
 /* Faint separator between the self card and the per-host cards below --
    flex-basis: 100% pushes it onto its own line, same trick as
@@ -588,16 +590,16 @@ body {
 .topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
 
 .topo-node-diagram { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.topo-node-row { display: flex; gap: 8px; }
+.topo-node-row { display: flex; gap: 6px; }
 .topo-node-box {
   display: flex; align-items: center; justify-content: center;
-  min-width: 30px; height: 22px; padding: 0 6px;
+  min-width: 26px; height: 22px; padding: 0 5px;
   background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
   font-size: 10px; color: #9c9c9c;
 }
 .topo-node-box-ac { border-color: #245a7a; color: #6ea6c9; }
 .topo-node-box-lr { border-color: #2e7a2e; color: #6ec96e; }
-/* A sub-application box (FC/CO/W) turns the same green as the LR box once
+/* A sub-application box (FC/CO/TC/SM/W) turns the same green as the LR box once
    that host's LR reports it healthy (see serviceHealthy in App.tsx) AND LR
    itself launched it (see subAppManaged) -- i.e. it's a managed instance. */
 .topo-node-box-healthy { border-color: #2e7a2e; color: #6ec96e; }

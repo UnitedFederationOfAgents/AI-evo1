@@ -133,6 +133,24 @@ type CondoccerStateMsg struct {
 	Condocs  []CondocInfo `json:"condocs"`
 }
 
+// SessionsStateMsg matches the sessions-state payload forwarded up from LR
+// (originating at a managed session-manager). HTTPPort is session-manager's
+// own port on the LR box; the coordinator reverse-proxies its UI at
+// /host/<id>/sessions/. Grows domain-specific fields in a later step (see
+// condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+type SessionsStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
+// ConvoStateMsg matches the convo-state payload forwarded up from LR
+// (originating at a managed the-conversationalist). HTTPPort is
+// the-conversationalist's own port on the LR box; the coordinator
+// reverse-proxies its UI at /host/<id>/convo/. Grows domain-specific fields
+// in a later step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+type ConvoStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
 // LRHTTPMsg matches the lr-http payload: the HTTP port an LR's dashboard listens
 // on, used to build the /host/<id>/ reverse-proxy target.
 type LRHTTPMsg struct {
@@ -171,6 +189,22 @@ type LRCondoccerMsg struct {
 	Available bool         `json:"available"`
 	Root      string       `json:"root,omitempty"`
 	Condocs   []CondocInfo `json:"condocs,omitempty"`
+}
+
+// LRSessionsMsg is the host-scoped "lr-sessions-state" message sent to
+// browser clients: whether a managed session-manager's forwarded UI is
+// available on that host -- mirrors LRCondoccerMsg.
+type LRSessionsMsg struct {
+	HostID    string `json:"host_id"`
+	Available bool   `json:"available"`
+}
+
+// LRConvoMsg is the host-scoped "lr-convo-state" message sent to browser
+// clients: whether a managed the-conversationalist's forwarded UI is
+// available on that host -- mirrors LRCondoccerMsg.
+type LRConvoMsg struct {
+	HostID    string `json:"host_id"`
+	Available bool   `json:"available"`
 }
 
 // ProcInfo mirrors one row of local-representative's system tab: LR itself or a
@@ -343,6 +377,8 @@ type hostState struct {
 	system     *SystemStateMsg
 	repo       *RepoStateMsg
 	condoccer  *CondoccerStateMsg
+	sessions   *SessionsStateMsg
+	convo      *ConvoStateMsg
 	files      *FilesStateMsg
 	lrHTTPPort string
 }
@@ -541,6 +577,8 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	system := hs.system
 	repo := hs.repo
 	condoccer := hs.condoccer
+	sessions := hs.sessions
+	convo := hs.convo
 	files := hs.files
 	hs.mu.RUnlock()
 
@@ -565,6 +603,8 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	s.sendToClient(c, "lr-repo-state", repoStateMsg(name, repo))
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
+	s.sendToClient(c, "lr-sessions-state", sessionsMsg(name, sessions))
+	s.sendToClient(c, "lr-convo-state", convoMsg(name, convo))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
@@ -579,6 +619,26 @@ func condoccerMsg(hostID string, cc *CondoccerStateMsg) LRCondoccerMsg {
 		return LRCondoccerMsg{HostID: hostID, Available: false}
 	}
 	return LRCondoccerMsg{HostID: hostID, Available: true, Root: cc.Root, Condocs: cc.Condocs}
+}
+
+// sessionsMsg builds a host-scoped lr-sessions-state payload; a nil state
+// means no managed session-manager is currently reporting on that host --
+// mirrors condoccerMsg.
+func sessionsMsg(hostID string, sm *SessionsStateMsg) LRSessionsMsg {
+	if sm == nil || sm.HTTPPort == "" {
+		return LRSessionsMsg{HostID: hostID, Available: false}
+	}
+	return LRSessionsMsg{HostID: hostID, Available: true}
+}
+
+// convoMsg builds a host-scoped lr-convo-state payload; a nil state means no
+// managed the-conversationalist is currently reporting on that host --
+// mirrors condoccerMsg.
+func convoMsg(hostID string, cv *ConvoStateMsg) LRConvoMsg {
+	if cv == nil || cv.HTTPPort == "" {
+		return LRConvoMsg{HostID: hostID, Available: false}
+	}
+	return LRConvoMsg{HostID: hostID, Available: true}
 }
 
 func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
@@ -1060,6 +1120,8 @@ func main() {
 			hs.system = nil
 			hs.repo = nil
 			hs.condoccer = nil
+			hs.sessions = nil
+			hs.convo = nil
 			hs.files = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
@@ -1071,6 +1133,8 @@ func main() {
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-repo-state", LRRepoStateMsg{HostID: name})
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
+			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
+			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 		}
@@ -1168,6 +1232,30 @@ func main() {
 				hs.condoccer = cc
 				hs.mu.Unlock()
 				s.broadcast("lr-condoccer-state", condoccerMsg(name, cc))
+			}
+		case "sessions-state":
+			var payload SessionsStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var sm *SessionsStateMsg
+				if payload.HTTPPort != "" {
+					sm = &payload
+				}
+				hs.mu.Lock()
+				hs.sessions = sm
+				hs.mu.Unlock()
+				s.broadcast("lr-sessions-state", sessionsMsg(name, sm))
+			}
+		case "convo-state":
+			var payload ConvoStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var cv *ConvoStateMsg
+				if payload.HTTPPort != "" {
+					cv = &payload
+				}
+				hs.mu.Lock()
+				hs.convo = cv
+				hs.mu.Unlock()
+				s.broadcast("lr-convo-state", convoMsg(name, cv))
 			}
 		case "lr-http":
 			var payload LRHTTPMsg

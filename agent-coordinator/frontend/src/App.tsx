@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  SelfInfoMsg, ModeMismatchMsg,
 } from './types'
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -23,6 +24,7 @@ interface HostClientState {
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
+  repo?: LRRepoStateMsg
   condoccer?: LRCondoccerMsg
   files?: LRFilesMsg
 }
@@ -35,6 +37,18 @@ function useCoordinatorWS() {
   const [connected, setConnected] = useState(false)
   const [hosts, setHosts] = useState<Host[]>([])
   const [hostData, setHostData] = useState<Record<string, HostClientState>>({})
+  const [devMode, setDevMode] = useState(false)
+  // The connected host (if any) that agent-coordinator itself runs on -- see
+  // GlobalTopologyPanel's self-card collapsing. null until self-info arrives
+  // or when it discloses no id.
+  const [selfHostId, setSelfHostId] = useState<string | null>(null)
+  // agent-coordinator's own restart-ability -- mirrors a local-representative
+  // self row's loader_managed/update_available, but for AC itself (see
+  // types.ts SelfInfoMsg and Step4Prompt.md Revision E).
+  const [acLoaderManaged, setACLoaderManaged] = useState(false)
+  const [acUpdateAvailable, setACUpdateAvailable] = useState(false)
+  // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
+  const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRefs = useRef<Record<string, string>>({})
@@ -53,6 +67,46 @@ function useCoordinatorWS() {
 
   const sendLRTerminateApp = useCallback((hostId: string, id: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-terminate-app', payload: { host_id: hostId, id } }))
+  }, [])
+
+  // Restarts one managed sub-application instance on the given host's LR
+  // (terminate the running instance, then launch a fresh one of the same
+  // app) -- distinct from sendLRRestartApp, which restarts LR itself. See
+  // Step4Prompt.md Revision H.
+  const sendLRRestartManagedApp = useCallback((hostId: string, id: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-restart-managed-app', payload: { host_id: hostId, id } }))
+  }, [])
+
+  // Restarts the selected host's local-representative itself (not
+  // agent-coordinator) -- only expected to come back up when it's
+  // loader-managed; see docs/DevMode.md "Loader".
+  const sendLRRestartApp = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-restart-app', payload: { host_id: hostId } }))
+  }, [])
+
+  // Dev-repo watcher controls for the selected host's LR (--dev-repo, see
+  // docs/DevMode.md): sendLRRebuildApp runs 'make deploy-dev-binaries' at the
+  // watched repo's root; sendLRSetAutoRebuild toggles the auto-rebuild flag.
+  const sendLRRebuildApp = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-rebuild-app', payload: { host_id: hostId } }))
+  }, [])
+
+  const sendLRSetAutoRebuild = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
+  }, [])
+
+  // Toggles whether the given host's LR restarts itself the instant an
+  // update becomes available, instead of waiting for the "restart and
+  // update LR" control -- see docs/DevMode.md "Loader".
+  const sendLRSetAutoUpdate = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-update', payload: { host_id: hostId, enabled } }))
+  }, [])
+
+  // Restarts agent-coordinator itself (not any host's LR) -- only expected to
+  // come back up when it's loader-managed; mirrors sendLRRestartApp but for
+  // AC's own process, with no host to target (see Step4Prompt.md Revision E).
+  const sendACRestartApp = useCallback(() => {
+    wsRef.current?.send(JSON.stringify({ type: 'ac-restart-app', payload: {} }))
   }, [])
 
   const selectHost = useCallback((hostId: string) => {
@@ -83,7 +137,12 @@ function useCoordinatorWS() {
     const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
     wsRef.current = ws
 
-    ws.onopen = () => setConnected(true)
+    ws.onopen = () => {
+      setConnected(true)
+      // The server resends a full mode-mismatch snapshot on connect; drop any
+      // stale entries from a mismatch that cleared while we were offline.
+      setModeMismatches({})
+    }
 
     ws.onclose = () => {
       setConnected(false)
@@ -96,6 +155,34 @@ function useCoordinatorWS() {
       try {
         const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown }
         switch (msg.type) {
+          case 'self-info': {
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setSelfHostId(p.host_id || null)
+            setACLoaderManaged(p.loader_managed)
+            setACUpdateAvailable(p.update_available)
+            // A rebuild+restart is invisible to an already-open tab -- the
+            // reconnect above is the only signal it gets. Compare the
+            // server's own reported version against this bundle's
+            // build-time version and reload if they differ; skip under the
+            // Vite dev server, where HMR already keeps the tab current and
+            // the two are never expected to match (see
+            // condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+            break
+          }
+          case 'mode-mismatch': {
+            const payload = msg.payload as ModeMismatchMsg
+            setModeMismatches(prev => {
+              const next = { ...prev }
+              if (payload.mismatched) next[payload.host_id] = payload
+              else delete next[payload.host_id]
+              return next
+            })
+            break
+          }
           case 'hosts':
             setHosts((msg.payload as HostsMsg).hosts)
             break
@@ -174,6 +261,14 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-repo-state': {
+            const p = msg.payload as LRRepoStateMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), repo: p.watched ? p : undefined },
+            }))
+            break
+          }
           case 'lr-condoccer-state': {
             const p = msg.payload as LRCondoccerMsg
             setHostData(prev => ({
@@ -206,8 +301,10 @@ function useCoordinatorWS() {
   }, [connect])
 
   return {
-    connected, hosts, hostData, selectHost,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
+    acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
   }
 }
 
@@ -216,15 +313,26 @@ function hostDotClass(status: string): string {
 }
 
 function HostSidebar({
-  hosts, selectedHostId, onSelect,
+  hosts, selectedHostId, onSelect, onSelectGlobal,
 }: {
   hosts: Host[]
   selectedHostId: string | null
   onSelect: (id: string) => void
+  onSelectGlobal: () => void
 }) {
   return (
     <div className="sidebar">
       <div className="sidebar-header">hosts</div>
+      {/* The global selection sits above the per-host list and is mutually
+          exclusive with picking a particular host -- selectedHostId === null
+          means global, which is also the default on first load. */}
+      <div
+        className={`host-item global-item${selectedHostId === null ? ' host-item-active' : ''}`}
+        onClick={onSelectGlobal}
+      >
+        <span className="global-icon">◎</span>
+        <span className="host-label">global</span>
+      </div>
       {hosts.length === 0 ? (
         <div className="sidebar-empty">no hosts connected</div>
       ) : (
@@ -251,6 +359,95 @@ const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
 // its own copy of the file (see docs/DistributedExchange.md, Path 1).
 const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
+
+// Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
+// stays scoped per-tab, and clears when the tab actually closes rather than
+// pinning stale state forever -- the right lifetime for "resume where I was".
+function initialACTab(): LRTab {
+  const stored = sessionStorage.getItem('ac-active-tab')
+  return (LR_TABS as readonly string[]).includes(stored ?? '') ? (stored as LRTab) : 'system'
+}
+
+// Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
+// Step5Prompt.md Revision M): how many recently-visited (host, tab) screens
+// we keep around for back/forward. A pragmatic starting value -- see
+// useScreenHistory below.
+const NAV_HISTORY_MAX = 20
+
+// Small forward/back stack over the app's top-level navigation state
+// (Step5Prompt.md Revision M). Deliberately independent of the real browser
+// history -- this app never calls pushState (see BrowserPickupStrategy.md on
+// why nav already relies on replaceState/sessionStorage instead), so this is
+// purely an in-app "last N screens" stack, not a wrapper around back/forward
+// button clicks. `max` caps how many screens are remembered.
+function useScreenHistory<T>(
+  screen: T,
+  isEqual: (a: T, b: T) => boolean,
+  applyScreen: (screen: T) => void,
+  max: number,
+) {
+  const [hist, setHist] = useState(() => ({ stack: [screen], index: 0 }))
+
+  useEffect(() => {
+    setHist(prev => {
+      if (isEqual(prev.stack[prev.index], screen)) return prev // e.g. applyScreen just navigated us here
+      let stack = [...prev.stack.slice(0, prev.index + 1), screen]
+      let index = stack.length - 1
+      if (stack.length > max) {
+        const drop = stack.length - max
+        stack = stack.slice(drop)
+        index -= drop
+      }
+      return { stack, index }
+    })
+  }, [screen])
+
+  const canBack = hist.index > 0
+  const canForward = hist.index < hist.stack.length - 1
+
+  const back = () => {
+    if (!canBack) return
+    applyScreen(hist.stack[hist.index - 1])
+    setHist(prev => (prev.index <= 0 ? prev : { ...prev, index: prev.index - 1 }))
+  }
+
+  const forward = () => {
+    if (!canForward) return
+    applyScreen(hist.stack[hist.index + 1])
+    setHist(prev => (prev.index >= prev.stack.length - 1 ? prev : { ...prev, index: prev.index + 1 }))
+  }
+
+  return { canBack, canForward, back, forward }
+}
+
+function NavArrows({ canBack, canForward, onBack, onForward }: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <span className="nav-arrows">
+      <button
+        className={`nav-arrow-btn${canBack ? ' nav-arrow-active' : ''}`}
+        onClick={onBack}
+        disabled={!canBack}
+        title={canBack ? 'back' : 'no earlier screen'}
+      >
+        ←
+      </button>
+      <button
+        className={`nav-arrow-btn${canForward ? ' nav-arrow-active' : ''}`}
+        onClick={onForward}
+        disabled={!canForward}
+        title={canForward ? 'forward' : 'no later screen'}
+      >
+        →
+      </button>
+    </span>
+  )
+}
 
 function FCCommandPanel({
   hostId, fcState, fcLog, sendLRCommand,
@@ -450,12 +647,24 @@ function formatUptime(startedAt: number, nowSec: number): string {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
 }
 
+// procRowKey identifies a system-tab row for selection/drill-down purposes:
+// managed instances are unique by instance_id, but self has none (it's a
+// singleton row), so it gets a fixed sentinel instead.
+function procRowKey(proc: ProcInfo): string {
+  return proc.managed ? proc.instance_id : '__self__'
+}
+
 function SystemProcRow({
-  proc, nowSec, onTerminate,
+  proc, nowSec, selected, onSelect, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
+  selected?: boolean
+  onSelect?: () => void
   onTerminate?: (id: string) => void
+  onRestart?: () => void
+  onRestartManaged?: (id: string) => void
+  onSetAutoUpdate?: (enabled: boolean) => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -466,39 +675,313 @@ function SystemProcRow({
     : proc.name
 
   return (
-    <div className={`sys-row sys-row-${proc.status}`}>
+    <div
+      className={`sys-row sys-row-${proc.status}${onSelect ? ' sys-row-clickable' : ''}${selected ? ' sys-row-selected' : ''}`}
+      onClick={onSelect}
+      title={onSelect ? 'click for version details' : undefined}
+    >
       <span className="sys-col sys-col-name">
-        {label}
-        {!proc.managed && <span className="sys-self-tag">this LR</span>}
+        <span className="sys-col-name-main">
+          {label}
+          {!proc.managed && <span className="sys-self-tag">this LR</span>}
+          {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        </span>
+        {proc.version && (
+          <span className="sys-version-tag" title="build version">{proc.version}</span>
+        )}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
       <span className="sys-col sys-col-detail" title={proc.detail}>{detail}</span>
       <span className="sys-col sys-col-actions">
+        {proc.managed && onRestartManaged && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            title={proc.update_available
+              ? 'a newer build has landed on disk — terminate this instance and launch a new one with it'
+              : 'terminate this instance and launch a fresh one of the same application'}
+            onClick={e => { e.stopPropagation(); onRestartManaged(proc.instance_id) }}
+          >
+            {proc.update_available ? 'restart and update' : 'restart'}
+          </button>
+        )}
         {proc.managed && onTerminate && (
           <button
             className="sys-btn sys-btn-terminate"
-            onClick={() => onTerminate(proc.instance_id)}
+            onClick={e => { e.stopPropagation(); onTerminate(proc.instance_id) }}
           >
             {proc.status === 'running' ? 'terminate' : 'dismiss'}
           </button>
+        )}
+        {!proc.managed && onRestart && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            disabled={!proc.loader_managed}
+            title={proc.loader_managed
+              ? (proc.update_available
+                ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
+                : 'terminate this LR so ufa-loader relaunches it with the identical config')
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={e => { e.stopPropagation(); onRestart() }}
+          >
+            {proc.update_available ? 'update and restart' : 'restart'}
+          </button>
+        )}
+        {!proc.managed && onSetAutoUpdate && (
+          <label
+            className="sys-auto-rebuild"
+            title={proc.loader_managed
+              ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={e => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              disabled={!proc.loader_managed}
+              checked={!!proc.auto_update}
+              onChange={e => onSetAutoUpdate(e.target.checked)}
+            />
+            auto-update
+          </label>
         )}
       </span>
     </div>
   )
 }
 
+// SystemProcDetails is the drill-down shown below the table when a process
+// row is clicked (see procRowKey/SystemPanel) -- Step5Prompt.md Revision J.
+// Mirrors the topology view's .topo-details readout-row convention
+// (App.tsx's per-host "Details & Control" pane).
+function SystemProcDetails({ proc, nowSec }: { proc: ProcInfo; nowSec: number }) {
+  const label = proc.managed && proc.instance > 0 ? `${proc.name} #${proc.instance}` : proc.name
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  return (
+    <div className="sys-details">
+      <div className="sys-details-header">{label}</div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">status</span>
+        <span className="sys-readout-value">
+          {proc.status}{proc.status === 'running' ? ` (${detail} uptime)` : ` (${detail})`}
+          {proc.detail && ` — ${proc.detail}`}
+        </span>
+      </div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">current version</span>
+        <span className="sys-readout-value">
+          {proc.version || <span className="sys-readout-placeholder">not yet reported</span>}
+        </span>
+      </div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">pending version</span>
+        <span className="sys-readout-value">
+          {!proc.update_available
+            ? <span className="sys-readout-placeholder">up to date</span>
+            : proc.pending_version || <span className="sys-readout-placeholder">update available (version unknown)</span>}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// TroughEntry is one line in a system tab's "trough" (see Trough below) --
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision L.
+interface TroughEntry {
+  id: number
+  ts: number // Date.now(), when the notification was recorded
+  text: string
+}
+
+// TROUGH_MAX_ENTRIES caps how much history a trough keeps -- it's a live,
+// session-scoped notification log (not persisted; a refresh starts it fresh),
+// not an audit trail, so old entries are simply dropped off the front.
+const TROUGH_MAX_ENTRIES = 50
+
+let troughIdSeq = 0
+
+// useTrough appends a new trough entry each time `error` changes to a new,
+// non-empty value -- right now that's only ever LRRepoStateMsg.last_error
+// after a failed rebuild, per the prompt's "print errors or notifications
+// when things happen like a failure during rebuild", but the trough itself
+// is generic (any future error/notification source can feed it the same
+// way). Used by the per-host system tab; see useAggregateTrough for the
+// global system tab's multi-host equivalent.
+function useTrough(error: string | undefined): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (error && error !== lastSeen.current) {
+      setEntries(prev => [
+        ...prev.slice(-(TROUGH_MAX_ENTRIES - 1)),
+        { id: ++troughIdSeq, ts: Date.now(), text: `rebuild failed — ${error}` },
+      ])
+    }
+    lastSeen.current = error
+  }, [error])
+
+  return entries
+}
+
+// useAggregateTrough is useTrough generalized across every connected host, for
+// the global system tab: each host's own rebuild failure is recorded once,
+// tagged with that host's label, keyed independently so one host's repeated
+// failures don't mask another's.
+function useAggregateTrough(hosts: Host[], hostData: Record<string, HostClientState>): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<Record<string, string | undefined>>({})
+
+  useEffect(() => {
+    setEntries(prev => {
+      let next = prev
+      for (const h of hosts) {
+        const error = hostData[h.id]?.repo?.last_error
+        if (error && error !== lastSeen.current[h.id]) {
+          next = [
+            ...next.slice(-(TROUGH_MAX_ENTRIES - 1)),
+            { id: ++troughIdSeq, ts: Date.now(), text: `${h.label}: rebuild failed — ${error}` },
+          ]
+        }
+        lastSeen.current[h.id] = error
+      }
+      return next
+    })
+  }, [hosts, hostData])
+
+  return entries
+}
+
+// Trough is "an expandable-and-then-scrollable single line at the bottom of
+// the main pane where we can print errors or notifications when things
+// happen" (Step5Prompt.md Revision L). Collapsed, it's just the most recent
+// entry on one line; clicking it expands into a scrollable list of
+// everything recorded this session, newest first.
+function Trough({ entries }: { entries: TroughEntry[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const latest = entries[entries.length - 1]
+
+  return (
+    <div className={`sys-trough${expanded ? ' sys-trough-expanded' : ''}`}>
+      <button
+        className="sys-trough-line"
+        onClick={() => setExpanded(e => !e)}
+        disabled={entries.length === 0}
+        title={entries.length === 0 ? 'no notifications yet' : expanded ? 'collapse' : 'expand for full history'}
+      >
+        <span className="sys-trough-chevron">{expanded ? '▾' : '▸'}</span>
+        {latest ? (
+          <>
+            <span className="sys-trough-ts">{new Date(latest.ts).toLocaleTimeString()}</span>
+            <span className="sys-trough-text">{latest.text}</span>
+          </>
+        ) : (
+          <span className="sys-trough-empty">no notifications</span>
+        )}
+        {entries.length > 1 && <span className="sys-trough-count">{entries.length}</span>}
+      </button>
+      {expanded && (
+        <div className="sys-trough-list">
+          {entries.slice().reverse().map(e => (
+            <div key={e.id} className="sys-trough-entry">
+              <span className="sys-trough-ts">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className="sys-trough-text">{e.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// RepoWatchPanel mirrors local-representative's own dev-repo watcher widget
+// (--dev-repo, see docs/DevMode.md): the rebuild button turns orange and
+// reads "dirty" while the watched repo has uncommitted changes -- but stays
+// disabled, since rebuilding a dirty tree would silently bake in unreviewed
+// changes. It's selectable, plain, and reads "rebuild" only once HEAD has
+// moved since the last build with the repo clean; otherwise it's disabled.
+// Rendered only when that host's LR was actually launched with --dev-repo.
+function RepoWatchPanel({
+  repoState, onRebuild, onSetAutoRebuild,
+}: {
+  repoState: LRRepoStateMsg | undefined
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+}) {
+  if (!repoState?.watched) return null
+
+  const locked = repoState.condoc_locked && !repoState.dirty
+  const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : locked ? 'condoc' : 'rebuild'
+
+  return (
+    <div className="sys-repo-panel">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-repo</span>
+        <span className="sys-repo-root" title={repoState.root}>{repoState.root}</span>
+        {repoState.head && <span className="sys-repo-head">{repoState.head}</span>}
+      </div>
+      <div className="sys-repo-controls">
+        <button
+          className={`sys-btn sys-btn-rebuild${repoState.dirty ? ' sys-btn-rebuild-dirty' : ''}`}
+          disabled={repoState.building || !repoState.rebuild_ready}
+          onClick={onRebuild}
+          title={
+            repoState.dirty
+              ? 'uncommitted changes — commit or revert to enable rebuilding'
+              : locked
+              ? 'a condoc is mid-transition (.condoc lock file present) — rebuilding is held off until it settles'
+              : repoState.rebuild_ready
+              ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              : 'nothing to rebuild since the last successful build'
+          }
+        >
+          {label}
+        </button>
+        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst">
+          <input
+            type="checkbox"
+            checked={repoState.auto_rebuild}
+            onChange={e => onSetAutoRebuild(e.target.checked)}
+          />
+          auto-rebuild
+        </label>
+        {repoState.auto_rebuild_pending && (
+          <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time HEAD moves again">
+            rebuilding in {repoState.auto_rebuild_seconds ?? 0}s
+          </span>
+        )}
+      </div>
+      {repoState.last_error && (
+        <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
+      )}
+    </div>
+  )
+}
+
 function SystemPanel({
-  hostId, state, active, fcState, onLaunch, onTerminate,
+  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
   active: boolean
   fcState: string
+  repoState: LRRepoStateMsg | undefined
   onLaunch: (hostId: string, name: string) => void
   onTerminate: (hostId: string, id: string) => void
+  onRestart: (hostId: string) => void
+  onRestartManaged: (hostId: string, id: string) => void
+  onRebuild: (hostId: string) => void
+  onSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  onSetAutoUpdate: (hostId: string, enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  // Which process row's drill-down is open, keyed by procRowKey -- cleared
+  // whenever that row disappears (e.g. a terminated instance is dismissed)
+  // rather than left pointing at a stale selection.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const troughEntries = useTrough(repoState?.last_error)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -522,8 +1005,17 @@ function SystemPanel({
     : fcState === 'local-control' ? 'local'
     : 'not connected'
 
+  const selectedProc = selectedKey === null
+    ? undefined
+    : [state.self, ...managed].find(p => procRowKey(p) === selectedKey)
+
   return (
     <div className="sys-panel">
+      <RepoWatchPanel
+        repoState={repoState}
+        onRebuild={() => onRebuild(hostId)}
+        onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
+      />
       {fcRunning && (
         <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
           federation-command control: <strong>{fcControl}</strong>
@@ -538,19 +1030,30 @@ function SystemPanel({
           <span className="sys-col sys-col-detail">uptime</span>
           <span className="sys-col sys-col-actions" />
         </div>
-        <SystemProcRow proc={state.self} nowSec={nowSec} />
+        <SystemProcRow
+          proc={state.self}
+          nowSec={nowSec}
+          selected={selectedKey === procRowKey(state.self)}
+          onSelect={() => setSelectedKey(k => k === procRowKey(state.self) ? null : procRowKey(state.self))}
+          onRestart={() => onRestart(hostId)}
+          onSetAutoUpdate={enabled => onSetAutoUpdate(hostId, enabled)}
+        />
         {managed.map(p => (
           <SystemProcRow
             key={p.instance_id}
             proc={p}
             nowSec={nowSec}
+            selected={selectedKey === procRowKey(p)}
+            onSelect={() => setSelectedKey(k => k === procRowKey(p) ? null : procRowKey(p))}
             onTerminate={id => onTerminate(hostId, id)}
+            onRestartManaged={id => onRestartManaged(hostId, id)}
           />
         ))}
         {managed.length === 0 && (
           <div className="sys-row sys-row-none">no managed applications</div>
         )}
       </div>
+      {selectedProc && <SystemProcDetails proc={selectedProc} nowSec={nowSec} />}
 
       <div className="sys-launch">
         <span className="sys-launch-label">launch</span>
@@ -570,6 +1073,7 @@ function SystemPanel({
           )
         })}
       </div>
+      <Trough entries={troughEntries} />
     </div>
   )
 }
@@ -672,6 +1176,13 @@ function filePersistUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/persist`
 }
 
+// fileHighlightUrl backs the file-details dialog's "highlight" toggle,
+// through the same transparent proxy as hold/persist/delete above -- see
+// local-representative/files.go's handleFileHighlight.
+function fileHighlightUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/highlight`
+}
+
 function fileDeleteUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
 }
@@ -725,7 +1236,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -781,6 +1292,10 @@ function FileDetailPane({
     void runAction(url, 'POST')
   }
 
+  const handleHighlight = () => {
+    void runAction(fileHighlightUrl(hostId, file.id), 'POST')
+  }
+
   const handleDelete = () => {
     if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
     void runAction(fileDeleteUrl(hostId, file.id), 'DELETE').then(ok => { if (ok) onClose() })
@@ -824,6 +1339,16 @@ function FileDetailPane({
         <a className="file-detail-download" href={fileDownloadUrl(hostId, file.id)} download={file.name}>
           download
         </a>
+      </div>
+      <div className="file-detail-actions">
+        <button
+          className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
+          onClick={handleHighlight}
+          disabled={busy}
+          title="Mark this file at the LR/AC level"
+        >
+          {file.highlighted ? 'unhighlight' : 'highlight'}
+        </button>
       </div>
       <div className="file-detail-actions">
         {file.state !== 'persisted' && (
@@ -901,8 +1426,640 @@ function FileViewer({
   )
 }
 
+/* ---- Global view ----
+ *
+ * The global selection sits above the per-host list (App.tsx's
+ * selectedHostId === null) and shows a net-centric alternative to a single
+ * host's dashboard. Every one of a host's tabs (LR_TABS) has a global
+ * counterpart in principle, but only 'system' has one implemented so far --
+ * the rest render the same "not yet implemented" placeholder until a later
+ * increment gives them a real view (Step4Prompt.md).
+ */
+
+// GLOBAL_SYSTEM_TABS: nested tabs within the global system tab's main-view
+// selector. Only 'topology' is populated this increment -- it's not
+// interactive yet, just visible. 'timeline' is a placeholder.
+const GLOBAL_SYSTEM_TABS = ['topology', 'timeline'] as const
+type GlobalSystemTab = typeof GLOBAL_SYSTEM_TABS[number]
+
+// serviceHealthy reports whether `services` (a host's lrState.services, as
+// also used by LRView's getServiceStatus) lists `name` as healthy -- drives
+// whether that sub-application's box in the topology diagram renders green.
+function serviceHealthy(services: ServiceStatus[] | undefined, name: string): boolean {
+  return services?.find(s => s.name === name)?.status === 'healthy'
+}
+
+// subAppOutOfDate reports whether `managed` (a host's system.managed, keyed
+// by app name the same way ServiceStatus.name is -- representable only
+// tracks one connection identity per app name today) lists `name` with
+// update_available set: that application's on-disk binary now differs from
+// the version its connected instance last reported (see
+// local-representative/procman.go's pollManagedVersions). Drives the orange
+// halo drawn around that sub-application's green "connected" box in the
+// topology diagram (Step4Prompt.md Revision D) -- LR itself is excluded
+// because hostOutOfDate already covers it at the whole-card level.
+function subAppOutOfDate(managed: ProcInfo[] | undefined, name: string): boolean {
+  return !!managed?.find(p => p.name === name)?.update_available
+}
+
+// subAppManaged reports whether `managed` lists `name` at all -- a
+// sub-application can be connected (see serviceHealthy) without LR having
+// launched it (e.g. run manually and pointed at LR's address), in which case
+// it never appears here. Drives the topology diagram's distinction (Step4Prompt.md
+// Revision K) between a managed connected box (green border, matching LR)
+// and a merely-connected one (green abbreviation, but the border stays the
+// same grey as an unlit box) -- LR itself is always "managed" by definition
+// so this only applies to FC/CO/W.
+function subAppManaged(managed: ProcInfo[] | undefined, name: string): boolean {
+  return !!managed?.find(p => p.name === name)
+}
+
+// subAppBoxClass builds an FC/CO/W box's className: connected-and-managed
+// gets the full green treatment (border + text, matching the LR box);
+// connected-but-unmanaged (see subAppManaged) gets only the green
+// abbreviation, leaving the border the same grey as an unlit box
+// (Step4Prompt.md Revision K). outdated layers its halo on top of either, and
+// never applies unless healthy is also true (see subAppOutOfDate).
+function subAppBoxClass(healthy: boolean, managed: boolean, outdated: boolean): string {
+  const healthClass = healthy ? (managed ? ' topo-node-box-healthy' : ' topo-node-box-unmanaged') : ''
+  return `topo-node-box${healthClass}${outdated ? ' topo-node-box-outdated' : ''}`
+}
+
+// hostRebuildReady reports whether this host's LR is watching a --dev-repo
+// whose "rebuild" control would be enabled right now (HEAD has moved past
+// the last successful build and the repo is clean) -- the same condition
+// RepoWatchPanel uses to un-disable its own rebuild button. Factored out of
+// hostOutOfDate so the global "rebuild all" control (Step4Prompt.md
+// Revision J) can ask the same question across every connected host at once.
+function hostRebuildReady(data: HostClientState | undefined): boolean {
+  return !!data?.repo?.watched && !data.repo.building && !!data.repo.rebuild_ready
+}
+
+// hostOutOfDate reports whether a host's LR is behind the dev branch it's
+// tracking -- true while either the "rebuild" control would be enabled (see
+// hostRebuildReady) or the "restart" control would read "update and restart"
+// (a newer build has already landed on disk but isn't running yet). Drives
+// the topology card's orange halo (Step4Prompt.md Revision C); dev-mode-only,
+// so callers gate this on the viewing agent-coordinator's own devMode.
+function hostOutOfDate(data: HostClientState | undefined): boolean {
+  const updateAvailable = !!data?.system?.self?.update_available
+  return hostRebuildReady(data) || updateAvailable
+}
+
+// hostAnySubAppUpdateAvailable reports whether any of this host's connected
+// FC/CO/W sub-applications is running an older build than what's on disk --
+// the same per-app check that drives an individual box's own halo (see
+// subAppOutOfDate), OR'd across the three. Factored out so both the
+// self-host-only "host update all" button and the network-wide "network
+// update all" button (Step4Prompt.md Revisions F/G and J) share one
+// definition of "this host has a pending sub-app update".
+function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
+  const services = data?.lrState?.services
+  const managed = data?.system?.managed
+  return ['federation-command', 'condoccer', 'worker'].some(
+    name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
+  )
+}
+
+// TopologyNodeCard is one node in the topology main pane: the "self" card
+// (agent-coordinator collapsed together with its own LR box -- there's no
+// separate self-only panel any more) is pinned to its own row above the
+// per-host cards, which are selectable and color their sub-application boxes
+// green once that host's LR reports them healthy -- fully green (border and
+// abbreviation) once LR also launched it (see subAppManaged), or just the
+// abbreviation, with the border left the same grey as an unlit box, when it's
+// merely connected without LR managing it (Step4Prompt.md Revision K).
+// outOfDate draws a faint orange halo around the whole card (dev mode only)
+// without displacing the grey-vs-blue selected indication -- see
+// hostOutOfDate. devMode additionally draws that same halo around an
+// individual FC/CO/W box's own green border once it's connected but out of
+// date (see subAppOutOfDate) -- LR/AC never get one; the card-level halo
+// already implies it for LR.
+function TopologyNodeCard({
+  label, status, isSelf, services, managed, devMode, selected, outOfDate, onClick,
+}: {
+  label: string
+  status?: string
+  isSelf?: boolean
+  services?: ServiceStatus[]
+  managed?: ProcInfo[]
+  devMode?: boolean
+  selected?: boolean
+  outOfDate?: boolean
+  onClick?: () => void
+}) {
+  const fcHealthy = serviceHealthy(services, 'federation-command')
+  const coHealthy = serviceHealthy(services, 'condoccer')
+  const wHealthy = serviceHealthy(services, 'worker')
+  const fcManaged = subAppManaged(managed, 'federation-command')
+  const coManaged = subAppManaged(managed, 'condoccer')
+  const wManaged = subAppManaged(managed, 'worker')
+  const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
+  const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
+  const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
+
+  return (
+    <div
+      className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}${outOfDate ? ' topo-node-outdated' : ''}`}
+      title={outOfDate ? "this host's LR is behind the dev branch it's tracking — see details & control" : undefined}
+      onClick={onClick}
+    >
+      <div className="topo-node-header">
+        {status && <span className={`host-dot ${hostDotClass(status)}`} />}
+        <span className="topo-node-label">{label}</span>
+        {isSelf && <span className="topo-node-self-tag">self</span>}
+      </div>
+      <div className="topo-node-diagram">
+        <div className="topo-node-row topo-node-row-top">
+          {isSelf && <span className="topo-node-box topo-node-box-ac">AC</span>}
+          <span className="topo-node-box topo-node-box-lr">LR</span>
+        </div>
+        <div className="topo-node-row topo-node-row-bottom">
+          <span
+            className={subAppBoxClass(fcHealthy, fcManaged, !!fcOutdated)}
+            title={fcOutdated ? "federation-command is connected but running an older build than what's on disk" : undefined}
+          >FC</span>
+          <span
+            className={subAppBoxClass(coHealthy, coManaged, !!coOutdated)}
+            title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
+          >CO</span>
+          <span
+            className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
+            title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
+          >W</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// GlobalTopologyPanel: main pane of host cards (left, agent-coordinator's own
+// card always on top, a faint divider below it) plus a details-and-control
+// pane (right) -- see
+// condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
+// Selecting a host card drives the details pane's readouts and its restart
+// control (which sends that host's LR a restart, same as the per-host system
+// tab's self-restart button). When selfHostId names a currently-connected
+// host, that's the host agent-coordinator itself runs on -- its card
+// collapses the AC box together with that host's own LR/FC/CO/W card (one
+// panel, keeping the host's real name) and it's selectable like any other
+// host. Without a match (no co-located LR connected), a static,
+// unselectable "agent-coordinator" placeholder card is shown instead, same
+// as before. Everything else here (live per-app data beyond health) is still
+// a placeholder. devMode gates the out-of-date halo and the rebuild/restart
+// controls below (Step4Prompt.md Revision C) -- both are meaningless outside
+// a dev workflow. When the selected card is the self host, the details pane
+// also grows a small "agent-coordinator" section below the rebuild/restart
+// controls with its own restart button, since that selection's restart
+// control above only ever targets that host's LR -- restarting AC itself is
+// a separate action (Step4Prompt.md Revision E) -- its rebuild & restart
+// controls sibling above is labeled "restart LR"/"restart and update LR" to
+// keep the two unambiguous now that they sit side by side. That same
+// agent-coordinator section also grows a "host update all" button, enabled
+// once any connected sub-application on this host is out of date (see
+// anySubAppUpdateAvailable) -- but pressing it only actually restarts
+// whichever of this host's LR / AC itself is the one running a stale
+// binary (each checked independently, same willUpdate/acWillUpdate flags
+// the controls above already use), rather than always restarting both
+// (Step4Prompt.md Revision F, narrowed by Revision G). Two more controls
+// (Revision J) round out that section: a green "rebuild all" button plus its
+// accompanying auto-rebuild toggle at the top, sweeping every connected
+// host's dev-repo watcher instead of just the selected one; and a
+// blue-or-orange "network update all" button at the bottom, the same
+// selective-restart effect as "host update all" but generalized to every
+// connected host's LR plus AC, rather than just the AC host.
+function GlobalTopologyPanel({
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selfHostId: string | null
+  devMode: boolean
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  sendACRestartApp: () => void
+}) {
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+  const selectedData = selectedHostId ? hostData[selectedHostId] : undefined
+  const selfProc = selectedData?.system?.self
+  const canRestart = !!selectedHostId && !!selfProc?.loader_managed
+  const willUpdate = devMode && !!selfProc?.update_available
+  // The selected card is the one agent-coordinator itself runs on -- see
+  // GlobalTopologyPanel's self-card collapsing above.
+  const isSelfSelected = !!selectedHostId && selectedHostId === selfHostId
+  const acWillUpdate = devMode && acUpdateAvailable
+
+  const selfHost = selfHostId ? hosts.find(h => h.id === selfHostId) ?? null : null
+  const otherHosts = selfHost ? hosts.filter(h => h.id !== selfHost.id) : hosts
+
+  // Drives the "host update all" button below: true once any connected
+  // sub-application on the AC host itself is running an older build than
+  // what's on disk (same per-app check TopologyNodeCard uses for that box's
+  // own halo -- see hostAnySubAppUpdateAvailable) -- LR/AC's own staleness
+  // isn't counted here since they're what the button updates, not what it's
+  // watching for.
+  const selfHostData = selfHost ? hostData[selfHost.id] : undefined
+  const anySubAppUpdateAvailable = devMode && hostAnySubAppUpdateAvailable(selfHostData)
+  const canUpdateAll = anySubAppUpdateAvailable && !!selfHostData?.system?.self?.loader_managed && acLoaderManaged
+
+  // allHosts: every connected host, self first when known -- the set both new
+  // agent-coordinator-section controls below (Step4Prompt.md Revision J)
+  // sweep across, since unlike the controls above them these two aren't
+  // scoped to whichever single host card is selected.
+  const allHosts = selfHost ? [selfHost, ...otherHosts] : otherHosts
+
+  // "rebuild all": green, enabled once any connected host's LR has a
+  // rebuild ready (see hostRebuildReady); clicking rebuilds only those hosts,
+  // leaving already-up-to-date ones untouched.
+  const rebuildableHosts = devMode ? allHosts.filter(h => hostRebuildReady(hostData[h.id])) : []
+  const anyRebuildReady = rebuildableHosts.length > 0
+  const handleRebuildAll = () => rebuildableHosts.forEach(h => sendLRRebuildApp(h.id))
+
+  // Accompanying auto-rebuild toggle-selector: applies to every connected
+  // host with a watched dev-repo (not just ones currently rebuild-ready,
+  // since auto-rebuild is a standing setting, not a one-shot action).
+  // Reads as checked only when every watched repo already has it on.
+  const watchedHosts = devMode ? allHosts.filter(h => hostData[h.id]?.repo?.watched) : []
+  const allAutoRebuildOn = watchedHosts.length > 0 && watchedHosts.every(h => !!hostData[h.id]?.repo?.auto_rebuild)
+  const handleSetAutoRebuildAll = (enabled: boolean) =>
+    watchedHosts.forEach(h => sendLRSetAutoRebuild(h.id, enabled))
+
+  // "network update all": the same selective-restart effect as "host update
+  // all" above, generalized to every connected host's LR plus AC -- each
+  // host's own `update_available` (not its sub-apps') decides whether that
+  // host's LR gets restarted, same as the "restart LR"/"restart and update
+  // LR" control above already does for whichever single host is selected.
+  const staleHosts = allHosts.filter(h => devMode && !!hostData[h.id]?.system?.self?.update_available)
+  const restartableStaleHosts = staleHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed)
+  const anyNetworkUpdateAvailable = staleHosts.length > 0 || acWillUpdate
+  const canNetworkUpdateAll = restartableStaleHosts.length > 0 || (acWillUpdate && acLoaderManaged)
+  const handleNetworkUpdateAll = () => {
+    restartableStaleHosts.forEach(h => sendLRRestartApp(h.id))
+    if (acWillUpdate && acLoaderManaged) sendACRestartApp()
+  }
+
+  // Accompanying auto-update toggle-selector, mirroring auto-rebuild's above:
+  // applies to every connected, loader-managed host at once (not just ones
+  // currently stale, since like auto-rebuild this is a standing setting, not
+  // a one-shot action) -- Step5Prompt.md Revision E. Deliberately scoped to
+  // hosts, same as "network update all" is scoped to *restartable* hosts
+  // plus AC handled separately by its own "restart AC" control above; this
+  // doesn't reach into AC's own restart at all.
+  const updatableHosts = devMode ? allHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed) : []
+  const allAutoUpdateOn = updatableHosts.length > 0 && updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update)
+  const handleSetAutoUpdateAll = (enabled: boolean) =>
+    updatableHosts.forEach(h => sendLRSetAutoUpdate(h.id, enabled))
+
+  return (
+    <div className="topo-panel">
+      <div className="topo-main">
+        {selfHost ? (
+          <TopologyNodeCard
+            label={selfHost.label}
+            status={selfHost.status}
+            isSelf
+            services={hostData[selfHost.id]?.lrState?.services}
+            managed={hostData[selfHost.id]?.system?.managed}
+            devMode={devMode}
+            selected={selectedHostId === selfHost.id}
+            outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
+            onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
+          />
+        ) : (
+          <TopologyNodeCard label="agent-coordinator" isSelf />
+        )}
+        {otherHosts.length > 0 && <div className="topo-divider" />}
+        {otherHosts.map(h => (
+          <TopologyNodeCard
+            key={h.id}
+            label={h.label}
+            status={h.status}
+            services={hostData[h.id]?.lrState?.services}
+            managed={hostData[h.id]?.system?.managed}
+            devMode={devMode}
+            selected={selectedHostId === h.id}
+            outOfDate={devMode && hostOutOfDate(hostData[h.id])}
+            onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}
+          />
+        ))}
+      </div>
+      <div className="topo-details">
+        <div className="topo-details-header">details &amp; control</div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">Host</span>
+          <span className={`topo-readout-value${selectedHost ? '' : ' topo-readout-placeholder'}`}>
+            {selectedHost?.label ?? '—'}
+          </span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">status</span>
+          <span className={`topo-readout-value${selectedHost ? '' : ' topo-readout-placeholder'}`}>
+            {selectedHost?.status ?? '—'}
+          </span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">version</span>
+          <span className={`topo-readout-value${selfProc?.version ? '' : ' topo-readout-placeholder'}`}>
+            {selfProc?.version ?? '—'}
+          </span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">uptime</span>
+          <span className={`topo-readout-value${selfProc ? '' : ' topo-readout-placeholder'}`}>
+            {selfProc ? formatUptime(selfProc.started_at, nowSec) : '—'}
+          </span>
+        </div>
+        <div className="topo-controls">
+          <div className="topo-controls-label">rebuild &amp; restart controls</div>
+          {devMode && (
+            <RepoWatchPanel
+              repoState={selectedData?.repo}
+              onRebuild={() => selectedHostId && sendLRRebuildApp(selectedHostId)}
+              onSetAutoRebuild={enabled => selectedHostId && sendLRSetAutoRebuild(selectedHostId, enabled)}
+            />
+          )}
+          <div className="topo-controls-buttons">
+            <button
+              className={`sys-btn sys-btn-restart${willUpdate ? ' sys-btn-restart-update' : ''}`}
+              disabled={!canRestart}
+              title={
+                !selectedHostId
+                  ? 'select a host to enable'
+                  : !canRestart
+                  ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                  : willUpdate
+                  ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
+                  : "terminate that host's LR so ufa-loader relaunches it with the identical config"
+              }
+              onClick={() => selectedHostId && sendLRRestartApp(selectedHostId)}
+            >
+              {willUpdate ? 'restart and update LR' : 'restart LR'}
+            </button>
+            <label
+              className="sys-auto-rebuild"
+              title={canRestart
+                ? 'restart that host\'s LR automatically the instant an update becomes available, instead of waiting for the button above'
+                : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            >
+              <input
+                type="checkbox"
+                disabled={!canRestart}
+                checked={!!selfProc?.auto_update}
+                onChange={e => selectedHostId && sendLRSetAutoUpdate(selectedHostId, e.target.checked)}
+              />
+              auto-update
+            </label>
+          </div>
+          {!selectedHostId && (
+            <div className="topo-controls-hint">select a host to enable rebuild/restart controls</div>
+          )}
+        </div>
+        {isSelfSelected && (
+          <div className="topo-ac-controls">
+            <div className="topo-controls-label">agent-coordinator</div>
+            {devMode && (
+              <div className="topo-controls-buttons">
+                <button
+                  className="sys-btn sys-btn-rebuild"
+                  disabled={!anyRebuildReady}
+                  title={
+                    anyRebuildReady
+                      ? 'runs make deploy-dev-binaries on every connected host whose dev-repo has moved past its last rebuild'
+                      : 'no connected host has a rebuild ready'
+                  }
+                  onClick={handleRebuildAll}
+                >
+                  rebuild all
+                </button>
+                <label
+                  className="sys-auto-rebuild"
+                  title="rebuild automatically, per host, whenever it becomes possible -- toggles auto-rebuild for every connected host's dev-repo watcher at once"
+                >
+                  <input
+                    type="checkbox"
+                    disabled={watchedHosts.length === 0}
+                    checked={allAutoRebuildOn}
+                    onChange={e => handleSetAutoRebuildAll(e.target.checked)}
+                  />
+                  auto-rebuild
+                </label>
+              </div>
+            )}
+            <div className="topo-controls-buttons">
+              <button
+                className={`sys-btn sys-btn-restart${acWillUpdate ? ' sys-btn-restart-update' : ''}`}
+                disabled={!acLoaderManaged}
+                title={
+                  !acLoaderManaged
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : acWillUpdate
+                    ? 'a newer build has landed on disk — terminate agent-coordinator so ufa-loader relaunches it with the new binary'
+                    : 'terminate agent-coordinator so ufa-loader relaunches it with the identical config'
+                }
+                onClick={sendACRestartApp}
+              >
+                {acWillUpdate ? 'restart and update AC' : 'restart AC'}
+              </button>
+              <button
+                className={`sys-btn sys-btn-restart${anySubAppUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
+                disabled={!canUpdateAll}
+                title={
+                  !anySubAppUpdateAvailable
+                    ? 'no sub-application on this host has a pending update'
+                    : !canUpdateAll
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : willUpdate && acWillUpdate
+                    ? "terminate this host's LR, then agent-coordinator, so ufa-loader relaunches both with their new binaries"
+                    : willUpdate
+                    ? "terminate this host's LR so ufa-loader relaunches it with its new binary — agent-coordinator is already up to date"
+                    : acWillUpdate
+                    ? "terminate agent-coordinator so ufa-loader relaunches it with its new binary — this host's LR is already up to date"
+                    : "this host's LR and agent-coordinator are both already up to date"
+                }
+                onClick={() => {
+                  if (selfHost && willUpdate) sendLRRestartApp(selfHost.id)
+                  if (acWillUpdate) sendACRestartApp()
+                }}
+              >
+                host update all
+              </button>
+            </div>
+            <div className="topo-controls-buttons">
+              <button
+                className={`sys-btn sys-btn-restart${anyNetworkUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
+                disabled={!canNetworkUpdateAll}
+                title={
+                  !anyNetworkUpdateAvailable
+                    ? 'every connected host and agent-coordinator are already up to date'
+                    : !canNetworkUpdateAll
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : "terminate every connected host's LR that has a newer build waiting, plus agent-coordinator itself if it does, so ufa-loader relaunches each with its new binary"
+                }
+                onClick={handleNetworkUpdateAll}
+              >
+                network update all
+              </button>
+              <label
+                className="sys-auto-rebuild"
+                title="restart automatically, per host, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once (agent-coordinator's own restart above isn't included)"
+              >
+                <input
+                  type="checkbox"
+                  disabled={updatableHosts.length === 0}
+                  checked={allAutoUpdateOn}
+                  onChange={e => handleSetAutoUpdateAll(e.target.checked)}
+                />
+                auto-update
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function GlobalSystemPanel({
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selfHostId: string | null
+  devMode: boolean
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  sendACRestartApp: () => void
+}) {
+  const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
+  const troughEntries = useAggregateTrough(hosts, hostData)
+  return (
+    <div className="global-sys-panel">
+      <div className="tab-bar tab-bar-nested">
+        <div className="tabs">
+          {GLOBAL_SYSTEM_TABS.map(t => (
+            <button
+              key={t}
+              className={`tab${subTab === t ? ' tab-active' : ''}`}
+              onClick={() => setSubTab(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {subTab === 'topology' ? (
+        <GlobalTopologyPanel
+          hosts={hosts}
+          hostData={hostData}
+          selfHostId={selfHostId}
+          devMode={devMode}
+          sendLRRestartApp={sendLRRestartApp}
+          sendLRRebuildApp={sendLRRebuildApp}
+          sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+          acLoaderManaged={acLoaderManaged}
+          acUpdateAvailable={acUpdateAvailable}
+          sendACRestartApp={sendACRestartApp}
+        />
+      ) : (
+        <div className="service-empty">not yet implemented</div>
+      )}
+      <Trough entries={troughEntries} />
+    </div>
+  )
+}
+
+function GlobalView({
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
+  acLoaderManaged, acUpdateAvailable, sendACRestartApp, hasHighlighted, onGoToHighlighted,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selfHostId: string | null
+  devMode: boolean
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  activeTab: LRTab
+  setActiveTab: (tab: LRTab) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  sendACRestartApp: () => void
+  hasHighlighted: boolean
+  onGoToHighlighted: () => void
+}) {
+  return (
+    <div className="lr-view">
+      <div className="lr-header">
+        <span className="lr-host-label">global</span>
+      </div>
+      <div className="tab-bar">
+        <div className="tabs">
+          {LR_TABS.map(t => (
+            <button
+              key={t}
+              className={`tab${activeTab === t ? ' tab-active' : ''}`}
+              onClick={() => setActiveTab(t)}
+            >
+              {t}
+              {t === 'files' && hasHighlighted && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); onGoToHighlighted() }}
+                />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="main-pane">
+        {activeTab === 'system' ? (
+          <GlobalSystemPanel
+            hosts={hosts}
+            hostData={hostData}
+            selfHostId={selfHostId}
+            devMode={devMode}
+            sendLRRestartApp={sendLRRestartApp}
+            sendLRRebuildApp={sendLRRebuildApp}
+            sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+            sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+            acLoaderManaged={acLoaderManaged}
+            acUpdateAvailable={acUpdateAvailable}
+            sendACRestartApp={sendACRestartApp}
+          />
+        ) : (
+          <div className="service-empty">not yet implemented</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
+  hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
   data: HostClientState
@@ -910,13 +2067,60 @@ function LRView({
   sendLRRidealongCommand: (hostId: string, action: string) => void
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRestartManagedApp: (hostId: string, id: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList) => void
+  activeTab: LRTab
+  setActiveTab: (tab: LRTab) => void
+  hasHighlighted: boolean
+  onGoToHighlighted: () => void
+  pendingFileTarget: { hostId: string; fileId: string } | null
+  onConsumePendingFileTarget: () => void
 }) {
-  const [activeTab, setActiveTab] = useState<LRTab>('federation-command')
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
+
+  // Consume the global "go to first highlighted file" handoff (Step5SubstepR
+  // Revision E) once this is the host it was aimed at -- App() has already
+  // selected this host and switched to the files tab by the time this fires.
+  useEffect(() => {
+    if (pendingFileTarget && pendingFileTarget.hostId === host.id) {
+      setSelectedFileId(null)
+      setViewerFileId(pendingFileTarget.fileId)
+      onConsumePendingFileTarget()
+    }
+  }, [pendingFileTarget, host.id, onConsumePendingFileTarget])
+
+  // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
+  // so condoccer's own hash-based resume (Layer 1 of the browser pickup
+  // strategy) never survives a refresh of this outer page on its own -- the
+  // iframe just remounts at the bare `/host/<id>/condoccer/`. Capture the
+  // iframe's hash as it navigates and bake it back into `src` so a refresh
+  // here hands condoccer back its resume point. Keyed per host so switching
+  // between hosts (this component isn't remounted on host change) doesn't
+  // leak one host's condoc position into another's iframe.
+  const [condoccerHash, setCondoccerHash] = useState(() => sessionStorage.getItem(`ac-condoccer-hash:${host.id}`) ?? '')
+  const condoccerFrameRef = useRef<HTMLIFrameElement>(null)
+
+  useEffect(() => {
+    setCondoccerHash(sessionStorage.getItem(`ac-condoccer-hash:${host.id}`) ?? '')
+  }, [host.id])
+
+  const handleCondoccerLoad = () => {
+    const win = condoccerFrameRef.current?.contentWindow
+    if (!win) return
+    const capture = () => {
+      setCondoccerHash(win.location.hash)
+      sessionStorage.setItem(`ac-condoccer-hash:${host.id}`, win.location.hash)
+    }
+    win.addEventListener('hashchange', capture)
+    capture() // in case condoccer already restored a hash before this attached
+  }
 
   const getServiceStatus = (name: string): string => {
     if (!active) return 'unknown'
@@ -948,6 +2152,14 @@ function LRView({
               onClick={() => { setActiveTab(svc); setSelectedFileId(null); setViewerFileId(null) }}
             >
               {svc}
+              {svc === 'files' && hasHighlighted && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); onGoToHighlighted() }}
+                />
+              )}
             </button>
           ))}
         </div>
@@ -968,8 +2180,14 @@ function LRView({
                 state={data.system}
                 active={active}
                 fcState={data.fcState}
+                repoState={data.repo}
                 onLaunch={sendLRLaunchApp}
                 onTerminate={sendLRTerminateApp}
+                onRestart={sendLRRestartApp}
+                onRestartManaged={sendLRRestartManagedApp}
+                onRebuild={sendLRRebuildApp}
+                onSetAutoRebuild={sendLRSetAutoRebuild}
+                onSetAutoUpdate={sendLRSetAutoUpdate}
               />
             )}
             {activeTab === 'files' && viewerFileId ? (
@@ -1013,9 +2231,11 @@ function LRView({
             {activeTab === 'condoccer' && active && (
               data.condoccer ? (
                 <iframe
+                  ref={condoccerFrameRef}
                   className="condoccer-frame"
-                  src={`/host/${host.id}/condoccer/`}
+                  src={`/host/${host.id}/condoccer/${condoccerHash}`}
                   title={`condoccer on ${host.label}`}
+                  onLoad={handleCondoccerLoad}
                 />
               ) : (
                 <div className="service-empty">
@@ -1043,10 +2263,21 @@ function LRView({
 
 export default function App() {
   const {
-    connected, hosts, hostData, selectHost,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
+    acLoaderManaged, acUpdateAvailable,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
   } = useCoordinatorWS()
-  const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  const mismatches = Object.values(modeMismatches)
+  // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
+  // refresh lands back on the same host -- if that host id no longer
+  // exists, `selectedHost` below just comes back null and we fall through
+  // to the global view, same as picking an unknown host any other way.
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(() => sessionStorage.getItem('ac-selected-host'))
+  // Shared across the global view and any host's view, so switching between
+  // them (selecting/deselecting a host) keeps whichever tab was active
+  // instead of resetting it.
+  const [activeTab, setActiveTab] = useState<LRTab>(initialACTab)
   // Mobile nav drawer: the host sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css), same treatment as condoccer's
   // sidebar. Desktop layout is untouched -- this state has no visible effect
@@ -1059,12 +2290,91 @@ export default function App() {
     setMobileNavOpen(false)
   }
 
+  // Global is the default landing view (selectedHostId === null) and is
+  // mutually exclusive with a particular host selection.
+  const handleSelectGlobal = () => {
+    setSelectedHostId(null)
+    setMobileNavOpen(false)
+  }
+
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
 
+  // Files tab picker's highlighted-file indicator (Step5SubstepR Revision E).
+  // Computed across every known host -- not just whichever one is currently
+  // selected -- so the dot lights up on the global view, or while looking at
+  // an unrelated host, and double-clicking it can jump to the right host
+  // *and* the right file. "First" follows the host sidebar's own order, then
+  // each host's own file order.
+  const firstHighlighted = useMemo(() => {
+    for (const host of hosts) {
+      const hit = hostData[host.id]?.files?.files?.find(f => f.highlighted)
+      if (hit) return { hostId: host.id, fileId: hit.id }
+    }
+    return null
+  }, [hosts, hostData])
+  // One-shot handoff to whichever LRView ends up rendered for the target
+  // host, telling it to open that file's viewer -- cleared once consumed.
+  const [pendingFileTarget, setPendingFileTarget] = useState<{ hostId: string; fileId: string } | null>(null)
+
+  const goToFirstHighlighted = () => {
+    if (!firstHighlighted) return
+    setPendingFileTarget(firstHighlighted)
+    if (firstHighlighted.hostId !== selectedHostId) handleSelectHost(firstHighlighted.hostId)
+    setActiveTab('files')
+  }
+
+  useEffect(() => {
+    if (selectedHostId) sessionStorage.setItem('ac-selected-host', selectedHostId)
+    else sessionStorage.removeItem('ac-selected-host')
+  }, [selectedHostId])
+
+  useEffect(() => {
+    sessionStorage.setItem('ac-active-tab', activeTab)
+  }, [activeTab])
+
+  // Forward/back nav arrows (Step5Prompt.md Revision M) track the pair of
+  // top-level navigation choices -- which host (or global) and which tab --
+  // as a single "screen".
+  const navScreen = useMemo(() => ({ hostId: selectedHostId, tab: activeTab }), [selectedHostId, activeTab])
+  const applyNavScreen = (s: { hostId: string | null; tab: LRTab }) => {
+    // Only re-issue the host (de)selection -- with its selectHost() resubscribe
+    // -- when the host actually changes, so navigating between tabs on the
+    // same host doesn't needlessly resubscribe on every back/forward step.
+    if (s.hostId !== selectedHostId) {
+      if (s.hostId) handleSelectHost(s.hostId)
+      else handleSelectGlobal()
+    }
+    setActiveTab(s.tab)
+  }
+  const nav = useScreenHistory(
+    navScreen,
+    (a, b) => a.hostId === b.hostId && a.tab === b.tab,
+    applyNavScreen,
+    NAV_HISTORY_MAX,
+  )
+
+  // A host id restored from sessionStorage was never sent via
+  // handleSelectHost's own selectHost() call -- issue it here exactly once,
+  // now that the websocket is actually up.
+  const hashSelectHostDone = useRef(false)
+  useEffect(() => {
+    if (connected && selectedHostId && !hashSelectHostDone.current) {
+      hashSelectHostDone.current = true
+      selectHost(selectedHostId)
+    }
+  }, [connected, selectedHostId, selectHost])
+
   return (
-    <div className="app">
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {mismatches.length > 0 && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch — {mismatches.map(m => `${m.host_id} (${m.peer_mode})`).join(', ')}:
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
       <div className="app-header">
         <span className="app-title">agent-coordinator</span>
+        <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}
           title={connected ? 'connected' : 'disconnected'}
@@ -1100,6 +2410,7 @@ export default function App() {
             hosts={hosts}
             selectedHostId={selectedHostId}
             onSelect={handleSelectHost}
+            onSelectGlobal={handleSelectGlobal}
           />
         </div>
         <div className="content">
@@ -1111,12 +2422,37 @@ export default function App() {
               sendLRRidealongCommand={sendLRRidealongCommand}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRestartManagedApp={sendLRRestartManagedApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               uploadFiles={uploadFiles}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              hasHighlighted={!!firstHighlighted}
+              onGoToHighlighted={goToFirstHighlighted}
+              pendingFileTarget={pendingFileTarget}
+              onConsumePendingFileTarget={() => setPendingFileTarget(null)}
             />
           ) : (
-            <div className="no-selection">
-              <span className="no-selection-text">select a host</span>
-            </div>
+            <GlobalView
+              hosts={hosts}
+              hostData={hostData}
+              selfHostId={selfHostId}
+              devMode={devMode}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              acLoaderManaged={acLoaderManaged}
+              acUpdateAvailable={acUpdateAvailable}
+              sendACRestartApp={sendACRestartApp}
+              hasHighlighted={!!firstHighlighted}
+              onGoToHighlighted={goToFirstHighlighted}
+            />
           )}
         </div>
       </div>

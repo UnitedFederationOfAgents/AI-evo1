@@ -11,15 +11,67 @@ make build      # build frontend + Go binary
 ./local-representative
 ```
 
+### Running under ufa-loader
+
+`SIGHUP` sent to LR's own pid makes it print a restart announcement on
+stdout and exit 0, instead of just logging and continuing — see
+[`docs/DevMode.md`](../docs/DevMode.md)'s "Loader" section. Run it under
+[`ufa-loader`](../ufa-loader) to have that turned into an actual relaunch —
+expected once the on-disk binary has been replaced with a newer build:
+
+```bash
+make run-loader                    # builds ufa-loader too, then wraps LR
+make run-loader ARGS="--dev-mode"  # ARGS is passed straight through to LR
+kill -HUP <local-representative pid>   # ask the running instance to restart
+```
+
+Plain `kill -HUP` without a wrapping `ufa-loader` still works — LR
+announces and exits — but nothing relaunches it in that case.
+
+The system tab's **restart** control (see below) does the same thing from
+the dashboard instead of a shell. `ufa-loader` sets `UFA_LOADER_INIT` on
+every sub-application it launches, which is how LR tells whether it is
+loader-managed at all — the control greys itself out (and the backend
+refuses the request) when it isn't, since pressing it would otherwise just
+stop LR for good.
+
+Every restart also carries this LR's own live state forward — the
+`auto-rebuild` toggle, whether/where it was connected to `agent-coordinator`
+(`auto-connect`), and which of its own managed sub-applications were running
+(see below) — so the instance that comes back up matches what was live just
+before the restart rather than resetting to whatever
+`--auto-connect`/`--ac-host`/`--ac-port`/`--auto-launch` it happens to be
+relaunched with (see [`docs/DevMode.md`](../docs/DevMode.md) "Loader" and
+`reststate.go`).
+
+As its own final act before exiting, a restarting LR also terminates every
+managed sub-application it launched itself (an `--auto-launch` entry or one
+started from the system tab) — the `federation-command`/`condoccer` instances
+it directly parents would otherwise just be orphaned by its exit rather than
+coming back up alongside it. Terminating them first and relaunching them by
+name (rather than relying on the OS to somehow carry the old processes
+forward) is what makes this a real "restart" of the whole set: the new LR
+instance auto-launches fresh instances of exactly the apps that were running,
+in place of whatever `--auto-launch` it was otherwise given (see
+`terminateManagedForRestart`/`runningManagedTokens` in `procman.go`). This
+only applies to sub-applications LR itself launched — a future
+"manage-on-connect" instance that merely connects to LR without LR having
+started it is a separate, independent process that a restart leaves alone
+(and that instance's own heartbeat retry loop, not LR's exit, is what brings
+it back once LR is listening again).
+
 ## Flags
 
 | Flag | Config key | Default | Purpose |
 | --- | --- | --- | --- |
+| `--version` | — | — | print version and exit instead of starting the dashboard (see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning") |
 | `--config` | — | `~/.ufa/config` | directory holding the `ufa-configurable` YAML files |
 | `--port` | `port` | `8081` | HTTP port for the dashboard / WebSocket |
 | `--repr-port` | `repr-port` | `8082` | TCP port for the `representable` heartbeat server FC dials |
 | `--name` | `name` | hostname | identifier reported to `agent-coordinator` |
 | `--dev` | `dev` | `false` | dev mode: don't serve the embedded frontend |
+| `--dev-mode` | `dev-mode` | `false` | dev mode in the SDLC sense (see [`docs/DevMode.md`](../docs/DevMode.md)): this LR — and every `federation-command`/`condoccer` it launches — is running from an in-progress branch. Unrelated to `--dev` above. |
+| `--dev-repo` | `dev-repo` | `false` | implies `--dev-mode`; also watches the launch working directory's git repo for changes to rebuild from (see "Dev-repo watcher" below and [`docs/DevMode.md`](../docs/DevMode.md)) — requires running inside a git repository |
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `agent-coordinator` in the background |
 | `--ac-host` | `ac-host` | `localhost` | `agent-coordinator` host/IP for `--auto-connect` |
 | `--ac-port` | `ac-port` | `8084` | `agent-coordinator` port for `--auto-connect` |
@@ -70,13 +122,29 @@ background, retrying every 10 seconds for up to 10 minutes. The retry runs
 without blocking the HTTP server; while it is in progress the dashboard's
 agent-coordinator panel shows a pulsing "auto-connecting…" indicator. On success
 the connection is adopted like a manual connect; if the 10-minute window elapses
-first, LR prints that it gave up. Driving an explicit connect or disconnect from
-the dashboard supersedes and cancels the background loop.
+first without connecting, LR prints that it gave up (but see below — the
+retry cycle can resume later without a restart).
 
 ```bash
 ./local-representative --auto-connect                       # localhost:8084
 ./local-representative --auto-connect --ac-host 10.0.0.5 --ac-port 9000
 ```
+
+Auto-connect is a first-class toggle, not a one-shot startup action: the
+agent-coordinator panel has its own **auto-connect** checkbox alongside the
+connect/disconnect control. It stays armed across a successful connection, so
+if that connection later drops *unintentionally* (agent-coordinator going
+away, a network blip) the retry cycle begins again on its own; an *explicit*
+disconnect from the dashboard, though, turns the toggle off as well as
+dropping the link — driving a manual connect or unchecking the toggle mid-retry
+only stops that one attempt/cycle, it doesn't touch an already-live
+connection. This mirrors `condoccer`'s and `federation-command`'s own
+auto-connect toggles (see their docs) — see
+[`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
+Revision I.
+
+A loader-managed restart carries the live connection state forward regardless
+of these flags — see "Running under ufa-loader" above.
 
 ## System tab
 
@@ -93,8 +161,23 @@ here you can:
   trailing argv can't drop `--auto-connect` and leave FC stuck in local control;
 - **terminate** a managed instance (SIGTERM to its process group, escalating to
   SIGKILL after a grace period), or **dismiss** one that has already exited;
+- **restart** LR itself — the same as sending it `SIGHUP` (see "Running under
+  ufa-loader" above): it terminates so a wrapping `ufa-loader` relaunches it
+  with the identical config. Only enabled when this LR is loader-managed
+  (`UFA_LOADER_INIT` was set at startup) — otherwise the button is greyed
+  out, since there would be nothing to bring it back. When loader-managed, LR
+  also polls its own on-disk binary's `--version` every 5 seconds; once it
+  disagrees with the version actually running, the button turns orange and
+  reads **update and restart** instead of a plain **restart**, so you know
+  pressing it lands a newer build rather than just cycling the same one. The
+  restart carries this LR's own live state (auto-rebuild, auto-connect) into
+  the instance that comes back up — see "Running under ufa-loader" above;
 - read each managed instance's PID, status (`running` / `exited` / `failed`) and
-  exit code.
+  exit code;
+- see this LR's own build **version** next to its name (see
+  [`docs/DevMode.md`](../docs/DevMode.md) "Versioning") — and, once a managed
+  `federation-command`/`condoccer` instance has connected and reported in,
+  its version next to *its* name too.
 
 `federation-command` is **N-per-host**: the launch button stays enabled while
 instances run and each press starts another, listed as `federation-command #1`,
@@ -110,8 +193,9 @@ it in an iframe), and `agent-coordinator` reverse-proxies `/host/<name>/*` back
 through this LR — so the coordinator dashboard (and anything reaching it through
 the web-exposure path) can drive condoccer on this box with no shell here.
 `--auto-connect` is how LR always launches it, but it isn't mandatory for
-condoccer in general: its UI has its own connect/disconnect widget for the case
-where it's started by hand instead.
+condoccer in general: its UI has its own connect/disconnect widget — with the
+same first-class auto-connect toggle described above — for the case where
+it's started by hand instead.
 
 `federation-command` is an interactive shell and must run in a real terminal or
 its input reader dies on startup ("error creating cancelreader"). It should be
@@ -148,16 +232,50 @@ confirm the machine-driven chain landed in remote control.
 ### Driving the system tab from agent-coordinator
 
 When LR is connected to an `agent-coordinator`, it mirrors this system tab up
-over the `representable` channel (a `system-state` data message on every change)
-and accepts `__system:launch <app>` / `__system:terminate <instance-id>` commands
-back. The coordinator dashboard gains a matching **system** tab per host, so an
-operator can launch and terminate managed applications on any connected LR
-without a shell on that host — closing the loop for provisioning a new machine
-and bringing it up fully remote-controlled.
+over the `representable` channel (a `system-state` data message on every change,
+plus a `repo-state` one when `--dev-repo` is set) and accepts `__system:launch
+<app>` / `__system:terminate <instance-id>` / `__system:restart` /
+`__system:rebuild` / `__system:auto-rebuild <on|off>` commands back. The
+coordinator dashboard gains a matching **system** tab per host, so an operator
+can launch, terminate, and restart managed applications — and, for a
+`--dev-repo` host, trigger or auto-enable a rebuild — on any connected LR
+without a shell on that host, closing the loop for provisioning a new machine
+and bringing it up fully remote-controlled. `__system:restart` is subject to
+the same loader-managed guard as the dashboard's own button — it's a no-op
+(logged) if this LR wasn't launched by `ufa-loader`; `__system:rebuild` /
+`__system:auto-rebuild` are likewise no-ops (logged, or silent for
+auto-rebuild) if this LR wasn't launched with `--dev-repo`.
 
 The launch binary is resolved by looking next to the `local-representative`
 executable, then in `$AI_EVO1_DEV_BIN` (default `/AI-evo1-dev/bin`), then on
 `$PATH`; `--fc-bin` / `fc-bin` overrides that.
+
+### Dev-repo watcher
+
+Launch with `--dev-repo` (from inside a git checkout — it refuses to start
+otherwise) and the system tab grows a **rebuild** control for the repo LR was
+launched from. The watcher treats the HEAD it first sees as already built, so
+the button starts out inactive rather than lighting up for a repo that hasn't
+changed since LR started watching. Every 5 seconds LR checks the repo: a
+dirty working tree (`git diff HEAD` non-empty — untracked files don't count)
+turns the button orange and labels it **dirty**, but leaves it disabled —
+rebuilding a dirty tree would silently bake in uncommitted, unreviewed
+changes; a clean tree instead pulls in any upstream movement (`git fetch` +
+`pull --rebase`) and, if HEAD has moved since the last successful rebuild,
+makes the button active, green, and labelled **rebuild**. Pressing it (or
+`agent-coordinator`'s `__system:rebuild`) runs `make deploy-dev-binaries` at
+the repo root, greying the button and showing **building…** meanwhile.
+
+The **auto-rebuild** checkbox next to it (also `__system:auto-rebuild
+<on|off>` from `agent-coordinator`) makes LR press that button itself once
+it becomes active — but only after a 90-second debounce settles (shown next
+to the toggle as **rebuilding in Ns**), re-armed to the full 90s every time
+a further change lands (HEAD moves again) before it fires. This avoids
+rebuilding once per commit when several land in a row. Every git/make call
+the watcher makes — checks, the pull, and a rebuild — is serialized through
+one mutex, so the check-and-rebuild process never overlaps itself. See
+[`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" for the full
+detection rules.
 
 ## Files tab
 

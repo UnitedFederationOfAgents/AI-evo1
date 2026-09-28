@@ -45,6 +45,87 @@ reachable only by a browser connected directly to that LR — into
   transparent `/host/<id>/*` proxy unmodified, same as a direct LR client —
   no dedicated AC-owned relay route was needed for them, unlike Path 1's
   upload relay.
+- **Step5SubstepRPrompt.md added `POST /api/files/<id>/highlight`**: a plain
+  toggle on a file's `highlighted` marking (independent of `state`), shown in
+  the same file-details dialog alongside enter/hold/persist/download and
+  rendered as a yellow ring around a highlighted file's grid box. It's the
+  same style of action as Revision C's — ungated on `proxiedHeader`, passes
+  through AC's transparent proxy unmodified. This increment only implements
+  the marking itself: a first step toward flagging files at the LR/AC level
+  for cross-system functionality condoccer will build on later.
+- **Revision A wires up that cross-system functionality for condoccer**:
+  condoccer's "Add Resources" action (available on any step/substep while
+  it's `awaiting_action`) pulls every currently-highlighted file straight
+  from local-representative and copies it into the condoc's `Impls` folder,
+  inserting a `## Resource N` block that links to each copy. condoccer
+  already maintains a `representable.Client` connection to LR (see
+  `condoccer/repr.go`) purely for status/commands, which knows LR's dial
+  host but not its separate HTTP dashboard port — so `representable.Server`
+  gained an opt-in `SetHTTPPort`, disclosed to every connecting client in its
+  existing "hello" message (`representable.Client.PeerHTTPPort`).
+  local-representative sets it to its own `-port`; condoccer resolves
+  `http://<lr-host>:<lr-http-port>/api/files` (and `/api/files/<id>?download=1`
+  per highlighted file) directly against it — the same ungated endpoints AC's
+  transparent proxy already passes through, so nothing new was needed on the
+  AC side. The `.condoc` lock is asserted for the duration of the copy+edit
+  (see `condoccer/resources.go`), since — unlike every other condoccer
+  action — inserting a resource block doesn't itself change the condoc's
+  phase, so nothing else would otherwise stop local-representative's
+  dev-repo watcher from rebuilding mid-operation.
+- **Revision B of Step5SubstepRPrompt.md makes a resource block a first-class
+  citizen of the condoc viewer**, rather than unstyled text tacked onto
+  whichever Reply/Revision preceded it. The heading dropped its parens
+  (`## Resource N`, not `## Resource (N)`) and gained an optional
+  `-- <name>` suffix from a new "name" field on the "Add Resources" dialog;
+  condoccer's markdown parser (`parseIterations` server-side,
+  `parseStepSections` client-side) now cuts a `## Resource N` heading out as
+  its own `Iteration`/section rather than folding its body into the
+  preceding one, so it gets its own sidebar entry (`Resource N` or
+  `Resource N | <name>`) instead of appearing as a tail of the Reply. A new
+  `GET /api/resource/<filename>?condoc=<path>[&download=1]` route — the only
+  HTTP route condoccer serves besides its own embedded frontend and `/ws` —
+  lets the scroll pane render an image or text resource inline instead of
+  showing its raw markdown link text; clicking an image opens a full-size
+  overlay. Anything else falls back to a plain download link.
+- **Revision C of Step5SubstepRPrompt.md adds a second "Add Resources"
+  source: "Upload".** Unlike "Highlighted" (pulls files off
+  local-representative over the representable connection), "Upload" is a
+  plain multipart `POST /api/upload-resource` straight from the browser — the
+  same shape as local-representative's own files-dialog upload — except the
+  bytes land directly in the condoc's `Impls` folder instead of LR's
+  host-cache; no highlighting, no representable connection, and no
+  host-cache TTL sweep are involved. The dialog's "Source" dropdown gained
+  the option, revealing an "up arrow" button that opens the browser's file
+  picker; choosing a file locks the dropdown (an operator can't switch
+  sources mid-upload) until Cancel or a successful submission clears it. The
+  same `.condoc`-lock discipline as "Highlighted" applies, asserted before
+  the first uploaded byte lands in the Impls folder.
+- **Revision D of Step5SubstepRPrompt.md fixes "Upload" breaking under a
+  reverse-proxy prefix.** The upload `fetch` was built from an
+  origin-absolute `/api/upload-resource`, unlike every other request this UI
+  makes (the WebSocket URL, `GET /api/resource/...`), which all derive their
+  target from `basePath()` — the path condoccer's own document was actually
+  served under. Viewed directly that prefix is empty, so the bug was
+  invisible; viewed through local-representative's `/condoccer/` proxy or,
+  worse, agent-coordinator's `/host/<id>/condoccer/` iframe, the absolute
+  path instead lands on the *outer* server's unrelated catch-all route,
+  which answers with its own frontend's `index.html` (200 OK) rather than
+  ever reaching condoccer — read as a silent success by the dialog even
+  though nothing was uploaded. Depending on the upload's size and timing,
+  browsers may instead abort the still-in-flight request body once that
+  premature response arrives, surfacing as a `TypeError: Failed to fetch`.
+  The fix routes the request through `basePath()` like everything else.
+- **Revision E of Step5SubstepRPrompt.md adds a highlighted-file indicator to
+  the "files" tab picker** in both local-representative's and
+  agent-coordinator's dashboards — a small yellow dot in the tab button's
+  corner, shown whenever any file (`FileInfo.highlighted`) is highlighted.
+  Double-clicking the dot jumps straight to the first highlighted file's
+  detail view. In agent-coordinator this is computed across every known
+  host, not just whichever one is currently selected, so the dot lights up
+  from the global view or while looking at an unrelated host; double-
+  clicking it there selects the right host *and* opens the right file — a
+  one-shot handoff from the top-level app component to whichever host view
+  ends up rendered.
 
 The rest of this doc sketches what closing that remaining gap — LR-to-LR
 transfer brokered through AC — would look like, without committing to it yet.

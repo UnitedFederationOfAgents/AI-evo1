@@ -9,14 +9,19 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"representable"
 	ufaconfig "ufa-configurable"
 	ufahostid "ufa-hostid"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
 
 //go:embed frontend/dist
@@ -87,6 +92,11 @@ type ACStateMsg struct {
 	// Connecting is true while the background --auto-connect retry loop is still
 	// attempting to reach agent-coordinator (visible indication in the UI).
 	Connecting bool `json:"connecting,omitempty"`
+	// AutoConnect is the persistent auto-connect toggle (see Revision I of
+	// Step3Prompt.md): true whenever the auto-connect cycle is armed, whether
+	// or not it is currently connected/connecting -- it stays true across a
+	// successful connection and only an explicit disconnect turns it off.
+	AutoConnect bool `json:"auto_connect,omitempty"`
 }
 
 // CondocInfo mirrors condoccer's per-condoc summary row (see condoccer/main.go).
@@ -135,6 +145,14 @@ type Server struct {
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
 	lrName     string
+	devMode    bool // --dev-mode: cascaded to every managed instance this LR launches — see docs/DevMode.md
+
+	// repoWatch is the dev-repo watcher (--dev-repo — see docs/DevMode.md and
+	// repowatch.go); nil unless this LR was launched with --dev-repo.
+	repoWatch *repoWatch
+
+	modeMu         sync.RWMutex
+	modeMismatches map[string]ModeMismatchMsg // peer name -> current mismatch disclosure, mismatched entries only
 
 	fcMu    sync.RWMutex
 	fcState string // "remote-control", "local-control", or "" (disconnected)
@@ -149,8 +167,31 @@ type Server struct {
 	acClient            *representable.Client
 	acHost              string
 	acPort              string
-	acAutoConnecting    bool          // true while the startup --auto-connect retry loop is trying
+	acAutoConnecting    bool          // true while the --auto-connect retry loop is currently trying
 	acAutoConnectCancel chan struct{} // closed to stop the auto-connect retry loop early
+	// acAutoConnectEnabled is the persistent auto-connect toggle (see Revision
+	// I of Step3Prompt.md) -- a first-class state independent of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// connectAC); only an explicit disconnect (see disconnectAC) turns it off.
+	acAutoConnectEnabled bool
+	// acIntentionalDisconnect marks the next DisconnectCh close as
+	// operator-driven (see disconnectAC) so connectAC's teardown can tell it
+	// apart from the remote end dropping unexpectedly, which representable
+	// itself does not distinguish (both close the same channel).
+	acIntentionalDisconnect bool
+
+	// loaderManaged is true when this process was launched by ufa-loader (see
+	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart"
+	// can be expected to actually come back up rather than just stop.
+	loaderManaged bool
+
+	// selfVersion watches this process's own on-disk binary for a newer
+	// build landing while it runs (see selfversion.go) so the system tab's
+	// restart control can offer "update and restart". Only started when
+	// loaderManaged, since that's the only case restart actually helps; nil
+	// (and selfVersion.available() reports false) otherwise.
+	selfVersion *selfVersionWatch
 
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
@@ -163,6 +204,34 @@ type Server struct {
 	procMu        sync.Mutex
 	managed       map[string]*managedProc // instance id -> running/finished child
 	instanceSeq   map[string]int          // app name -> highest instance ordinal handed out
+
+	// versionMu guards managedVersions: app name -> the build version most
+	// recently reported over representable's "version" data message (see
+	// procman.go). Keyed by app name, not instance id, mirroring how
+	// representable itself only tracks one connection identity per app name
+	// today (see reprServer.IsHealthy("federation-command")) -- multiple
+	// instances of the same N-per-host app share one reported version.
+	versionMu       sync.RWMutex
+	managedVersions map[string]string
+
+	// managedUpdateAvailable mirrors selfVersion.available() but per managed
+	// sub-application: app name -> whether that app's on-disk binary now
+	// answers "--version" differently than the version most recently
+	// reported in managedVersions (see pollManagedVersions). Guarded by
+	// versionMu alongside managedVersions since the two are always read and
+	// compared together. Drives the topology view's per-sub-app halo (see
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
+	managedUpdateAvailable map[string]bool
+
+	// managedPendingVersion mirrors managedUpdateAvailable but holds the
+	// actual on-disk version string observed by pollManagedVersions (after
+	// stripping any app-specific "--version" prefix, e.g.
+	// federation-command's), rather than just a boolean -- so the system
+	// tab's drill-down can show what version a rebuild/relaunch would pick
+	// up, not merely that one is available. Guarded by versionMu alongside
+	// the two maps above. Empty until pollManagedVersions has run at least
+	// once for that app.
+	managedPendingVersion map[string]string
 
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
@@ -180,13 +249,55 @@ func newServer(lrName string) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:      make(map[*wsClient]bool),
-		lrName:       lrName,
-		selfStart:    time.Now(),
-		binOverrides: make(map[string]string),
-		managed:      make(map[string]*managedProc),
-		instanceSeq:  make(map[string]int),
+		clients:                make(map[*wsClient]bool),
+		lrName:                 lrName,
+		selfStart:              time.Now(),
+		binOverrides:           make(map[string]string),
+		managed:                make(map[string]*managedProc),
+		instanceSeq:            make(map[string]int),
+		modeMismatches:         make(map[string]ModeMismatchMsg),
+		managedVersions:        make(map[string]string),
+		managedUpdateAvailable: make(map[string]bool),
+		managedPendingVersion:  make(map[string]string),
 	}
+}
+
+// ModeMismatchMsg is the "mode-mismatch" WebSocket payload disclosing that a
+// connected peer's dev-mode status differs from this LR's own (see
+// docs/DevMode.md). peer is "agent-coordinator" for the uplink or a
+// representable client name ("federation-command", "condoccer", ...) for a
+// downlink. Mismatched=false clears a previously-disclosed mismatch.
+type ModeMismatchMsg struct {
+	Peer       string `json:"peer"`
+	Mismatched bool   `json:"mismatched"`
+	PeerMode   string `json:"peer_mode,omitempty"`
+}
+
+// setModeMismatch records peer's current mismatch verdict and broadcasts it
+// to every connected browser client. Called from both the reprServer handler
+// (federation-command/condoccer dialling in) and the acClient handler (this
+// LR dialling out to agent-coordinator).
+func (s *Server) setModeMismatch(peer string, mismatched bool, peerMode string) {
+	s.modeMu.Lock()
+	if mismatched {
+		s.modeMismatches[peer] = ModeMismatchMsg{Peer: peer, Mismatched: true, PeerMode: peerMode}
+	} else {
+		delete(s.modeMismatches, peer)
+	}
+	s.modeMu.Unlock()
+	s.broadcast("mode-mismatch", ModeMismatchMsg{Peer: peer, Mismatched: mismatched, PeerMode: peerMode})
+}
+
+// currentModeMismatches returns a snapshot of every peer currently disclosed
+// as mismatched, for a newly-connected browser client.
+func (s *Server) currentModeMismatches() []ModeMismatchMsg {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	out := make([]ModeMismatchMsg, 0, len(s.modeMismatches))
+	for _, m := range s.modeMismatches {
+		out = append(out, m)
+	}
+	return out
 }
 
 func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
@@ -288,10 +399,11 @@ func (s *Server) getACState() ACStateMsg {
 	s.acMu.RLock()
 	defer s.acMu.RUnlock()
 	return ACStateMsg{
-		Connected:  s.acClient != nil,
-		Host:       s.acHost,
-		Port:       s.acPort,
-		Connecting: s.acAutoConnecting,
+		Connected:   s.acClient != nil,
+		Host:        s.acHost,
+		Port:        s.acPort,
+		Connecting:  s.acAutoConnecting,
+		AutoConnect: s.acAutoConnectEnabled,
 	}
 }
 
@@ -301,8 +413,9 @@ func (s *Server) getACState() ACStateMsg {
 func (s *Server) acStateMsg(connected bool, host, port string) ACStateMsg {
 	s.acMu.RLock()
 	connecting := s.acAutoConnecting
+	enabled := s.acAutoConnectEnabled
 	s.acMu.RUnlock()
-	return ACStateMsg{Connected: connected, Host: host, Port: port, Connecting: connecting}
+	return ACStateMsg{Connected: connected, Host: host, Port: port, Connecting: connecting, AutoConnect: enabled}
 }
 
 func (s *Server) setACAutoConnecting(v bool) {
@@ -322,6 +435,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("ridealong-state", s.getRidealongState())
 	ac.SendData("condoc-state", s.getCondocState())
 	ac.SendData("system-state", s.systemState())
+	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
 	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
 	if cc := s.getCondoccerState(); cc != nil {
@@ -344,7 +458,7 @@ func (s *Server) connectAC(host, port string) {
 	addr := host + ":" + port
 	log.Printf("connecting to agent-coordinator at %s as %q", addr, s.lrName)
 
-	client, err := representable.Connect(addr, s.lrName, 5*time.Second)
+	client, err := representable.Connect(addr, s.lrName, representable.Mode(s.devMode), 5*time.Second)
 	if err != nil {
 		log.Printf("failed to connect to agent-coordinator: %v", err)
 		s.acMu.RLock()
@@ -377,6 +491,9 @@ func (s *Server) connectAC(host, port string) {
 			s.reprServer.SendCommand("federation-command", cmd)
 		}
 	})
+	client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
+		s.setModeMismatch("agent-coordinator", mismatched, peerMode)
+	})
 
 	s.pushStateToAC()
 	s.broadcast("ac-state", s.acStateMsg(true, host, port))
@@ -386,29 +503,62 @@ func (s *Server) connectAC(host, port string) {
 	<-client.DisconnectCh()
 
 	s.acMu.Lock()
-	if s.acClient == client {
+	current := s.acClient == client
+	if current {
 		s.acClient = nil
+	}
+	intentional := s.acIntentionalDisconnect
+	if current {
+		s.acIntentionalDisconnect = false
 	}
 	s.acMu.Unlock()
 
+	if !current {
+		// This connection was already superseded by a newer connect attempt
+		// (e.g. an explicit connect to a different target, which closes
+		// whatever was live first) -- that attempt owns the current
+		// ac-state and any resume decision, so there's nothing left to
+		// report for this one.
+		return
+	}
+
 	log.Printf("disconnected from agent-coordinator at %s", addr)
 	s.broadcast("ac-state", s.acStateMsg(false, host, port))
+	s.setModeMismatch("agent-coordinator", false, "")
+
+	if !intentional && s.acAutoConnectEnabled {
+		// Auto-connect is still enabled and this wasn't an operator-driven
+		// disconnect -- the cycle begins automatically again at the same
+		// target (see Revision I of Step3Prompt.md: "the auto-connect cycle
+		// begins automatically upon unintentional disconnection").
+		log.Printf("auto-connect: connection to agent-coordinator dropped unexpectedly -- resuming the retry cycle")
+		s.startAutoConnectAC(host, port)
+	}
 }
 
-// disconnectAC closes the AC connection; the connectAC goroutine handles cleanup.
+// disconnectAC closes the AC connection; the connectAC goroutine handles
+// cleanup. Being operator-driven, this is always an *intentional* disconnect,
+// which (per Revision I of Step3Prompt.md) terminates auto-connect entirely:
+// it marks the drop so connectAC's teardown won't resume the retry cycle, and
+// clears the persistent enabled flag so the toggle reports off afterward.
 func (s *Server) disconnectAC() {
 	s.acMu.Lock()
 	client := s.acClient
+	s.acAutoConnectEnabled = false
+	if client != nil {
+		s.acIntentionalDisconnect = true
+	}
 	s.acMu.Unlock()
 	if client != nil {
 		client.Close()
 	}
 }
 
-// startAutoConnectAC launches the background agent-coordinator auto-connect loop.
-// It is a no-op if a loop is already running.
+// startAutoConnectAC arms the persistent auto-connect toggle and launches the
+// background agent-coordinator retry loop unless one is already running.
 func (s *Server) startAutoConnectAC(host, port string) {
 	s.acMu.Lock()
+	s.acAutoConnectEnabled = true
 	if s.acAutoConnectCancel != nil {
 		s.acMu.Unlock()
 		return
@@ -417,6 +567,40 @@ func (s *Server) startAutoConnectAC(host, port string) {
 	s.acAutoConnectCancel = cancel
 	s.acMu.Unlock()
 	go s.autoConnectAC(host, port, cancel)
+}
+
+// setAutoConnectAC drives the auto-connect toggle from an explicit UI/API
+// action (see the "set-auto-connect-ac" WebSocket message): enabling it arms
+// the persistent state and, unless already connected, (re)starts the
+// background retry loop at host/port (falling back to the last-used target,
+// then defaultACHost/defaultACPort, when unset). Disabling it only stops a
+// retry in progress -- it does not drop an existing connection; only an
+// explicit disconnect (see disconnectAC) does that, and disconnect already
+// clears this flag on its own.
+func (s *Server) setAutoConnectAC(enabled bool, host, port string) {
+	s.acMu.Lock()
+	s.acAutoConnectEnabled = enabled
+	if host == "" {
+		host = s.acHost
+	}
+	if host == "" {
+		host = defaultACHost
+	}
+	if port == "" {
+		port = s.acPort
+	}
+	if port == "" {
+		port = defaultACPort
+	}
+	connected := s.acClient != nil
+	s.acMu.Unlock()
+
+	if !enabled {
+		s.stopAutoConnectAC()
+	} else if !connected {
+		s.startAutoConnectAC(host, port)
+	}
+	s.broadcast("ac-state", s.acStateMsg(connected, host, port))
 }
 
 // stopAutoConnectAC cancels the background auto-connect retry loop if it is
@@ -518,9 +702,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "condoc-state", s.getCondocState())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
+		s.sendToClient(c, "repo-state", s.repoState())
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
+		}
+		for _, mm := range s.currentModeMismatches() {
+			s.sendToClient(c, "mode-mismatch", mm)
 		}
 	}()
 
@@ -598,6 +786,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case "disconnect-ac":
 			s.stopAutoConnectAC()
 			s.disconnectAC()
+		case "set-auto-connect-ac":
+			var payload struct {
+				Enabled bool   `json:"enabled"`
+				Host    string `json:"host,omitempty"`
+				Port    string `json:"port,omitempty"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoConnectAC(payload.Enabled, payload.Host, payload.Port)
+			}
 		case "launch-app":
 			var payload struct {
 				Name string `json:"name"`
@@ -622,6 +819,24 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 						log.Printf("terminate-app %q: %v", target, err)
 					}
 				}
+			}
+		case "restart-app":
+			s.requestRestart("operator")
+		case "rebuild-app":
+			s.requestRebuild("operator")
+		case "set-auto-rebuild":
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoRebuild(payload.Enabled)
+			}
+		case "set-auto-update":
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoUpdate(payload.Enabled)
 			}
 		}
 	}
@@ -718,6 +933,8 @@ type appConfig struct {
 	heartbeatPort string
 	name          string
 	dev           bool
+	devMode       bool // --dev-mode: this instance (and everything it launches) runs from an in-progress branch — see docs/DevMode.md. Distinct from dev, which just skips serving the embedded frontend.
+	devRepo       bool // --dev-repo: implies devMode and watches the launch working directory's git repo for rebuild-worthy changes — see docs/DevMode.md and repowatch.go.
 	autoConnect   bool
 	acHost        string
 	acPort        string
@@ -779,20 +996,89 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
 		return out, err
 	}
+	if out.devMode, err = pickBool("dev-mode", defaults.devMode); err != nil {
+		return out, err
+	}
+	if out.devRepo, err = pickBool("dev-repo", defaults.devRepo); err != nil {
+		return out, err
+	}
 	if out.autoConnect, err = pickBool("auto-connect", defaults.autoConnect); err != nil {
 		return out, err
 	}
 	return out, nil
 }
 
+// announceRestartAndExit writes the restartsignal announcement (the
+// "structured section after an identifying banner" a ufa-loader wrapping
+// this process watches stdout for — see ufa-loader/README.md and
+// docs/DevMode.md), attaching this process's live state (see
+// lrState/currentState and Revision D of
+// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md) for the
+// instance replacing it to pick back up, and exits 0. As its own final act
+// it also terminates every LR-launched managed sub-app still running (see
+// terminateManagedForRestart) -- the state snapshot is taken first so the
+// announcement's ManagedApps reflects what was actually running rather than
+// racing the termination it triggers (see Step4Prompt.md Revision I).
+// Callers are expected to have already decided a restart is appropriate;
+// this never returns.
+func (s *Server) announceRestartAndExit(reason string) {
+	log.Printf("announcing a restart (%s) and exiting", reason)
+	st := s.currentState()
+	s.terminateManagedForRestart()
+	if err := restartsignal.AnnounceState(os.Stdout, "local-representative", reason, st); err != nil {
+		log.Printf("restartsignal.AnnounceState: %v", err)
+	}
+	os.Exit(0)
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart as this process's final act before exiting 0. The signal is sent
+// directly to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself: ufa-loader only watches stdout, it doesn't originate
+// the restart trigger. Unlike requestRestart, this always restarts — a bare
+// `kill -HUP` without a wrapping ufa-loader is documented to still announce
+// and exit, just with nothing there to relaunch it (see README.md). Run in
+// its own goroutine; never returns.
+func (s *Server) watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		s.announceRestartAndExit("sighup")
+	}
+}
+
+// requestRestart handles an operator-driven restart request — the system
+// tab's "restart" control (WebSocket "restart-app") or agent-coordinator's
+// "__system:restart" — which terminates this process such that a wrapping
+// ufa-loader relaunches it with the same config, plus this instance's live
+// state carried forward (see announceRestartAndExit/lrState). Unlike
+// SIGHUP, this refuses (logging why) when the process isn't loaderManaged:
+// the system tab greys the control out in that case since pressing it
+// wouldn't come back up, and this is the server-side enforcement of that
+// same guard for any caller (e.g. agent-coordinator) that bypasses the UI.
+func (s *Server) requestRestart(reason string) {
+	if !s.loaderManaged {
+		log.Printf("restart requested (%s) but this process is not loader-managed (no %s) — ignoring", reason, restartsignal.InitEnvVar)
+		return
+	}
+	s.announceRestartAndExit(reason)
+}
+
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
 	defaultName := ufahostid.GetHostID()
 
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	configDir := flag.String("config", "", "directory holding ufa-configurable YAML files (default ~/.ufa/config)")
 	port := flag.String("port", "8081", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8082", "TCP port for representable heartbeat server")
 	name := flag.String("name", defaultName, "name used to identify this LR to agent-coordinator")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): launched from an in-progress branch. Cascades to every federation-command/condoccer instance this LR launches. Unrelated to --dev.")
+	devRepo := flag.Bool("dev-repo", false, "dev mode plus watch the current working directory's git repo for changes to rebuild from (see docs/DevMode.md); implies --dev-mode; requires running inside a git repository")
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
@@ -818,6 +1104,8 @@ func main() {
 		heartbeatPort: *reprPort,
 		name:          *name,
 		dev:           *dev,
+		devMode:       *devMode,
+		devRepo:       *devRepo,
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
@@ -832,8 +1120,54 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if cfg.devRepo {
+		// --dev-repo automatically sets dev-mode too — see docs/DevMode.md.
+		cfg.devMode = true
+	}
+
+	// A restart-carrying relaunch (see reststate.go and Revision D of
+	// condocs/initialDistributedDevelopmentImpls/Step3Prompt.md) overrides
+	// the auto-connect and auto-launch settings just resolved above -- the
+	// live state as of the moment the prior instance asked to be restarted
+	// wins over whatever flags/config this launch happens to carry, which is
+	// also how the LR-launched managed sub-apps that were running right
+	// before the restart (terminated as that instance's final act -- see
+	// terminateManagedForRestart) come back: prevState.ManagedApps feeds
+	// cfg.autoLaunch below, so the ordinary auto-launch path (further down)
+	// relaunches them -- Step4Prompt.md Revision I. prevState/havePrevState
+	// is also consulted below once repoWatch/selfVersion exist, for the
+	// auto-rebuild and auto-update halves.
+	prevState, havePrevState := loadPreviousState()
+	if havePrevState {
+		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v from before the restart",
+			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps)
+		prevState.applyToConfig(&cfg)
+	}
 
 	s := newServer(cfg.name)
+	s.loaderManaged = restartsignal.IsLoaderManaged()
+	if s.loaderManaged {
+		// Only worth polling for an on-disk update when a restart could
+		// actually pick it up -- see selfversion.go. restart wires the
+		// "auto-update" toggle to the same requestRestart an operator's
+		// "update and restart" button drives, per
+		// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSystemState, func() { s.requestRestart("auto-update") })
+		if s.selfVersion != nil {
+			if havePrevState && prevState.AutoUpdate {
+				s.selfVersion.setAutoUpdate(true)
+			}
+			go s.selfVersion.watchLoop()
+		}
+	}
+	s.devMode = cfg.devMode
+	if s.devMode {
+		// Per-sub-application out-of-date detection (see pollManagedVersions)
+		// is, like the rest of this dev/ops-mode-gated feature set, only
+		// meaningful for a dev workflow -- see
+		// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision C/D.
+		go s.watchManagedVersions()
+	}
 	s.heartbeatPort = cfg.heartbeatPort
 	s.httpPort = cfg.httpPort
 	s.condoccerPort = cfg.condoccerPort
@@ -852,10 +1186,29 @@ func main() {
 	}
 	go s.cleanupFilesLoop()
 
-	reprSrv, err := representable.NewServer(":" + cfg.heartbeatPort)
+	if cfg.devRepo {
+		root, err := repoRootFromCWD()
+		if err != nil {
+			log.Fatalf("--dev-repo requires running inside a git repository: %v", err)
+		}
+		s.repoWatch = newRepoWatch(root, s.broadcastRepoState)
+		log.Printf("dev-repo: watching %s for changes to rebuild from (see docs/DevMode.md)", root)
+		if havePrevState && prevState.AutoRebuild {
+			s.repoWatch.setAutoRebuild(true)
+		}
+		go s.repoWatch.watchLoop()
+	}
+
+	reprSrv, err := representable.NewServer(":"+cfg.heartbeatPort, representable.Mode(s.devMode))
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
+	// Disclose our own HTTP port to every connecting client (federation-command,
+	// condoccer, ...) so a sub-app that only knows our representable dial
+	// address can still reach our HTTP API directly -- see
+	// condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md,
+	// Revision A.
+	reprSrv.SetHTTPPort(s.httpPort)
 	s.reprServer = reprSrv
 
 	// Track FC control mode changes and forward log entries to browser clients.
@@ -870,6 +1223,7 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("condoccer-state", empty)
 				}
+				s.setModeMismatch("condoccer", false, "")
 			}
 			return
 		}
@@ -888,8 +1242,16 @@ func main() {
 					ac.SendData("ridealong-state", RidealongStateMsg{Active: false})
 					ac.SendData("condoc-state", CondocStateMsg{Active: false})
 				}
+				s.setModeMismatch("federation-command", false, "")
 			}
 		}
+	})
+
+	// Disclose a dev/ops mode mismatch with a connecting FC or condoccer — see
+	// docs/DevMode.md. Both still exchange heartbeats; representable itself
+	// refuses their state/log/data traffic while mismatched.
+	reprSrv.SetModeMismatchHandler(func(name string, mismatched bool, peerMode string) {
+		s.setModeMismatch(name, mismatched, peerMode)
 	})
 
 	reprSrv.SetLogHandler(func(name, line, kind string) {
@@ -906,6 +1268,17 @@ func main() {
 	})
 
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if dataType == "version" {
+			// Every managed app reports its build version once it connects
+			// (see docs/DevMode.md "Versioning") -- generic across app names
+			// so any future adopter gets it for free, unlike the
+			// per-app-name dispatch below.
+			var payload VersionMsg
+			if err := json.Unmarshal(data, &payload); err == nil && payload.Version != "" {
+				s.setManagedVersion(name, payload.Version)
+			}
+			return
+		}
 		if name == "condoccer" {
 			if dataType == "condoccer-state" {
 				var payload CondoccerStateMsg
@@ -952,6 +1325,7 @@ func main() {
 
 	log.Printf("representable server listening on tcp://localhost:%s", cfg.heartbeatPort)
 
+	go s.watchRestartSignal()
 	go s.broadcastLoop()
 
 	if cfg.autoConnect {

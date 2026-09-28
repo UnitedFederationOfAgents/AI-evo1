@@ -1,12 +1,17 @@
-.PHONY: build docker-build run clean test all deploy-dev-binary
+.PHONY: build docker-build run run-loader clean test all deploy-dev-binary
 
 BINARY_NAME=dungeon-keeper
+LOADER_DIR=../ufa-loader
+
+# Repo-level version, embedded into the binary below -- see docs/DevMode.md
+# "Versioning" and scripts/compute-version.sh.
+VERSION := $(shell bash ../scripts/compute-version.sh)
 
 all: build
 
 # Build the Go binary
 build:
-	go build -o $(BINARY_NAME) .
+	go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 # Build Docker image (from parent directory context)
 docker-build:
@@ -23,6 +28,14 @@ run: build
 run-heuristic: build
 	@echo "Starting dungeon-keeper (heuristic-request) watch loop..."
 	./$(BINARY_NAME) watch --agent-type heuristic-request
+
+# Run the agent-worker watch loop under ufa-loader: it relaunches
+# $(BINARY_NAME) whenever a SIGHUP sent to its pid makes it announce a
+# restart on stdout before exiting (see ufa-loader/README.md /
+# docs/DevMode.md). Extra flags: `make run-loader ARGS="--dev-mode"`.
+run-loader: build
+	$(MAKE) -C $(LOADER_DIR) build
+	$(LOADER_DIR)/ufa-loader ./$(BINARY_NAME) watch --agent-type agent-worker $(ARGS)
 
 # Clean up build artifacts
 clean:

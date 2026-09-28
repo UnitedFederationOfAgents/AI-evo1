@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, Phase, ReprStatus, ReprStatusMsg, StepSummary } from './types'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary } from './types'
 
 // ---- WebSocket hook ----
 
@@ -18,9 +18,20 @@ function useCondocWS() {
   const [condocs, setCondocs] = useState<CondocInfo[]>([])
   const [activeState, setActiveState] = useState<CondocState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Distinct from `error`: only true when the *server* explicitly rejected a
+  // subscribe (path renamed/reverted-away/deleted). `error` also gets set by
+  // transport-level hiccups (ws.onerror's generic "retrying" message), which
+  // fire routinely during a reconnect -- e.g. every restart triggered by the
+  // browser-refresh/auto-update mechanisms, while the server is still coming
+  // back up. Only a genuine server rejection should be treated as staleness.
+  const [subscribeError, setSubscribeError] = useState(false)
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
+  const [reprAutoConnect, setReprAutoConnect] = useState(false)
+  const [devMode, setDevMode] = useState(false)
+  const [version, setVersion] = useState('')
+  const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
   const [diffFiles, setDiffFiles] = useState<string[]>([])
   const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
   const [fileDiffContent, setFileDiffContent] = useState<string | null>(null)
@@ -35,6 +46,7 @@ function useCondocWS() {
   const subscribe = useCallback(
     (path: string) => {
       subscribedRef.current = path
+      setSubscribeError(false)
       send('subscribe', { path })
     },
     [send],
@@ -57,6 +69,19 @@ function useCondocWS() {
   const disconnectRepr = useCallback(() => {
     send('disconnect', {})
   }, [send])
+
+  // setAutoConnectRepr toggles the persistent auto-connect state: on, it arms
+  // the retry cycle (starting a connect attempt at host/port if none is
+  // already underway) and keeps it armed across a successful connection, so a
+  // later unintentional disconnect resumes on its own; off, it only stops a
+  // retry in progress -- Disconnect above is still the separate, explicit
+  // action for dropping an active connection.
+  const setAutoConnectRepr = useCallback(
+    (enabled: boolean, host?: string, port?: string) => {
+      send('set-auto-connect', { enabled, host, port })
+    },
+    [send],
+  )
 
   const getDiff = useCallback(
     (fromCommit: string, toCommit: string) => {
@@ -112,14 +137,34 @@ function useCondocWS() {
             setCondocs(p.condocs ?? [])
           } else if (msg.type === 'condoc') {
             setActiveState(msg.payload as CondocState)
+            setSubscribeError(false)
           } else if (msg.type === 'error') {
             const p = msg.payload as { message: string }
             setError(p.message)
+            setSubscribeError(true)
           } else if (msg.type === 'repr-status') {
             const p = msg.payload as ReprStatusMsg
             setReprStatus(p.status)
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
+            setReprAutoConnect(!!p.auto_connect)
+          } else if (msg.type === 'self-info') {
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setVersion(p.version)
+            // A rebuild+restart is invisible to an already-open tab -- the
+            // reconnect above is the only signal it gets. Compare the
+            // server's own reported version against this bundle's
+            // build-time version and reload if they differ; skip under the
+            // Vite dev server, where HMR already keeps the tab current and
+            // the two are never expected to match (see
+            // condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+          } else if (msg.type === 'mode-mismatch') {
+            const p = msg.payload as ModeMismatchMsg
+            setModeMismatch(p.mismatched ? p : null)
           } else if (msg.type === 'diff-list') {
             const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
             setDiffFiles(p.files ?? [])
@@ -144,14 +189,20 @@ function useCondocWS() {
     condocs,
     activeState,
     error,
+    subscribeError,
     subscribe,
     sendAction,
     setError,
     reprStatus,
     reprHost,
     reprPort,
+    reprAutoConnect,
+    devMode,
+    version,
+    modeMismatch,
     connectRepr,
     disconnectRepr,
+    setAutoConnectRepr,
     getDiff,
     getFileDiff,
     diffFiles,
@@ -169,6 +220,132 @@ function useCondocWS() {
 
 type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' | 'file-diff'
 
+// ---- URL-hash resume (browser pickup strategy) ----
+//
+// The nav state above lives only in useState, so a refresh used to always
+// land back on the condoc list. We mirror it into `location.hash` (never a
+// real path -- see condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md for why: condoccer's `base: './'` asset
+// resolution depends on the served directory never changing) so a refresh,
+// or an LR/AC iframe remount replaying a captured hash, can resume straight
+// to the same condoc/step/iteration/diff pane.
+//
+// Formats:
+//   #/condoc/<enc(path)>
+//   #/condoc/<enc(path)>/step/<num>[/iter/<id>]
+//   #/condoc/<enc(path)>/step/<num>/substep[/iter/<id>]
+//   #/condoc/<enc(path)>/step/<num>[/substep]/files/<from>..<to>[/file/<enc(file)>[/hunk/<idx>]]
+
+interface NavHashState {
+  navLevel: NavLevel
+  condocPath: string | null
+  stepNum: number | null
+  iterId: string | null
+  substepIterId: string | null
+  diffReturnLevel: 'step' | 'substep'
+  diffFromCommit: string | null
+  diffToCommit: string | null
+  selectedDiffFile: string | null
+  selectedDiffHunkIdx: number | null
+}
+
+function hashFromNav(s: NavHashState): string {
+  if (s.navLevel === 'condoc-list' || !s.condocPath) return ''
+  let h = `#/condoc/${encodeURIComponent(s.condocPath)}`
+  if (s.navLevel === 'condoc' || s.stepNum === null) return h
+
+  h += `/step/${s.stepNum}`
+  if (s.navLevel === 'step') {
+    return s.iterId ? `${h}/iter/${s.iterId}` : h
+  }
+  if (s.navLevel === 'substep') {
+    h += '/substep'
+    return s.substepIterId ? `${h}/iter/${s.substepIterId}` : h
+  }
+  if (s.navLevel === 'files-changed' || s.navLevel === 'file-diff') {
+    if (s.diffReturnLevel === 'substep') h += '/substep'
+    if (s.diffFromCommit === null) return h
+    h += `/files/${s.diffFromCommit}..${s.diffToCommit ?? ''}`
+    if (s.navLevel === 'file-diff' && s.selectedDiffFile) {
+      h += `/file/${encodeURIComponent(s.selectedDiffFile)}`
+      if (s.selectedDiffHunkIdx !== null) h += `/hunk/${s.selectedDiffHunkIdx}`
+    }
+  }
+  return h
+}
+
+function emptyNavHashState(): NavHashState {
+  return {
+    navLevel: 'condoc-list',
+    condocPath: null,
+    stepNum: null,
+    iterId: null,
+    substepIterId: null,
+    diffReturnLevel: 'step',
+    diffFromCommit: null,
+    diffToCommit: null,
+    selectedDiffFile: null,
+    selectedDiffHunkIdx: null,
+  }
+}
+
+function navFromHash(hash: string): NavHashState {
+  const result = emptyNavHashState()
+  const trimmed = hash.replace(/^#\/?/, '')
+  if (!trimmed) return result
+
+  const parts = trimmed.split('/')
+  let i = 0
+  if (parts[i] !== 'condoc' || !parts[i + 1]) return result
+  result.condocPath = decodeURIComponent(parts[i + 1])
+  result.navLevel = 'condoc'
+  i += 2
+
+  if (parts[i] !== 'step' || !parts[i + 1]) return result
+  const stepNum = parseInt(parts[i + 1], 10)
+  if (Number.isNaN(stepNum)) return result
+  result.stepNum = stepNum
+  result.navLevel = 'step'
+  i += 2
+
+  let inSubstep = false
+  if (parts[i] === 'substep') {
+    inSubstep = true
+    result.navLevel = 'substep'
+    result.diffReturnLevel = 'substep'
+    i += 1
+  }
+
+  if (parts[i] === 'iter' && parts[i + 1]) {
+    if (inSubstep) result.substepIterId = parts[i + 1]
+    else result.iterId = parts[i + 1]
+    return result
+  }
+
+  if (parts[i] === 'files' && parts[i + 1]) {
+    const range = parts[i + 1]
+    const sep = range.indexOf('..')
+    if (sep < 0) return result
+    result.diffFromCommit = range.slice(0, sep)
+    result.diffToCommit = range.slice(sep + 2)
+    result.navLevel = 'files-changed'
+    i += 2
+
+    if (parts[i] === 'file' && parts[i + 1]) {
+      result.selectedDiffFile = decodeURIComponent(parts[i + 1])
+      result.navLevel = 'file-diff'
+      i += 2
+
+      if (parts[i] === 'hunk' && parts[i + 1]) {
+        const hunkIdx = parseInt(parts[i + 1], 10)
+        if (!Number.isNaN(hunkIdx)) result.selectedDiffHunkIdx = hunkIdx
+      }
+    }
+  }
+
+  return result
+}
+
 // ---- Phase helpers ----
 
 const PHASE_LABELS: Record<Phase, string> = {
@@ -185,12 +362,18 @@ function PhaseBadge({ phase }: { phase: Phase }) {
 
 // ---- Step section parser ----
 
+interface ResourceLink {
+  name: string
+  filename: string
+}
+
 interface StepSection {
   id: string
   label: string
-  kind: 'prompt' | 'reply' | 'revision' | 'retry' | 'substep'
+  kind: 'prompt' | 'reply' | 'revision' | 'retry' | 'substep' | 'resource'
   content: string
   substepLetter?: string
+  resourceLinks?: ResourceLink[]
 }
 
 const COMMIT_LINK_RE = /^\[`[a-f0-9]+`\]\([^)]+\)\s*$/gm
@@ -221,20 +404,31 @@ function parseStepSections(content: string): StepSection[] {
     letter: string
     from: string
     substepTitle: string
+    resourceNum: string
+    resourceName: string
     fullMatch: string
   }
   const headings: Heading[] = []
   const reMain = /^## (Reply|Revision|Retry|Human-Prompt)(?: ([A-Z]))?(?: \(from (\w+)\))?/gm
   const reSubstep = /^## Substep ([A-Z]) - (.+)/gm
+  // "## Resource N" or "## Resource N -- <name>" (Revision B; the original
+  // "## Resource (N)" parens were dropped) -- given its own heading here so
+  // it gets cut out as its own section below, rather than reading as an
+  // unstyled tail of whichever Reply/Revision precedes it.
+  const reResource = /^## Resource (\d+)(?: -- (.+))?/gm
   reMain.lastIndex = 0
   reSubstep.lastIndex = 0
+  reResource.lastIndex = 0
 
   let m: RegExpExecArray | null
   while ((m = reMain.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', substepTitle: '', fullMatch: m[0] })
+    headings.push({ index: m.index, kind: m[1], letter: m[2] ?? '', from: m[3] ?? '', substepTitle: '', resourceNum: '', resourceName: '', fullMatch: m[0] })
   }
   while ((m = reSubstep.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), fullMatch: m[0] })
+    headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), resourceNum: '', resourceName: '', fullMatch: m[0] })
+  }
+  while ((m = reResource.exec(content)) !== null) {
+    headings.push({ index: m.index, kind: 'Resource', letter: '', from: '', substepTitle: '', resourceNum: m[1], resourceName: (m[2] ?? '').trim(), fullMatch: m[0] })
   }
   headings.sort((a, b) => a.index - b.index)
 
@@ -253,6 +447,8 @@ function parseStepSections(content: string): StepSection[] {
 
     let id: string, label: string, kind: StepSection['kind']
     let substepLetter: string | undefined
+    let resourceLinks: ResourceLink[] | undefined
+    let sectionContent = cleaned
 
     if (h.kind === 'Reply') {
       id = h.letter ? `reply-${h.letter}` : 'reply-initial'
@@ -266,6 +462,17 @@ function parseStepSections(content: string): StepSection[] {
       id = `retry-${h.letter}`
       label = h.from ? `Retry ${h.letter} (from ${h.from})` : `Retry ${h.letter}`
       kind = 'retry'
+    } else if (h.kind === 'Resource') {
+      id = `resource-${h.resourceNum}`
+      label = h.resourceName ? `Resource ${h.resourceNum} | ${h.resourceName}` : `Resource ${h.resourceNum}`
+      kind = 'resource'
+      resourceLinks = []
+      const linkLineRe = /^- \[(.+?)\]\((.+?)\)\s*$/gm
+      let lm: RegExpExecArray | null
+      while ((lm = linkLineRe.exec(cleaned)) !== null) {
+        resourceLinks.push({ name: lm[1], filename: lm[2] })
+      }
+      sectionContent = cleaned.replace(linkLineRe, '').trim()
     } else {
       // Substep
       id = `substep-${h.letter}`
@@ -274,7 +481,7 @@ function parseStepSections(content: string): StepSection[] {
       substepLetter = h.letter
     }
 
-    sections.push({ id, label, kind, content: cleaned, substepLetter })
+    sections.push({ id, label, kind, content: sectionContent, substepLetter, resourceLinks })
   }
 
   return sections
@@ -284,6 +491,118 @@ function sectionsToIterations(sections: StepSection[]): Iteration[] {
   return sections
     .filter((s) => s.kind !== 'prompt')
     .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
+}
+
+// ---- Resource rendering (Revision B of Step5SubstepRPrompt.md) ----
+//
+// "## Resource N" blocks link to files condoccer copied into the condoc's
+// Impls folder (see condoccer/resources.go's addResource). basePath() mirrors
+// the WebSocket hook's own path-prefix derivation so /api/resource/... also
+// resolves correctly when this UI is reverse-proxied under a path prefix
+// (/condoccer/ via local-representative, /host/<id>/condoccer/ via AC).
+function basePath(): string {
+  const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+  return dir.endsWith('/') ? dir.slice(0, -1) : dir
+}
+
+function resourceUrl(condocPath: string, filename: string, opts?: { download?: boolean }): string {
+  const params = new URLSearchParams({ condoc: condocPath })
+  if (opts?.download) params.set('download', '1')
+  return `${basePath()}/api/resource/${encodeURIComponent(filename)}?${params.toString()}`
+}
+
+// RESOURCE_TEXT_EXTENSIONS / RESOURCE_IMAGE_EXTENSIONS mirror
+// local-representative's files.go classifyKind -- condoccer has no code
+// shared with LR's frontend, so this small classification table is
+// duplicated rather than imported.
+const RESOURCE_TEXT_EXTENSIONS = new Set([
+  '.txt', '.md', '.log', '.csv', '.json', '.yaml', '.yml', '.go', '.py',
+  '.js', '.ts', '.tsx', '.jsx', '.html', '.css', '.sh', '.xml', '.ini',
+  '.toml', '.conf',
+])
+const RESOURCE_IMAGE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico',
+])
+
+function classifyResourceKind(filename: string): 'text' | 'image' | 'other' {
+  const dot = filename.lastIndexOf('.')
+  const ext = dot >= 0 ? filename.slice(dot).toLowerCase() : ''
+  if (RESOURCE_TEXT_EXTENSIONS.has(ext)) return 'text'
+  if (RESOURCE_IMAGE_EXTENSIONS.has(ext)) return 'image'
+  return 'other'
+}
+
+// ResourceTextPreview fetches a text resource's raw content once and renders
+// it inline; failures (e.g. the file was since removed from the Impls
+// folder) just leave nothing rendered rather than an error block.
+function ResourceTextPreview({ url }: { url: string }) {
+  const [text, setText] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    setText(null)
+    fetch(url)
+      .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
+      .then((t) => { if (!cancelled) setText(t) })
+      .catch(() => { if (!cancelled) setText(null) })
+    return () => { cancelled = true }
+  }, [url])
+  if (text === null) return null
+  return <pre className="resource-text-preview">{text}</pre>
+}
+
+// ResourceSectionBody renders a "## Resource N" section's body: its
+// description text, then each linked file rendered inline when it's an image
+// or text file (anything else falls back to a plain download link). Clicking
+// an image "enters" it -- a full-size overlay, since there's nowhere in
+// condoccer's hash-based nav model that makes sense as a dedicated page for
+// it the way local-representative/agent-coordinator's FileViewer does.
+function ResourceSectionBody({ sec, condocPath }: { sec: StepSection; condocPath: string }) {
+  const [viewing, setViewing] = useState<{ url: string; name: string } | null>(null)
+
+  return (
+    <div className="iter-section-content resource-section-content">
+      {sec.content && <div className="resource-description">{sec.content}</div>}
+      {(sec.resourceLinks ?? []).map((link) => {
+        const kind = classifyResourceKind(link.filename)
+        const url = resourceUrl(condocPath, link.filename)
+        if (kind === 'image') {
+          return (
+            <img
+              key={link.filename}
+              className="resource-image"
+              src={url}
+              alt={link.name}
+              title="Click to view full size"
+              onClick={() => setViewing({ url, name: link.name })}
+            />
+          )
+        }
+        if (kind === 'text') {
+          return <ResourceTextPreview key={link.filename} url={url} />
+        }
+        return (
+          <a key={link.filename} className="resource-file-link" href={resourceUrl(condocPath, link.filename, { download: true })}>
+            {link.name}
+          </a>
+        )
+      })}
+      {viewing && (
+        <div className="resource-image-overlay" onClick={() => setViewing(null)}>
+          <img src={viewing.url} alt={viewing.name} />
+          <button className="resource-image-overlay-close" onClick={() => setViewing(null)}>× Close</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// sectionBody renders a parsed section's content: the raw-text default for
+// every kind but 'resource', which gets ResourceSectionBody's inline
+// image/text rendering instead (see Revision B of Step5SubstepRPrompt.md).
+function sectionBody(sec: StepSection, condocPath: string) {
+  return sec.kind === 'resource'
+    ? <ResourceSectionBody sec={sec} condocPath={condocPath} />
+    : <div className="iter-section-content">{sec.content}</div>
 }
 
 function parseCommitRanges(content: string): Map<string, CommitRange> {
@@ -342,11 +661,13 @@ interface ReprFooterProps {
   status: ReprStatus
   host: string
   port: string
+  autoConnect: boolean
   onConnect: (host: string, port: string) => void
   onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
 }
 
-function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterProps) {
+function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, onSetAutoConnect }: ReprFooterProps) {
   const [hostInput, setHostInput] = useState(host)
   const [portInput, setPortInput] = useState(port)
 
@@ -355,6 +676,23 @@ function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterP
   // the fields themselves.
   useEffect(() => setHostInput(host), [host])
   useEffect(() => setPortInput(port), [port])
+
+  // Auto-connect toggle: a first-class state independent of the current
+  // connection (see Revision I of Step3Prompt.md) -- checking it arms the
+  // retry cycle and keeps it armed across a successful connection, so a later
+  // unintentional disconnect resumes on its own; unchecking it only stops a
+  // retry in progress. Disconnect above is still the separate, explicit
+  // action that drops an active connection and also turns this off.
+  const autoConnectToggle = (
+    <label className="repr-footer-auto-connect" title="keep reaching for local-representative: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off">
+      <input
+        type="checkbox"
+        checked={autoConnect}
+        onChange={(e) => onSetAutoConnect(e.target.checked, hostInput.trim(), portInput.trim())}
+      />
+      auto-connect
+    </label>
+  )
 
   return (
     <div className="repr-footer">
@@ -381,10 +719,12 @@ function ReprFooter({ status, host, port, onConnect, onDisconnect }: ReprFooterP
           <button className="btn-secondary" onClick={() => onConnect(hostInput.trim(), portInput.trim())}>
             Connect
           </button>
+          {autoConnectToggle}
         </div>
       ) : (
         <div className="repr-footer-form">
           <span className="repr-footer-addr">{host}:{port}</span>
+          {autoConnectToggle}
           <button className="btn-secondary" onClick={onDisconnect}>
             Disconnect
           </button>
@@ -563,8 +903,11 @@ interface SidebarProps {
   reprStatus: ReprStatus
   reprHost: string
   reprPort: string
+  reprAutoConnect: boolean
   onReprConnect: (host: string, port: string) => void
   onReprDisconnect: () => void
+  onReprSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
+  version: string
 }
 
 function Sidebar({
@@ -593,16 +936,21 @@ function Sidebar({
   reprStatus,
   reprHost,
   reprPort,
+  reprAutoConnect,
   onReprConnect,
   onReprDisconnect,
+  onReprSetAutoConnect,
+  version,
 }: SidebarProps) {
   const reprFooter = (
     <ReprFooter
       status={reprStatus}
       host={reprHost}
       port={reprPort}
+      autoConnect={reprAutoConnect}
       onConnect={onReprConnect}
       onDisconnect={onReprDisconnect}
+      onSetAutoConnect={onReprSetAutoConnect}
     />
   )
 
@@ -610,7 +958,7 @@ function Sidebar({
     return (
       <div className="sidebar">
         <div className="sidebar-header">
-          <h1>Condoccer</h1>
+          <h1>Condoccer{version && <span className="app-version-tag">{version}</span>}</h1>
         </div>
         <div className="nav-list">
           {condocs.length === 0 && (
@@ -835,7 +1183,7 @@ function Sidebar({
 
   return (
     <div className="sidebar">
-      <div className="sidebar-header"><h1>Condoccer</h1></div>
+      <div className="sidebar-header"><h1>Condoccer{version && <span className="app-version-tag">{version}</span>}</h1></div>
       {reprFooter}
     </div>
   )
@@ -1074,7 +1422,7 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
 
 // ---- Action panel (for step or substep view) ----
 
-type ActionMode = null | 'revision' | 'retry' | 'revert' | 'substep'
+type ActionMode = null | 'revision' | 'retry' | 'revert' | 'substep' | 'add_resource'
 
 interface ActionPanelProps {
   state: CondocState
@@ -1089,6 +1437,16 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [fromSel, setFromSel] = useState('start')
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
+  const [resourceType, setResourceType] = useState<'highlighted' | 'upload'>('highlighted')
+  const [resourceName, setResourceName] = useState('')
+  const [resourceDescription, setResourceDescription] = useState('')
+  // "Upload" source (Revision C): the up-arrow button locks in the file
+  // selection the moment a file is chosen, so the operator can't switch back
+  // to "Highlighted" mid-flight -- only Cancel or Submit clears it.
+  const [uploadFiles, setUploadFiles] = useState<File[]>([])
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
+  const uploadInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     setMode(null)
@@ -1096,6 +1454,11 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setFromSel('start')
     setRevertIter('')
     setSubstepTitle('')
+    setResourceName('')
+    setResourceDescription('')
+    setResourceType('highlighted')
+    setUploadFiles([])
+    setUploadError('')
   }, [info.path, info.stepNum, info.substepLetter])
 
   if (info.phase === 'agent_running') {
@@ -1162,6 +1525,9 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           )}
           <button className="btn-danger" onClick={() => setMode('revert')}>
             Revert↩
+          </button>
+          <button className="btn-secondary" onClick={() => setMode('add_resource')}>
+            Add Resources…
           </button>
         </div>
       )}
@@ -1315,6 +1681,132 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           </div>
         </div>
       )}
+
+      {mode === 'add_resource' && (
+        <div className="action-form">
+          <div className="action-form-title">Add Resources</div>
+          <div className="action-form-row">
+            <span className="action-form-label">Source:</span>
+            <select
+              value={resourceType}
+              disabled={resourceType === 'upload' && uploadFiles.length > 0}
+              onChange={(e) => {
+                setResourceType(e.target.value as 'highlighted' | 'upload')
+                setUploadFiles([])
+                setUploadError('')
+              }}
+            >
+              <option value="highlighted">Highlighted</option>
+              <option value="upload">Upload</option>
+            </select>
+            {resourceType === 'upload' && (
+              <>
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      setUploadFiles(Array.from(e.target.files))
+                      setUploadError('')
+                    }
+                    e.target.value = ''
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn-secondary resource-upload-btn"
+                  title="Choose file(s) to upload"
+                  disabled={uploadFiles.length > 0}
+                  onClick={() => uploadInputRef.current?.click()}
+                >
+                  ⬆
+                </button>
+                {uploadFiles.length > 0 && (
+                  <span className="resource-upload-filenames">
+                    {uploadFiles.map((f) => f.name).join(', ')}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+          <input
+            className="step-form-input"
+            type="text"
+            placeholder="Name (optional) — e.g. Screenshots…"
+            value={resourceName}
+            onChange={(e) => setResourceName(e.target.value)}
+          />
+          <textarea
+            placeholder="Describe why these resources are included…"
+            value={resourceDescription}
+            onChange={(e) => setResourceDescription(e.target.value)}
+            rows={3}
+          />
+          {uploadError && (
+            <div className="action-status resource-upload-error">{uploadError}</div>
+          )}
+          <div className="action-row">
+            <button
+              className="btn-primary"
+              disabled={(resourceType === 'upload' && uploadFiles.length === 0) || uploading}
+              onClick={async () => {
+                if (resourceType === 'upload') {
+                  if (uploadFiles.length === 0) return
+                  setUploading(true)
+                  setUploadError('')
+                  try {
+                    const form = new FormData()
+                    form.append('path', info.path)
+                    if (resourceName.trim()) form.append('name', resourceName.trim())
+                    form.append('description', resourceDescription.trim())
+                    for (const f of uploadFiles) form.append('file', f)
+                    const resp = await fetch(`${basePath()}/api/upload-resource`, { method: 'POST', body: form })
+                    if (!resp.ok) {
+                      setUploadError(await resp.text())
+                      return
+                    }
+                    setMode(null)
+                    setResourceType('highlighted')
+                    setUploadFiles([])
+                    setResourceName('')
+                    setResourceDescription('')
+                  } catch (err) {
+                    setUploadError(String(err))
+                  } finally {
+                    setUploading(false)
+                  }
+                  return
+                }
+                onAction({
+                  action: 'add_resource',
+                  path: info.path,
+                  resourceType,
+                  resourceName: resourceName.trim() || undefined,
+                  content: resourceDescription.trim(),
+                })
+                setMode(null)
+                setResourceName('')
+                setResourceDescription('')
+              }}
+            >
+              {uploading ? 'Uploading…' : 'Add Resources →'}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                setMode(null)
+                setResourceType('highlighted')
+                setUploadFiles([])
+                setUploadError('')
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1364,7 +1856,7 @@ function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDe
             ref={(el) => { sectionRefs.current[sec.id] = el }}
           >
             <div className="iter-section-label">{sec.label}</div>
-            <div className="iter-section-content">{sec.content}</div>
+            {sectionBody(sec, state.info.path)}
           </div>
         ))}
       </div>
@@ -1427,7 +1919,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                       </button>
                     </div>
                   ) : (
-                    <div className="iter-section-content">{sec.content}</div>
+                    sectionBody(sec, state.info.path)
                   )}
                 </div>
               ))
@@ -1484,7 +1976,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                 </button>
               )}
             </div>
-            <div className="iter-section-content">{sec.content}</div>
+            {sectionBody(sec, state.info.path)}
           </div>
         ))}
       </div>
@@ -1501,14 +1993,20 @@ export default function App() {
     condocs,
     activeState,
     error,
+    subscribeError,
     subscribe,
     sendAction,
     setError,
     reprStatus,
     reprHost,
     reprPort,
+    reprAutoConnect,
+    devMode,
+    version,
+    modeMismatch,
     connectRepr,
     disconnectRepr,
+    setAutoConnectRepr,
     getDiff,
     getFileDiff,
     diffFiles,
@@ -1521,16 +2019,21 @@ export default function App() {
     setFileDiffHunks,
   } = useCondocWS()
 
-  const [navLevel, setNavLevel] = useState<NavLevel>('condoc-list')
-  const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(null)
-  const [selectedStepNum, setSelectedStepNum] = useState<number | null>(null)
-  const [selectedIterId, setSelectedIterId] = useState<string | null>(null)
-  const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(null)
-  const [diffFromCommit, setDiffFromCommit] = useState<string | null>(null)
-  const [diffToCommit, setDiffToCommit] = useState<string | null>(null)
-  const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(null)
-  const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(null)
-  const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>('step')
+  // Seed nav state from the URL hash on mount so a refresh (or an LR/AC
+  // iframe remount replaying a captured hash) resumes where it left off --
+  // ref so this only ever runs once, not on every render.
+  const initialNav = useRef(navFromHash(window.location.hash)).current
+
+  const [navLevel, setNavLevel] = useState<NavLevel>(initialNav.navLevel)
+  const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(initialNav.condocPath)
+  const [selectedStepNum, setSelectedStepNum] = useState<number | null>(initialNav.stepNum)
+  const [selectedIterId, setSelectedIterId] = useState<string | null>(initialNav.iterId)
+  const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(initialNav.substepIterId)
+  const [diffFromCommit, setDiffFromCommit] = useState<string | null>(initialNav.diffFromCommit)
+  const [diffToCommit, setDiffToCommit] = useState<string | null>(initialNav.diffToCommit)
+  const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(initialNav.selectedDiffFile)
+  const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(initialNav.selectedDiffHunkIdx)
+  const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>(initialNav.diffReturnLevel)
 
   // Mobile nav drawer: the sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css). Desktop layout is untouched —
@@ -1654,8 +2157,105 @@ export default function App() {
     }
   }
 
+  // Mirror nav state into the URL hash with replaceState -- not pushState,
+  // so this stays a pure resume mechanism and doesn't add a history entry
+  // per click (back-button support could be a deliberate follow-up).
+  useEffect(() => {
+    const hash = hashFromNav({
+      navLevel,
+      condocPath: selectedCondocPath,
+      stepNum: selectedStepNum,
+      iterId: selectedIterId,
+      substepIterId: selectedSubstepIterId,
+      diffReturnLevel,
+      diffFromCommit,
+      diffToCommit,
+      selectedDiffFile,
+      selectedDiffHunkIdx,
+    })
+    if (hash === window.location.hash || (hash === '' && window.location.hash === '')) return
+    const url = hash || window.location.pathname + window.location.search
+    const oldURL = window.location.href
+    history.replaceState(null, '', url)
+    // history.replaceState never fires a 'hashchange' event (unlike setting
+    // location.hash directly), so an embedder that resumes condoccer's nav
+    // state by listening for that event on this window -- e.g. agent-
+    // coordinator's iframe, see BrowserPickupStrategy.md -- would otherwise
+    // only ever see the hash as of the iframe's initial load and never learn
+    // about later in-app navigation, sending a subsequent AC-page reload
+    // back to that stale spot instead of wherever the user actually was.
+    // Dispatch one by hand so same-origin listeners stay in sync.
+    window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: window.location.href }))
+  }, [
+    navLevel, selectedCondocPath, selectedStepNum, selectedIterId, selectedSubstepIterId,
+    diffReturnLevel, diffFromCommit, diffToCommit, selectedDiffFile, selectedDiffHunkIdx,
+  ])
+
+  // Catch up once connected: state seeded from the hash at mount was never
+  // triggered by a click, so (re-)issue exactly the requests a click would
+  // have made -- keyed off the frozen `initialNav` snapshot, not the live
+  // state, so this can't also fire (redundantly, alongside the handlers'
+  // own calls) the first time a normal click sets the same state later.
+  const hashSubscribeDone = useRef(false)
+  useEffect(() => {
+    if (connected && initialNav.condocPath && !hashSubscribeDone.current) {
+      hashSubscribeDone.current = true
+      subscribe(initialNav.condocPath)
+    }
+  }, [connected, initialNav.condocPath, subscribe])
+
+  const hashDiffCatchupDone = useRef(false)
+  useEffect(() => {
+    if (connected && initialNav.diffFromCommit !== null && !hashDiffCatchupDone.current) {
+      hashDiffCatchupDone.current = true
+      getDiff(initialNav.diffFromCommit, initialNav.diffToCommit ?? '')
+    }
+  }, [connected, initialNav.diffFromCommit, initialNav.diffToCommit, getDiff])
+
+  const hashFileDiffCatchupDone = useRef(false)
+  useEffect(() => {
+    if (connected && initialNav.diffFromCommit !== null && initialNav.selectedDiffFile && !hashFileDiffCatchupDone.current) {
+      hashFileDiffCatchupDone.current = true
+      getFileDiff(initialNav.diffFromCommit, initialNav.diffToCommit ?? '', initialNav.selectedDiffFile)
+    }
+  }, [connected, initialNav.diffFromCommit, initialNav.diffToCommit, initialNav.selectedDiffFile, getFileDiff])
+
+  // Staleness: a hash can point at a condoc that's since been renamed,
+  // reverted away, or deleted. If we're anywhere but the list and never got
+  // a subscribe response before the *server* explicitly rejected it, fall
+  // back to the list (which also clears the now-stale hash via the effect
+  // above) instead of sitting on a dead deep link.
+  //
+  // This deliberately checks `subscribeError`, not the generic `error` --
+  // `error` also gets set by transport-level ws.onerror hiccups, which fire
+  // routinely while reconnecting (e.g. every restart the browser-refresh and
+  // auto-update mechanisms trigger, while the server is still coming back
+  // up). Falling back on that would kick a perfectly-valid hash-restored
+  // condoc back to the list the moment a restart's reconnect flaked, which
+  // is exactly the "brought back to the main page" regression this guards
+  // against.
+  useEffect(() => {
+    if (subscribeError && activeState === null && navLevel !== 'condoc-list') {
+      setNavLevel('condoc-list')
+      setSelectedCondocPath(null)
+      setSelectedStepNum(null)
+      setSelectedIterId(null)
+      setSelectedSubstepIterId(null)
+      setDiffFromCommit(null)
+      setDiffToCommit(null)
+      setSelectedDiffFile(null)
+      setSelectedDiffHunkIdx(null)
+    }
+  }, [subscribeError, activeState, navLevel])
+
   return (
-    <div className="app">
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {modeMismatch && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch with local-representative ({modeMismatch.peer_mode}):
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
       <button
         className="mobile-nav-toggle"
         aria-label="Open navigation"
@@ -1719,8 +2319,11 @@ export default function App() {
           reprStatus={reprStatus}
           reprHost={reprHost}
           reprPort={reprPort}
+          reprAutoConnect={reprAutoConnect}
           onReprConnect={connectRepr}
           onReprDisconnect={disconnectRepr}
+          onReprSetAutoConnect={setAutoConnectRepr}
+          version={version}
         />
       </div>
 

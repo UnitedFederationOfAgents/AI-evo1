@@ -21,6 +21,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	cp "github.com/otiai10/copy"
+	ufaversion "ufa-version"
 )
 
 // Mode constants for agent permission levels
@@ -230,6 +231,10 @@ func modeDescription(mode string) string {
 }
 
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
 	// Define flags
 	var (
 		agent      string
@@ -240,6 +245,7 @@ func main() {
 		execMode   bool
 		listAgents bool
 		listModels bool
+		showVer    bool
 		addDirs    string
 		prompt     string
 		session    string
@@ -256,6 +262,7 @@ func main() {
 	flag.BoolVar(&execMode, "x", false, "Execute mode: full access including command execution")
 	flag.BoolVar(&listAgents, "list-agents", false, "List available agents")
 	flag.BoolVar(&listModels, "list-models", false, "List available models for an agent (use -a to specify agent)")
+	flag.BoolVar(&showVer, "version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	flag.StringVar(&addDirs, "add-dirs", "", "Colon-separated list of directories to add (for agent records access)")
 	flag.StringVar(&prompt, "prompt", "", "Prompt to send to the agent (alternative to positional argument)")
 	flag.StringVar(&session, "session", "", "Session identifier (default: AGENT_SESSION env var or auto-generated)")
@@ -285,6 +292,7 @@ Options:
                          Use 'default' for current session, copies to temp dir
   --list-agents         List available agents and exit
   --list-models         List available models for an agent (use -a to specify)
+  --version             Print version and exit
 
 Environment:
   AGENT_NAME          Default agent selection

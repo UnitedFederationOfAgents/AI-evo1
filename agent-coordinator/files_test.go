@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,37 @@ import (
 	"strings"
 	"testing"
 )
+
+// TestFileInfoHighlightedRoundTrips guards against the same class of bug as
+// TestProcInfoAutoUpdateRoundTrips (Revision K): AC's own FileInfo (used to
+// decode LR's "files-state" payload) must keep every field local-representative's
+// FileInfo serializes, or json.Unmarshal silently drops it and the
+// file-details dialog's "highlight" toggle (and the grid box's yellow ring)
+// could never render as active when viewed through agent-coordinator. See
+// condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md.
+func TestFileInfoHighlightedRoundTrips(t *testing.T) {
+	raw := []byte(`{"id":"a1_x.txt","name":"x.txt","kind":"text","state":"cached","highlighted":true}`)
+
+	var fi FileInfo
+	if err := json.Unmarshal(raw, &fi); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !fi.Highlighted {
+		t.Fatal("expected Highlighted=true after decoding a payload with highlighted:true")
+	}
+
+	out, err := json.Marshal(fi)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTripped map[string]any
+	if err := json.Unmarshal(out, &roundTripped); err != nil {
+		t.Fatalf("unmarshal round-tripped output: %v", err)
+	}
+	if v, ok := roundTripped["highlighted"]; !ok || v != true {
+		t.Fatalf("re-encoded FileInfo missing/false highlighted: %v", roundTripped)
+	}
+}
 
 // newTestServerWithHost creates an agent-coordinator Server with one
 // connected host, "lr-a", whose local-representative HTTP dashboard is

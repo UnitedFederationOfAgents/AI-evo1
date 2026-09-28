@@ -7,7 +7,7 @@ import (
 
 // TestNewBlinker verifies initial blinker state
 func TestNewBlinker(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 
 	if b.State() != BlinkerIdle {
 		t.Errorf("expected initial state BlinkerIdle, got %v", b.State())
@@ -20,9 +20,23 @@ func TestNewBlinker(t *testing.T) {
 	}
 }
 
+// TestBlinkerDevMode verifies NewBlinker records --dev-mode (see
+// docs/DevMode.md) so View renders blinkerBracketDevStyle's green brackets
+// instead of blinkerBracketStyle's for the life of the instance. Rendered
+// ANSI output isn't asserted here since lipgloss disables color outside a
+// TTY, which would make both styles render identical plain text.
+func TestBlinkerDevMode(t *testing.T) {
+	if b := NewBlinker(false); b.devMode {
+		t.Error("expected devMode false when NewBlinker(false)")
+	}
+	if b := NewBlinker(true); !b.devMode {
+		t.Error("expected devMode true when NewBlinker(true)")
+	}
+}
+
 // TestBlinkerSetState verifies state transitions
 func TestBlinkerSetState(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 
 	// Set to inactive
 	b.SetState(BlinkerInactive)
@@ -57,7 +71,7 @@ func TestBlinkerSetState(t *testing.T) {
 
 // TestBlinkerTick verifies blink toggling
 func TestBlinkerTick(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 
 	// Initial visible state
 	if !b.visible {
@@ -78,7 +92,7 @@ func TestBlinkerTick(t *testing.T) {
 
 // TestBlinkerTickInactive verifies no ticking when inactive
 func TestBlinkerTickInactive(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 	b.SetState(BlinkerInactive)
 
 	initialVisible := b.visible
@@ -94,7 +108,7 @@ func TestBlinkerTickInactive(t *testing.T) {
 
 // TestBlinkerViewIdle verifies idle view rendering
 func TestBlinkerViewIdle(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 	b.visible = true
 
 	view := b.View()
@@ -111,7 +125,7 @@ func TestBlinkerViewIdle(t *testing.T) {
 
 // TestBlinkerViewSelect verifies select mode view rendering
 func TestBlinkerViewSelect(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 	b.SetState(BlinkerSelect)
 	b.visible = true
 
@@ -123,7 +137,7 @@ func TestBlinkerViewSelect(t *testing.T) {
 
 // TestBlinkerViewInactive verifies inactive view rendering
 func TestBlinkerViewInactive(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 	b.SetState(BlinkerInactive)
 
 	view := b.View()
@@ -135,7 +149,7 @@ func TestBlinkerViewInactive(t *testing.T) {
 
 // TestBlinkerStartFlash verifies flash initiation
 func TestBlinkerStartFlash(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 	b.SetState(BlinkerSelect)
 
 	cmd := b.StartFlash()
@@ -153,7 +167,7 @@ func TestBlinkerStartFlash(t *testing.T) {
 // TestBlinkerAccent verifies the auto-connect accent blink overlays the current
 // mode with a brief blue pulse and can be disabled cleanly.
 func TestBlinkerAccent(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 
 	// Disabled by default: no pulse, and ticks are inert.
 	if b.accentOn {
@@ -206,7 +220,7 @@ func TestBlinkerAccent(t *testing.T) {
 
 // TestBlinkerShouldBlink verifies ShouldBlink logic
 func TestBlinkerShouldBlink(t *testing.T) {
-	b := NewBlinker()
+	b := NewBlinker(false)
 
 	// Idle should blink
 	if !b.ShouldBlink() {

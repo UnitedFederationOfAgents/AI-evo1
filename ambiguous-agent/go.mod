@@ -5,7 +5,10 @@ go 1.25
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/otiai10/copy v1.14.1
+	ufa-version v0.0.0
 )
+
+replace ufa-version => ../ufa-version
 
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect

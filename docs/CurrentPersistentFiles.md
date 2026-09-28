@@ -70,20 +70,29 @@ unless the file details dialog's "hold" button has extended that to 72 hours
 (see below) or its "persist" button has moved the entry to the host-store.
 
 Every upload also gets a `.manifest_<id>.yaml` sidecar (flat `key: value`
-YAML — id, name, kind, size, uploaded_at, held, expires_at, creator) written
-alongside it. It's hidden from the "files" tab; name/kind/size/uploaded_at
-are for an operator to read by hand, but `held`/`expires_at` ARE read back by
-LR — the files tab's "hold" button rewrites them (`held: true`, `expires_at`
-pushed out to 72 hours from the press) so the extended TTL survives an LR
-restart, since the data file's own mtime only ever reflects its original
-upload time. `creator` records the identity of the local-representative that
-uploaded the file (the same host/head id it uses to identify itself to
-agent-coordinator — see `~/.ufa/host.yaml` below), kept for future
-correlation once file exchange spans more than one host. Uploads whose
-claimed filename starts with `.manifest_` are refused; the sweep removes a
-manifest alongside its data file (and cleans up an orphaned manifest whose
-data file is already gone). A "persist" press moves the manifest into the
-host-store along with its data file rather than dropping it (see below).
+YAML — id, name, kind, size, uploaded_at, held, expires_at, creator,
+highlighted) written alongside it. It's hidden from the "files" tab;
+name/kind/size/uploaded_at are for an operator to read by hand, but
+`held`/`expires_at`/`highlighted` ARE read back by LR — the files tab's
+"hold" button rewrites the former pair (`held: true`, `expires_at` pushed
+out to 72 hours from the press) so the extended TTL survives an LR restart,
+since the data file's own mtime only ever reflects its original upload time.
+`creator` records the identity of the local-representative that uploaded the
+file (the same host/head id it uses to identify itself to agent-coordinator
+— see `~/.ufa/host.yaml` below), kept for future correlation once file
+exchange spans more than one host. `highlighted` is a plain operator-set
+toggle rewritten by the files tab's "highlight" button — independent of
+held/expires_at, it marks a file at the LR/AC level (yellow ring around its
+grid box) for cross-system functionality; condoccer's "Add Resources" action
+is the first consumer, pulling every currently-highlighted file into a
+condoc's `Impls` folder (see
+[`condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md`](../condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md)
+and [`docs/DistributedExchange.md`](DistributedExchange.md)).
+Uploads whose claimed filename starts with `.manifest_` are refused; the
+sweep removes a manifest alongside its data file (and cleans up an orphaned
+manifest whose data file is already gone). A "persist" press moves the
+manifest into the host-store along with its data file rather than dropping
+it (see below).
 
 ---
 
@@ -97,7 +106,9 @@ of "hold" once a file is already held) moves a host-cache entry to. Flat
 directory, same `<8-hex>_<original-filename>` naming as the host-cache —
 nothing here is ever swept. Its `.manifest_<id>.yaml` sidecar moves along
 with it (a persisted entry has no expiry left to track, but its `creator`
-field is kept for future correlation — see above).
+and `highlighted` fields are kept — see above). The "highlight" button still
+works on a persisted entry, rewriting the manifest in place in the
+host-store.
 
 ---
 

@@ -26,6 +26,50 @@ body {
   overflow: hidden;
 }
 
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable green
+   border around the whole app, reusing the "healthy"/"connected" green
+   palette rather than introducing a new accent color. An outline (not
+   border) so it never nudges the layout. Revision A: the original 1px/45%
+   outline was too subtle, so it became a thick, fully-opaque outline plus an
+   inner glow. Revision B: still too easy to miss, so the outline/glow now use
+   the brighter #6ec96e (already used elsewhere for "connect"/"launch" accent
+   text) instead of the darker #4ec94e, the glow is bigger and more opaque,
+   and a fixed "DEV MODE" tag is pinned to the top of the viewport so it's
+   visible even when the outline itself is scrolled out of view. Revision G:
+   now that the outline uses such a bright green, it reads clearly at half
+   the thickness, so it dropped from 4px to 2px. */
+.app-dev-mode {
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
+}
+
+.app-dev-mode::before {
+  content: 'DEV MODE';
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #6ec96e;
+  color: #0d1f0d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 10px;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
+.mode-mismatch-banner {
+  flex-shrink: 0;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
 /* ---- Agent-coordinator connection bar ---- */
 
 .ac-panel {
@@ -129,6 +173,19 @@ body {
   background: #5a2e2e;
 }
 
+/* Auto-connect toggle (Step3Prompt.md Revision I): a first-class state
+   rendered alongside every ACConnectionPanel variant, mirroring
+   .sys-auto-rebuild's checkbox styling. */
+.ac-auto-connect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 /* ---- Tab bar ---- */
 
 .tab-bar {
@@ -159,6 +216,7 @@ body {
 }
 
 .tab {
+  position: relative;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -179,6 +237,19 @@ body {
   border-bottom-color: #007acc;
 }
 
+/* Files tab picker's "something is highlighted" indicator (Step5SubstepR
+   Revision E). Double-clicking it jumps to the first highlighted file. */
+.tab-highlight-dot {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d7c22b;
+  cursor: pointer;
+}
+
 .conn-dot {
   display: inline-block;
   width: 8px;
@@ -189,6 +260,32 @@ body {
 
 .conn-dot-ok  { background: #4ec94e; }
 .conn-dot-err { background: #cc4444; }
+
+/* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
+   right corner alongside the connection dot. */
+.nav-arrows {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.nav-arrow-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.nav-arrow-btn.nav-arrow-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.nav-arrow-btn.nav-arrow-active:hover { background: #333; }
 
 /* ---- Main pane ---- */
 
@@ -717,7 +814,22 @@ body {
 
 .sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.sys-col-name { color: #d4d4d4; font-weight: 600; }
+.sys-col-name {
+  color: #d4d4d4;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  overflow: visible;
+  white-space: normal;
+}
+.sys-col-name-main {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .sys-col-pid { color: #9c9c9c; }
 .sys-col-detail { color: #9c9c9c; }
 
@@ -729,6 +841,25 @@ body {
   border: 1px solid #245a7a;
   border-radius: 8px;
   padding: 0 6px;
+}
+
+.sys-dev-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #6ec96e;
+  background: #1a3a1a;
+  border: 1px solid #6ec96e;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.sys-version-tag {
+  font-size: 10px;
+  font-weight: 400;
+  color: #666;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .sys-col-status { font-weight: 600; }
@@ -758,6 +889,184 @@ body {
 }
 
 .sys-btn-terminate:hover { background: #5a2e2e; }
+
+.sys-btn-restart {
+  background: #1a2a3a;
+  border: 1px solid #2e5a7a;
+  color: #6ea6c9;
+}
+
+.sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
+
+/* A newer build has landed on disk since this process started -- orange,
+   matching .sys-btn-rebuild-dirty's "worth your attention" treatment. */
+.sys-btn-restart-update {
+  background: #3a2a14;
+  border: 1px solid #a06a1e;
+  color: #e0a83e;
+}
+
+.sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
+
+/* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) ---- */
+
+.sys-repo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #111;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.sys-repo-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sys-repo-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.sys-repo-root {
+  color: #9c9c9c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.sys-repo-head {
+  color: #666;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.sys-repo-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sys-btn-rebuild {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.sys-btn-rebuild:hover:not(:disabled) { background: #2e5a2e; }
+
+/* Dirty repo: orange, per the prompt -- distinct from the plain green
+   "HEAD moved" rebuild state. */
+.sys-btn-rebuild-dirty {
+  background: #3a2a14;
+  border: 1px solid #a06a1e;
+  color: #e0a83e;
+}
+
+.sys-btn-rebuild-dirty:hover:not(:disabled) { background: #5a4420; }
+
+.sys-auto-rebuild {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+}
+
+/* Auto-rebuild's 90s debounce countdown (Step3Prompt.md Revision E) --
+   shown next to the auto-rebuild toggle while it's waiting for changes to
+   settle before building. */
+.sys-repo-auto-pending {
+  font-size: 11px;
+  color: #e0a83e;
+  font-style: italic;
+}
+
+.sys-repo-error {
+  font-size: 11px;
+  color: #e05c5c;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
+
+.sys-trough {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #111;
+}
+
+.sys-trough-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-family: inherit;
+  font-size: 11px;
+  color: #aaa;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sys-trough-line:disabled { cursor: default; color: #666; }
+
+.sys-trough-chevron { flex-shrink: 0; color: #666; }
+
+.sys-trough-ts { flex-shrink: 0; color: #666; }
+
+.sys-trough-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sys-trough-empty { font-style: italic; color: #666; }
+
+.sys-trough-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #888;
+  background: #252526;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.sys-trough-list {
+  max-height: 160px;
+  overflow-y: auto;
+  border-top: 1px solid #2a2a2a;
+}
+
+.sys-trough-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #c96e6e;
+  border-bottom: 1px solid #202020;
+}
+
+.sys-trough-entry:last-child { border-bottom: none; }
 
 .sys-launch {
   display: flex;
@@ -876,6 +1185,12 @@ body {
 .files-item-active {
   border-color: #007acc;
   background: #14283a;
+}
+
+/* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
+   independent of (and layered outside) the active-selection border above. */
+.files-item-highlighted {
+  box-shadow: 0 0 0 2px #d7c22b;
 }
 
 .file-icon {
@@ -1031,6 +1346,30 @@ body {
 
 .file-detail-hold:hover { background: #5a4e2e; border-color: #c4b04e; }
 .file-detail-hold:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-highlight {
+  flex: 1;
+  background: #2a2a1a;
+  border: 1px solid #5a5a2e;
+  border-radius: 3px;
+  color: #999;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-highlight:hover { background: #3a3a2a; border-color: #7a7a4e; }
+.file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-highlight-active {
+  background: #3a341a;
+  border-color: #d7c22b;
+  color: #d7c22b;
+}
+
+.file-detail-highlight-active:hover { background: #5a4e2e; }
 
 .file-detail-delete {
   flex: 1;

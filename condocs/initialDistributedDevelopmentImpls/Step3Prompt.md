@@ -1,0 +1,175 @@
+# Prompt
+
+[InitialDistributedDevelopment](../InitialDistributedDevelopment.md)
+
+Now that we have restart mechanisms available we need the ability to detect changes and automatically rebuild.
+
+We will start by giving this ability to LR, specifically in dev-mode. We can now launch LR with the argument --dev-repo: this automatically sets dev-mode and also marks the current working directory repo as watched. (We must be in a repo for this to be accepted)
+
+When the repo is watched LR will watch the HEAD for changes. If there are changes detected there is an indication in the system tab (a 'rebuild' button becomes available). If the repo is dirty (modified unstaged changes or staged changes) the rebuild button will become orange and say 'dirty'. If the repo is clean there is a periodic check for remote changes and a 'pull --rebase' if there are.
+
+When the rebuild button is active pressing it will cause LR to run 'make deploy-dev-binaries' at the repo root (and indicate while this is progressing).
+
+LR also has an 'auto-rebuild' toggle available. This causes the rebuild to happen automatically when it is detected as possible. The check-and-rebuild process is single-threaded to avoid conflicts.
+
+
+prompt: [`0eab75d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0eab75d317e400785f6a359d08e66921d4bac1f1) → reply: [`a87e2ba`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a87e2ba1645c2cbee7376a6f6a748934a38d92bb)
+
+## Reply
+
+Implemented Step 3: added local-representative's dev-repo watcher (`--dev-repo`, implying `--dev-mode`, refusing to start outside a git repo) as a new `repowatch.go`, polling the watched repo every 5s to drive a system-tab **rebuild** control that turns orange/"dirty" on uncommitted changes or green/"rebuild" once HEAD has moved (auto-pulling a clean repo's upstream with `pull --rebase` first), runs `make deploy-dev-binaries` at the repo root on press (showing "building…"), and offers an **auto-rebuild** toggle — all serialized through one mutex so the check-and-rebuild process is single-threaded, plus matching `agent-coordinator` `__system:rebuild`/`__system:auto-rebuild` remote commands. Wired the full stack: WebSocket `repo-state`/`rebuild-app`/`set-auto-rebuild` messages, the React system-tab UI and CSS, `docs/DevMode.md`/`local-representative/README.md` documentation, and new Go tests (`repowatch_test.go`) exercising the logic against real temporary git repos. As with every prior reply in this sandbox, `go build`/`go test`/`tsc` couldn't actually be run (toolchain approval denied), so this was verified by careful manual review instead.
+
+
+## Revision A
+
+Let's add the ufa-loader binary to the .gitignore.
+
+Let's also fix the 'rebuild' control:
+- We should not see the illuminated button when the HEAD has not moved (currently we see it even with no changes)
+- When the repo is 'dirty' we should not be able to select the control
+
+
+prompt: [`9819f4c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9819f4c415722c954395f0afae418b4359b4499c) → reply: [`6b8dca8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6b8dca828e189604da5c0c1f4f3c2187a7879650)
+
+## Reply A
+
+These are unrelated (Makefile target references, not the binary path), so no further changes needed.
+
+## Summary
+
+For the rebuild-control fix I changed `rebuildReadyLocked` in `repowatch.go` from `dirty || head != builtHead` to `!dirty && head != builtHead`, and seeded `builtHead`/`head` from the actual HEAD when the watcher starts (`newRepoWatch`) instead of leaving `builtHead` empty — this stops the button lighting up on launch when nothing has actually changed, and now makes the button disabled (not just orange) whenever the repo is dirty, since `requestRebuild`/`maybeAutoRebuild` both gate on the same flag. Updated the Go tests, `App.tsx`'s tooltip/doc comment, and `docs/DevMode.md`/`local-representative/README.md` to match the corrected behavior.
+
+For the `.gitignore` request I added `ufa-loader/.gitignore` (matching the `# Binary\n<name>` pattern every other sub-project uses). One caveat: `ufa-loader/ufa-loader` is currently a tracked file in this repo (unlike the other components' binaries), and untracking it needs a `git rm --cached ufa-loader/ufa-loader`, which this sandbox blocked me from running (all state-mutating git commands here return "requires approval" with no prompt reaching me) — you'll need to run that yourself for the new `.gitignore` entry to actually take effect. As with prior replies, `go build`/`go test`/`tsc` also couldn't be run here, so this was verified by manual review.
+
+
+## Revision B
+
+Now let's add two more elements to improve this dev loop:
+- We need the LR-managed sub-applications to report their version so we can see that listed in the LR 'system' tab
+- We want the 'restart' button for LR's self-management row in the system tab to show 'update and restart' when the binary the loader is managing has changed. (We could watch this file or we could poll the 'version' command)
+
+
+prompt: [`05a523e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/05a523e86d1a58f90025b0323f4095e8bc3bae53) → reply: [`7fc1f1a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7fc1f1aad5e5851eb1da16f3e690d0ee3581ca42)
+
+## Reply B
+
+Implemented Revision B's two additions: (1) `federation-command` and `condoccer` now report their build version to LR once over `representable` (a new "version" data message, mirrored by generic handling in LR's data dispatcher plus a `managedVersions` map), so the system tab lists each managed instance's version alongside LR's own; (2) a new `selfversion.go` watcher polls LR's own on-disk binary's `--version` every 5s when loader-managed, and the system tab's restart control now turns orange and reads "update and restart" once that differs from the running version. Updated `types.ts`/`App.tsx`/`index.css`, `docs/DevMode.md`, `local-representative/README.md`, and added Go tests (`selfversion_test.go`, plus new cases in `procman_test.go`); as before, the toolchain (`go build`/`go vet`/`gofmt`) couldn't actually be run here (approval denied), so this was verified by careful manual review instead.
+
+
+## Revision C
+
+Let's add functionality to the ufa-loader restart sequence for LR.
+
+The return value will now hold local state data (covering only LR - nothing yet for the sub-applications it manages) such as the 'auto-rebuild' and 'auto-connect' state.
+
+This will be fed back into the newly launched instance, bringing the state up to date with that established before the restart. The live state will take precedence over arguments where applicable.
+
+
+prompt: [`cfc5743`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/cfc574363764764a2e9eb9a37284cf22254e52ff) → reply: [`ea086d5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ea086d5b3c65291c0fc46a07796995c2fe12f6e5)
+
+## Reply C
+
+bash: line 1: /AI-evo1-dev/bin/clauditable: No such file or directory
+
+
+## Revision D
+
+Let's add functionality to the ufa-loader restart sequence for LR.
+
+The return value will now hold local state data (covering only LR - nothing yet for the sub-applications it manages) such as the 'auto-rebuild' and 'auto-connect' state.
+
+This will be fed back into the newly launched instance, bringing the state up to date with that established before the restart. The live state will take precedence over arguments where applicable.
+
+
+prompt: [`b837bb1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b837bb131e288c124c44b037cad504b73b82265b) → reply: [`bc8154a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bc8154a96b100a9d513f1d618c096326d2daa740)
+
+## Reply D
+
+Implemented Revision D (re-executing after Reply C's tooling failure): extended `restartsignal` with a generic `State` field and `AnnounceState`/`PreviousState` API, and taught `ufa-loader` to carry an announced restart's state forward as the `UFA_LOADER_STATE` env var on the next launch — all app-agnostic, per the package's existing "knows nothing about the sub-application" design. On the local-representative side, added `reststate.go`'s `lrState` (auto-rebuild toggle + auto-connect/host/port), wired it into every restart announcement (`announceRestartAndExit`, now a `*Server` method) and applied it at startup — overriding `--auto-connect`/`--ac-host`/`--ac-port` and the dev-repo watcher's auto-rebuild flag — so a newly launched instance picks up exactly the live state established before the restart. Added Go tests for both packages and updated `docs/DevMode.md`, `local-representative/README.md`, and `ufa-loader/README.md`; as with every prior reply, the Go toolchain couldn't be run here (approval denied), so this was verified by manual review only.
+
+
+## Revision E
+
+Let's add a mechanism for LR's 'auto-rebuild' function where a 90 second timer kicks off when the change is detected before the rebuild happens. If any further changes are detected the timer is bumped back to 90 seconds.
+
+The rebuild will only occur when the timer hits 0 and auto-rebuild is still active.
+
+This will reduce the amount of churn when sequential updates are happening to the repo.
+
+Let's implement this now.
+
+
+prompt: [`2f78416`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2f78416e1388b6f182982b23ede39bf1b9056ec4) → reply: [`cfd0526`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/cfd052667e6c7617ec7d512d558f596579f5d5cb)
+
+## Reply E
+
+Implemented Revision E: LR's auto-rebuild now arms a 90-second debounce timer (`autoRebuildDeadline`/`autoRebuildArmedHead` in `repowatch.go`) the moment the rebuild button first becomes active, re-arming to a full 90s whenever HEAD moves again before it fires, and only actually running the build once the timer expires with auto-rebuild still on (or clearing it if the button goes inactive/dirty/toggled off). Wired the new `auto_rebuild_pending`/`auto_rebuild_seconds` fields through the `repo-state` message, the system tab's UI ("rebuilding in Ns" next to the toggle) and CSS, added six new Go tests exercising the arm/fire/reset/disarm cases, and updated `docs/DevMode.md`/`local-representative/README.md`. As with every prior reply, the Go/TS toolchain couldn't actually be run here (approval denied), so this was verified by manual review only.
+
+
+## Revision F
+
+Let's ensure that if the repo becomes dirty during the countdown before the auto-rebuild occurs that the countdown (and auto-rebuild process) is cancelled.
+
+
+prompt: [`fa58c3c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fa58c3cc932a193a278395d635c74106a19c41a9) → reply: [`1c8b651`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1c8b651341b808208613c7d5f48cb2f1b27b3fc3)
+
+## Reply F
+
+Frontend just renders whatever `auto_rebuild_pending`/`auto_rebuild_seconds` the backend reports, so when the backend clears those on dirty, the "rebuilding in Ns" label disappears on its own. This confirms the requested behavior is already fully wired end-to-end.
+
+Given `maybeAutoRebuild()` already gates on `rebuildReadyLocked()` (which is `!dirty && head != builtHead`) before either keeping the timer armed or letting it fire, going dirty mid-countdown already disarms the timer and blocks the rebuild from ever running — this was built into Revision E's implementation itself (`repowatch.go`'s `maybeAutoRebuild`), is already covered by `TestRepoWatchAutoRebuildDisarmsWhenNotReady`, and is already documented in `docs/DevMode.md` ("the repo going dirty ... cancels the pending timer"). I verified this by re-reading the code, tests, and docs closely and found no gap: the dirty check happens on the very next poll tick (≤5s) before the debounce deadline is ever evaluated, so no rebuild can slip through. No code changes were needed for this revision.
+
+
+## Revision G
+
+Let's take a moment to adjust the dev-mode highlights on all of the web UIs again.
+
+Now that we are using such a bright green we can reduce the border thickness by half.
+
+
+prompt: [`bc1203a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bc1203aa01ce8f32743a98e7c97e3508095bdbd6) → reply: [`d366422`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d366422fdc0e38f2bac7c728e99a4f14b9e90d70)
+
+## Reply G
+
+All three frontends are covered. This completes Revision G.
+
+## Summary
+
+Halved the dev-mode outline thickness in all three frontends' `index.css` (`local-representative`, `agent-coordinator`, `condoccer`) from `outline: 4px solid #6ec96e` / `outline-offset: -4px` to `2px`/`-2px`, since the brighter green from Revision B is now vivid enough at half the thickness. Updated the comment blocks in each CSS file and `docs/DevMode.md` to document this as Revision G.
+
+
+## Revision H
+
+Let's make the updates to the 'system' pane in agent-coordinator that we have in local-representative for restarting/viewing versions/triggering builds (triggering builds in dev mode only).
+
+These controls refer to the local-representative instance, of course, no to agent-coordinator itself.
+
+
+prompt: [`d005002`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d005002f44c31c6f37a7aea81107a0b701d86649) → reply: [`f2b70cb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f2b70cb76fb94ec32fb8fc5c19e52d1bfebef890)
+
+## Reply H
+
+Implemented Revision H: `agent-coordinator`'s per-host system pane now has the same restart/version/dev-repo-build controls as `local-representative`'s own system tab, and they act on the selected host's LR, never on agent-coordinator itself. Backend (`agent-coordinator/main.go`): `ProcInfo` now carries `loader_managed`/`version`/`update_available`, a new `repo-state` handler stores and forwards LR's dev-repo watcher snapshot as host-scoped `lr-repo-state`, and three new browser commands (`lr-restart-app`, `lr-rebuild-app`, `lr-set-auto-rebuild`) route to LR's existing `__system:restart`/`__system:rebuild`/`__system:auto-rebuild` remote commands. Frontend: added a `RepoWatchPanel` (rebuild/dirty button, auto-rebuild toggle, 90s countdown) mirroring LR's own, a restart button + version tag on the self row of `SystemProcRow`, matching CSS, and wired the new state/callbacks through `LRView`/`App`; the rebuild panel — and thus the build trigger — only renders when the host's LR reports `watched: true`, i.e. it was launched with `--dev-repo`, so it's dev-mode-only automatically. Updated `agent-coordinator/docs/architecture.md` and `docs/DevMode.md` to document the additions. As with every prior reply, the Go/TS toolchain couldn't actually be run here (approval denied), so this was verified by careful manual review instead.
+
+
+## Revision I
+
+Now let's make auto-connect a first class state in all implementing sub-applications.
+
+Wherever we have a UI with a 'connect' button we want to also have an 'auto-connect' toggle.
+
+In federation-command we'll have a new set of commands: 'auto-connect|auto-connect enable|auto-connect disable' or 'ufa fc auto-connect [<enable|disable>]' (Where 'ufa fc auto-connect' prints the status and the available enable/disable commands)
+
+The auto-connect state remains intact when a successful connection occurs, and the auto-connect cycle begins automatically upon unintentional disconnection. (Intentionally disconnect terminates auto-connect)
+
+
+prompt: [`02f7240`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/02f7240368f3f5b18751745664fe89c2d4ec0109) → reply: [`618bdbb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/618bdbbe5e0e277e45aa64c534e469ae24919ea5)
+
+## Reply I
+
+Implemented Revision I across all three sub-applications with a persistent, first-class **auto-connect** toggle: **local-representative** (its agent-coordinator connection panel gained an auto-connect checkbox plus a `set-auto-connect-ac` WS message) and **condoccer** (its connect/disconnect widget gained the same, over a new `set-auto-connect` message) both now distinguish an *intentional* disconnect (which disarms the toggle) from an *unintentional* drop (which auto-resumes the retry cycle), with the toggle surviving a successful connection either way. **federation-command** gained a new `auto-connect`/`auto-connect enable`/`auto-connect disable` command set (also reachable as `ufa fc auto-connect [<enable|disable>]`), plus a previously-missing background listener on the representable connection's `DisconnectCh()` so it can now detect a dropped connection at all and resume auto-connect when armed. Updated Go tests (`main_test.go`/`repr_test.go`) exercising the toggle/resume/terminate semantics with real loopback `representable` servers, and refreshed `local-representative/README.md`, `federation-command/README.md` and `docs/brief-tour.md`, and `agent-coordinator/docs/architecture.md` to document the new behavior. While reviewing, I caught and fixed a real race in local-representative's original design where a superseded/stale connection's teardown could spuriously broadcast stale state or restart a retry loop against the wrong target — now guarded correctly. As with every prior reply in this sandbox, the Go/TS toolchain couldn't actually be run (approval denied), so this was verified by careful manual review of every diff instead.
+
+
+## Step Completed
+
+This step was completed at 1790083046 (Tue Sep 22 01:17:26 PM UTC 2026).

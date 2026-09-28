@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
+
+// Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
+// Step5Prompt.md Revision M): how many recently-visited tabs we keep around
+// for back/forward. A pragmatic starting value -- see useScreenHistory below.
+const NAV_HISTORY_MAX = 20
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
@@ -25,7 +30,11 @@ function useStatusWS() {
   const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
+  const [repoState, setRepoState] = useState<RepoStateMsg>({ watched: false, dirty: false, rebuild_ready: false, building: false, auto_rebuild: false })
   const [filesState, setFilesState] = useState<FilesStateMsg | null>(null)
+  // Peer name -> current mismatch disclosure -- see docs/DevMode.md. A
+  // mismatched peer only ever exchanges health information with this LR.
+  const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -63,6 +72,18 @@ function useStatusWS() {
     }
   }, [])
 
+  // setAutoConnectAC toggles the persistent auto-connect state: on, it arms
+  // the background retry loop at host/port (falling back to the last-used
+  // target server-side when omitted) and keeps it armed across a successful
+  // connection, so a later unintentional disconnect resumes the cycle on its
+  // own; off, it only cancels a retry in progress -- disconnecting an active
+  // connection is still a separate, explicit action (see disconnectFromAC).
+  const setAutoConnectAC = useCallback((enabled: boolean, host?: string, port?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-connect-ac', payload: { enabled, host, port } }))
+    }
+  }, [])
+
   const launchApp = useCallback((name: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'launch-app', payload: { name } }))
@@ -72,6 +93,39 @@ function useStatusWS() {
   const terminateApp = useCallback((id: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'terminate-app', payload: { id } }))
+    }
+  }, [])
+
+  // Restarts this local-representative process itself — only expected to
+  // come back up when it is loader-managed (see ProcInfo.loader_managed);
+  // the system tab greys the control out otherwise.
+  const restartApp = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'restart-app', payload: {} }))
+    }
+  }, [])
+
+  // Dev-repo watcher controls (--dev-repo, see docs/DevMode.md): rebuildRepo
+  // runs 'make deploy-dev-binaries' at the watched repo's root; setAutoRebuild
+  // toggles whether that happens automatically whenever it becomes possible.
+  const rebuildRepo = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'rebuild-app', payload: {} }))
+    }
+  }, [])
+
+  const setAutoRebuild = useCallback((enabled: boolean) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-rebuild', payload: { enabled } }))
+    }
+  }, [])
+
+  // Toggles whether this LR restarts itself the instant an update becomes
+  // available, instead of waiting for the "update and restart" button --
+  // see docs/DevMode.md "Loader".
+  const setAutoUpdate = useCallback((enabled: boolean) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-update', payload: { enabled } }))
     }
   }, [])
 
@@ -96,7 +150,12 @@ function useStatusWS() {
     const ws = new WebSocket(`ws://${window.location.host}/ws`)
     wsRef.current = ws
 
-    ws.onopen = () => setConnected(true)
+    ws.onopen = () => {
+      setConnected(true)
+      // The server resends a full mode-mismatch snapshot on connect; drop any
+      // stale entries from a mismatch that cleared while we were offline.
+      setModeMismatches({})
+    }
 
     ws.onclose = () => {
       setConnected(false)
@@ -152,12 +211,37 @@ function useStatusWS() {
           case 'ac-state':
             setAcState(msg.payload as ACStateMsg)
             break
-          case 'system-state':
-            setSystemState(msg.payload as SystemStateMsg)
+          case 'system-state': {
+            const payload = msg.payload as SystemStateMsg
+            setSystemState(payload)
+            // A rebuild+restart (see docs/DevMode.md, --dev-repo) is
+            // invisible to an already-open tab -- the reconnect above is the
+            // only signal it gets. Compare the server's own reported
+            // version against this bundle's build-time version and reload
+            // if they differ; skip under the Vite dev server, where HMR
+            // already keeps the tab current and the two are never expected
+            // to match (see BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && payload.self.version && payload.self.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+            break
+          }
+          case 'repo-state':
+            setRepoState(msg.payload as RepoStateMsg)
             break
           case 'files-state':
             setFilesState(msg.payload as FilesStateMsg)
             break
+          case 'mode-mismatch': {
+            const payload = msg.payload as ModeMismatchMsg
+            setModeMismatches(prev => {
+              const next = { ...prev }
+              if (payload.mismatched) next[payload.peer] = payload
+              else delete next[payload.peer]
+              return next
+            })
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -174,8 +258,9 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, filesState,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, launchApp, terminateApp, uploadFiles,
+    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
+    rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
 }
 
@@ -403,19 +488,39 @@ function ACConnectionPanel({
   acState,
   onConnect,
   onDisconnect,
+  onSetAutoConnect,
 }: {
-  acState: { connected: boolean; host?: string; port?: string; connecting?: boolean }
+  acState: { connected: boolean; host?: string; port?: string; connecting?: boolean; auto_connect?: boolean }
   onConnect: (host: string, port: string) => void
   onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
 }) {
   const [host, setHost] = useState(acState.host ?? 'localhost')
   const [port, setPort] = useState(acState.port ?? '8084')
+
+  // auto-connect toggle: a first-class state independent of the current
+  // connection, so it's rendered alongside every panel variant (see Revision
+  // I of Step3Prompt.md) -- checking it arms the background retry loop and
+  // keeps it armed across a successful connection; unchecking it only stops a
+  // retry in progress, not an already-live connection (use disconnect below
+  // for that, which also unchecks this).
+  const autoConnectToggle = (
+    <label className="ac-auto-connect" title="keep reaching for agent-coordinator: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off">
+      <input
+        type="checkbox"
+        checked={acState.auto_connect ?? false}
+        onChange={e => onSetAutoConnect(e.target.checked, host, port)}
+      />
+      auto-connect
+    </label>
+  )
 
   if (acState.connected) {
     return (
       <div className="ac-panel ac-panel-connected">
         <span className="ac-label">agent-coordinator</span>
         <span className="ac-addr">{acState.host}:{acState.port}</span>
+        {autoConnectToggle}
         <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>disconnect</button>
       </div>
     )
@@ -426,6 +531,7 @@ function ACConnectionPanel({
       <div className="ac-panel ac-panel-connecting">
         <span className="ac-label">agent-coordinator</span>
         <span className="ac-connecting">auto-connecting… {acState.host}:{acState.port}</span>
+        {autoConnectToggle}
         <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>cancel</button>
       </div>
     )
@@ -452,6 +558,7 @@ function ACConnectionPanel({
         onKeyDown={e => { if (e.key === 'Enter') onConnect(host, port) }}
       />
       <button className="ac-btn ac-btn-connect" onClick={() => onConnect(host, port)}>connect</button>
+      {autoConnectToggle}
     </div>
   )
 }
@@ -468,10 +575,14 @@ function SystemProcRow({
   proc,
   nowSec,
   onTerminate,
+  onRestart,
+  onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
+  onRestart?: () => void
+  onSetAutoUpdate?: (enabled: boolean) => void
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -484,8 +595,14 @@ function SystemProcRow({
   return (
     <div className={`sys-row sys-row-${proc.status}`}>
       <span className="sys-col sys-col-name">
-        {label}
-        {!proc.managed && <span className="sys-self-tag">this process</span>}
+        <span className="sys-col-name-main">
+          {label}
+          {!proc.managed && <span className="sys-self-tag">this process</span>}
+          {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        </span>
+        {proc.version && (
+          <span className="sys-version-tag" title="build version">{proc.version}</span>
+        )}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
@@ -499,7 +616,182 @@ function SystemProcRow({
             {proc.status === 'running' ? 'terminate' : 'dismiss'}
           </button>
         )}
+        {!proc.managed && onRestart && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            disabled={!proc.loader_managed}
+            title={proc.loader_managed
+              ? (proc.update_available
+                ? 'a newer build has landed on disk — terminate this process so ufa-loader relaunches it with the new binary'
+                : 'terminate this process so ufa-loader relaunches it with the identical config')
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={onRestart}
+          >
+            {proc.update_available ? 'update and restart' : 'restart'}
+          </button>
+        )}
+        {!proc.managed && onSetAutoUpdate && (
+          <label
+            className="sys-auto-rebuild"
+            title={proc.loader_managed
+              ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+          >
+            <input
+              type="checkbox"
+              disabled={!proc.loader_managed}
+              checked={!!proc.auto_update}
+              onChange={e => onSetAutoUpdate(e.target.checked)}
+            />
+            auto-update
+          </label>
+        )}
       </span>
+    </div>
+  )
+}
+
+// TroughEntry is one line in the system tab's "trough" (see Trough below) --
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision L.
+interface TroughEntry {
+  id: number
+  ts: number // Date.now(), when the notification was recorded
+  text: string
+}
+
+// TROUGH_MAX_ENTRIES caps how much history the trough keeps -- it's a live,
+// session-scoped notification log (not persisted; a refresh starts it fresh),
+// not an audit trail, so old entries are simply dropped off the front.
+const TROUGH_MAX_ENTRIES = 50
+
+let troughIdSeq = 0
+
+// useTrough appends a new trough entry each time `error` changes to a new,
+// non-empty value -- right now that's only ever RepoStateMsg.last_error after
+// a failed rebuild, per the prompt's "print errors or notifications when
+// things happen like a failure during rebuild", but the trough itself is
+// generic (any future error/notification source can feed it the same way).
+function useTrough(error: string | undefined): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (error && error !== lastSeen.current) {
+      setEntries(prev => [
+        ...prev.slice(-(TROUGH_MAX_ENTRIES - 1)),
+        { id: ++troughIdSeq, ts: Date.now(), text: `rebuild failed — ${error}` },
+      ])
+    }
+    lastSeen.current = error
+  }, [error])
+
+  return entries
+}
+
+// Trough is "an expandable-and-then-scrollable single line at the bottom of
+// the main pane where we can print errors or notifications when things
+// happen" (Step5Prompt.md Revision L). Collapsed, it's just the most recent
+// entry on one line; clicking it expands into a scrollable list of
+// everything recorded this session, newest first.
+function Trough({ entries }: { entries: TroughEntry[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const latest = entries[entries.length - 1]
+
+  return (
+    <div className={`sys-trough${expanded ? ' sys-trough-expanded' : ''}`}>
+      <button
+        className="sys-trough-line"
+        onClick={() => setExpanded(e => !e)}
+        disabled={entries.length === 0}
+        title={entries.length === 0 ? 'no notifications yet' : expanded ? 'collapse' : 'expand for full history'}
+      >
+        <span className="sys-trough-chevron">{expanded ? '▾' : '▸'}</span>
+        {latest ? (
+          <>
+            <span className="sys-trough-ts">{new Date(latest.ts).toLocaleTimeString()}</span>
+            <span className="sys-trough-text">{latest.text}</span>
+          </>
+        ) : (
+          <span className="sys-trough-empty">no notifications</span>
+        )}
+        {entries.length > 1 && <span className="sys-trough-count">{entries.length}</span>}
+      </button>
+      {expanded && (
+        <div className="sys-trough-list">
+          {entries.slice().reverse().map(e => (
+            <div key={e.id} className="sys-trough-entry">
+              <span className="sys-trough-ts">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className="sys-trough-text">{e.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// RepoWatchPanel is the system tab's dev-repo watcher widget (--dev-repo, see
+// docs/DevMode.md): the rebuild button turns orange and reads "dirty" while
+// the watched repo has uncommitted changes -- but stays disabled, since
+// rebuilding a dirty tree would silently bake in unreviewed changes. It's
+// selectable, plain, and reads "rebuild" only once HEAD has moved since the
+// last build with the repo clean; otherwise it's disabled. Rendered only
+// when LR was actually launched with --dev-repo.
+function RepoWatchPanel({
+  repoState,
+  onRebuild,
+  onSetAutoRebuild,
+}: {
+  repoState: RepoStateMsg
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+}) {
+  if (!repoState.watched) return null
+
+  const locked = repoState.condoc_locked && !repoState.dirty
+  const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : locked ? 'condoc' : 'rebuild'
+
+  return (
+    <div className="sys-repo-panel">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-repo</span>
+        <span className="sys-repo-root" title={repoState.root}>{repoState.root}</span>
+        {repoState.head && <span className="sys-repo-head">{repoState.head}</span>}
+      </div>
+      <div className="sys-repo-controls">
+        <button
+          className={`sys-btn sys-btn-rebuild${repoState.dirty ? ' sys-btn-rebuild-dirty' : ''}`}
+          disabled={repoState.building || !repoState.rebuild_ready}
+          onClick={onRebuild}
+          title={
+            repoState.dirty
+              ? 'uncommitted changes — commit or revert to enable rebuilding'
+              : locked
+              ? 'a condoc is mid-transition (.condoc lock file present) — rebuilding is held off until it settles'
+              : repoState.rebuild_ready
+              ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              : 'nothing to rebuild since the last successful build'
+          }
+        >
+          {label}
+        </button>
+        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst">
+          <input
+            type="checkbox"
+            checked={repoState.auto_rebuild}
+            onChange={e => onSetAutoRebuild(e.target.checked)}
+          />
+          auto-rebuild
+        </label>
+        {repoState.auto_rebuild_pending && (
+          <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time HEAD moves again">
+            rebuilding in {repoState.auto_rebuild_seconds ?? 0}s
+          </span>
+        )}
+      </div>
+      {repoState.last_error && (
+        <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>
+      )}
     </div>
   )
 }
@@ -507,15 +799,26 @@ function SystemProcRow({
 function SystemPanel({
   state,
   fcState,
+  repoState,
   onLaunch,
   onTerminate,
+  onRestart,
+  onRebuild,
+  onSetAutoRebuild,
+  onSetAutoUpdate,
 }: {
   state: SystemStateMsg | null
   fcState: string
+  repoState: RepoStateMsg
   onLaunch: (name: string) => void
   onTerminate: (id: string) => void
+  onRestart: () => void
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+  onSetAutoUpdate: (enabled: boolean) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const troughEntries = useTrough(repoState.last_error)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -537,6 +840,7 @@ function SystemPanel({
 
   return (
     <div className="sys-panel">
+      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} />
       {fcRunning && (
         <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
           federation-command control: <strong>{fcControl}</strong>
@@ -551,7 +855,7 @@ function SystemPanel({
           <span className="sys-col sys-col-detail">uptime</span>
           <span className="sys-col sys-col-actions" />
         </div>
-        <SystemProcRow proc={state.self} nowSec={nowSec} />
+        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} onSetAutoUpdate={onSetAutoUpdate} />
         {state.managed.map(p => (
           <SystemProcRow key={p.instance_id} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
         ))}
@@ -578,6 +882,7 @@ function SystemPanel({
           )
         })}
       </div>
+      <Trough entries={troughEntries} />
     </div>
   )
 }
@@ -678,6 +983,13 @@ function filePersistUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}/persist`
 }
 
+// fileHighlightUrl backs the file-details dialog's "highlight" toggle (POST,
+// no body -- see local-representative/files.go's handleFileHighlight). A
+// plain flip, independent of hold/persist state -- see FileInfo.highlighted.
+function fileHighlightUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/highlight`
+}
+
 function fileDeleteUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}`
 }
@@ -734,7 +1046,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -791,6 +1103,10 @@ function FileDetailPane({
     void runAction(url, 'POST')
   }
 
+  const handleHighlight = () => {
+    void runAction(fileHighlightUrl(file.id), 'POST')
+  }
+
   const handleDelete = () => {
     if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
     void runAction(fileDeleteUrl(file.id), 'DELETE').then(ok => { if (ok) onClose() })
@@ -838,6 +1154,16 @@ function FileDetailPane({
         >
           download
         </a>
+      </div>
+      <div className="file-detail-actions">
+        <button
+          className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
+          onClick={handleHighlight}
+          disabled={busy}
+          title="Mark this file at the LR/AC level"
+        >
+          {file.highlighted ? 'unhighlight' : 'highlight'}
+        </button>
       </div>
       <div className="file-detail-actions">
         {file.state !== 'persisted' && (
@@ -919,16 +1245,121 @@ function FileViewer({
   )
 }
 
+// Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
+// stays scoped per-tab (so two LR tabs on different condocs don't clobber
+// each other), and clears when the tab actually closes rather than pinning
+// stale state forever -- the right lifetime for "resume where I was".
+function initialTab(): Tab {
+  const stored = sessionStorage.getItem('lr-active-tab')
+  return (TABS as readonly string[]).includes(stored ?? '') ? (stored as Tab) : 'federation-command'
+}
+
+// Small forward/back stack over the app's top-level navigation state
+// (Step5Prompt.md Revision M). Deliberately independent of the real browser
+// history -- this app never calls pushState (see BrowserPickupStrategy.md on
+// why nav already relies on replaceState/sessionStorage instead), so this is
+// purely an in-app "last N screens" stack, not a wrapper around back/forward
+// button clicks. `max` caps how many screens are remembered.
+function useScreenHistory<T>(
+  screen: T,
+  isEqual: (a: T, b: T) => boolean,
+  applyScreen: (screen: T) => void,
+  max: number,
+) {
+  const [hist, setHist] = useState(() => ({ stack: [screen], index: 0 }))
+
+  useEffect(() => {
+    setHist(prev => {
+      if (isEqual(prev.stack[prev.index], screen)) return prev // e.g. applyScreen just navigated us here
+      let stack = [...prev.stack.slice(0, prev.index + 1), screen]
+      let index = stack.length - 1
+      if (stack.length > max) {
+        const drop = stack.length - max
+        stack = stack.slice(drop)
+        index -= drop
+      }
+      return { stack, index }
+    })
+  }, [screen])
+
+  const canBack = hist.index > 0
+  const canForward = hist.index < hist.stack.length - 1
+
+  const back = () => {
+    if (!canBack) return
+    applyScreen(hist.stack[hist.index - 1])
+    setHist(prev => (prev.index <= 0 ? prev : { ...prev, index: prev.index - 1 }))
+  }
+
+  const forward = () => {
+    if (!canForward) return
+    applyScreen(hist.stack[hist.index + 1])
+    setHist(prev => (prev.index >= prev.stack.length - 1 ? prev : { ...prev, index: prev.index + 1 }))
+  }
+
+  return { canBack, canForward, back, forward }
+}
+
+function NavArrows({ canBack, canForward, onBack, onForward }: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <span className="nav-arrows">
+      <button
+        className={`nav-arrow-btn${canBack ? ' nav-arrow-active' : ''}`}
+        onClick={onBack}
+        disabled={!canBack}
+        title={canBack ? 'back' : 'no earlier screen'}
+      >
+        ←
+      </button>
+      <button
+        className={`nav-arrow-btn${canForward ? ' nav-arrow-active' : ''}`}
+        onClick={onForward}
+        disabled={!canForward}
+        title={canForward ? 'forward' : 'no later screen'}
+      >
+        →
+      </button>
+    </span>
+  )
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('federation-command')
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab)
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
+  // so condoccer's own hash-based resume (Layer 1) never survives a refresh
+  // of this outer page on its own -- the iframe just remounts at the bare
+  // `/condoccer/`. Capture the iframe's hash as it navigates and bake it
+  // back into `src` so a refresh here hands condoccer back its resume point.
+  const [condoccerHash, setCondoccerHash] = useState(() => sessionStorage.getItem('lr-condoccer-hash') ?? '')
+  const condoccerFrameRef = useRef<HTMLIFrameElement>(null)
+
+  const handleCondoccerLoad = () => {
+    const win = condoccerFrameRef.current?.contentWindow
+    if (!win) return
+    const capture = () => {
+      setCondoccerHash(win.location.hash)
+      sessionStorage.setItem('lr-condoccer-hash', win.location.hash)
+    }
+    win.addEventListener('hashchange', capture)
+    capture() // in case condoccer already restored a hash before this attached
+  }
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, filesState,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC,
-    launchApp, terminateApp, uploadFiles,
+    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
+    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
+    launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
+
+  const devMode = systemState?.self.dev_mode ?? false
+  const mismatches = Object.values(modeMismatches)
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -941,12 +1372,43 @@ export default function App() {
     ? filesState?.files.find(f => f.id === viewerFileId) ?? null
     : null
 
+  // Files tab picker gets a yellow dot (Step5SubstepR Revision E) whenever a
+  // file is highlighted, so highlighting something is discoverable without
+  // having to keep the files tab open. Double-clicking the dot jumps
+  // straight to whichever file was highlighted first.
+  const firstHighlightedFile = filesState?.files.find(f => f.highlighted) ?? null
+
+  useEffect(() => {
+    sessionStorage.setItem('lr-active-tab', activeTab)
+  }, [activeTab])
+
+  const goToTab = (tab: Tab) => {
+    setActiveTab(tab)
+    setSelectedFileId(null)
+    setViewerFileId(null)
+  }
+
+  const goToFirstHighlighted = () => {
+    if (!firstHighlightedFile) return
+    setActiveTab('files')
+    setSelectedFileId(null)
+    setViewerFileId(firstHighlightedFile.id)
+  }
+  const nav = useScreenHistory(activeTab, (a, b) => a === b, goToTab, NAV_HISTORY_MAX)
+
   return (
-    <div className="app">
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {mismatches.length > 0 && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch — {mismatches.map(m => `${m.peer} (${m.peer_mode})`).join(', ')}:
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
       <ACConnectionPanel
         acState={acState}
         onConnect={connectToAC}
         onDisconnect={disconnectFromAC}
+        onSetAutoConnect={setAutoConnectAC}
       />
       <div className="tab-bar">
         <span className="app-title">local-representative</span>
@@ -955,12 +1417,21 @@ export default function App() {
             <button
               key={tab}
               className={`tab${activeTab === tab ? ' tab-active' : ''}`}
-              onClick={() => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
+              onClick={() => goToTab(tab)}
             >
               {tab}
+              {tab === 'files' && firstHighlightedFile && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); goToFirstHighlighted() }}
+                />
+              )}
             </button>
           ))}
         </div>
+        <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}
           title={connected ? 'connected' : 'disconnected'}
@@ -974,8 +1445,13 @@ export default function App() {
               <SystemPanel
                 state={systemState}
                 fcState={fcState}
+                repoState={repoState}
                 onLaunch={launchApp}
                 onTerminate={terminateApp}
+                onRestart={restartApp}
+                onRebuild={rebuildRepo}
+                onSetAutoRebuild={setAutoRebuild}
+                onSetAutoUpdate={setAutoUpdate}
               />
             ) : activeTab === 'files' && viewerFileId ? (
               <FileViewer
@@ -1022,9 +1498,11 @@ export default function App() {
                 {activeTab === 'condoccer' && (
                   getStatus('condoccer') === 'healthy' ? (
                     <iframe
+                      ref={condoccerFrameRef}
                       className="condoccer-frame"
-                      src="/condoccer/"
+                      src={`/condoccer/${condoccerHash}`}
                       title="condoccer"
+                      onLoad={handleCondoccerLoad}
                     />
                   ) : (
                     <div className="service-empty">

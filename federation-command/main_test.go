@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"representable"
 	ufaconfig "ufa-configurable"
+	ufaversion "ufa-version"
 )
 
 // writeConfigFile is a test helper for laying down ufa-configurable YAML files.
@@ -43,8 +45,8 @@ func TestVersion(t *testing.T) {
 	if !strings.Contains(output, "federation-command") {
 		t.Errorf("expected output to contain 'federation-command', got: %s", output)
 	}
-	if !strings.Contains(output, Version) {
-		t.Errorf("expected output to contain version '%s', got: %s", Version, output)
+	if !strings.Contains(output, ufaversion.Version) {
+		t.Errorf("expected output to contain version '%s', got: %s", ufaversion.Version, output)
 	}
 }
 
@@ -275,21 +277,24 @@ func TestParseCLIArgs(t *testing.T) {
 		name        string
 		args        []string
 		wantAuto    bool
+		wantDev     bool
 		wantAddr    string
 		wantHandled bool
 		wantErr     bool
 	}{
-		{"no args", nil, false, defaultAddr, false, false},
-		{"auto-connect long", []string{"--auto-connect"}, true, defaultAddr, false, false},
-		{"auto-connect short", []string{"-auto-connect"}, true, defaultAddr, false, false},
-		{"lr-port separate", []string{"--lr-port", "9001"}, false, "localhost:9001", false, false},
-		{"lr-port equals", []string{"--lr-port=9002"}, false, "localhost:9002", false, false},
-		{"auto-connect with port", []string{"--auto-connect", "--lr-port", "9003"}, true, "localhost:9003", false, false},
-		{"version handled", []string{"--version"}, false, "", true, false},
-		{"lr-port missing value", []string{"--lr-port"}, false, "", false, true},
-		{"lr-port not a number", []string{"--lr-port", "abc"}, false, "", false, true},
-		{"lr-port out of range", []string{"--lr-port", "70000"}, false, "", false, true},
-		{"unknown ignored", []string{"--frobnicate", "--auto-connect"}, true, defaultAddr, false, false},
+		{"no args", nil, false, false, defaultAddr, false, false},
+		{"auto-connect long", []string{"--auto-connect"}, true, false, defaultAddr, false, false},
+		{"auto-connect short", []string{"-auto-connect"}, true, false, defaultAddr, false, false},
+		{"lr-port separate", []string{"--lr-port", "9001"}, false, false, "localhost:9001", false, false},
+		{"lr-port equals", []string{"--lr-port=9002"}, false, false, "localhost:9002", false, false},
+		{"auto-connect with port", []string{"--auto-connect", "--lr-port", "9003"}, true, false, "localhost:9003", false, false},
+		{"dev-mode long", []string{"--dev-mode"}, false, true, defaultAddr, false, false},
+		{"dev-mode short", []string{"-dev-mode"}, false, true, defaultAddr, false, false},
+		{"version handled", []string{"--version"}, false, false, "", true, false},
+		{"lr-port missing value", []string{"--lr-port"}, false, false, "", false, true},
+		{"lr-port not a number", []string{"--lr-port", "abc"}, false, false, "", false, true},
+		{"lr-port out of range", []string{"--lr-port", "70000"}, false, false, "", false, true},
+		{"unknown ignored", []string{"--frobnicate", "--auto-connect"}, true, false, defaultAddr, false, false},
 	}
 
 	for _, tt := range tests {
@@ -312,6 +317,9 @@ func TestParseCLIArgs(t *testing.T) {
 			}
 			if cfg.autoConnect != tt.wantAuto {
 				t.Errorf("autoConnect = %v, want %v", cfg.autoConnect, tt.wantAuto)
+			}
+			if cfg.devMode != tt.wantDev {
+				t.Errorf("devMode = %v, want %v", cfg.devMode, tt.wantDev)
 			}
 			if cfg.lrAddr != tt.wantAddr {
 				t.Errorf("lrAddr = %q, want %q", cfg.lrAddr, tt.wantAddr)
@@ -393,7 +401,7 @@ func TestAutoConnectControlState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := NewBlinker()
+			b := NewBlinker(false)
 			b.SetState(tt.state)
 			if got := autoConnectControlState(&b, tt.preferRemote); got != tt.want {
 				t.Errorf("autoConnectControlState(%v, %v) = %v, want %v", tt.state, tt.preferRemote, got, tt.want)
@@ -499,6 +507,30 @@ func TestParseCLIArgsEnvOverrides(t *testing.T) {
 		}
 	})
 
+	t.Run("FC_DEV_MODE cascades a launching LR's dev mode", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_DEV_MODE", "1")
+		cfg, _, err := parseCLIArgs(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.devMode {
+			t.Errorf("FC_DEV_MODE=1 should set devMode: %+v", cfg)
+		}
+	})
+
+	t.Run("dev-mode CLI flag beats env", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_DEV_MODE", "0")
+		cfg, _, err := parseCLIArgs([]string{"--dev-mode"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.devMode {
+			t.Errorf("--dev-mode flag should win over FC_DEV_MODE=0: %+v", cfg)
+		}
+	})
+
 	t.Run("bad FC_LR_PORT is an error", func(t *testing.T) {
 		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
 		t.Setenv("FC_LR_PORT", "not-a-port")
@@ -506,4 +538,83 @@ func TestParseCLIArgsEnvOverrides(t *testing.T) {
 			t.Fatal("expected an error for a non-numeric FC_LR_PORT")
 		}
 	})
+}
+
+// TestEnableDisableAutoConnect verifies the persistent auto-connect toggle
+// (Step3Prompt.md Revision I) is a first-class state, settable independent
+// of any single connection attempt: enabling it arms both the toggle and the
+// background retry loop, and disabling it clears both.
+func TestEnableDisableAutoConnect(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082"}
+
+	if cmd := m.enableAutoConnect(); cmd == nil {
+		t.Fatalf("expected enableAutoConnect to return a command that kicks off the retry loop")
+	}
+	if !m.autoConnectEnabled || !m.autoConnect {
+		t.Fatalf("expected enableAutoConnect to arm both the persistent toggle and the retry loop, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
+
+	// Enabling again while already retrying is a no-op for the retry loop.
+	if cmd := m.enableAutoConnect(); cmd != nil {
+		t.Fatalf("expected a redundant enable while already retrying to return nil")
+	}
+
+	if cmd := m.disableAutoConnect(); cmd == nil {
+		t.Fatalf("expected disableAutoConnect to return a blinker-reset command while cancelling a running retry")
+	}
+	if m.autoConnectEnabled || m.autoConnect {
+		t.Fatalf("expected disableAutoConnect to clear both flags, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
+
+	// Disabling again with nothing running is a safe no-op.
+	if cmd := m.disableAutoConnect(); cmd != nil {
+		t.Fatalf("expected a redundant disable to return nil")
+	}
+}
+
+// TestEnableAutoConnectNoopWhenAlreadyConnected verifies enabling the toggle
+// while already connected only arms the persistent flag -- it doesn't start
+// a redundant retry loop.
+func TestEnableAutoConnectNoopWhenAlreadyConnected(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082", reprClient: &representable.Client{}}
+
+	if cmd := m.enableAutoConnect(); cmd != nil {
+		t.Fatalf("expected enableAutoConnect to be a no-op (nil command) while already connected")
+	}
+	if !m.autoConnectEnabled {
+		t.Fatalf("expected the persistent toggle to be armed")
+	}
+	if m.autoConnect {
+		t.Fatalf("expected the transient retry-loop flag to stay false while already connected")
+	}
+}
+
+// TestAutoConnectStatusLine verifies the status line reflects the toggle and
+// current connection phase, since it's the sole output of the bare
+// "auto-connect" / "ufa fc auto-connect" commands.
+func TestAutoConnectStatusLine(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082"}
+	if got := m.autoConnectStatusLine(); !strings.Contains(got, "disabled") {
+		t.Errorf("expected 'disabled' in status line before enabling, got %q", got)
+	}
+
+	m.enableAutoConnect()
+	if got := m.autoConnectStatusLine(); !strings.Contains(got, "retrying") {
+		t.Errorf("expected 'retrying' in status line while the loop runs, got %q", got)
+	}
+}
+
+// TestDisconnectReprClearsAutoConnect verifies an explicit, operator-driven
+// disconnect (^C) terminates auto-connect entirely (Step3Prompt.md Revision
+// I: "Intentionally disconnect terminates auto-connect"), including
+// cancelling a retry loop that was still in progress.
+func TestDisconnectReprClearsAutoConnect(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082", listenerStop: make(chan struct{})}
+	m.enableAutoConnect()
+
+	m.disconnectRepr()
+
+	if m.autoConnectEnabled || m.autoConnect {
+		t.Fatalf("expected disconnectRepr to clear both auto-connect flags, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
 }

@@ -12,6 +12,22 @@ make build
 ./federation-command
 ```
 
+### Running under ufa-loader
+
+`SIGHUP` sent to FC's own pid makes it quit the TUI, restore the terminal,
+print a restart announcement on stdout, and exit 0 — see
+[`docs/DevMode.md`](../docs/DevMode.md)'s "Loader" section. Run it under
+[`ufa-loader`](../ufa-loader) to have that turned into an actual relaunch —
+expected once the on-disk binary has been replaced with a newer build:
+
+```bash
+make run-loader                       # builds ufa-loader too, then wraps FC
+kill -HUP <federation-command pid>    # ask the running instance to restart
+```
+
+Plain `kill -HUP` without a wrapping `ufa-loader` still works — FC announces
+and exits — but nothing relaunches it in that case.
+
 ## Flags
 
 | Flag | Config key | Default | Purpose |
@@ -20,7 +36,7 @@ make build
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) **and adopt remote control** once connected — for fully machine-driven auto-launch/auto-connect chains |
 | `--lr-host <host>` | `lr-host` | `localhost` | `local-representative` host for auto-connect and the manual blinker connect |
 | `--lr-port <n>` | `lr-port` | `8082` | `local-representative` `representable` port (same two flows) |
-| `--version`, `-v` | — | — | print version and exit |
+| `--version`, `-v` | — | — | print version and exit (build-time-injected — see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning"); also available inside the shell as `version` / `ufa version` |
 
 Single-dash spellings (`-auto-connect`, `-lr-port`, ...) also work. Unknown
 flags are ignored for backward compatibility.
@@ -86,3 +102,33 @@ suspended** (the prompt does not accept keystrokes), closing the window in which
 the FC terminal would otherwise be locally controllable. Input is handed back if
 auto-connect gives up after 10 minutes, or stays with LR once it connects. An FC
 started *without* auto-connect is always locally controlled.
+
+## Auto-connect as a runtime toggle
+
+`--auto-connect` (and its config/env equivalents above) only arms the toggle at
+startup; from the shell it can be checked and flipped at any time with:
+
+```
+auto-connect                  # print whether it's armed, and the connection phase
+auto-connect enable           # arm it (kicks off the retry loop if not already connected)
+auto-connect disable          # disarm it (cancels a retry in progress; leaves a live connection alone)
+```
+
+or, namespaced under `ufa` (`ufa fc auto-connect` with no argument prints the
+same status plus this list of subcommands):
+
+```
+ufa fc auto-connect
+ufa fc auto-connect enable
+ufa fc auto-connect disable
+```
+
+The toggle is a first-class state, independent of any single connection
+attempt (see
+[`condocs/initialDistributedDevelopmentImpls/Step3Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step3Prompt.md)
+Revision I): it stays armed across a successful connection, so if that
+connection later drops *unintentionally* (LR going away, a network blip) the
+retry cycle begins again on its own. An *explicit* disconnect (`^C` while
+connected/connecting/in local control) disarms it as well as dropping the
+link; `auto-connect disable` alone only cancels a retry in progress, leaving an
+already-live connection up.

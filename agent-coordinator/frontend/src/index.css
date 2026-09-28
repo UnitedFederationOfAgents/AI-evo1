@@ -26,6 +26,61 @@ body {
   overflow: hidden;
 }
 
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable green
+   border around the whole app, reusing the "healthy"/"connected" green
+   palette rather than introducing a new accent color. An outline (not
+   border) so it never nudges the layout. Revision A: the original 1px/45%
+   outline was too subtle, so it became a thick, fully-opaque outline plus an
+   inner glow. Revision B: still too easy to miss, so the outline/glow now use
+   the brighter #6ec96e (already used elsewhere for "connect"/"launch" accent
+   text) instead of the darker #4ec94e, the glow is bigger and more opaque,
+   and a fixed "DEV MODE" tag is pinned to the top of the viewport so it's
+   visible even when the outline itself is scrolled out of view. Revision G:
+   now that the outline uses such a bright green, it reads clearly at half
+   the thickness, so it dropped from 4px to 2px. */
+.app-dev-mode {
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
+}
+
+.app-dev-mode::before {
+  content: 'DEV MODE';
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #6ec96e;
+  color: #0d1f0d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 10px;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
+.mode-mismatch-banner {
+  flex-shrink: 0;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.sys-dev-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #6ec96e;
+  background: #1a3a1a;
+  border: 1px solid #6ec96e;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
 /* ---- App header ---- */
 
 .app-header {
@@ -58,6 +113,39 @@ body {
 
 .conn-dot-ok  { background: #4ec94e; }
 .conn-dot-err { background: #cc4444; }
+
+/* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
+   right corner alongside the connection dot. Unlike local-representative's
+   tab-bar, this app's header has nothing else in the middle, so the arrows
+   used to read as an empty gap between the title and the connection dot
+   (Step5Prompt.md Revision Q) -- the bordered pill below gives the control
+   group a visible presence of its own regardless of active/inactive state. */
+.nav-arrows {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.nav-arrow-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.nav-arrow-btn.nav-arrow-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.nav-arrow-btn.nav-arrow-active:hover { background: #333; }
 
 /* ---- App body: sidebar + content ---- */
 
@@ -163,18 +251,23 @@ body {
   overflow: hidden;
 }
 
-/* ---- No selection placeholder ---- */
+/* ---- Global sidebar item ----
+ *
+ * Sits above the per-host list; mutually exclusive with a particular host
+ * (App.tsx: selectedHostId === null) and is the default view on first load.
+ */
 
-.no-selection {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.global-item {
+  border-bottom: 1px solid #2a2a2a;
+  margin-bottom: 4px;
 }
 
-.no-selection-text {
-  color: #555;
-  font-style: italic;
+.global-icon {
+  display: inline-block;
+  width: 7px;
+  text-align: center;
+  color: #6ea6c9;
+  flex-shrink: 0;
 }
 
 /* ---- LR view ---- */
@@ -235,6 +328,7 @@ body {
 }
 
 .tab {
+  position: relative;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -253,6 +347,19 @@ body {
 .tab-active {
   color: #d4d4d4;
   border-bottom-color: #007acc;
+}
+
+/* Files tab picker's "something is highlighted" indicator (Step5SubstepR
+   Revision E). Double-clicking it jumps to the right host and file. */
+.tab-highlight-dot {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d7c22b;
+  cursor: pointer;
 }
 
 /* ---- Main pane ---- */
@@ -406,6 +513,148 @@ body {
 .condoc-phase-label { font-size: 13px; color: #6ec96e; font-weight: 600; }
 .condoc-msg { font-size: 11px; color: #888; font-style: italic; }
 
+/* ---- Nested tab bar (e.g. global system tab's topology/timeline selector) ---- */
+
+.tab-bar-nested {
+  background: none;
+  border-bottom: 1px solid #2a2a2a;
+  height: 30px;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.tab-bar-nested .tab {
+  font-size: 12px;
+  padding: 0 12px;
+}
+
+/* ---- Global topology panel (global system tab, see
+   condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg) ----
+ *
+ * Main pane of dummy host cards on the left, details-and-control pane on the
+ * right. This increment: visible but not interactive.
+ */
+
+.topo-panel { display: flex; align-items: flex-start; gap: 24px; }
+
+/* GlobalSystemPanel's wrapper -- deliberately not .sys-panel (that class's
+   max-width is right for the single-host process table, but would keep the
+   topology pane's details-and-control column short of the tab's actual
+   right edge). */
+.global-sys-panel { display: flex; flex-direction: column; gap: 20px; }
+
+.topo-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.topo-node {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 12px 14px;
+  width: 180px;
+}
+
+/* Self (agent-coordinator collapsed with its own LR) always leads, on its
+   own row -- flex-basis: 100% forces every card after it in .topo-main's
+   wrap onto the next line. */
+.topo-node-self { flex-basis: 100%; width: auto; max-width: 180px; }
+
+/* Faint separator between the self card and the per-host cards below --
+   flex-basis: 100% pushes it onto its own line, same trick as
+   .topo-node-self. */
+.topo-divider { flex-basis: 100%; height: 1px; background: #2a2a2a; margin: 2px 0; }
+
+.topo-node-clickable { cursor: pointer; }
+.topo-node-clickable:hover { border-color: #565656; }
+.topo-node-selected { border-color: #007acc; box-shadow: 0 0 0 1px #007acc; }
+
+/* Out-of-date halo (dev mode only -- see hostOutOfDate in App.tsx): an orange
+   glow just outside the card's own border, distinct from the grey-vs-blue
+   selected ring above so the two stack instead of fighting for the same
+   box-shadow layer. */
+.topo-node-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 10px 2px rgba(224, 168, 62, 0.45); }
+.topo-node-outdated.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(224, 168, 62, 0.55), 0 0 10px 2px rgba(224, 168, 62, 0.45); }
+
+.topo-node-header { display: flex; align-items: center; gap: 6px; }
+.topo-node-label { color: #d4d4d4; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+
+.topo-node-diagram { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.topo-node-row { display: flex; gap: 8px; }
+.topo-node-box {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 30px; height: 22px; padding: 0 6px;
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 10px; color: #9c9c9c;
+}
+.topo-node-box-ac { border-color: #245a7a; color: #6ea6c9; }
+.topo-node-box-lr { border-color: #2e7a2e; color: #6ec96e; }
+/* A sub-application box (FC/CO/W) turns the same green as the LR box once
+   that host's LR reports it healthy (see serviceHealthy in App.tsx) AND LR
+   itself launched it (see subAppManaged) -- i.e. it's a managed instance. */
+.topo-node-box-healthy { border-color: #2e7a2e; color: #6ec96e; }
+/* Connected but not managed (Step4Prompt.md Revision K): the abbreviation
+   still reads green, but the border is left at .topo-node-box's default grey
+   -- the same grey as an unlit box -- since LR isn't the one running it. */
+.topo-node-box-unmanaged { color: #6ec96e; }
+/* Sub-application out-of-date halo (dev mode only -- see subAppOutOfDate in
+   App.tsx): the same orange glow as .topo-node-outdated, scaled down for a
+   box this small, drawn just outside a connected (green-bordered) FC/CO/W
+   box so the green "connected" border stays visible underneath -- it never
+   applies without .topo-node-box-healthy already being set. */
+.topo-node-box-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 6px 1px rgba(224, 168, 62, 0.45); }
+
+.topo-details {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.topo-details-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-readout-row { display: flex; flex-direction: column; gap: 2px; }
+.topo-readout-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-readout-value { font-size: 12px; color: #d4d4d4; }
+.topo-readout-placeholder { color: #555; font-style: italic; }
+
+.topo-controls {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 12px;
+}
+.topo-controls-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-controls-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.topo-controls-hint { font-size: 11px; color: #555; font-style: italic; }
+
+/* Small "restart agent-coordinator" section shown under the rebuild &
+   restart controls when the selected card is the self host -- see
+   isSelfSelected in App.tsx and Step4Prompt.md Revision E. Mirrors
+   .topo-controls's own divider treatment so it reads as a distinct
+   sub-section rather than more of the same control block. */
+.topo-ac-controls {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 12px;
+}
+
 /* ---- System panel (host system tab) ---- */
 
 .sys-panel { display: flex; flex-direction: column; gap: 20px; max-width: 720px; }
@@ -414,13 +663,21 @@ body {
 .sys-fc-control-remote-control { border-color: #2e5a2e; color: #8fd18f; }
 .sys-fc-control-local-control { border-color: #6a5a2e; color: #d1c48f; }
 .sys-table { border: 1px solid #3c3c3c; border-radius: 4px; overflow: hidden; }
-.sys-row { display: grid; grid-template-columns: 1fr 80px 90px 120px 110px; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #2a2a2a; font-size: 12px; }
+.sys-row { display: grid; grid-template-columns: 1fr 80px 90px 120px 230px; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #2a2a2a; font-size: 12px; }
 .sys-row:last-child { border-bottom: none; }
 .sys-row-head { background: #252526; color: #666; text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; font-weight: 600; }
 .sys-row-none { display: block; color: #666; font-style: italic; padding: 10px 12px; }
 .sys-row-failed { background: #241717; }
+/* Process rows are clickable to open the version drill-down below the table
+   (see SystemProcDetails/procRowKey) -- Step5Prompt.md Revision J. */
+.sys-row-clickable { cursor: pointer; }
+.sys-row-clickable:hover { background: #262626; }
+.sys-row-selected { background: #16324a; }
+.sys-row-selected:hover { background: #1a3a56; }
 .sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sys-col-name { color: #d4d4d4; font-weight: 600; }
+.sys-col-name { color: #d4d4d4; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow: visible; white-space: normal; }
+.sys-col-name-main { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-version-tag { font-size: 10px; font-weight: 400; color: #666; white-space: normal; overflow-wrap: anywhere; }
 .sys-col-pid { color: #9c9c9c; }
 .sys-col-detail { color: #9c9c9c; }
 .sys-self-tag { margin-left: 8px; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; }
@@ -428,15 +685,73 @@ body {
 .sys-status-running { color: #4ec94e; }
 .sys-status-exited { color: #9c9c9c; }
 .sys-status-failed { color: #cc4444; }
-.sys-col-actions { text-align: right; }
+.sys-col-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; overflow: visible; white-space: normal; }
 .sys-btn { font-family: inherit; font-size: 11px; padding: 2px 10px; border-radius: 3px; cursor: pointer; }
 .sys-btn:disabled { opacity: 0.5; cursor: default; }
 .sys-btn-terminate { background: #3a1a1a; border: 1px solid #7a2e2e; color: #c96e6e; }
 .sys-btn-terminate:hover { background: #5a2e2e; }
+.sys-btn-restart { background: #1a2a3a; border: 1px solid #2e5a7a; color: #6ea6c9; }
+.sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
+/* A newer build has landed on disk since this LR started -- orange, matching
+   .sys-btn-rebuild-dirty's "worth your attention" treatment. */
+.sys-btn-restart-update { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
+.sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
+/* Version drill-down for a selected process row (SystemProcDetails) --
+   mirrors .topo-details/.topo-readout-* from the global topology view's
+   per-host "Details & Control" pane, scaled down to sit under the table. */
+.sys-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+.sys-details-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-readout-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-readout-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-readout-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-readout-placeholder { color: #555; font-style: italic; }
+
 .sys-launch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
 .sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) -- mirrors this
+   host's LR system tab, forwarded up as "lr-repo-state" ---- */
+.sys-repo-panel { display: flex; flex-direction: column; gap: 8px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-repo-info { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sys-repo-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+.sys-repo-root { color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sys-repo-head { color: #666; font-size: 11px; flex-shrink: 0; }
+.sys-repo-controls { display: flex; align-items: center; gap: 12px; }
+.sys-btn-rebuild { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-rebuild:hover:not(:disabled) { background: #2e5a2e; }
+/* Dirty repo: orange, per the prompt -- distinct from the plain green "HEAD
+   moved" rebuild state. */
+.sys-btn-rebuild-dirty { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
+.sys-btn-rebuild-dirty:hover:not(:disabled) { background: #5a4420; }
+.sys-auto-rebuild { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; cursor: pointer; }
+/* Auto-rebuild's 90s debounce countdown (Step3Prompt.md Revision E) -- shown
+   next to the auto-rebuild toggle while it's waiting for changes to settle
+   before building. */
+.sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
+.sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
+.sys-trough { border: 1px solid #3c3c3c; border-radius: 4px; background: #111; }
+.sys-trough-line { display: flex; align-items: center; gap: 8px; width: 100%; font-family: inherit; font-size: 11px; color: #aaa; background: transparent; border: none; padding: 6px 10px; cursor: pointer; text-align: left; }
+.sys-trough-line:disabled { cursor: default; color: #666; }
+.sys-trough-chevron { flex-shrink: 0; color: #666; }
+.sys-trough-ts { flex-shrink: 0; color: #666; }
+.sys-trough-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-trough-empty { font-style: italic; color: #666; }
+.sys-trough-count { flex-shrink: 0; font-size: 10px; color: #888; background: #252526; border-radius: 8px; padding: 0 6px; }
+.sys-trough-list { max-height: 160px; overflow-y: auto; border-top: 1px solid #2a2a2a; }
+.sys-trough-entry { display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; font-size: 11px; color: #c96e6e; border-bottom: 1px solid #202020; }
+.sys-trough-entry:last-child { border-bottom: none; }
 
 /* ---- Main pane with optional right-hand detail pane (files tab) ---- */
 
@@ -465,6 +780,9 @@ body {
 }
 .files-item:hover { background: #2a2a2a; border-color: #555; }
 .files-item-active { border-color: #007acc; background: #14283a; }
+/* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
+   independent of (and layered outside) the active-selection border above. */
+.files-item-highlighted { box-shadow: 0 0 0 2px #d7c22b; }
 .file-icon { display: inline-flex; width: 28px; height: 28px; }
 .file-icon svg { width: 100%; height: 100%; }
 /* File-details-dialog cache state: orange while short-term cached, yellow
@@ -508,6 +826,14 @@ body {
 }
 .file-detail-hold:hover { background: #5a4e2e; border-color: #c4b04e; }
 .file-detail-hold:disabled { opacity: 0.5; cursor: default; }
+.file-detail-highlight {
+  flex: 1; background: #2a2a1a; border: 1px solid #5a5a2e; border-radius: 3px; color: #999;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-highlight:hover { background: #3a3a2a; border-color: #7a7a4e; }
+.file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
+.file-detail-highlight-active { background: #3a341a; border-color: #d7c22b; color: #d7c22b; }
+.file-detail-highlight-active:hover { background: #5a4e2e; }
 .file-detail-delete {
   flex: 1; background: #3a1a1a; border: 1px solid #7a2e2e; border-radius: 3px; color: #e06a6a;
   font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
@@ -560,7 +886,12 @@ body {
     align-items: center;
     justify-content: center;
     position: fixed;
-    top: 10px;
+    /* Below .app-header (40px) -- condoccer's original off-canvas-drawer
+       pattern this was copied from has no such header to clear, but AC's
+       does (app-title/nav arrows/conn-dot), so top: 10px here used to sit
+       right on top of it, occluding and swallowing clicks meant for the
+       nav arrows (Step5Prompt.md Revision O/P). */
+    top: 48px;
     z-index: 101;
     width: 38px;
     height: 38px;
@@ -612,7 +943,7 @@ body {
   }
 
   .app-body {
-    padding-top: 48px;
+    padding-top: 92px; /* clears the header (40px) plus the 48px-positioned toggle/back button */
   }
 
   .host-item {
@@ -640,11 +971,13 @@ body {
     padding: 0 12px;
   }
 
-  .main-pane-inner {
+  .main-pane-inner,
+  .topo-panel {
     flex-direction: column;
   }
 
-  .file-detail-pane {
+  .file-detail-pane,
+  .topo-details {
     width: 100%;
   }
 
@@ -653,7 +986,7 @@ body {
   }
 
   .sys-row {
-    min-width: 480px;
+    min-width: 600px;
   }
 
   .file-viewer-header {

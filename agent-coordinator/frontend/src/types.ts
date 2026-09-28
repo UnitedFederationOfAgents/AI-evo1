@@ -64,6 +64,39 @@ export interface ProcInfo {
   started_at: number // unix seconds
   exit_code: number  // meaningful once status != "running"
   detail?: string
+  dev_mode?: boolean // launched with --dev-mode -- see docs/DevMode.md
+  loader_managed?: boolean // self only: launched by ufa-loader, so "restart" comes back up
+  version?: string // this process's build version -- see docs/DevMode.md "Versioning"
+  update_available?: boolean // the on-disk binary now answers --version differently than this running process (self: docs/DevMode.md "Loader"; managed: Step4Prompt.md Revision D)
+  pending_version?: string // the on-disk version update_available refers to; empty whenever update_available is false -- see Step5Prompt.md Revision J
+  auto_update?: boolean // self only: restart that host's LR automatically the moment update_available goes true, instead of waiting for the "restart and update" control -- see docs/DevMode.md "Loader"
+}
+
+// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
+// status (see docs/DevMode.md), host identity, and restart-ability -- sent
+// when the WebSocket connects and re-sent whenever loader_managed/
+// update_available change. host_id is the same ufahostid value a co-located
+// local-representative defaults its "-name" to, letting the frontend
+// recognize which connected host (if any) is the one agent-coordinator
+// itself runs on. loader_managed/update_available mirror ProcInfo's
+// same-named fields for a local-representative's own self row -- see the
+// global topology view's "restart agent-coordinator" control
+// (Step4Prompt.md Revision E).
+export interface SelfInfoMsg {
+  dev_mode: boolean
+  host_id: string
+  loader_managed: boolean
+  update_available: boolean
+  version: string // this process's own build version -- see BrowserRefreshStrategy.md
+}
+
+// ModeMismatchMsg discloses that a connected local-representative's dev-mode
+// status differs from this agent-coordinator's own. mismatched: false clears
+// a prior disclosure.
+export interface ModeMismatchMsg {
+  host_id: string
+  mismatched: boolean
+  peer_mode?: string
 }
 
 export interface LRSystemStateMsg {
@@ -71,6 +104,32 @@ export interface LRSystemStateMsg {
   active: boolean
   self: ProcInfo
   managed: ProcInfo[]
+}
+
+// LRRepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,
+// see docs/DevMode.md) for one host. watched is false both when that LR isn't
+// watching a repo and when it isn't connected.
+export interface LRRepoStateMsg {
+  host_id: string
+  watched: boolean
+  root?: string
+  dirty: boolean          // uncommitted staged or unstaged changes relative to HEAD
+  rebuild_ready: boolean  // the rebuild button is active -- HEAD moved since the last successful rebuild, and the repo isn't dirty
+  building: boolean       // 'make deploy-dev-binaries' is running right now
+  auto_rebuild: boolean
+  // 90s auto-rebuild debounce timer (Step3Prompt.md Revision E): pending is
+  // true from the moment the rebuild button first becomes active with
+  // auto-rebuild on, until the debounced build actually starts; seconds
+  // counts down and is re-armed to 90 whenever a further change lands.
+  auto_rebuild_pending?: boolean
+  auto_rebuild_seconds?: number
+  head?: string
+  last_error?: string
+  // True while condoccer's '.condoc' lock file sits at the repo root (see
+  // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- forces
+  // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
+  // is never rebuilt out from under.
+  condoc_locked?: boolean
 }
 
 export interface CondocInfo {
@@ -98,6 +157,7 @@ export interface FileInfo {
   state: string // "cached" | "held" | "persisted" -- selects the icon's color
   uploaded_at: number // unix seconds
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
+  highlighted: boolean // plain operator-set toggle, independent of state
 }
 
 export interface LRFilesMsg {

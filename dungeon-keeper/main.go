@@ -27,7 +27,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"dungeon-keeper/pkg/executor"
@@ -38,11 +40,12 @@ import (
 	"dungeon-keeper/pkg/writespace"
 
 	"github.com/google/uuid"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
 
 const (
 	checkInterval = 10 * time.Second
-	version       = "0.1.0"
 )
 
 var backoffLevels = []time.Duration{
@@ -69,8 +72,8 @@ func main() {
 		runReadspace(cfg, os.Args[2:])
 	case "writespace":
 		runWritespace(cfg, os.Args[2:])
-	case "version":
-		fmt.Printf("dungeon-keeper %s\n", version)
+	case "version", "--version", "-v":
+		fmt.Println(ufaversion.Version)
 	case "check-deps":
 		if err := executor.CheckDependencies(); err != nil {
 			log.Fatalf("Dependency check failed: %v", err)
@@ -187,6 +190,7 @@ func loadConfig() *types.Config {
 func runWatch(cfg *types.Config, args []string) {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	agentType := fs.String("agent-type", "agent-worker", "Agent type: agent-worker or heuristic-request")
+	devMode := fs.Bool("dev-mode", false, "dev mode (see docs/DevMode.md): this watch loop is running from an in-progress branch")
 	fs.Parse(args)
 
 	switch *agentType {
@@ -197,15 +201,40 @@ func runWatch(cfg *types.Config, args []string) {
 	default:
 		log.Fatalf("Invalid agent type: %s", *agentType)
 	}
+	cfg.DevMode = *devMode
 
 	// Check dependencies at startup
 	log.Printf("[%s] Checking dependencies...", cfg.WorkerID)
 	if err := executor.CheckDependencies(); err != nil {
 		log.Printf("[%s] Warning: %v", cfg.WorkerID, err)
 	}
+	if cfg.DevMode {
+		log.Printf("[%s] dev mode — running from an in-progress branch (see docs/DevMode.md)", cfg.WorkerID)
+	}
+
+	go watchRestartSignal()
 
 	worker := NewWorker(cfg)
 	worker.Run()
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart (see ufa-loader/README.md and docs/DevMode.md's "Loader" section)
+// as this process's final act before exiting 0. The signal is sent directly
+// to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself. Only the long-running `watch` command benefits from
+// this — every other dungeon-keeper subcommand already exits on its own.
+// Run in its own goroutine; never returns.
+func watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		log.Printf("received SIGHUP: announcing a restart and exiting")
+		if err := restartsignal.Announce(os.Stdout, "dungeon-keeper", "sighup"); err != nil {
+			log.Printf("restartsignal.Announce: %v", err)
+		}
+		os.Exit(0)
+	}
 }
 
 func runSlopspace(cfg *types.Config, args []string) {

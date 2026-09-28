@@ -321,6 +321,20 @@ func condocCallerPath(filePath, cwd string) string {
 	return rel
 }
 
+// removeCondocLockFile deletes condoccer's '.condoc' lock file (if present)
+// immediately, before staging and committing a git sequence that will land
+// the condoc at "awaiting action" or "completed". Its removal must be staged
+// in the very same commit as whatever content change causes that phase
+// transition -- condoccer only notices the transition (and removes the file
+// itself) on its next ~1s poll, well after such a commit has already
+// landed, which leaves the deletion as a dangling, uncommitted change in the
+// working tree. Every call site that commits a transition into one of those
+// two phases must call this first. (See
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md, Revisions D and H.)
+func removeCondocLockFile(repoRoot string) {
+	_ = os.Remove(filepath.Join(repoRoot, ".condoc"))
+}
+
 // runGitSequence runs git commands in sequence inside dir.
 // Returns a condocGitDoneMsg — intended for use as a tea.Cmd goroutine.
 func runGitSequence(cmds [][]string, dir string) tea.Cmd {
@@ -1846,6 +1860,10 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 	cs.statusMsg = "committing agent reply…"
 	m.blinker.SetState(BlinkerCondoc)
 
+	// This lands the condoc at "awaiting action" -- remove the lock file so its
+	// removal is captured by the same commit. (See removeCondocLockFile.)
+	removeCondocLockFile(cs.repoRoot)
+
 	// Build a descriptive commit message indicating step/substep, iteration type and letter.
 	var commitMsg string
 	if cs.substepFile != "" {
@@ -2154,6 +2172,10 @@ func (m appModel) condocCompleteSubstep() (appModel, tea.Cmd) {
 	cs.commitTarget = condocPhaseAwaitingAction
 	cs.statusMsg = fmt.Sprintf("substep %s completed, returning to step…", substepLetter)
 
+	// This lands the condoc at "awaiting action" -- remove the lock file so its
+	// removal is captured by the same commit. (See removeCondocLockFile.)
+	removeCondocLockFile(cs.repoRoot)
+
 	gitCmds := [][]string{
 		{"add", "."},
 		{"commit", "-m", fmt.Sprintf("condoc: step %d substep %s completed", cs.stepNum, substepLetter)},
@@ -2419,7 +2441,10 @@ func runCondocRevertGitSequence(repoRoot, mainBranch, takeBranch, diffFilePath, 
 			return revertGitDoneMsg{errStr: "write diff file: " + err.Error()}
 		}
 
-		// 6. Commit diff file and updated file(s).
+		// 6. Commit diff file and updated file(s). This lands the condoc back at
+		// "awaiting action" -- remove the lock file so its removal is captured by
+		// the same commit. (See removeCondocLockFile.)
+		removeCondocLockFile(repoRoot)
 		addCmd := exec.Command("git", "add", ".")
 		addCmd.Dir = repoRoot
 		if out, err := addCmd.CombinedOutput(); err != nil {
@@ -2534,6 +2559,10 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 	cs.phase = condocPhaseDone
 	cs.active = false
 
+	// This lands the condoc at "completed" -- remove the lock file so its removal
+	// is captured by the same commit. (See removeCondocLockFile.)
+	removeCondocLockFile(cs.repoRoot)
+
 	gitCmds := [][]string{
 		{"add", "."},
 		{"commit", "-m", "condoc: completed"},
@@ -2543,7 +2572,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 	m.condoc = nil
 	m.blinker.SetState(BlinkerIdle)
 	m.input.Focus()
-	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 	m.prevInputLen = 0
 
 	return m, tea.Batch(
@@ -2564,7 +2593,7 @@ func (m appModel) exitCondoc() (appModel, tea.Cmd) {
 	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
 	m.input.Focus()
-	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 	m.prevInputLen = 0
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("condoc mode exited")),

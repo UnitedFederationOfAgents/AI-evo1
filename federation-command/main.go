@@ -15,11 +15,13 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -30,10 +32,9 @@ import (
 	"representable"
 	ufaconfig "ufa-configurable"
 	ufahostid "ufa-hostid"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
-
-// Version information
-const Version = "0.1.0"
 
 // Default configuration
 const (
@@ -138,6 +139,13 @@ var agentModelConfigs = map[string]AgentModelConfig{
 	"clod": {ModelFlag: "", DefaultModel: "", Models: nil},
 }
 
+// devGreen is the single source of truth for FC's --dev-mode green (Revision
+// B): the blinker brackets (blinkerBracketDevStyle, blinker.go), the prompt
+// cursor and startup/mismatch banners (devModeStyle, below) all render in
+// this exact color so the two never drift apart. Same "healthy"/"connected"
+// green used across the web UIs — see docs/DevMode.md.
+const devGreen = lipgloss.Color("34")
+
 // Agent colors for visual distinction (matching ambiguous-agent)
 var agentColors = map[string]lipgloss.Color{
 	"copilot":  lipgloss.Color("39"),  // Cyan (GitHub blue)
@@ -171,6 +179,14 @@ var (
 	devWarningStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("220")).
 				Bold(true)
+
+	// devModeStyle renders in devGreen — used for the startup banner, the
+	// prompt cursor, and any --dev-mode notices (distinct from
+	// devWarningStyle's yellow, which flags dev *dependencies*, an unrelated
+	// concept). See docs/DevMode.md.
+	devModeStyle = lipgloss.NewStyle().
+			Foreground(devGreen).
+			Bold(true)
 
 	continuationStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
@@ -403,9 +419,28 @@ type appModel struct {
 
 	// Auto-connect: background retry loop that dials local-representative on startup.
 	lrAddr              string    // representable address used for both manual and auto connects
-	autoConnect         bool      // true while the background retry loop is still running
+	autoConnect         bool      // true while the background retry loop is currently running
 	autoConnectDeadline time.Time // stop retrying once this instant has passed
 	remoteDefault       bool      // auto-connect implies this: adopt remote control (not local) when the background connection is established
+	// autoConnectEnabled is the persistent auto-connect toggle (see Revision
+	// I of Step3Prompt.md: "ufa fc auto-connect [<enable|disable>]") -- a
+	// first-class state independent of autoConnect above (which just tracks
+	// whether the retry loop is currently running) or of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// the reprDisconnectedMsg handler); only an explicit disconnect (see
+	// disconnectRepr) turns it off. disconnectRepr also nils reprClient
+	// synchronously, so the reprDisconnectedMsg handler's own staleness
+	// check (msg.client no longer matching m.reprClient) is what tells an
+	// intentional disconnect apart from the remote end dropping
+	// unexpectedly -- no separate "was this intentional" flag is needed.
+	autoConnectEnabled bool
+
+	// Dev mode: launch-time only (no runtime switch — see docs/DevMode.md).
+	devMode          bool
+	modeMismatchCh   chan modeMismatchInfo // receives mode-mismatch verdicts from reprClient's handler
+	modeMismatch     bool                  // true once the connected LR's mode is known to differ from ours
+	modeMismatchPeer string                // the mismatched peer's disclosed mode ("dev" or "ops")
 
 	quitting    bool
 	windowWidth int
@@ -529,6 +564,33 @@ type reprConnectFailedMsg struct{}
 // reprRemoteCmdMsg is sent when LR delivers a command for FC to execute.
 type reprRemoteCmdMsg struct{ cmd string }
 
+// modeMismatchInfo carries one mode-mismatch verdict from reprClient's
+// SetModeMismatchHandler callback (which runs on the client's read-loop
+// goroutine) into a reprModeMismatchMsg the Update loop can safely act on.
+type modeMismatchInfo struct {
+	mismatched bool
+	peerMode   string
+}
+
+// reprModeMismatchMsg is sent whenever the connected local-representative's
+// disclosed dev-mode verdict changes — see docs/DevMode.md. A mismatched LR
+// already refuses everything past the representable protocol's health/hello
+// exchange; this just surfaces that disclosure in the FC UI.
+type reprModeMismatchMsg modeMismatchInfo
+
+// listenForModeMismatchCmd blocks until reprClient's mode-mismatch handler
+// reports a verdict or the stop channel closes (mirrors listenForRemoteCmdCmd).
+func listenForModeMismatchCmd(ch <-chan modeMismatchInfo, stop <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case info := <-ch:
+			return reprModeMismatchMsg(info)
+		case <-stop:
+			return nil
+		}
+	}
+}
+
 // ridealongStatePayload is sent over the representable data channel to broadcast ridealong state.
 type ridealongStatePayload struct {
 	Active       bool     `json:"active"`
@@ -551,6 +613,24 @@ type condocStatePayload struct {
 	Phase     string `json:"phase,omitempty"`
 	StepNum   int    `json:"step_num,omitempty"`
 	StatusMsg string `json:"status_msg,omitempty"`
+}
+
+// versionPayload is sent once over the representable data channel right
+// after connecting, so local-representative's system tab can list this
+// instance's build version alongside its own (see docs/DevMode.md
+// "Versioning").
+type versionPayload struct {
+	Version string `json:"version"`
+}
+
+// sendVersion reports this binary's build version to local-representative.
+// Called once a representable connection lands, mirroring how control state
+// is announced immediately after connecting.
+func (m appModel) sendVersion() {
+	if m.reprClient == nil {
+		return
+	}
+	m.reprClient.SendData("version", versionPayload{Version: ufaversion.Version})
 }
 
 // sendRidealongState pushes the current ridealong state to local-representative.
@@ -599,13 +679,34 @@ func (m appModel) sendCondocState() {
 }
 
 // attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
-func attemptConnectCmd(addr string) tea.Cmd {
+func attemptConnectCmd(addr string, devMode bool) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(addr, "federation-command", 3*time.Second)
+		client, err := representable.Connect(addr, "federation-command", representable.Mode(devMode), 3*time.Second)
 		if err != nil {
 			return reprConnectFailedMsg{}
 		}
 		return reprConnectedMsg{client: client}
+	}
+}
+
+// reprDisconnectedMsg is delivered when an established representable
+// connection to local-representative drops -- via DisconnectCh, so it fires
+// whether the remote end closed it (unintentional) or this side called
+// Close (an intentional disconnectRepr -- see Revision I of Step3Prompt.md).
+// client guards against a stale message: disconnectRepr nils m.reprClient
+// synchronously, so by the time an intentional disconnect's message is
+// processed it no longer matches, and the handler tells the two cases apart
+// that way rather than via a separate flag.
+type reprDisconnectedMsg struct{ client *representable.Client }
+
+// listenForDisconnectCmd blocks until client's connection drops, then
+// delivers reprDisconnectedMsg so Update can decide whether to resume
+// auto-connect. Started once per adopted connection (see reprConnectedMsg and
+// the successful half of autoConnectResultMsg).
+func listenForDisconnectCmd(client *representable.Client) tea.Cmd {
+	return func() tea.Msg {
+		<-client.DisconnectCh()
+		return reprDisconnectedMsg{client: client}
 	}
 }
 
@@ -618,9 +719,9 @@ type autoConnectResultMsg struct{ client *representable.Client }
 
 // autoConnectDialCmd performs one background connection attempt to local-representative.
 // It never blocks the UI: the dial runs inside the returned tea.Cmd goroutine.
-func autoConnectDialCmd(addr string) tea.Cmd {
+func autoConnectDialCmd(addr string, devMode bool) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(addr, "federation-command", autoConnectDialTimeout)
+		client, err := representable.Connect(addr, "federation-command", representable.Mode(devMode), autoConnectDialTimeout)
 		if err != nil {
 			return autoConnectResultMsg{}
 		}
@@ -668,6 +769,51 @@ func (m *appModel) autoConnectGaveUp() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// autoConnectStatusLine renders the persistent auto-connect toggle plus a
+// hint at the enable/disable commands -- used by both "auto-connect" and
+// "ufa fc auto-connect" with no argument (see Revision I of Step3Prompt.md).
+func (m *appModel) autoConnectStatusLine() string {
+	state := "disabled"
+	if m.autoConnectEnabled {
+		switch {
+		case m.reprClient != nil:
+			state = fmt.Sprintf("enabled (connected to local-representative at %s)", m.lrAddr)
+		case m.autoConnect:
+			state = fmt.Sprintf("enabled (retrying local-representative at %s)", m.lrAddr)
+		default:
+			state = "enabled (idle)"
+		}
+	}
+	return fmt.Sprintf("auto-connect: %s\ncommands: auto-connect enable | auto-connect disable (or: ufa fc auto-connect enable|disable)", state)
+}
+
+// enableAutoConnect arms the persistent auto-connect toggle (see Revision I
+// of Step3Prompt.md) and, unless already connected or already retrying,
+// starts the background retry loop at m.lrAddr.
+func (m *appModel) enableAutoConnect() tea.Cmd {
+	m.autoConnectEnabled = true
+	if m.reprClient != nil || m.autoConnect {
+		return nil // already connected, or already retrying
+	}
+	m.autoConnect = true
+	m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+	m.blinker.EnableAccent()
+	return tea.Batch(autoConnectDialCmd(m.lrAddr, m.devMode), m.blinker.accentTickCmd())
+}
+
+// disableAutoConnect clears the persistent auto-connect toggle and, if a
+// retry loop is currently running (not yet connected), cancels it. It never
+// drops an already-established connection -- only disconnectRepr does that.
+func (m *appModel) disableAutoConnect() tea.Cmd {
+	m.autoConnectEnabled = false
+	if !m.autoConnect {
+		return nil
+	}
+	m.autoConnect = false
+	m.blinker.DisableAccent()
+	return m.blinker.ResetTick()
+}
+
 // listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
 func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
@@ -681,8 +827,19 @@ func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
 }
 
 // disconnectRepr closes the representable client and resets the listener stop channel
-// so any in-flight listenForRemoteCmdCmd goroutine exits.
+// so any in-flight listenForRemoteCmdCmd goroutine exits. Being operator-driven,
+// this also terminates auto-connect entirely (see Revision I of Step3Prompt.md:
+// "Intentionally disconnect terminates auto-connect") -- unlike an unintentional
+// drop, which resumes the retry cycle automatically as long as auto-connect is
+// still armed (see the reprDisconnectedMsg handler).
 func (m *appModel) disconnectRepr() {
+	m.autoConnectEnabled = false
+	if m.autoConnect {
+		// A background retry loop was still running (not yet connected) --
+		// stop it too, mirroring autoConnectGaveUp's cleanup.
+		m.autoConnect = false
+		m.blinker.DisableAccent()
+	}
 	if m.reprClient != nil {
 		m.reprClient.Close()
 		m.reprClient = nil
@@ -696,6 +853,25 @@ func (m *appModel) disconnectRepr() {
 		m.reprOutPath = ""
 		m.reprOutOffset = 0
 	}
+	// A fresh connection starts with a clean mismatch verdict; the next
+	// "hello" (or lack of one) re-establishes it via wireModeMismatchHandler.
+	m.modeMismatch = false
+	m.modeMismatchPeer = ""
+}
+
+// wireModeMismatchHandler registers reprClient's mode-mismatch callback so a
+// verdict lands on modeMismatchCh for listenForModeMismatchCmd to pick up.
+// The callback runs on the client's read-loop goroutine, so it must not touch
+// appModel directly — see docs/DevMode.md for the representable-level protocol
+// this discloses.
+func (m *appModel) wireModeMismatchHandler() {
+	ch := m.modeMismatchCh
+	m.reprClient.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
+		select {
+		case ch <- modeMismatchInfo{mismatched: mismatched, peerMode: peerMode}:
+		default: // drop if full; the next heartbeat's verdict will follow
+		}
+	})
 }
 
 func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder, cfg cliConfig) appModel {
@@ -723,12 +899,15 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		recordsPath:   recordsPath,
 		logFile:       logFile,
 		encoder:       encoder,
-		blinker:       NewBlinker(),
-		remoteCmdCh:   make(chan string, 8),
-		listenerStop:  make(chan struct{}),
-		lrAddr:        cfg.lrAddr,
-		autoConnect:   cfg.autoConnect,
-		remoteDefault: cfg.remote,
+		blinker:            NewBlinker(cfg.devMode),
+		remoteCmdCh:        make(chan string, 8),
+		listenerStop:       make(chan struct{}),
+		lrAddr:             cfg.lrAddr,
+		autoConnect:        cfg.autoConnect,
+		autoConnectEnabled: cfg.autoConnect,
+		remoteDefault:      cfg.remote,
+		devMode:            cfg.devMode,
+		modeMismatchCh:     make(chan modeMismatchInfo, 4),
 	}
 
 	if cfg.autoConnect {
@@ -745,7 +924,7 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		m.input.Blur()
 	}
 
-	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
+	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0, m.devMode)
 	m.history = loadHistory(historyFilePath())
 	m.historyIdx = len(m.history)
 
@@ -847,6 +1026,10 @@ func (m appModel) Init() tea.Cmd {
 		"",
 	}, "\n")
 	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd()}
+	if m.devMode {
+		cmds = append(cmds, tea.Println(devModeStyle.Render(
+			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session")))
+	}
 	if devBins := devBinaries(); len(devBins) > 0 {
 		devNotice := devWarningStyle.Render("⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): " + strings.Join(devBins, ", "))
 		cmds = append(cmds, tea.Println(devNotice))
@@ -859,7 +1042,7 @@ func (m appModel) Init() tea.Cmd {
 		acNotice := successStyle.Render(fmt.Sprintf(
 			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background; adopts %s)",
 			m.lrAddr, autoConnectInterval, autoConnectWindow, adopts))
-		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr), m.blinker.accentTickCmd())
+		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr, m.devMode), m.blinker.accentTickCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -889,7 +1072,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mlQuote = 0
 				m.mlMode = mlNone
 				m.input.SetValue("")
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				// Reset blinker to idle (was inactive while typing multi-line)
 				m.blinker.SetState(BlinkerIdle)
 				m.prevInputLen = 0
@@ -955,7 +1138,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
 			Command:   msg.line,
@@ -977,7 +1160,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionNewDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		if msg.exitCode == 0 && msg.newSessionID != "" {
 			newM, switchErr := m.switchToSession(msg.newSessionID)
 			if switchErr == nil {
@@ -998,7 +1181,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sessionRenameDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		if msg.exitCode == 0 && msg.newName != "" {
 			if err := updateSessionName(m.sessionDir, msg.newName); err != nil {
 				m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 1)
@@ -1024,7 +1207,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentDoneMsg:
 		m.lastExitCode = msg.exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
 			Command:   msg.line,
@@ -1056,7 +1239,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case listModelsDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		var suffix string
 		if msg.currentModel != "" {
 			suffix = "\n" + sessionStyle.Render("current selection: "+msg.currentModel)
@@ -1097,7 +1280,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.autoConnectGaveUp()
 			return m, cmd
 		}
-		return m, autoConnectDialCmd(m.lrAddr)
+		return m, autoConnectDialCmd(m.lrAddr, m.devMode)
 
 	case autoConnectResultMsg:
 		if !m.autoConnect || m.reprClient != nil {
@@ -1129,6 +1312,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default: // drop if full
 			}
 		})
+		m.wireModeMismatchHandler()
+		m.sendVersion()
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
 			m.reprOutPath = tf.Name()
@@ -1150,6 +1335,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tea.Println(successStyle.Render(controlNotice)),
 			resetTick,
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+			listenForDisconnectCmd(m.reprClient),
 		}
 		if !wantsRemote {
 			cmds = append(cmds, textinput.Blink)
@@ -1177,6 +1364,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default: // drop if full
 			}
 		})
+		m.wireModeMismatchHandler()
+		m.sendVersion()
 		// Create temp file for output capture.
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
@@ -1186,7 +1375,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Announce initial control mode so LR shows the entry field immediately.
 		m.reprClient.SendState("remote-control")
 		m.blinker.SetState(BlinkerConnected)
-		return m, tea.Batch(m.blinker.ResetTick(), listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop))
+		return m, tea.Batch(
+			m.blinker.ResetTick(),
+			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+			listenForDisconnectCmd(m.reprClient),
+		)
 
 	case reprConnectFailedMsg:
 		if m.blinker.IsConnecting() {
@@ -1195,6 +1389,66 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.blinker.ResetTick()
 		}
 		return m, nil
+
+	case reprDisconnectedMsg:
+		if m.reprClient != msg.client {
+			// Stale: this connection was already superseded or torn down --
+			// which also covers an *intentional* disconnect, since
+			// disconnectRepr nils m.reprClient synchronously (before this
+			// async message can ever arrive), so it always lands here too.
+			return m, nil
+		}
+		m.reprClient = nil
+		wasActive := m.blinker.IsRemoteControlActive()
+		if !m.autoConnectEnabled {
+			if !wasActive {
+				return m, nil
+			}
+			m.blinker.SetState(BlinkerIdle)
+			return m, tea.Batch(
+				tea.Println(errorStyle.Render("disconnected from local-representative at "+m.lrAddr)),
+				m.blinker.ResetTick(),
+			)
+		}
+		// Auto-connect is still armed and this wasn't an operator-driven
+		// disconnect -- the cycle begins automatically again at the same
+		// target (see Revision I of Step3Prompt.md: "the auto-connect cycle
+		// begins automatically upon unintentional disconnection").
+		m.autoConnect = true
+		m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+		m.blinker.EnableAccent()
+		if wasActive {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		notice := fmt.Sprintf(
+			"auto-connect: connection to local-representative at %s dropped unexpectedly — resuming the retry cycle",
+			m.lrAddr)
+		return m, tea.Batch(
+			tea.Println(errorStyle.Render(notice)),
+			autoConnectDialCmd(m.lrAddr, m.devMode),
+			m.blinker.accentTickCmd(),
+			m.blinker.ResetTick(),
+		)
+
+	case reprModeMismatchMsg:
+		listenCmd := listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop)
+		if m.reprClient == nil {
+			return m, listenCmd // stale verdict from a connection we've since dropped
+		}
+		wasMismatched := m.modeMismatch
+		m.modeMismatch = msg.mismatched
+		m.modeMismatchPeer = msg.peerMode
+		if !msg.mismatched {
+			if wasMismatched {
+				return m, tea.Batch(tea.Println(devModeStyle.Render("✓ dev-mode mismatch with local-representative cleared")), listenCmd)
+			}
+			return m, listenCmd
+		}
+		ourMode := representable.Mode(m.devMode)
+		notice := devWarningStyle.Render(fmt.Sprintf(
+			"⚠ dev-mode mismatch: this FC is %q but local-representative at %s is %q — remote control and log/data exchange are refused until the mismatch is resolved (health checks still work)",
+			ourMode, m.lrAddr, msg.peerMode))
+		return m, tea.Batch(tea.Println(notice), listenCmd)
 
 	case reprRemoteCmdMsg:
 		if msg.cmd == "" {
@@ -1252,7 +1506,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 
 		// Log the command
 		record := CommandRecord{
@@ -1285,7 +1539,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongReviewDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		reviewText := ""
 		if b, err := os.ReadFile(msg.cachePath); err == nil {
@@ -1314,7 +1568,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongFixDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		var postOutput string
 		if msg.execErr != nil {
@@ -1335,7 +1589,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		// Forward any new output lines to LR.
 		if m.reprOutPath != "" && m.reprClient != nil {
@@ -1506,7 +1760,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 				m.mlAccumulated = ""
 				m.mlDelim = ""
 				m.mlMode = mlNone
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				newM, execCmd := m.executeCommand(accumulated)
 				return newM, tea.Sequence(echo, execCmd)
 			}
@@ -1534,7 +1788,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 				m.mlAccumulated = ""
 				m.mlQuote = 0
 				m.mlMode = mlNone
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				newM, execCmd := m.executeCommand(newAccumulated)
 				return newM, tea.Sequence(echo, execCmd)
 			}
@@ -1597,7 +1851,7 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 	if m.blinker.IsSelectMode() {
 		// Up in select mode: initiate LR connection attempt.
 		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr))
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr, m.devMode))
 	}
 	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
@@ -1629,7 +1883,7 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 	if m.blinker.IsSelectMode() {
 		// Down in select mode: initiate LR connection attempt.
 		connectCmd := m.blinker.StartConnecting()
-		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr))
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr, m.devMode))
 	}
 	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		// Cancel/disconnect — return to select mode (not back to terminal).
@@ -1903,7 +2157,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		m.oldCwd = m.cwd
 		m.cwd = newDir
 		m.lastExitCode = exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode)
 		return true, m, seqPrint(cdOutput, exitCode)
 	}
 
@@ -1923,7 +2177,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		if isValidAgent(newAgent) {
 			m.currentAgent = newAgent
 			m.currentModel = ""
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			return true, m, seqPrint(successStyle.Render("agent set to: "+m.currentAgent), 0)
 		}
 		out := errorStyle.Render("unknown agent: "+newAgent) + "\n" +
@@ -1948,7 +2202,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 			return true, m, seqPrint(errorStyle.Render(err.Error()), 1)
 		}
 		m.currentModel = newModel
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		return true, m, seqPrint(successStyle.Render("model set to: "+m.currentModel), 0)
 	}
 	if line == "set-model" {
@@ -1960,7 +2214,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	// clear-model
 	if line == "clear-model" {
 		m.currentModel = ""
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		return true, m, seqPrint(successStyle.Render("model cleared - using agent's default"), 0)
 	}
 
@@ -1978,6 +2232,11 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	// list-sessions
 	if line == "list-sessions" {
 		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
+	}
+
+	// version / ufa version
+	if line == "version" || line == "ufa version" {
+		return true, m, seqPrint(successStyle.Render(ufaversion.Version), 0)
 	}
 
 	// select-session — interactive picker not available inside ridealong
@@ -2599,7 +2858,7 @@ func (m appModel) exitRidealong() (appModel, tea.Cmd) {
 	m.sendRidealongState()
 	m.ridealongDynapane.Deactivate()
 	m.input.SetValue("")
-	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 	// Restore the control mode that was active before the ridealong started.
 	switch m.ridealongPrevState {
 	case BlinkerConnected:
@@ -3014,7 +3273,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			}
 		}
 		m.lastExitCode = exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode)
 		m.logRecord(line, cmdTime, deltaMs, exitCode)
 		if output != "" {
 			return m, tea.Println(output)
@@ -3049,7 +3308,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		if isValidAgent(newAgent) {
 			m.currentAgent = newAgent
 			m.currentModel = ""
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			output = successStyle.Render("agent set to: " + m.currentAgent)
 		} else {
 			exitCode = 1
@@ -3083,7 +3342,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			output = errorStyle.Render(err.Error())
 		} else {
 			m.currentModel = newModel
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			output = successStyle.Render("model set to: " + m.currentModel)
 		}
 		m.lastExitCode = exitCode
@@ -3100,7 +3359,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "clear-model" {
 		m.currentModel = ""
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render("model cleared - using agent's default"))
 	}
@@ -3120,6 +3379,31 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	if line == "list-sessions" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
+	}
+
+	// version (also available as "ufa version", handled by the "ufa "
+	// dispatch below)
+	if line == "version" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(ufaversion.Version))
+	}
+
+	// auto-connect | auto-connect enable | auto-connect disable (also
+	// available as "ufa fc auto-connect [<enable|disable>]", handled by the
+	// "ufa " dispatch below) -- see Revision I of Step3Prompt.md.
+	if line == "auto-connect" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(m.autoConnectStatusLine()))
+	}
+	if line == "auto-connect enable" {
+		cmd := m.enableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+	}
+	if line == "auto-connect disable" {
+		cmd := m.disableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
 	}
 
 	if line == "select-session" {
@@ -3456,6 +3740,28 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
 
+	case "version":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(ufaversion.Version))
+
+	case "fc", "fc help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaFcHelpText())
+
+	case "fc auto-connect":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(m.autoConnectStatusLine()))
+
+	case "fc auto-connect enable":
+		cmd := m.enableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+
+	case "fc auto-connect disable":
+		cmd := m.disableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+
 	case "session archive":
 		clauditablePath, err := findBinary("clauditable")
 		if err != nil {
@@ -3558,6 +3864,10 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			unknown := strings.TrimPrefix(sub, "head ")
 			return m, tea.Println(errorStyle.Render("ufa head: unknown subcommand '"+unknown+"'")+"\n"+ufaHeadHelpText())
 		}
+		if strings.HasPrefix(sub, "fc ") {
+			unknown := strings.TrimPrefix(sub, "fc ")
+			return m, tea.Println(errorStyle.Render("ufa fc: unknown subcommand '"+unknown+"'")+"\n"+ufaFcHelpText())
+		}
 		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
 	}
 }
@@ -3567,11 +3877,29 @@ func ufaHelpText() string {
 		sessionStyle.Render("ufa — unified federation actions"),
 		"",
 		"  ufa help               show this help",
+		"  ufa version            print federation-command's version",
 		"  ufa host <sub>         host identification commands",
 		"  ufa head <sub>         head (instance) identification commands",
 		"  ufa session <sub>      session management commands",
+		"  ufa fc <sub>           federation-command auto-connect commands",
 		"",
-		sessionStyle.Render("run 'ufa host help', 'ufa head help', or 'ufa session help' for subcommands"),
+		sessionStyle.Render("run 'ufa host help', 'ufa head help', 'ufa session help', or 'ufa fc help' for subcommands"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaFcHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa fc — federation-command auto-connect"),
+		"",
+		"  ufa fc help                     show this help",
+		"  ufa fc auto-connect             show whether auto-connect is armed",
+		"  ufa fc auto-connect enable      arm auto-connect (also: 'auto-connect enable')",
+		"  ufa fc auto-connect disable     disarm auto-connect (also: 'auto-connect disable')",
+		"",
+		sessionStyle.Render("also available unprefixed: 'auto-connect [enable|disable]'"),
+		sessionStyle.Render("armed auto-connect stays armed across a successful connection, and resumes"),
+		sessionStyle.Render("on its own after an unintentional disconnect; an explicit disconnect (^C) disarms it"),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -4495,7 +4823,7 @@ func abbreviatePath(path string, maxLen int) string {
 	return result
 }
 
-func buildPrompt(cwd string, agent string, model string, lastExitCode int) string {
+func buildPrompt(cwd string, agent string, model string, lastExitCode int, devMode bool) string {
 	dir := abbreviatePath(cwd, 30)
 	color := agentColors[agent]
 	if color == "" {
@@ -4509,7 +4837,14 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 	} else {
 		promptLabel = "[" + agent + "]"
 	}
-	prompt := agentPromptStyle.Render(promptLabel) + " " + promptStyle.Render(dir) + " > "
+	// Revision B: the cursor itself ('>') also renders in devModeStyle's green
+	// while --dev-mode is on, alongside the blinker's green brackets — see
+	// docs/DevMode.md.
+	cursor := "> "
+	if devMode {
+		cursor = devModeStyle.Render(cursor)
+	}
+	prompt := agentPromptStyle.Render(promptLabel) + " " + promptStyle.Render(dir) + " " + cursor
 	if lastExitCode != 0 {
 		rcStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 		prompt = rcStyle.Render(fmt.Sprintf("[%d]", lastExitCode)) + " " + prompt
@@ -4766,6 +5101,7 @@ type cliConfig struct {
 	autoConnect bool   // --auto-connect / auto-connect / FC_AUTO_CONNECT: dial local-representative in the background on startup
 	remote      bool   // derived: true whenever autoConnect is set — a machine-driven auto-launch/auto-connect chain always adopts remote control (no separate --remote flag)
 	lrAddr      string // local-representative representable address (--lr-host / --lr-port / FC_LR_HOST / FC_LR_PORT override host / port)
+	devMode     bool   // --dev-mode / dev-mode / FC_DEV_MODE: launched from an in-progress dev branch — see docs/DevMode.md. Unrelated to the ambiguous-agent-style "--dev" flag other sub-apps use for frontend development.
 }
 
 // Config-file keys recognised for federation-command (see README.md).
@@ -4773,6 +5109,7 @@ const (
 	cfgKeyAutoConnect = "auto-connect"
 	cfgKeyLRHost      = "lr-host"
 	cfgKeyLRPort      = "lr-port"
+	cfgKeyDevMode     = "dev-mode"
 )
 
 // Environment variables recognised for the local-representative connection.
@@ -4784,6 +5121,10 @@ const (
 	envAutoConnect = "FC_AUTO_CONNECT"
 	envLRHost      = "FC_LR_HOST"
 	envLRPort      = "FC_LR_PORT"
+	// envDevMode is set by a dev-mode local-representative when it auto-launches
+	// FC, so a managed instance always cascades its launcher's mode (see
+	// docs/DevMode.md) even if the terminal wrapper mangles trailing argv.
+	envDevMode = "FC_DEV_MODE"
 )
 
 // envTruthy interprets a boolean-ish environment variable. Unset, "", "0",
@@ -4824,6 +5165,9 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	if cfg.autoConnect, err = conf.Bool(cfgKeyAutoConnect, false); err != nil {
 		return cfg, false, err
 	}
+	if cfg.devMode, err = conf.Bool(cfgKeyDevMode, false); err != nil {
+		return cfg, false, err
+	}
 	port, err := conf.Int(cfgKeyLRPort, DefaultLRPort)
 	if err != nil {
 		return cfg, false, err
@@ -4839,6 +5183,9 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 	if v, set := envTruthy(envAutoConnect); set {
 		cfg.autoConnect = v
 	}
+	if v, set := envTruthy(envDevMode); set {
+		cfg.devMode = v
+	}
 	if v := strings.TrimSpace(os.Getenv(envLRHost)); v != "" {
 		host = v
 	}
@@ -4852,10 +5199,12 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 		arg := args[i]
 		switch {
 		case arg == "--version" || arg == "-v":
-			fmt.Printf("federation-command %s\n", Version)
+			fmt.Printf("federation-command %s\n", ufaversion.Version)
 			return cfg, true, nil
 		case arg == "--auto-connect" || arg == "-auto-connect":
 			cfg.autoConnect = true
+		case arg == "--dev-mode" || arg == "-dev-mode":
+			cfg.devMode = true
 		case arg == "--lr-host" || arg == "-lr-host":
 			if i+1 >= len(args) {
 				return cfg, false, fmt.Errorf("--lr-host requires a value")
@@ -4963,8 +5312,38 @@ func main() {
 	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder, cfg)
 
 	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
+
+	restartReason := make(chan string, 1)
+	go watchRestartSignal(p, restartReason)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	// If the TUI stopped because watchRestartSignal asked it to (rather than
+	// the user quitting normally), announce the restart now that the
+	// terminal has been restored — this must be the final act before exit,
+	// see ufa-loader/README.md and docs/DevMode.md's "Loader" section.
+	select {
+	case reason := <-restartReason:
+		if err := restartsignal.Announce(os.Stdout, "federation-command", reason); err != nil {
+			fmt.Fprintf(os.Stderr, "restartsignal.Announce: %v\n", err)
+		}
+	default:
+	}
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, tells p to
+// quit (so the terminal is restored before anything else is printed) and
+// sends the trigger reason on restartReason for main to announce and exit
+// with once p.Run() returns. The signal is sent directly to this process's
+// own pid (e.g. `kill -HUP <pid>`), not through ufa-loader itself. Run in
+// its own goroutine; returns once it has handled one signal.
+func watchRestartSignal(p *tea.Program, restartReason chan<- string) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	<-sigCh
+	restartReason <- "sighup"
+	p.Quit()
 }

@@ -10,16 +10,20 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
 	"github.com/gorilla/websocket"
 	"representable"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
 
 //go:embed frontend/dist
@@ -71,7 +75,7 @@ type wsMsg struct {
 
 // ActionRequest is sent by the client when the user clicks an action button.
 type ActionRequest struct {
-	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert, resubmit
+	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert, resubmit, add_resource
 	Path          string `json:"path"`          // condoc path (relative to repo root)
 	Content       string `json:"content,omitempty"`
 	Letter        string `json:"letter,omitempty"`
@@ -80,6 +84,8 @@ type ActionRequest struct {
 	RevertStep    int    `json:"revertStep,omitempty"`    // for revert action
 	RevertIter    string `json:"revertIter,omitempty"`    // for revert action (optional iteration letter)
 	RevertSubIter string `json:"revertSubIter,omitempty"` // for revert action (optional substep iter letter)
+	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" (only option so far)
+	ResourceName  string `json:"resourceName,omitempty"`  // for add_resource action: optional display name -> "## Resource N -- <name>"
 }
 
 // CondocMeta holds the parsed condoc-yaml fields.
@@ -102,7 +108,7 @@ type StepSummary struct {
 type Iteration struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
-	Type  string `json:"type"` // "reply", "revision", "retry", "substep"
+	Type  string `json:"type"` // "reply", "revision", "retry", "substep", "resource"
 	From  string `json:"from,omitempty"`
 }
 
@@ -126,6 +132,8 @@ var (
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 	commitHashRe         = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
+	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource (\d+)(?: -- (.+))?\s*$`)
+	placeholderLineRe    = regexp.MustCompile(`(?m)^## <REPLACE-Revision\|Retry> [A-Z]\s*$`)
 )
 
 // DiffHunk represents a single @@ hunk in a unified diff.
@@ -327,8 +335,8 @@ func parseSteps(content string) []StepSummary {
 	return steps
 }
 
-// parseIterations extracts the ordered list of reply/revision/retry/substep sections from a step file.
-// Results are ordered by their position in the file so substeps appear in context with other iterations.
+// parseIterations extracts the ordered list of reply/revision/retry/substep/resource sections from a step file.
+// Results are ordered by their position in the file so substeps and resources appear in context with other iterations.
 func parseIterations(stepContent string) []Iteration {
 	type candidate struct {
 		pos  int
@@ -378,6 +386,27 @@ func parseIterations(stepContent string) []Iteration {
 				Label: "Substep " + letter + " — " + title,
 				Type:  "substep",
 			},
+		})
+	}
+
+	// Parse Resource headings and interleave them by position too -- Revision B
+	// of Step5SubstepRPrompt.md gives each "## Resource N[ -- <name>]" block its
+	// own sidebar entry (previously it had no heading of its own here, so its
+	// body just read as an unstyled tail of whichever Reply/Revision preceded
+	// it -- see parseStepSections on the frontend for the client-side mirror).
+	for _, idx := range resourceHeadingRe.FindAllStringSubmatchIndex(stepContent, -1) {
+		num := stepContent[idx[2]:idx[3]]
+		name := ""
+		if idx[4] >= 0 {
+			name = strings.TrimSpace(stepContent[idx[4]:idx[5]])
+		}
+		label := "Resource " + num
+		if name != "" {
+			label += " | " + name
+		}
+		candidates = append(candidates, candidate{
+			pos:  idx[0],
+			iter: Iteration{ID: "resource-" + num, Label: label, Type: "resource"},
 		})
 	}
 
@@ -497,17 +526,27 @@ type Server struct {
 	root     string
 	httpPort string // HTTP port this condoccer serves on (reported to local-representative)
 	name     string // identifier reported to local-representative
+	devMode  bool   // --dev-mode: this condoccer instance -- see docs/DevMode.md
 	upgrader websocket.Upgrader
 	mu       sync.RWMutex
 	clients  map[*wsClient]bool
 
 	// representable link to local-representative (see repr.go). nil until connected.
-	reprMu     sync.Mutex
-	reprClient *representable.Client
-	reprStatus string        // "disconnected" | "connecting" | "connected"
-	reprHost   string        // host of the current/last connect attempt (widget default)
-	reprPort   string        // port of the current/last connect attempt (widget default)
-	reprStop   chan struct{} // non-nil while a connectLoop is running; closing it stops retries
+	reprMu       sync.Mutex
+	reprClient   *representable.Client
+	reprStatus   string        // "disconnected" | "connecting" | "connected"
+	reprHost     string        // host of the current/last connect attempt (widget default)
+	reprPort     string        // port of the current/last connect attempt (widget default)
+	reprStop     chan struct{} // non-nil while a connectLoop is running; closing it stops retries
+	// reprAutoConnect is the persistent auto-connect toggle (see Revision I
+	// of Step3Prompt.md) -- a first-class state independent of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// connectLoop); only an explicit disconnect (see disconnectRepr) turns it
+	// off.
+	reprAutoConnect  bool
+	modeMismatch     bool   // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
+	modeMismatchPeer string // the mismatched LR's disclosed mode ("dev" or "ops")
 }
 
 func newServer(root string) *Server {
@@ -602,6 +641,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial condoc list and representable connection status.
 	go s.sendList(c)
 	go s.sendReprStatus(c)
+	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
+	go s.sendModeMismatch(c)
 
 	// Write pump.
 	go func() {
@@ -684,7 +725,16 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		s.startConnectLoop(host, port)
 
 	case "disconnect":
-		s.stopConnectLoop()
+		s.disconnectRepr()
+
+	case "set-auto-connect":
+		var p struct {
+			Enabled bool   `json:"enabled"`
+			Host    string `json:"host"`
+			Port    string `json:"port"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setAutoConnect(p.Enabled, strings.TrimSpace(p.Host), strings.TrimSpace(p.Port))
 
 	case "get-diff":
 		var p struct {
@@ -790,6 +840,9 @@ func (s *Server) performAction(action ActionRequest) error {
 		}
 		// Write revert directive to the active condoc file so the handler sees it.
 		return appendToFile(activeFile, "\n"+directive+"\n")
+
+	case "add_resource":
+		return s.addResource(absPath, info, action)
 
 	case "resubmit":
 		// Stage and commit any outstanding working-tree changes so that the
@@ -939,16 +992,85 @@ func replaceIterationPlaceholder(sfPath, letter, header, content string) error {
 	return appendToFile(sfPath, "\n!HANDOFF!\n")
 }
 
+// ---- condoc lock file (see condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) ----
+//
+// condoccer maintains a '.condoc' file at the repo root while any condoc is
+// mid-transition. local-representative treats its mere presence as a signal
+// to always report "rebuild available" as false (see repowatch.go's
+// rebuildReadyLocked), so a dev-repo rebuild never lands out from under an
+// in-flight condoc handoff. The point is to prevent excessive rebuilds, not
+// to track exact repo state -- so the file is a dumb presence/absence lock,
+// not something condoccer ever reads back.
+
+// condocLockPath is the lock file's well-known location.
+func (s *Server) condocLockPath() string {
+	return filepath.Join(s.root, ".condoc")
+}
+
+// writeCondocLock creates or overwrites the lock file to record the most
+// recent condoc state transition.
+func (s *Server) writeCondocLock(action string) {
+	now := time.Now()
+	content := fmt.Sprintf("Condoccer %s at %s (%d)\n", action, now.Format(time.RFC1123), now.Unix())
+	if err := os.WriteFile(s.condocLockPath(), []byte(content), 0644); err != nil {
+		log.Printf("condoc lock: write failed: %v", err)
+	}
+}
+
+// removeCondocLock deletes the lock file, if present.
+func (s *Server) removeCondocLock() {
+	if err := os.Remove(s.condocLockPath()); err != nil && !os.IsNotExist(err) {
+		log.Printf("condoc lock: remove failed: %v", err)
+	}
+}
+
+// updateCondocLock reacts to one condoc's phase (possibly) having changed
+// since the last poll, creating/updating/removing the shared lock file per
+// Step5Prompt.md:
+//   - a condoc seen for the first time -- condoccer "begins working" on it --
+//     creates the lock
+//   - reaching "awaiting action" (an agent just completed its work) or
+//     "completed" removes the lock -- both are safe points for LR to rebuild
+//   - every other transition (re-)creates the lock, so it stays present for
+//     the duration of anything else in flight (e.g. an agent about to run,
+//     or having just been handed off to)
+func (s *Server) updateCondocLock(info CondocInfo, prev Phase, existed bool) {
+	switch {
+	case !existed:
+		if info.Phase == PhaseAwaitingAction || info.Phase == PhaseCompleted {
+			// Already sitting at a safe-to-rebuild point the first time we
+			// see it -- e.g. condoccer just (re)started mid-condoc. Nothing
+			// to lock until it actually transitions.
+			return
+		}
+		s.writeCondocLock(fmt.Sprintf("began work on %s", info.Name))
+	case prev == info.Phase:
+		// no transition
+	case info.Phase == PhaseAwaitingAction, info.Phase == PhaseCompleted:
+		s.removeCondocLock()
+	default:
+		s.writeCondocLock(fmt.Sprintf("advanced %s to %s", info.Name, info.Phase))
+	}
+}
+
 // watchLoop polls condoc files every second and pushes updates to subscribed clients.
 func (s *Server) watchLoop() {
 	var lastList []CondocInfo
 	lastContent := make(map[string]string) // relPath → last known content fingerprint
+	lastPhase := make(map[string]Phase)    // relPath → last known phase, for lock-file transitions
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		current, _ := findCondocs(s.root)
+
+		for _, info := range current {
+			prev, existed := lastPhase[info.Path]
+			s.updateCondocLock(info, prev, existed)
+			lastPhase[info.Path] = info.Phase
+		}
+
 		if !condocListEqual(lastList, current) {
 			lastList = current
 			s.broadcastList()
@@ -1012,6 +1134,8 @@ func condocListEqual(a, b []CondocInfo) bool {
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/resource/", s.handleResourceFile)
+	mux.HandleFunc("/api/upload-resource", s.handleUploadResource)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.
@@ -1050,10 +1174,33 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	return mux
 }
 
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart (see ufa-loader/README.md and docs/DevMode.md's "Loader" section)
+// as this process's final act before exiting 0. The signal is sent directly
+// to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself. Run in its own goroutine; never returns.
+func watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		log.Printf("received SIGHUP: announcing a restart and exiting")
+		if err := restartsignal.Announce(os.Stdout, "condoccer", "sighup"); err != nil {
+			log.Printf("restartsignal.Announce: %v", err)
+		}
+		os.Exit(0)
+	}
+}
+
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	port := flag.String("port", "8080", "HTTP port to listen on")
 	root := flag.String("root", ".", "repository root to scan for condocs")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): this condoccer is running from an in-progress branch. Unrelated to --dev.")
 	name := flag.String("name", "condoccer", "identifier reported to local-representative")
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
@@ -1068,12 +1215,14 @@ func main() {
 	s := newServer(absRoot)
 	s.httpPort = *port
 	s.name = *name
+	s.devMode = *devMode
 	go s.watchLoop()
+	go watchRestartSignal()
 
 	if *autoConnect {
 		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",
 			*lrHost, *lrPort, autoConnectInterval, autoConnectWindow)
-		s.startConnectLoop(*lrHost, *lrPort)
+		s.setAutoConnect(true, *lrHost, *lrPort)
 	} else {
 		// No --auto-connect: still record the configured target as the manual
 		// widget's default so a "Connect" click dials the same place

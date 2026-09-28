@@ -32,7 +32,7 @@ export interface StepSummary {
 export interface Iteration {
   id: string
   label: string
-  type: 'reply' | 'revision' | 'retry' | 'substep'
+  type: 'reply' | 'revision' | 'retry' | 'substep' | 'resource'
   from?: string
 }
 
@@ -57,6 +57,27 @@ export interface ReprStatusMsg {
   status: ReprStatus
   host?: string
   port?: string
+  // auto_connect is the persistent auto-connect toggle: true whenever the
+  // cycle is armed, whether or not it's currently connected/connecting -- it
+  // stays true across a successful connection, and only an explicit
+  // disconnect turns it off.
+  auto_connect?: boolean
+}
+
+// SelfInfoMsg discloses this condoccer instance's own dev-mode status and
+// build version (see docs/DevMode.md) -- sent once when the WebSocket
+// connects.
+export interface SelfInfoMsg {
+  dev_mode: boolean
+  version: string
+}
+
+// ModeMismatchMsg discloses that the connected local-representative's
+// dev-mode status differs from this condoccer's own. mismatched: false
+// clears a prior disclosure.
+export interface ModeMismatchMsg {
+  mismatched: boolean
+  peer_mode?: string
 }
 
 export type ServerMsg =
@@ -64,9 +85,11 @@ export type ServerMsg =
   | { type: 'condoc'; payload: CondocState }
   | { type: 'error'; payload: { message: string } }
   | { type: 'repr-status'; payload: ReprStatusMsg }
+  | { type: 'self-info'; payload: SelfInfoMsg }
+  | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
 
 export interface ActionRequest {
-  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit'
+  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit' | 'add_resource'
   path: string
   content?: string
   letter?: string
@@ -75,4 +98,6 @@ export interface ActionRequest {
   revertStep?: number
   revertIter?: string
   revertSubIter?: string
+  resourceType?: 'highlighted' // for add_resource action; only option so far
+  resourceName?: string // for add_resource action: optional display name -> "## Resource N -- <name>"
 }

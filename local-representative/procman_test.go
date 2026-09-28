@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	ufaversion "ufa-version"
 )
 
 // TestSplitList covers the comma/whitespace list parsing used for --auto-launch.
@@ -160,6 +162,46 @@ func TestFederationCommandBuildEnv(t *testing.T) {
 	if got["FC_LR_PORT"] != "8082" {
 		t.Errorf("FC_LR_PORT = %q, want 8082", got["FC_LR_PORT"])
 	}
+	if _, set := got["FC_DEV_MODE"]; set {
+		t.Errorf("FC_DEV_MODE should be unset when the LR is not in dev mode, got %v", got)
+	}
+}
+
+// TestFederationCommandDevModeCascades verifies a dev-mode LR launches FC with
+// both --dev-mode and FC_DEV_MODE=1 (belt-and-braces, mirroring --auto-connect
+// / FC_AUTO_CONNECT) — see docs/DevMode.md.
+func TestFederationCommandDevModeCascades(t *testing.T) {
+	spec := managedApps["federation-command"]
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.devMode = true
+
+	if args := strings.Join(spec.buildArgs(s), " "); !strings.Contains(args, "--dev-mode") {
+		t.Errorf("federation-command buildArgs should include --dev-mode when the LR is in dev mode: %q", args)
+	}
+	env := map[string]string{}
+	for _, kv := range spec.buildEnv(s) {
+		if k, v, found := strings.Cut(kv, "="); found {
+			env[k] = v
+		}
+	}
+	if env["FC_DEV_MODE"] != "1" {
+		t.Errorf("buildEnv should cascade dev mode, got %v", env)
+	}
+}
+
+// TestCondoccerDevModeCascades mirrors TestFederationCommandDevModeCascades
+// for the condoccer launch spec.
+func TestCondoccerDevModeCascades(t *testing.T) {
+	spec := managedApps["condoccer"]
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.condoccerPort = "8080"
+	s.devMode = true
+
+	if args := strings.Join(spec.buildArgs(s), " "); !strings.Contains(args, "--dev-mode") {
+		t.Errorf("condoccer buildArgs should include --dev-mode when the LR is in dev mode: %q", args)
+	}
 }
 
 // TestCondoccerManagedSpec verifies condoccer is registered as a one-per-box
@@ -241,8 +283,180 @@ func TestSystemStateSelf(t *testing.T) {
 	if st.Self.Status != "running" || st.Self.Managed {
 		t.Errorf("Self = %+v, want running & unmanaged", st.Self)
 	}
+	if st.Self.DevMode {
+		t.Errorf("Self.DevMode should be false by default")
+	}
+	if st.Self.Version != ufaversion.Version {
+		t.Errorf("Self.Version = %q, want %q", st.Self.Version, ufaversion.Version)
+	}
 	if len(st.Managed) != 0 {
 		t.Errorf("fresh server should manage nothing, got %v", st.Managed)
+	}
+}
+
+// TestSystemStateDevModeCascadesToManaged verifies systemState() stamps every
+// managed instance with LR's own dev mode (see docs/DevMode.md) — cascading
+// is unconditional, not a per-instance choice.
+func TestSystemStateDevModeCascadesToManaged(t *testing.T) {
+	s := newServer("test-lr")
+	s.devMode = true
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+
+	st := s.systemState()
+	if !st.Self.DevMode {
+		t.Errorf("Self.DevMode should be true when the LR is in dev mode")
+	}
+	if len(st.Managed) != 1 || !st.Managed[0].DevMode {
+		t.Errorf("managed instance should inherit dev mode, got %+v", st.Managed)
+	}
+}
+
+// TestSystemStateSelfUpdateAvailable verifies systemState() surfaces the
+// self-version watcher's verdict on Self, and that a process without one
+// (not loader-managed, per main.go) always reports false rather than
+// panicking on the nil watch.
+func TestSystemStateSelfUpdateAvailable(t *testing.T) {
+	s := newServer("test-lr")
+	if s.systemState().Self.UpdateAvailable {
+		t.Errorf("a fresh (non-loader-managed) server should report UpdateAvailable=false")
+	}
+
+	s.selfVersion = &selfVersionWatch{updateAvailable: true}
+	if !s.systemState().Self.UpdateAvailable {
+		t.Errorf("systemState() should surface a true selfVersion.available()")
+	}
+}
+
+// TestSystemStateSelfAutoUpdate verifies systemState() surfaces the
+// self-version watcher's auto-update flag on Self the same way it surfaces
+// UpdateAvailable, again falling back to false on a nil watch -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+func TestSystemStateSelfAutoUpdate(t *testing.T) {
+	s := newServer("test-lr")
+	if s.systemState().Self.AutoUpdate {
+		t.Errorf("a fresh (non-loader-managed) server should report AutoUpdate=false")
+	}
+
+	s.selfVersion = &selfVersionWatch{autoUpdate: true}
+	if !s.systemState().Self.AutoUpdate {
+		t.Errorf("systemState() should surface a true selfVersion.autoUpdateEnabled()")
+	}
+}
+
+// TestManagedVersionInSystemState verifies a version reported over
+// representable's "version" data message (see setManagedVersion, wired up in
+// main.go's SetDataHandler) shows up on the matching managed instance's
+// ProcInfo, keyed by app name rather than instance id -- representable
+// itself only tracks one connection identity per app name today.
+func TestManagedVersionInSystemState(t *testing.T) {
+	s := newServer("test-lr")
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+
+	if v := s.managedVersion("federation-command"); v != "" {
+		t.Errorf("managedVersion before any report = %q, want empty", v)
+	}
+
+	s.setManagedVersion("federation-command", "v0.4.3-main-8b1e2d4")
+
+	st := s.systemState()
+	if len(st.Managed) != 1 || st.Managed[0].Version != "v0.4.3-main-8b1e2d4" {
+		t.Fatalf("expected the reported version on the managed instance, got %+v", st.Managed)
+	}
+}
+
+// TestPollManagedVersionsDetectsDrift verifies pollManagedVersions flips
+// managedUpdateAvailable (and systemState() surfaces it on the matching
+// managed instance) once a reported running version disagrees with what the
+// resolved on-disk binary now answers to "--version" -- the per-sub-app
+// analogue of TestSelfVersionWatchPoll. See
+// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D.
+func TestPollManagedVersionsDetectsDrift(t *testing.T) {
+	s := newServer("test-lr")
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+	s.binOverrides["federation-command"] = fakeVersionBin(t, "v2")
+	s.setManagedVersion("federation-command", "v1")
+
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("should report no update available before the first poll")
+	}
+
+	s.pollManagedVersions()
+	if !s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("expected an update to be available: on-disk v2 != reported v1")
+	}
+	if st := s.systemState(); len(st.Managed) != 1 || !st.Managed[0].UpdateAvailable {
+		t.Errorf("systemState() should surface the drift on the managed instance, got %+v", st.Managed)
+	}
+
+	// The running instance "catches up" (as it would after a terminate +
+	// re-launch onto the newer build) -- the verdict flips back.
+	s.setManagedVersion("federation-command", "v2")
+	s.pollManagedVersions()
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("expected no update available once the reported version matches on-disk")
+	}
+}
+
+// TestPollManagedVersionsStripsFCPrefix verifies pollManagedVersions doesn't
+// spuriously flag federation-command as having an update available just
+// because it prints its friendlier, name-prefixed "federation-command
+// <version>" for --version instead of the bare string every other managed
+// app answers with (and self-reports over representable, i.e.
+// runningVersion) -- see
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision J.
+func TestPollManagedVersionsStripsFCPrefix(t *testing.T) {
+	s := newServer("test-lr")
+	s.procMu.Lock()
+	s.managed["federation-command#1"] = &managedProc{
+		app: "federation-command", instanceID: "federation-command#1", instance: 1, status: "running",
+	}
+	s.procMu.Unlock()
+	s.binOverrides["federation-command"] = fakeVersionBin(t, "federation-command v1")
+	s.setManagedVersion("federation-command", "v1")
+
+	s.pollManagedVersions()
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("prefixed on-disk output matching the reported version should not read as an update available")
+	}
+	if pv := s.managedPendingVersionFor("federation-command"); pv != "" {
+		t.Errorf("managedPendingVersionFor = %q, want empty when no update is available", pv)
+	}
+
+	// A genuine drift (this time behind the same prefix) should still be
+	// caught, with the prefix stripped from the surfaced pending version.
+	s.binOverrides["federation-command"] = fakeVersionBin(t, "federation-command v2")
+	s.pollManagedVersions()
+	if !s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("expected an update to be available: on-disk v2 != reported v1")
+	}
+	if pv := s.managedPendingVersionFor("federation-command"); pv != "v2" {
+		t.Errorf("managedPendingVersionFor = %q, want %q (prefix stripped)", pv, "v2")
+	}
+	if st := s.systemState(); len(st.Managed) != 1 || st.Managed[0].PendingVersion != "v2" {
+		t.Errorf("systemState() should surface the stripped pending version, got %+v", st.Managed)
+	}
+}
+
+// TestPollManagedVersionsSkipsUnreported verifies pollManagedVersions neither
+// panics nor shells out for an app that has never reported a running version
+// (nothing to compare against yet).
+func TestPollManagedVersionsSkipsUnreported(t *testing.T) {
+	s := newServer("test-lr")
+	s.pollManagedVersions()
+	if s.managedUpdateAvailableFor("federation-command") {
+		t.Fatal("an app that never reported a version should never show an update available")
 	}
 }
 
@@ -395,6 +609,104 @@ func TestHandleSystemCommand(t *testing.T) {
 	_ = s.terminateManaged(id)
 }
 
+// TestRestartManaged verifies restarting a managed singleton instance
+// terminates the old process and launches a fresh instance of the same
+// application, dropping the old entry rather than leaving a stale "exited"
+// row behind (see Step4Prompt.md Revision H).
+func TestRestartManaged(t *testing.T) {
+	const app = "test-restart"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: true,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+	id1, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged: %v", err)
+	}
+	s.procMu.Lock()
+	pid1 := s.managed[id1].pid
+	s.procMu.Unlock()
+
+	if err := s.restartManaged(id1); err != nil {
+		t.Fatalf("restartManaged: %v", err)
+	}
+
+	s.procMu.Lock()
+	_, stillPresent := s.managed[id1]
+	var id2 string
+	for id, p := range s.managed {
+		if p.app == app {
+			id2 = id
+		}
+	}
+	s.procMu.Unlock()
+	if stillPresent {
+		t.Fatal("old instance should have been dropped after restart")
+	}
+	if id2 == "" {
+		t.Fatal("expected a fresh instance of the app to be running after restart")
+	}
+	if id2 == id1 {
+		t.Fatal("restart should allocate a new instance id, not reuse the old one")
+	}
+
+	s.procMu.Lock()
+	p2 := s.managed[id2]
+	s.procMu.Unlock()
+	if p2.state() != "running" {
+		t.Fatalf("expected the restarted instance to be running, got %q", p2.state())
+	}
+	if p2.pid == pid1 {
+		t.Fatal("restarted instance should have a new pid")
+	}
+
+	_ = s.terminateManaged(id2)
+}
+
+// TestHandleSystemCommandRestartManaged drives "__system:restart-managed"
+// through handleSystemCommand, mirroring TestHandleSystemCommand.
+func TestHandleSystemCommandRestartManaged(t *testing.T) {
+	const app = "test-syscmd-restart"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: true,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+	id1, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged: %v", err)
+	}
+
+	s.handleSystemCommand("__system:restart-managed " + id1)
+
+	s.procMu.Lock()
+	_, stillPresent := s.managed[id1]
+	var id2 string
+	for id, p := range s.managed {
+		if p.app == app {
+			id2 = id
+		}
+	}
+	s.procMu.Unlock()
+	if stillPresent {
+		t.Fatal("remote restart-managed did not drop the old instance")
+	}
+	if id2 == "" {
+		t.Fatal("remote restart-managed did not launch a fresh instance")
+	}
+
+	// Missing arg is ignored without panicking.
+	s.handleSystemCommand("__system:restart-managed")
+	_ = s.terminateManaged(id2)
+}
+
 // TestLaunchManagedSingleton verifies a singleton app rejects a second launch
 // while an instance is running.
 func TestLaunchManagedSingleton(t *testing.T) {
@@ -441,5 +753,117 @@ func TestRecordLaunchFailure(t *testing.T) {
 	}
 	if got == nil || got.Status != "failed" {
 		t.Fatalf("expected a failed entry for %q, got %+v", app, got)
+	}
+}
+
+// TestRunningManagedTokens verifies the auto-launch-style token snapshot
+// (see Step4Prompt.md Revision I) counts only running instances, groups them
+// by app, and omits ":1" for a lone instance -- mirroring what
+// parseAutoLaunchEntry accepts.
+func TestRunningManagedTokens(t *testing.T) {
+	const single, multi = "test-tokens-single", "test-tokens-multi"
+	for _, app := range []string{single, multi} {
+		managedApps[app] = launchSpec{
+			binName:   "sleep",
+			singleton: false,
+			buildArgs: func(s *Server) []string { return []string{"30"} },
+		}
+	}
+	defer delete(managedApps, single)
+	defer delete(managedApps, multi)
+
+	s := newServer("test-lr")
+	if got := s.runningManagedTokens(); len(got) != 0 {
+		t.Fatalf("expected no tokens with nothing running, got %v", got)
+	}
+
+	id1, err := s.launchManaged(single)
+	if err != nil {
+		t.Fatalf("launchManaged(%s): %v", single, err)
+	}
+	if _, err := s.launchManaged(multi); err != nil {
+		t.Fatalf("launchManaged(%s) #1: %v", multi, err)
+	}
+	if _, err := s.launchManaged(multi); err != nil {
+		t.Fatalf("launchManaged(%s) #2: %v", multi, err)
+	}
+
+	got := s.runningManagedTokens()
+	want := []string{multi + ":2", single}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("runningManagedTokens = %v, want %v (sorted by app name)", got, want)
+	}
+
+	// A terminated instance drops out of the snapshot once it has actually
+	// stopped.
+	if err := s.terminateManaged(id1); err != nil {
+		t.Fatalf("terminateManaged: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		found := false
+		for _, tok := range s.runningManagedTokens() {
+			if tok == single {
+				found = true
+			}
+		}
+		if !found {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := s.runningManagedTokens(); strings.Join(got, ",") != multi+":2" {
+		t.Fatalf("runningManagedTokens after terminating %s = %v, want only %s:2", single, got, multi)
+	}
+
+	s.procMu.Lock()
+	ids := make([]string, 0, len(s.managed))
+	for id := range s.managed {
+		ids = append(ids, id)
+	}
+	s.procMu.Unlock()
+	for _, id := range ids {
+		_ = s.terminateManaged(id)
+	}
+}
+
+// TestTerminateManagedForRestart verifies it stops every running LR-launched
+// managed instance and waits for them to actually exit, as LR's own final
+// act before a restart carries them forward to be relaunched (see
+// Step4Prompt.md Revision I).
+func TestTerminateManagedForRestart(t *testing.T) {
+	const app = "test-restart-all"
+	managedApps[app] = launchSpec{
+		binName:   "sleep",
+		singleton: false,
+		buildArgs: func(s *Server) []string { return []string{"30"} },
+	}
+	defer delete(managedApps, app)
+
+	s := newServer("test-lr")
+
+	// A no-op with nothing running.
+	s.terminateManagedForRestart()
+
+	id1, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged #1: %v", err)
+	}
+	id2, err := s.launchManaged(app)
+	if err != nil {
+		t.Fatalf("launchManaged #2: %v", err)
+	}
+
+	s.terminateManagedForRestart()
+
+	s.procMu.Lock()
+	p1, ok1 := s.managed[id1]
+	p2, ok2 := s.managed[id2]
+	s.procMu.Unlock()
+	if (ok1 && p1.state() == "running") || (ok2 && p2.state() == "running") {
+		t.Fatalf("expected both instances stopped after terminateManagedForRestart, got present=%v/%v", ok1, ok2)
+	}
+	if got := s.runningManagedTokens(); len(got) != 0 {
+		t.Fatalf("expected no running tokens after terminateManagedForRestart, got %v", got)
 	}
 }

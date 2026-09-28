@@ -10,13 +10,19 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"os/signal"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"representable"
+	ufahostid "ufa-hostid"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
 
 //go:embed frontend/dist
@@ -143,6 +149,14 @@ type FileInfo struct {
 	State      string `json:"state"`
 	UploadedAt int64  `json:"uploaded_at"`
 	ExpiresAt  int64  `json:"expires_at"`
+
+	// Highlighted mirrors local-representative's FileInfo.Highlighted -- see
+	// local-representative/files.go. Without this field, decoding LR's
+	// files-state payload into this struct would silently drop the flag (the
+	// same class of bug as ProcInfo.AutoUpdate, Revision K), so the
+	// file-details dialog's "highlight" toggle could never render as active
+	// when viewed through agent-coordinator.
+	Highlighted bool `json:"highlighted"`
 }
 
 // FilesStateMsg matches the files-state payload sent from LR over representable.
@@ -171,12 +185,62 @@ type ProcInfo struct {
 	StartedAt  int64  `json:"started_at"`
 	ExitCode   int    `json:"exit_code"`
 	Detail     string `json:"detail,omitempty"`
+	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode -- see docs/DevMode.md
+
+	// LoaderManaged is only meaningful on Self: whether that local-representative
+	// was launched by ufa-loader, i.e. whether its "restart" control can be
+	// expected to actually come back up -- see docs/DevMode.md "Loader".
+	LoaderManaged bool `json:"loader_managed,omitempty"`
+
+	// Version is this process's build version -- see docs/DevMode.md
+	// "Versioning". Empty until it has reported at least once.
+	Version string `json:"version,omitempty"`
+
+	// UpdateAvailable is true once this process's on-disk binary answers
+	// "--version" differently than the version currently running. On Self
+	// that's the LR itself -- see docs/DevMode.md "Loader". On a managed
+	// instance it's the same comparison against that application's binary --
+	// see local-representative/procman.go's pollManagedVersions and
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D.
+	UpdateAvailable bool `json:"update_available,omitempty"`
+
+	// PendingVersion is the on-disk version UpdateAvailable refers to -- see
+	// local-representative/procman.go's ProcInfo. Empty whenever
+	// UpdateAvailable is false.
+	PendingVersion string `json:"pending_version,omitempty"`
+
+	// AutoUpdate is only meaningful on Self: whether that local-representative
+	// restarts itself automatically the instant UpdateAvailable goes true --
+	// see local-representative/selfversion.go and
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E.
+	// Without this field, decoding LR's system-state payload into this struct
+	// silently dropped the flag, so the frontend's "auto-update" checkbox
+	// could never render as checked (Revision K).
+	AutoUpdate bool `json:"auto_update,omitempty"`
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.
 type SystemStateMsg struct {
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
+}
+
+// RepoStateMsg mirrors local-representative's dev-repo watcher payload (see
+// local-representative/repowatch.go): its current view of the git repo it's
+// watching for rebuild-worthy changes. Watched is false when that LR wasn't
+// launched with --dev-repo.
+type RepoStateMsg struct {
+	Watched            bool   `json:"watched"`
+	Root               string `json:"root,omitempty"`
+	Dirty              bool   `json:"dirty"`
+	RebuildReady       bool   `json:"rebuild_ready"`
+	Building           bool   `json:"building"`
+	AutoRebuild        bool   `json:"auto_rebuild"`
+	AutoRebuildPending bool   `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
+	Head               string `json:"head,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+	CondocLocked       bool   `json:"condoc_locked,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -226,6 +290,25 @@ type LRSystemStateMsg struct {
 	Managed []ProcInfo `json:"managed"`
 }
 
+// LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
+// clients: local-representative's dev-repo watcher for one host (see
+// local-representative/repowatch.go). Watched is false both when that LR
+// isn't watching a repo and when it isn't connected.
+type LRRepoStateMsg struct {
+	HostID             string `json:"host_id"`
+	Watched            bool   `json:"watched"`
+	Root               string `json:"root,omitempty"`
+	Dirty              bool   `json:"dirty"`
+	RebuildReady       bool   `json:"rebuild_ready"`
+	Building           bool   `json:"building"`
+	AutoRebuild        bool   `json:"auto_rebuild"`
+	AutoRebuildPending bool   `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
+	Head               string `json:"head,omitempty"`
+	LastError          string `json:"last_error,omitempty"`
+	CondocLocked       bool   `json:"condoc_locked,omitempty"`
+}
+
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
 // clients: local-representative's files tab for one host. Upload is relayed
 // through handleFileUploadRelay rather than AC keeping its own copy of the
@@ -258,6 +341,7 @@ type hostState struct {
 	ridealong  *RidealongStateMsg
 	condoc     *CondocStateMsg
 	system     *SystemStateMsg
+	repo       *RepoStateMsg
 	condoccer  *CondoccerStateMsg
 	files      *FilesStateMsg
 	lrHTTPPort string
@@ -269,9 +353,28 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
+	devMode    bool   // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
+	selfHostID string // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
+
+	// loaderManaged is true when this process was launched by ufa-loader (see
+	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart
+	// agent-coordinator" (Step4Prompt.md Revision E) can be expected to
+	// actually come back up rather than just stop.
+	loaderManaged bool
+
+	// selfVersion watches this process's own on-disk binary for a newer
+	// build landing while it runs (see selfversion.go) so the "restart
+	// agent-coordinator" control can offer "restart and update". Only
+	// started when loaderManaged, since that's the only case restart
+	// actually helps; nil (and selfVersion.available() reports false)
+	// otherwise.
+	selfVersion *selfVersionWatch
 
 	hostsMu    sync.RWMutex
 	hostStates map[string]*hostState
+
+	modeMu         sync.RWMutex
+	modeMismatches map[string]ModeMismatchMsg // LR host id -> current mismatch disclosure, mismatched entries only
 }
 
 func newServer() *Server {
@@ -279,9 +382,92 @@ func newServer() *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:    make(map[*wsClient]bool),
-		hostStates: make(map[string]*hostState),
+		clients:        make(map[*wsClient]bool),
+		hostStates:     make(map[string]*hostState),
+		modeMismatches: make(map[string]ModeMismatchMsg),
 	}
+}
+
+// SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
+// status, host identity, and restart-ability to its frontend (see
+// docs/DevMode.md) — sent when a browser client connects and re-broadcast
+// whenever LoaderManaged/UpdateAvailable change, since AC has no
+// representable server above it forwarding a "self" ProcInfo the way LR
+// forwards one for itself. HostID is the same ufahostid.GetHostID() value a
+// co-located local-representative defaults its "-name" to, letting the
+// frontend recognize which connected host (if any) is the one
+// agent-coordinator itself runs on -- see the global topology panel's
+// self-card collapsing in App.tsx. LoaderManaged/UpdateAvailable mirror
+// ProcInfo's same-named fields for a local-representative's own self row,
+// duplicated here (see selfversion.go) rather than reused because it's a
+// legitimate deployment to run agent-coordinator alone on a box with only
+// off-node local-representatives -- driving the "restart agent-coordinator"
+// control added to the global topology view's Details & Control pane, see
+// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision E.
+// Version is this process's own build version (ufaversion.Version), used by
+// the frontend to detect a rebuild+restart out from under an already-open
+// tab and reload itself -- see
+// condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md.
+type SelfInfoMsg struct {
+	DevMode         bool   `json:"dev_mode"`
+	HostID          string `json:"host_id"`
+	LoaderManaged   bool   `json:"loader_managed"`
+	UpdateAvailable bool   `json:"update_available"`
+	Version         string `json:"version"`
+}
+
+// ModeMismatchMsg discloses that a connected local-representative's dev-mode
+// status differs from this agent-coordinator's own (see docs/DevMode.md).
+// Mismatched=false clears a previously-disclosed mismatch.
+type ModeMismatchMsg struct {
+	HostID     string `json:"host_id"`
+	Mismatched bool   `json:"mismatched"`
+	PeerMode   string `json:"peer_mode,omitempty"`
+}
+
+// setModeMismatch records hostID's current mismatch verdict and broadcasts it
+// to every connected browser client.
+func (s *Server) setModeMismatch(hostID string, mismatched bool, peerMode string) {
+	s.modeMu.Lock()
+	if mismatched {
+		s.modeMismatches[hostID] = ModeMismatchMsg{HostID: hostID, Mismatched: true, PeerMode: peerMode}
+	} else {
+		delete(s.modeMismatches, hostID)
+	}
+	s.modeMu.Unlock()
+	s.broadcast("mode-mismatch", ModeMismatchMsg{HostID: hostID, Mismatched: mismatched, PeerMode: peerMode})
+}
+
+// currentModeMismatches returns a snapshot of every host currently disclosed
+// as mismatched, for a newly-connected browser client.
+func (s *Server) currentModeMismatches() []ModeMismatchMsg {
+	s.modeMu.RLock()
+	defer s.modeMu.RUnlock()
+	out := make([]ModeMismatchMsg, 0, len(s.modeMismatches))
+	for _, m := range s.modeMismatches {
+		out = append(out, m)
+	}
+	return out
+}
+
+// selfInfo returns this agent-coordinator instance's current SelfInfoMsg
+// snapshot, including its own restart-ability (see selfversion.go).
+func (s *Server) selfInfo() SelfInfoMsg {
+	return SelfInfoMsg{
+		DevMode:         s.devMode,
+		HostID:          s.selfHostID,
+		LoaderManaged:   s.loaderManaged,
+		UpdateAvailable: s.selfVersion.available(),
+		Version:         ufaversion.Version,
+	}
+}
+
+// broadcastSelfInfo pushes a fresh self-info snapshot to every connected
+// browser client -- called whenever selfVersion's verdict changes (see
+// newSelfVersionWatch in main below), since self-info is otherwise only sent
+// once per connection.
+func (s *Server) broadcastSelfInfo() {
+	s.broadcast("self-info", s.selfInfo())
 }
 
 func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
@@ -353,6 +539,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	ridealong := hs.ridealong
 	condoc := hs.condoc
 	system := hs.system
+	repo := hs.repo
 	condoccer := hs.condoccer
 	files := hs.files
 	hs.mu.RUnlock()
@@ -376,6 +563,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 	}
+	s.sendToClient(c, "lr-repo-state", repoStateMsg(name, repo))
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
@@ -410,6 +598,28 @@ func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
 	}
 }
 
+// repoStateMsg builds a host-scoped lr-repo-state payload; a nil state means
+// no repo-state has been reported yet (treated the same as "not watched").
+func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
+	if r == nil {
+		return LRRepoStateMsg{HostID: hostID}
+	}
+	return LRRepoStateMsg{
+		HostID:             hostID,
+		Watched:            r.Watched,
+		Root:               r.Root,
+		Dirty:              r.Dirty,
+		RebuildReady:       r.RebuildReady,
+		Building:           r.Building,
+		AutoRebuild:        r.AutoRebuild,
+		AutoRebuildPending: r.AutoRebuildPending,
+		AutoRebuildSeconds: r.AutoRebuildSeconds,
+		Head:               r.Head,
+		LastError:          r.LastError,
+		CondocLocked:       r.CondocLocked,
+	}
+}
+
 func condocMsg(hostID string, c *CondocStateMsg) LRCondocMsg {
 	return LRCondocMsg{
 		HostID:    hostID,
@@ -440,6 +650,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial state.
 	go func() {
+		s.sendToClient(c, "self-info", s.selfInfo())
 		s.sendToClient(c, "hosts", HostsMsg{Hosts: s.getHosts()})
 		s.hostsMu.RLock()
 		names := make([]string, 0, len(s.hostStates))
@@ -449,6 +660,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.hostsMu.RUnlock()
 		for _, name := range names {
 			s.sendHostSnapshot(c, name)
+		}
+		for _, mm := range s.currentModeMismatches() {
+			s.sendToClient(c, "mode-mismatch", mm)
 		}
 	}()
 
@@ -531,6 +745,63 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				payload.HostID != "" && payload.ID != "" && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__system:terminate "+payload.ID)
 			}
+		case "lr-restart-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:restart")
+			}
+		case "lr-restart-managed-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+				ID     string `json:"id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.ID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:restart-managed "+payload.ID)
+			}
+		case "lr-rebuild-app":
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:rebuild")
+			}
+		case "lr-set-auto-rebuild":
+			var payload struct {
+				HostID  string `json:"host_id"`
+				Enabled bool   `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				state := "off"
+				if payload.Enabled {
+					state = "on"
+				}
+				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
+			}
+		case "lr-set-auto-update":
+			var payload struct {
+				HostID  string `json:"host_id"`
+				Enabled bool   `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				state := "off"
+				if payload.Enabled {
+					state = "on"
+				}
+				s.reprServer.SendCommand(payload.HostID, "__system:auto-update "+state)
+			}
+		case "ac-restart-app":
+			// Restarts agent-coordinator itself, not any host's LR -- the
+			// global topology view's "restart agent-coordinator" control
+			// (Step4Prompt.md Revision E). No payload: there's only ever one
+			// agent-coordinator to restart.
+			s.requestRestart("operator")
 		}
 	}
 }
@@ -701,15 +972,78 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	return mux
 }
 
+// announceRestartAndExit writes the restartsignal announcement (see
+// ufa-loader/README.md and docs/DevMode.md's "Loader" section) as this
+// process's final act before exiting 0. Callers are expected to have already
+// decided a restart is appropriate; this never returns.
+func (s *Server) announceRestartAndExit(reason string) {
+	log.Printf("announcing a restart (%s) and exiting", reason)
+	if err := restartsignal.Announce(os.Stdout, "agent-coordinator", reason); err != nil {
+		log.Printf("restartsignal.Announce: %v", err)
+	}
+	os.Exit(0)
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart as this process's final act before exiting 0. The signal is sent
+// directly to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself: ufa-loader only watches stdout, it doesn't originate the
+// restart trigger. Unlike requestRestart, this always restarts -- a bare
+// `kill -HUP` without a wrapping ufa-loader is documented to still announce
+// and exit, just with nothing there to relaunch it. Run in its own
+// goroutine; never returns.
+func (s *Server) watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		s.announceRestartAndExit("sighup")
+	}
+}
+
+// requestRestart handles an operator-driven restart request -- the global
+// topology view's "restart agent-coordinator" control (WebSocket
+// "ac-restart-app", see condocs/initialDistributedDevelopmentImpls/
+// Step4Prompt.md Revision E) -- which terminates this process such that a
+// wrapping ufa-loader relaunches it with the same config. Unlike SIGHUP,
+// this refuses (logging why) when the process isn't loaderManaged: the
+// frontend control is greyed out in that case since pressing it wouldn't
+// come back up, and this is the server-side enforcement of that same guard
+// for any caller that bypasses the UI.
+func (s *Server) requestRestart(reason string) {
+	if !s.loaderManaged {
+		log.Printf("restart requested (%s) but agent-coordinator is not loader-managed (no %s) — ignoring", reason, restartsignal.InitEnvVar)
+		return
+	}
+	s.announceRestartAndExit(reason)
+}
+
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	port := flag.String("port", "8083", "HTTP port to listen on")
 	reprPort := flag.String("repr-port", "8084", "TCP port for local-representative connections")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): this agent-coordinator is running from an in-progress branch. Unrelated to --dev.")
 	flag.Parse()
 
 	s := newServer()
+	s.devMode = *devMode
+	s.selfHostID = ufahostid.GetHostID()
 
-	reprSrv, err := representable.NewServer(":" + *reprPort)
+	s.loaderManaged = restartsignal.IsLoaderManaged()
+	if s.loaderManaged {
+		// Only worth polling for an on-disk update when a restart could
+		// actually pick it up -- see selfversion.go.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSelfInfo)
+		if s.selfVersion != nil {
+			go s.selfVersion.watchLoop()
+		}
+	}
+
+	reprSrv, err := representable.NewServer(":"+*reprPort, representable.Mode(s.devMode))
 	if err != nil {
 		log.Fatal("representable server:", err)
 	}
@@ -724,6 +1058,7 @@ func main() {
 			hs.ridealong = nil
 			hs.condoc = nil
 			hs.system = nil
+			hs.repo = nil
 			hs.condoccer = nil
 			hs.files = nil
 			hs.lrHTTPPort = ""
@@ -734,9 +1069,18 @@ func main() {
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
+			s.broadcast("lr-repo-state", LRRepoStateMsg{HostID: name})
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
+			s.setModeMismatch(name, false, "")
 		}
+	})
+
+	// Disclose a dev/ops mode mismatch with a connecting local-representative —
+	// see docs/DevMode.md. Both still exchange heartbeats; representable itself
+	// refuses their state/log/data traffic while mismatched.
+	reprSrv.SetModeMismatchHandler(func(name string, mismatched bool, peerMode string) {
+		s.setModeMismatch(name, mismatched, peerMode)
 	})
 
 	reprSrv.SetLogHandler(func(name, line, kind string) {
@@ -805,6 +1149,14 @@ func main() {
 					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed,
 				})
 			}
+		case "repo-state":
+			var payload RepoStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.repo = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-repo-state", repoStateMsg(name, &payload))
+			}
 		case "condoccer-state":
 			var payload CondoccerStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
@@ -837,6 +1189,7 @@ func main() {
 
 	log.Printf("representable server (LR connections) listening on tcp://localhost:%s", *reprPort)
 
+	go s.watchRestartSignal()
 	go s.broadcastLoop()
 
 	addr := ":" + *port

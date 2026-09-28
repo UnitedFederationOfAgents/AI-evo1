@@ -106,6 +106,14 @@ type FileInfo struct {
 	State      string `json:"state"`       // "cached", "held", or "persisted" -- selects the icon's color
 	UploadedAt int64  `json:"uploaded_at"` // unix seconds
 	ExpiresAt  int64  `json:"expires_at"`  // unix seconds; 0 once State is "persisted"
+
+	// Highlighted is a plain operator-set toggle, independent of State: it
+	// marks a file at the LR/AC level in preparation for future
+	// cross-system functionality (see
+	// condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md).
+	// This increment only implements the marking itself -- a highlighted
+	// file's grid box gets a yellow ring -- no behavior yet hangs off it.
+	Highlighted bool `json:"highlighted"`
 }
 
 // FilesStateMsg is the payload of "files-state" messages: the current
@@ -182,12 +190,13 @@ func ensureFileCacheDir(dir string) error {
 
 // manifestFields is the small subset of a manifest sidecar's flat "key:
 // value" YAML that's actually read back (see writeManifest): whether a
-// host-cache entry is held, the expiry that implies, and the LR identity
-// that created it.
+// host-cache entry is held, the expiry that implies, the LR identity that
+// created it, and whether it's been highlighted (see FileInfo.Highlighted).
 type manifestFields struct {
-	Held      bool
-	ExpiresAt int64
-	Creator   string
+	Held        bool
+	ExpiresAt   int64
+	Creator     string
+	Highlighted bool
 }
 
 // readManifest reads dir/.manifest_<id>.yaml, if present. ok is false when
@@ -216,6 +225,8 @@ func readManifest(dir, id string) (manifestFields, bool) {
 			}
 		case "creator":
 			m.Creator = val
+		case "highlighted":
+			m.Highlighted = val == "true"
 		}
 	}
 	return m, true
@@ -259,9 +270,12 @@ func (s *Server) scanCacheDir() []FileInfo {
 			UploadedAt: info.ModTime().Unix(),
 			ExpiresAt:  info.ModTime().Add(fileCacheTTL).Unix(),
 		}
-		if m, ok := readManifest(s.fileCacheDir, id); ok && m.Held {
-			fi.State = "held"
-			fi.ExpiresAt = m.ExpiresAt
+		if m, ok := readManifest(s.fileCacheDir, id); ok {
+			fi.Highlighted = m.Highlighted
+			if m.Held {
+				fi.State = "held"
+				fi.ExpiresAt = m.ExpiresAt
+			}
 		}
 		files = append(files, fi)
 	}
@@ -288,14 +302,18 @@ func (s *Server) scanStoreDir() []FileInfo {
 			continue
 		}
 		id := e.Name()
-		files = append(files, FileInfo{
+		fi := FileInfo{
 			ID:         id,
 			Name:       displayName(id),
 			Size:       info.Size(),
 			Kind:       classifyKind(id),
 			State:      "persisted",
 			UploadedAt: info.ModTime().Unix(),
-		})
+		}
+		if m, ok := readManifest(s.hostStoreDir, id); ok {
+			fi.Highlighted = m.Highlighted
+		}
+		files = append(files, fi)
 	}
 	return files
 }
@@ -491,28 +509,31 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 		UploadedAt: now.Unix(),
 		ExpiresAt:  now.Add(fileCacheTTL).Unix(),
 	}
-	s.writeManifest(info, s.lrName)
+	s.writeManifest(s.fileCacheDir, info, s.lrName)
 	return info, nil
 }
 
 // writeManifest writes the hidden ".manifest_<id>.yaml" sidecar for a
-// host-cache entry (see manifestPrefix). It's a flat "key: value" mapping,
-// the same small YAML subset ufa-configurable reads elsewhere in this repo.
-// name/kind/size/uploaded_at are for an operator to read by hand -- nothing
-// parses them back. held/expires_at ARE read back, by readManifest, so a
-// held file's extended TTL survives an LR restart (the data file's own mtime
-// only ever reflects its original upload time). creator records which LR
-// (see Server.lrName, the same identity used as this LR's host/head id when
-// connecting to agent-coordinator) originally uploaded the file -- callers
-// that rewrite an existing manifest (e.g. handleFileHold) should pass back
-// whatever readManifest reported rather than the current lrName, so the
-// original creator survives even if this LR were ever renamed between
-// upload and hold. A write failure is logged and otherwise swallowed: the
-// action that triggered it (upload/hold) already succeeded and shouldn't
-// fail over a sidecar note.
-func (s *Server) writeManifest(info FileInfo, creator string) {
+// host-cache or host-store entry (see manifestPrefix) into dir -- the
+// directory currently holding it, so a "persisted" file's manifest lands in
+// the host-store rather than being left behind in the host-cache. It's a
+// flat "key: value" mapping, the same small YAML subset ufa-configurable
+// reads elsewhere in this repo. name/kind/size/uploaded_at are for an
+// operator to read by hand -- nothing parses them back. held/expires_at/
+// highlighted ARE read back, by readManifest, so a held file's extended TTL
+// and a file's highlight marking both survive an LR restart (the data
+// file's own mtime only ever reflects its original upload time). creator
+// records which LR (see Server.lrName, the same identity used as this LR's
+// host/head id when connecting to agent-coordinator) originally uploaded the
+// file -- callers that rewrite an existing manifest (e.g. handleFileHold,
+// handleFileHighlight) should pass back whatever readManifest reported
+// rather than the current lrName, so the original creator survives even if
+// this LR were ever renamed in between. A write failure is logged and
+// otherwise swallowed: the action that triggered it (upload/hold/highlight)
+// already succeeded and shouldn't fail over a sidecar note.
+func (s *Server) writeManifest(dir string, info FileInfo, creator string) {
 	var b strings.Builder
-	b.WriteString("# host-cache manifest -- hidden from the files tab; held/expires_at/creator are read back by readManifest\n")
+	b.WriteString("# host-cache manifest -- hidden from the files tab; held/expires_at/creator/highlighted are read back by readManifest\n")
 	fmt.Fprintf(&b, "id: %q\n", info.ID)
 	fmt.Fprintf(&b, "name: %q\n", info.Name)
 	fmt.Fprintf(&b, "kind: %s\n", info.Kind)
@@ -521,7 +542,8 @@ func (s *Server) writeManifest(info FileInfo, creator string) {
 	fmt.Fprintf(&b, "held: %t\n", info.State == "held")
 	fmt.Fprintf(&b, "expires_at: %s\n", time.Unix(info.ExpiresAt, 0).UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "creator: %q\n", creator)
-	path := filepath.Join(s.fileCacheDir, manifestName(info.ID))
+	fmt.Fprintf(&b, "highlighted: %t\n", info.Highlighted)
+	path := filepath.Join(dir, manifestName(info.ID))
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		log.Printf("files: failed to write manifest for %s: %v", info.ID, err)
 	}
@@ -546,10 +568,11 @@ func dispositionFilename(name string) string {
 }
 
 // handleFileItem dispatches the "/api/files/<id>" subtree: GET/DELETE act
-// directly on "<id>" (raw bytes / delete), while POST "<id>/hold" and POST
-// "<id>/persist" drive the file-details dialog's state-changing buttons. None
-// of these are gated on proxiedHeader — see relayedUploadHeader's comment for
-// why that's a deliberate difference from upload.
+// directly on "<id>" (raw bytes / delete), while POST "<id>/hold", POST
+// "<id>/persist", and POST "<id>/highlight" drive the file-details dialog's
+// state-changing buttons. None of these are gated on proxiedHeader — see
+// relayedUploadHeader's comment for why that's a deliberate difference from
+// upload.
 func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/files/")
 	id, action, hasAction := strings.Cut(rest, "/")
@@ -563,6 +586,8 @@ func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
 			s.handleFileHold(w, r, id)
 		case r.Method == http.MethodPost && action == "persist":
 			s.handleFilePersist(w, r, id)
+		case r.Method == http.MethodPost && action == "highlight":
+			s.handleFileHighlight(w, r, id)
 		default:
 			http.NotFound(w, r)
 		}
@@ -643,21 +668,73 @@ func (s *Server) handleFileHold(w http.ResponseWriter, r *http.Request, id strin
 		http.NotFound(w, r)
 		return
 	}
+	m, _ := readManifest(s.fileCacheDir, id)
 	info := FileInfo{
-		ID:         id,
-		Name:       displayName(id),
-		Size:       fi.Size(),
-		Kind:       classifyKind(id),
-		State:      "held",
-		UploadedAt: fi.ModTime().Unix(),
-		ExpiresAt:  time.Now().Add(holdTTL).Unix(),
+		ID:          id,
+		Name:        displayName(id),
+		Size:        fi.Size(),
+		Kind:        classifyKind(id),
+		State:       "held",
+		UploadedAt:  fi.ModTime().Unix(),
+		ExpiresAt:   time.Now().Add(holdTTL).Unix(),
+		Highlighted: m.Highlighted,
 	}
 	creator := s.lrName
-	if m, ok := readManifest(s.fileCacheDir, id); ok && m.Creator != "" {
+	if m.Creator != "" {
 		creator = m.Creator
 	}
-	s.writeManifest(info, creator)
+	s.writeManifest(s.fileCacheDir, info, creator)
 	log.Printf("files: held %s (72h cache)", id)
+	s.broadcastFiles()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(info)
+}
+
+// handleFileHighlight implements the file-details dialog's "highlight"
+// toggle: flips a file's Highlighted marking in its manifest sidecar. Unlike
+// hold/persist this carries no TTL implications and doesn't move the file,
+// so it works from any state -- cached, held, or persisted -- writing the
+// manifest back into whichever directory (host-cache or host-store)
+// currently holds the file (see locateFile). This increment only implements
+// the marking itself, in preparation for future cross-system functionality
+// -- see condocs/initialDistributedDevelopmentImpls/Step5SubstepRPrompt.md.
+func (s *Server) handleFileHighlight(w http.ResponseWriter, r *http.Request, id string) {
+	dir, ok := s.locateFile(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	fi, err := os.Stat(filepath.Join(dir, id))
+	if err != nil || fi.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+
+	m, _ := readManifest(dir, id)
+	info := FileInfo{
+		ID:          id,
+		Name:        displayName(id),
+		Size:        fi.Size(),
+		Kind:        classifyKind(id),
+		UploadedAt:  fi.ModTime().Unix(),
+		Highlighted: !m.Highlighted,
+	}
+	switch {
+	case dir == s.hostStoreDir:
+		info.State = "persisted"
+	case m.Held:
+		info.State = "held"
+		info.ExpiresAt = m.ExpiresAt
+	default:
+		info.State = "cached"
+		info.ExpiresAt = fi.ModTime().Add(fileCacheTTL).Unix()
+	}
+	creator := s.lrName
+	if m.Creator != "" {
+		creator = m.Creator
+	}
+	s.writeManifest(dir, info, creator)
+	log.Printf("files: highlighted=%t for %s", info.Highlighted, id)
 	s.broadcastFiles()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(info)

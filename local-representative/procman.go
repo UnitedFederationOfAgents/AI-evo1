@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	ufaversion "ufa-version"
 )
 
 // ProcInfo is a snapshot of one process shown on the "system" tab: either
@@ -27,6 +29,59 @@ type ProcInfo struct {
 	StartedAt  int64  `json:"started_at"`       // unix seconds
 	ExitCode   int    `json:"exit_code"`        // meaningful once status != "running"
 	Detail     string `json:"detail,omitempty"` // launch/exit error text, if any
+	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode — see docs/DevMode.md
+
+	// LoaderManaged is only meaningful on Self: whether this local-representative
+	// process was launched by ufa-loader (see restartsignal.IsLoaderManaged),
+	// i.e. whether the system tab's "restart" control can be expected to
+	// actually come back up rather than just stop this process for good.
+	LoaderManaged bool `json:"loader_managed,omitempty"`
+
+	// Version is this process's build version (ufa-version.Version — see
+	// docs/DevMode.md "Versioning"). On Self it's this local-representative
+	// binary's own compiled-in version; on a managed instance it's whatever
+	// that instance most recently reported over representable's "version"
+	// data message (see setManagedVersion) -- empty until it has connected
+	// and reported at least once, or if it doesn't speak the protocol at
+	// all yet.
+	Version string `json:"version,omitempty"`
+
+	// UpdateAvailable is true once the on-disk binary for this process
+	// answers "--version" differently than the version currently running.
+	// On Self that's this local-representative binary itself (see
+	// selfversion.go) -- i.e. a newer build has landed since startup and
+	// pressing "restart" would pick it up; only ever true for a
+	// loader-managed process, see docs/DevMode.md "Loader". On a managed
+	// instance it's the same comparison against that application's resolved
+	// binary (see pollManagedVersions) -- i.e. a rebuild has landed since
+	// this instance was launched and re-launching it (terminate + launch)
+	// would pick it up. Drives the topology view's per-sub-app halo (see
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
+	UpdateAvailable bool `json:"update_available,omitempty"`
+
+	// PendingVersion is the on-disk version that UpdateAvailable refers to --
+	// i.e. what Version would become after a restart (Self) or a
+	// terminate+relaunch (a managed instance) picked up the update. Empty
+	// until the corresponding poll (selfversion.go / pollManagedVersions) has
+	// run at least once, and always empty when UpdateAvailable is false.
+	// Drives the system tab's per-process drill-down (see
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision J).
+	PendingVersion string `json:"pending_version,omitempty"`
+
+	// AutoUpdate is only meaningful on Self: whether an available update
+	// (UpdateAvailable above) should trigger a restart on its own, without an
+	// operator pressing the "update and restart" control -- the system tab's
+	// "auto-update" checkbox (see selfversion.go and
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E).
+	AutoUpdate bool `json:"auto_update,omitempty"`
+}
+
+// VersionMsg is the payload of a representable "version" data message: sent
+// once a managed sub-application connects, reporting its own build version
+// so LR can surface it on the system tab alongside its own (see
+// docs/DevMode.md "Versioning").
+type VersionMsg struct {
+	Version string `json:"version"`
 }
 
 // SystemStateMsg is the payload of "system-state" WebSocket messages.
@@ -67,6 +122,12 @@ var managedApps = map[string]launchSpec{
 			if s.condoccerRoot != "" {
 				args = append(args, "--root", s.condoccerRoot)
 			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md. A dev/ops mismatch would otherwise leave the
+				// pair unable to do more than exchange health information.
+				args = append(args, "--dev-mode")
+			}
 			return args
 		},
 	},
@@ -81,7 +142,13 @@ var managedApps = map[string]launchSpec{
 			// separate --remote flag), and --lr-port points it at our
 			// representable server: a fully machine-driven auto-launch chain lands
 			// ready to drive from local-representative rather than in the foreground.
-			return []string{"--auto-connect", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+			args := []string{"--auto-connect", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+			if s.devMode {
+				// Cascade this LR's dev mode to every FC it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
 		},
 		buildEnv: func(s *Server) []string {
 			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
@@ -91,11 +158,17 @@ var managedApps = map[string]launchSpec{
 			// terminal to hand control to LR. Environment variables pass through
 			// every wrapper untouched, and FC honours them below CLI flags.
 			// FC_AUTO_CONNECT alone is sufficient: it also selects remote control.
-			return []string{
+			// FC_DEV_MODE mirrors it for --dev-mode, so a dropped argv still lands
+			// FC in the mode its launching LR is in (see docs/DevMode.md).
+			env := []string{
 				"FC_AUTO_CONNECT=1",
 				"FC_LR_HOST=localhost",
 				"FC_LR_PORT=" + s.heartbeatPort,
 			}
+			if s.devMode {
+				env = append(env, "FC_DEV_MODE=1")
+			}
+			return env
 		},
 	},
 }
@@ -153,7 +226,14 @@ func (s *Server) systemState() SystemStateMsg {
 	s.procMu.Lock()
 	procs := make([]ProcInfo, 0, len(s.managed))
 	for _, p := range s.managed {
-		procs = append(procs, p.info())
+		info := p.info()
+		// Every instance LR launches cascades LR's own mode (see
+		// docs/DevMode.md) — there is no per-instance override.
+		info.DevMode = s.devMode
+		info.Version = s.managedVersion(p.app)
+		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
+		info.PendingVersion = s.managedPendingVersionFor(p.app)
+		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
 	sort.Slice(procs, func(i, j int) bool {
@@ -165,13 +245,139 @@ func (s *Server) systemState() SystemStateMsg {
 
 	return SystemStateMsg{
 		Self: ProcInfo{
-			Name:      s.lrName,
-			PID:       os.Getpid(),
-			Status:    "running",
-			Managed:   false,
-			StartedAt: s.selfStart.Unix(),
+			Name:            s.lrName,
+			PID:             os.Getpid(),
+			Status:          "running",
+			Managed:         false,
+			StartedAt:       s.selfStart.Unix(),
+			DevMode:         s.devMode,
+			LoaderManaged:   s.loaderManaged,
+			Version:         ufaversion.Version,
+			UpdateAvailable: s.selfVersion.available(),
+			PendingVersion:  s.selfVersion.pending(),
+			AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		},
 		Managed: procs,
+	}
+}
+
+// setManagedVersion records the build version a managed sub-application most
+// recently reported over representable (see the "version" data message
+// handled in main.go), broadcasting a fresh system-state if it's new or has
+// changed since the last report.
+func (s *Server) setManagedVersion(name, version string) {
+	s.versionMu.Lock()
+	changed := s.managedVersions[name] != version
+	if changed {
+		s.managedVersions[name] = version
+	}
+	s.versionMu.Unlock()
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// managedVersion returns the build version most recently reported by the
+// named application, or "" if none has connected/reported yet.
+func (s *Server) managedVersion(name string) string {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	return s.managedVersions[name]
+}
+
+// managedUpdateAvailableFor reports whether the named managed application's
+// on-disk binary currently differs from the version most recently reported
+// by a connected instance (see pollManagedVersions). Always false for a name
+// that has never reported a version, mirroring selfVersion.available() being
+// false until its own first poll.
+func (s *Server) managedUpdateAvailableFor(name string) bool {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	return s.managedUpdateAvailable[name]
+}
+
+// managedPendingVersionFor returns the on-disk version that would replace
+// the named application's currently-reported version on its next relaunch,
+// or "" if no update is available (or none has been observed yet) --
+// mirrors managedUpdateAvailableFor's guard so callers don't need to check
+// both.
+func (s *Server) managedPendingVersionFor(name string) string {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	if !s.managedUpdateAvailable[name] {
+		return ""
+	}
+	return s.managedPendingVersion[name]
+}
+
+// pollManagedVersions re-derives managedUpdateAvailable for every managed
+// application that has reported a running version at least once, by
+// resolving that application's binary the same way launchManaged would and
+// comparing its own "--version" output against the version last reported
+// over representable (managedVersion). This is the per-sub-application
+// analogue of selfVersionWatch.poll -- the difference is that the "running"
+// side here is whatever a connected instance most recently self-reported,
+// not a value fixed at this process's own startup, since a managed instance
+// can be launched (and can report in) at any point in LR's lifetime.
+// Broadcasts a fresh system-state if anything changed.
+func (s *Server) pollManagedVersions() {
+	s.versionMu.RLock()
+	running := make(map[string]string, len(s.managedVersions))
+	for name, v := range s.managedVersions {
+		running[name] = v
+	}
+	s.versionMu.RUnlock()
+
+	changed := false
+	for name, runningVersion := range running {
+		if runningVersion == "" {
+			continue
+		}
+		spec, ok := managedApps[name]
+		if !ok {
+			continue
+		}
+		bin, err := s.resolveAppBinary(name, spec.binName)
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(bin, "--version").Output()
+		if err != nil {
+			log.Printf("managed-version: %s --version failed: %v", bin, err)
+			continue
+		}
+		// Most managed apps answer "--version" with the bare version string
+		// (ufaversion.HandleVersionFlag), matching what they self-report over
+		// representable's "version" message (runningVersion, above) -- but
+		// federation-command hand-rolls its own --version handling and prints
+		// "federation-command <version>" instead, for a friendlier terminal
+		// experience. Strip that app-name prefix before comparing so FC isn't
+		// permanently flagged as having a pending update.
+		onDisk := strings.TrimSpace(string(out))
+		onDisk = strings.TrimPrefix(onDisk, spec.binName+" ")
+		updated := onDisk != runningVersion
+
+		s.versionMu.Lock()
+		s.managedPendingVersion[name] = onDisk
+		if s.managedUpdateAvailable[name] != updated {
+			s.managedUpdateAvailable[name] = updated
+			changed = true
+		}
+		s.versionMu.Unlock()
+	}
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// watchManagedVersions polls pollManagedVersions on selfVersionPollInterval,
+// forever. Run in its own goroutine, only while in dev mode (see main.go);
+// never returns.
+func (s *Server) watchManagedVersions() {
+	ticker := time.NewTicker(selfVersionPollInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.pollManagedVersions()
 	}
 }
 
@@ -192,6 +398,11 @@ func (s *Server) broadcastSystemState() {
 //
 //	__system:launch <app>
 //	__system:terminate <instance-id-or-app>
+//	__system:restart
+//	__system:restart-managed <instance-id-or-app>
+//	__system:rebuild
+//	__system:auto-rebuild <on|off>
+//	__system:auto-update <on|off>
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -213,6 +424,22 @@ func (s *Server) handleSystemCommand(raw string) {
 		if err := s.terminateManaged(arg); err != nil {
 			log.Printf("system: remote terminate %q failed: %v", arg, err)
 		}
+	case "restart":
+		s.requestRestart("operator")
+	case "restart-managed":
+		if arg == "" {
+			log.Printf("system: remote restart-managed command missing target")
+			return
+		}
+		if err := s.restartManaged(arg); err != nil {
+			log.Printf("system: remote restart-managed %q failed: %v", arg, err)
+		}
+	case "rebuild":
+		s.requestRebuild("operator")
+	case "auto-rebuild":
+		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
+	case "auto-update":
+		s.setAutoUpdate(arg == "on" || arg == "true" || arg == "1")
 	default:
 		log.Printf("system: ignoring unrecognised remote system command %q", raw)
 	}
@@ -614,6 +841,141 @@ func (s *Server) terminateManaged(target string) error {
 		}
 	}()
 	return nil
+}
+
+// restartManaged terminates a managed instance and, once it has actually
+// stopped, launches a fresh instance of the same application -- the system
+// tab's per-managed-row "restart"/"restart and update" control (see
+// Step4Prompt.md Revision H). Unlike self's "restart" (which just relies on
+// ufa-loader to relaunch LR), a managed sub-app has no loader watching it, so
+// LR does the terminate-then-launch itself. target is an instance id, or a
+// bare app name when only one instance is present.
+func (s *Server) restartManaged(target string) error {
+	s.procMu.Lock()
+	id := s.resolveInstanceLocked(target)
+	p := s.managed[id]
+	s.procMu.Unlock()
+	if p == nil {
+		return fmt.Errorf("%q is not managed by this local-representative", target)
+	}
+	app := p.app
+
+	if err := s.terminateManaged(id); err != nil {
+		return err
+	}
+
+	// terminateManaged's SIGTERM/SIGKILL escalation runs asynchronously, so
+	// wait for the instance to actually stop before launching its
+	// replacement -- otherwise a singleton app's launch would race the still
+	// -running old instance and be rejected as "already running".
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s.procMu.Lock()
+		cur, stillPresent := s.managed[id]
+		s.procMu.Unlock()
+		if !stillPresent || cur.state() != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Drop the now-stopped instance (mirrors the "dismiss" action) so the
+	// replacement doesn't sit alongside a stale exited row.
+	s.procMu.Lock()
+	delete(s.managed, id)
+	s.procMu.Unlock()
+	s.broadcastSystemState()
+
+	if _, err := s.launchManaged(app); err != nil {
+		return fmt.Errorf("restarted %s but relaunch failed: %w", app, err)
+	}
+	return nil
+}
+
+// runningManagedTokens returns auto-launch-style tokens ("app" or "app:N",
+// see parseAutoLaunchEntry) for every currently-running LR-launched managed
+// instance, one token per app name, ordered by name. This is the snapshot a
+// restart attaches to its announcement (see lrState.ManagedApps in
+// reststate.go) so the instance replacing this one relaunches the same
+// sub-apps -- Step4Prompt.md Revision I. Every entry in s.managed today is
+// LR-launched (there is no "manage-on-connect" yet), so nothing is excluded
+// here on that basis.
+func (s *Server) runningManagedTokens() []string {
+	counts := map[string]int{}
+	s.procMu.Lock()
+	for _, p := range s.managed {
+		if p.state() == "running" {
+			counts[p.app]++
+		}
+	}
+	s.procMu.Unlock()
+
+	apps := make([]string, 0, len(counts))
+	for app := range counts {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+
+	tokens := make([]string, 0, len(apps))
+	for _, app := range apps {
+		if n := counts[app]; n == 1 {
+			tokens = append(tokens, app)
+		} else {
+			tokens = append(tokens, fmt.Sprintf("%s:%d", app, n))
+		}
+	}
+	return tokens
+}
+
+// terminateManagedForRestart terminates every currently-running LR-launched
+// managed instance and waits (bounded) for them to actually stop -- LR's own
+// last act before announcing a restart and exiting (see
+// announceRestartAndExit and Step4Prompt.md Revision I). Without this, those
+// instances would be orphaned by LR's exit rather than cleanly restarted
+// alongside it: the newly launched LR instance relaunches fresh ones from
+// the ManagedApps snapshot captured just before this runs (see
+// runningManagedTokens/currentState), so leaving the old ones running would
+// merely double them up. LR is exiting either way, so a termination failure
+// here is logged, not fatal.
+func (s *Server) terminateManagedForRestart() {
+	s.procMu.Lock()
+	ids := make([]string, 0, len(s.managed))
+	for id, p := range s.managed {
+		if p.state() == "running" {
+			ids = append(ids, id)
+		}
+	}
+	s.procMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+
+	log.Printf("restart: terminating %d LR-launched managed instance(s) before exit: %s", len(ids), strings.Join(ids, ", "))
+	for _, id := range ids {
+		if err := s.terminateManaged(id); err != nil {
+			log.Printf("restart: terminating %s: %v", id, err)
+		}
+	}
+
+	// terminateManaged's SIGTERM/SIGKILL escalation runs asynchronously (same
+	// pattern as restartManaged's wait loop above); give every instance a
+	// chance to actually stop before this process exits, rather than racing
+	// still-live children out from under the restart.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		stillRunning := 0
+		s.procMu.Lock()
+		for _, id := range ids {
+			if p, ok := s.managed[id]; ok && p.state() == "running" {
+				stillRunning++
+			}
+		}
+		s.procMu.Unlock()
+		if stillRunning == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // recordLaunchFailure keeps a failed launch visible on the system tab instead of

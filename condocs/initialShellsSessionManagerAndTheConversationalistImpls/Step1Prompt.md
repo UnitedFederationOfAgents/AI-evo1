@@ -153,12 +153,16 @@ This is the fix I'm confident in given the environment's constraints (confirmed 
 
 **Summary:** The build failure is because `go.sum` never got the entries for the AWS SDK dependencies added in Revision D (a known gap flagged in that Reply's caveat) — `go build`'s default `-mod=readonly` refuses to proceed without them. Since I still have no network access in this sandbox to run `go mod tidy` and generate correct checksums myself (verified via direct attempts, including via `curl` and `WebFetch`, all blocked), I added `go mod tidy` as a step in `the-conversationalist/build-go` (Makefile) so the build self-heals against the network the next time it's run in an environment that has one — as the failing log shows yours does. This is a stopgap: once someone runs `make -C the-conversationalist deps` and commits the resulting `go.sum`, that line becomes a no-op and can be dropped to match the other subprojects' `build-go`, which don't auto-tidy.
 
+## Resource 1 -- DebugConvo
 
-## <REPLACE-Revision|Retry> F
+Error during transcribe
 
-<REPLACE-PROMPT>
+- [Screenshot_20260928-203218.png](f403b0be_Screenshot_20260928-203218.png)
 
+## Revision F
 
-## Human-Prompt
+We get an error when we attempt to transcribe, see the 'debugconvo' resource.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Note that we have default AWS credentials available (the standard env vars in this case).
+
+Let's either fix this immediately or respond with necessary data-collection steps.

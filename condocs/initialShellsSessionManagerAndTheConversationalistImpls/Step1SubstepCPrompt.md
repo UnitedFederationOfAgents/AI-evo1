@@ -56,3 +56,26 @@ You've hit your session limit · resets 6:30pm (UTC)
 This functionality works well in local-representative, but despite seeing the version number in the 'No agent-coordinator view update' on the system global tab, we do not see the UI updates working in AC.
 
 Let's revisit this and either fix it or explain why we should plan the fix in more detail first.
+
+
+prompt: [`f5077e8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f5077e878ab91685a2fdbb783da36df40107ae34) → reply: [`3e985c2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3e985c2c9e638c5f7929f711b12a7ba569001223)
+
+## Reply C
+
+Investigated why AC's UI update wasn't showing despite the version bump being visible. No code changes were needed — this is existing, documented behavior, not a bug:
+
+**Root cause:** `local-representative`'s dev-repo watcher runs `make deploy-dev-binaries`, which rebuilds *every* sub-project's binary (including `agent-coordinator`'s, frontend and all) onto disk. But per `docs/DevMode.md`'s "Loader" section, AC's own restart is deliberately **not** automatic the way LR's can be — it's a manual, one-shot action ("`agent-coordinator`'s own restart... stays a manual, one-shot action via **restart AC**"). So a fresh AC binary landing on disk only flips AC's `update_available`/pending-version state (which is what you saw update in the system/global tab — that's fed straight from the freshly-rebuilt on-disk `--version`, independent of which process is actually running). The AC *process* itself — and therefore the JS bundle it's still serving to your open tab — stays on the old build until it's actually restarted.
+
+**Resolution:** click **restart AC** (or **restart and update AC**, shown orange when an update's pending) in the global topology view's Details & Control pane — select the host AC runs on, then use the "agent-coordinator" section's restart control. Once that process restarts, your browser tab's WS reconnects, the existing version-mismatch check (`App.tsx`'s `self-info` handler) will see the new version and auto-reload, and the header version tag + screenshot button will appear — exactly like LR did after its own auto-update fired.
+
+No fix is warranted in the screenshot-tool code itself; I'd recommend closing this out as expected behavior rather than a defect, unless you want the "network update all"/auto-update semantics extended to cover AC's own restart automatically, which would be a separate, larger design change.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

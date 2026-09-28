@@ -51,11 +51,8 @@ prompt: [`f738bb2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f
 You've hit your session limit · resets 6:30pm (UTC)
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+This functionality works well in local-representative, but despite seeing the version number in the 'No agent-coordinator view update' on the system global tab, we do not see the UI updates working in AC.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's revisit this and either fix it or explain why we should plan the fix in more detail first.

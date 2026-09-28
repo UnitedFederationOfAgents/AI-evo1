@@ -59,6 +59,11 @@ Applied the same full-pane treatment to agent-coordinator's per-host view that l
 [Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep C is now active. Interact with the substep file (Step1SubstepCPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

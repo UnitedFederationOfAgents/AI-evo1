@@ -129,11 +129,6 @@ prompt: [`4e28eaf`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4
 Implemented Revision F's markup system: local-representative's `files.go` gained a `.markup_<id>.jpg` sidecar convention (disallowed from upload, hidden from listing, swept/moved/deleted alongside its image, mirroring `.manifest_`) plus five new routes (`GET`/`POST .../markup`, `.../markup/commit`, `.../markup/cancel`, `.../markup/copy`) and a `FileInfo.MarkedUp` field, all ungated on the AC-proxy header so agent-coordinator's files tab picks them up for free through its existing transparent proxy (mirrored into its own `FileInfo` struct). Both frontends got a new `MarkupDialog` — a colour palette plus click-drag arrow/rectangle and click-to-place text tools drawn onto a canvas, autosaving the flattened composite after every stroke — reachable via a new "markup" button on any image file, with a bright-orange grid-box border while a session is open; the file-detail pane's "enter →" button is now just "view" in both apps. Added Go tests for the new sidecar/route behavior (including a JSON round-trip guard on AC's mirrored field) and updated `docs/CurrentPersistentFiles.md`, `local-representative/README.md`, and `agent-coordinator/docs/architecture.md`; as before, `tsc`/`go build` are blocked in this sandbox, so I reviewed everything by hand — recommend `make -C local-representative build` and `make -C agent-coordinator build` before merging.
 
 
-## <REPLACE-Revision|Retry> G
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1790632257 (Mon Sep 28 09:50:57 PM UTC 2026).

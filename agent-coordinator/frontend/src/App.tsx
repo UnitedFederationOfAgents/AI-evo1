@@ -380,6 +380,17 @@ const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'wo
 const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
+// Tabs whose content is another app's own UI, embedded via same-origin
+// iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1Prompt.md Revision A: "nested UI" tabs; Revision B: bring this host
+// view up to the same full-pane treatment local-representative already got).
+// These skip the service-name heading and health-indicator every other tab
+// gets and instead get a full tab pane for the iframe plus a slim status bar
+// under the tab bar, so the embedded app's own UI (including its own
+// "DEV MODE" border, when that sub-app runs in dev mode) fills the space
+// instead of floating in a padded, header-topped box.
+const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo'])
+
 // Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
 // BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
 // stays scoped per-tab, and clears when the tab actually closes rather than
@@ -2168,6 +2179,7 @@ function LRView({
   const viewerFile = activeTab === 'files' && viewerFileId
     ? files.find(f => f.id === viewerFileId) ?? null
     : null
+  const isEmbedTab = EMBED_TABS.has(activeTab)
 
   return (
     <div className="lr-view">
@@ -2198,116 +2210,122 @@ function LRView({
           ))}
         </div>
       </div>
-      <div className="main-pane">
-        <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
-          <div className="service-view">
-            <div className="service-name">{activeTab}</div>
-            {activeTab !== 'system' && activeTab !== 'files' && (
-              <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
-                <span className="health-dot" />
-                <span className="health-label">{getServiceStatus(activeTab)}</span>
+      {isEmbedTab && (
+        <div className={`embed-status-bar health-${getServiceStatus(activeTab)}`}>
+          <span className="health-dot" />
+          <span className="health-label">{activeTab} — {getServiceStatus(activeTab)}</span>
+        </div>
+      )}
+      <div className={`main-pane${isEmbedTab ? ' main-pane-embed' : ''}`}>
+        {isEmbedTab ? (
+          !active ? (
+            <div className="service-empty service-empty-embed">local-representative on this host is not connected</div>
+          ) : activeTab === 'condoccer' ? (
+            data.condoccer ? (
+              <iframe
+                ref={condoccerFrameRef}
+                className="embed-frame"
+                src={`/host/${host.id}/condoccer/${condoccerHash}`}
+                title={`condoccer on ${host.label}`}
+                onLoad={handleCondoccerLoad}
+              />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                condoccer is not running on this host — launch it from the system tab
               </div>
-            )}
-            {activeTab === 'system' && (
-              <SystemPanel
-                hostId={host.id}
-                state={data.system}
-                active={active}
-                fcState={data.fcState}
-                repoState={data.repo}
-                onLaunch={sendLRLaunchApp}
-                onTerminate={sendLRTerminateApp}
-                onRestart={sendLRRestartApp}
-                onRestartManaged={sendLRRestartManagedApp}
-                onRebuild={sendLRRebuildApp}
-                onSetAutoRebuild={sendLRSetAutoRebuild}
-                onSetAutoUpdate={sendLRSetAutoUpdate}
-              />
-            )}
-            {activeTab === 'files' && viewerFileId ? (
-              <FileViewer
-                hostId={host.id}
-                fileId={viewerFileId}
-                file={viewerFile}
-                onBack={() => setViewerFileId(null)}
-              />
-            ) : activeTab === 'files' && (
-              <FilesPanel
-                files={files}
-                active={active}
-                selectedId={selectedFileId}
-                onSelect={setSelectedFileId}
-                onEnter={setViewerFileId}
-                onUpload={f => uploadFiles(host.id, f)}
-              />
-            )}
-            {activeTab === 'federation-command' && (
-              <>
-                {data.ridealong && (
-                  <RidealongPanel
-                    hostId={host.id}
-                    state={data.ridealong}
-                    fcState={data.fcState}
-                    sendLRRidealongCommand={sendLRRidealongCommand}
-                  />
-                )}
-                {data.condoc && !data.ridealong && (
-                  <CondocPanel state={data.condoc} fcState={data.fcState} />
-                )}
-                <FCCommandPanel
+            )
+          ) : activeTab === 'sessions' ? (
+            data.sessions ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/sessions/`} title={`sessions on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                sessions is not running on this host — launch it from the system tab
+              </div>
+            )
+          ) : (
+            data.convo ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/convo/`} title={`convo on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                convo is not running on this host — launch it from the system tab
+              </div>
+            )
+          )
+        ) : (
+          <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+            <div className="service-view">
+              <div className="service-name">{activeTab}</div>
+              {activeTab === 'federation-command' && (
+                <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
+                  <span className="health-dot" />
+                  <span className="health-label">{getServiceStatus(activeTab)}</span>
+                </div>
+              )}
+              {activeTab === 'system' && (
+                <SystemPanel
                   hostId={host.id}
+                  state={data.system}
+                  active={active}
                   fcState={data.fcState}
-                  fcLog={data.fcLog}
-                  sendLRCommand={sendLRCommand}
+                  repoState={data.repo}
+                  onLaunch={sendLRLaunchApp}
+                  onTerminate={sendLRTerminateApp}
+                  onRestart={sendLRRestartApp}
+                  onRestartManaged={sendLRRestartManagedApp}
+                  onRebuild={sendLRRebuildApp}
+                  onSetAutoRebuild={sendLRSetAutoRebuild}
+                  onSetAutoUpdate={sendLRSetAutoUpdate}
                 />
-              </>
-            )}
-            {activeTab === 'condoccer' && active && (
-              data.condoccer ? (
-                <iframe
-                  ref={condoccerFrameRef}
-                  className="condoccer-frame"
-                  src={`/host/${host.id}/condoccer/${condoccerHash}`}
-                  title={`condoccer on ${host.label}`}
-                  onLoad={handleCondoccerLoad}
+              )}
+              {activeTab === 'files' && viewerFileId ? (
+                <FileViewer
+                  hostId={host.id}
+                  fileId={viewerFileId}
+                  file={viewerFile}
+                  onBack={() => setViewerFileId(null)}
                 />
-              ) : (
-                <div className="service-empty">
-                  condoccer is not running on this host — launch it from the system tab
-                </div>
-              )
-            )}
-            {activeTab === 'sessions' && active && (
-              data.sessions ? (
-                <iframe className="condoccer-frame" src={`/host/${host.id}/sessions/`} title={`sessions on ${host.label}`} />
-              ) : (
-                <div className="service-empty">
-                  sessions is not running on this host — launch it from the system tab
-                </div>
-              )
-            )}
-            {activeTab === 'convo' && active && (
-              data.convo ? (
-                <iframe className="condoccer-frame" src={`/host/${host.id}/convo/`} title={`convo on ${host.label}`} />
-              ) : (
-                <div className="service-empty">
-                  convo is not running on this host — launch it from the system tab
-                </div>
-              )
-            )}
-            {activeTab !== 'federation-command' && activeTab !== 'system' && activeTab !== 'files' && !active && (
-              <div className="service-empty">local-representative on this host is not connected</div>
+              ) : activeTab === 'files' && (
+                <FilesPanel
+                  files={files}
+                  active={active}
+                  selectedId={selectedFileId}
+                  onSelect={setSelectedFileId}
+                  onEnter={setViewerFileId}
+                  onUpload={f => uploadFiles(host.id, f)}
+                />
+              )}
+              {activeTab === 'federation-command' && (
+                <>
+                  {data.ridealong && (
+                    <RidealongPanel
+                      hostId={host.id}
+                      state={data.ridealong}
+                      fcState={data.fcState}
+                      sendLRRidealongCommand={sendLRRidealongCommand}
+                    />
+                  )}
+                  {data.condoc && !data.ridealong && (
+                    <CondocPanel state={data.condoc} fcState={data.fcState} />
+                  )}
+                  <FCCommandPanel
+                    hostId={host.id}
+                    fcState={data.fcState}
+                    fcLog={data.fcLog}
+                    sendLRCommand={sendLRCommand}
+                  />
+                </>
+              )}
+            </div>
+            {selectedFile && (
+              <FileDetailPane
+                file={selectedFile}
+                hostId={host.id}
+                onClose={() => setSelectedFileId(null)}
+                onEnter={setViewerFileId}
+              />
             )}
           </div>
-          {selectedFile && (
-            <FileDetailPane
-              file={selectedFile}
-              hostId={host.id}
-              onClose={() => setSelectedFileId(null)}
-              onEnter={setViewerFileId}
-            />
-          )}
-        </div>
+        )}
       </div>
     </div>
   )

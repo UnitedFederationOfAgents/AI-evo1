@@ -45,3 +45,20 @@ Done. For the three embedded-app tabs (`condoccer`, `sessions`, `convo`), I remo
 This now looks good in local-representative.
 
 Let's ensure that the agent-coordinator view looks equally good.
+
+
+prompt: [`7f28bb1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7f28bb1df5febb0054c398d3d476156a26dd050e) → reply: [`2493aac`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2493aac32069c5bf5d9252da1ea4fd5b1c2d3b4a)
+
+## Reply B
+
+Applied the same full-pane treatment to agent-coordinator's per-host view that local-representative got in Revision A: added an `EMBED_TABS` set (condoccer/sessions/convo) in `agent-coordinator/frontend/src/App.tsx`, restructured `LRView` so those tabs render the iframe (renamed `condoccer-frame` → `embed-frame`) directly filling the pane with a slim 24px `embed-status-bar` under the tab bar instead of the padded `service-view`/`service-name` header, while `federation-command`/`system`/`files` keep their existing padded layout unchanged. Mirrored the corresponding CSS (`main-pane-embed`, `embed-frame`, `embed-status-bar`, `service-empty-embed`, plus the mobile override) into `agent-coordinator/frontend/src/index.css`, removing the now-dead `condoccer-frame` rule. Same sandbox restriction as before — I couldn't run `tsc`/`vite build` to confirm it compiles, so I'd recommend `make -C agent-coordinator build` before merging.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

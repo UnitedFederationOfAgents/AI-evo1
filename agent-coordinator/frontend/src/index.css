@@ -371,6 +371,18 @@ body {
   padding: 40px;
 }
 
+/* Embedded-app tabs (condoccer/sessions/convo -- see .embed-status-bar and
+   EMBED_TABS in App.tsx, Step1Prompt.md Revision A/B): the nested app's own
+   UI should fill the whole tab pane rather than sit in a padded,
+   header-topped box, so this drops main-pane's padding entirely and lets
+   .embed-frame flex to fill what's left. Mirrors local-representative's
+   identically-named rules. */
+.main-pane-embed {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
 .service-view {
   display: flex;
   flex-direction: column;
@@ -413,12 +425,40 @@ body {
   margin-top: 8px;
 }
 
-.condoccer-frame {
+.service-empty-embed {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px;
+  margin-top: 0;
+}
+
+.embed-frame {
+  flex: 1;
   width: 100%;
-  min-height: 70vh;
-  border: 1px solid #333;
-  border-radius: 6px;
+  height: 100%;
+  border: none;
   background: #1e1e1e;
+}
+
+/* Slim meta-status bar for embedded-app tabs, standing in for the
+   service-name/health-indicator header those tabs no longer render inline
+   (see .main-pane-embed above) -- keeps a sliver of "is this healthy" status
+   visible under the tab bar without taking space back from the nested UI. */
+.embed-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 12px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* ---- FC control panel ---- */
@@ -958,6 +998,10 @@ body {
 
   .main-pane {
     padding: 16px;
+  }
+
+  .main-pane-embed {
+    padding: 0;
   }
 
   .tab-bar {

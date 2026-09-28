@@ -125,6 +125,69 @@ body {
   padding: 0 24px;
 }
 
+/* ---- Transcription panel (Revision D) ---- */
+
+.transcribe-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 20px;
+  gap: 10px;
+}
+
+.transcribe-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transcribe-recording-dot {
+  animation: transcribe-pulse 1s infinite;
+}
+
+@keyframes transcribe-pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+
+.transcribe-output {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: #d4d4d4;
+}
+
+.transcribe-partial {
+  color: #888;
+  font-style: italic;
+}
+
+.transcribe-placeholder {
+  color: #555;
+}
+
+.transcribe-save-status {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 3px;
+}
+
+.transcribe-save-pending { background: #3a3316; color: #d9a800; }
+.transcribe-save-success { background: #17301a; color: #4ec94e; }
+.transcribe-save-error   { background: #331a1a; color: #e07070; }
+
 /* ---- Buttons ---- */
 
 button {

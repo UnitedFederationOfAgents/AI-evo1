@@ -1,13 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ModeMismatchMsg, ReprStatus, ReprStatusMsg, SelfInfoMsg } from './types'
+import type {
+  ModeMismatchMsg,
+  ReprStatus,
+  ReprStatusMsg,
+  SaveResultMsg,
+  SelfInfoMsg,
+  TranscriptMsg,
+} from './types'
 
 // ---- WebSocket hook ----
 //
 // This is a minimal application shell (see
-// condocs/InitialShellsSessionManagerAndTheConversationalist.md) -- it only
-// wires up the representable connect/disconnect widget, dev-mode banner, and
-// version-mismatch reload check shared by every sub-app in this repo. The
-// Conversationalist's own domain functionality lands in a later condoc step.
+// condocs/InitialShellsSessionManagerAndTheConversationalist.md) -- it wires
+// up the representable connect/disconnect widget, dev-mode banner, and
+// version-mismatch reload check shared by every sub-app in this repo, plus
+// (Revision D) The Conversationalist's first bit of domain functionality:
+// live speech transcription via AWS Transcribe, replicating
+// ignored-scratch/AI-sandboxing/agent-scribe's "start transcription"/"save
+// to file" buttons with this app's own Go backend and typed WebSocket
+// protocol instead of agent-scribe's Node/socket.io server.
 
 function useConversationalistWS() {
   const [connected, setConnected] = useState(false)
@@ -18,6 +29,10 @@ function useConversationalistWS() {
   const [devMode, setDevMode] = useState(false)
   const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
+  const [recording, setRecording] = useState(false)
+  const [transcript, setTranscript] = useState('')
+  const [partialTranscript, setPartialTranscript] = useState('')
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: 'idle' })
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -93,6 +108,25 @@ function useConversationalistWS() {
           } else if (msg.type === 'mode-mismatch') {
             const p = msg.payload as ModeMismatchMsg
             setModeMismatch(p.mismatched ? p : null)
+          } else if (msg.type === 'transcript') {
+            const p = msg.payload as TranscriptMsg
+            if (p.is_final) {
+              setTranscript((t) => (t ? `${t} ${p.text}` : p.text))
+              setPartialTranscript('')
+            } else {
+              setPartialTranscript(p.text)
+            }
+          } else if (msg.type === 'save-result') {
+            const p = msg.payload as SaveResultMsg
+            if (p.success) {
+              setSaveStatus({ kind: 'success', message: `saved as ${p.name ?? p.file_id}` })
+              setTranscript('')
+              setPartialTranscript('')
+            } else {
+              setSaveStatus({ kind: 'error', message: p.error ?? 'save failed' })
+            }
+          } else if (msg.type === 'error') {
+            setSaveStatus({ kind: 'error', message: String(msg.payload) })
           }
         } catch {
           // ignore malformed messages
@@ -103,6 +137,58 @@ function useConversationalistWS() {
     connect()
     return () => wsRef.current?.close()
   }, [])
+
+  // Microphone capture: ScriptProcessorNode -> Int16 PCM -> base64'd
+  // "audio-chunk" messages, the same capture technique agent-scribe's
+  // index.html uses, just handed to our own WebSocket send() instead of a
+  // socket.io emit.
+  const captureRef = useRef<{ ctx: AudioContext; stream: MediaStream; processor: ScriptProcessorNode } | null>(null)
+
+  const startRecording = useCallback(async () => {
+    if (captureRef.current) return
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const ctx = new AudioContext()
+      const source = ctx.createMediaStreamSource(stream)
+      const processor = ctx.createScriptProcessor(1024, 1, 1)
+      source.connect(processor)
+      processor.connect(ctx.destination)
+
+      processor.onaudioprocess = (e) => {
+        const float32 = e.inputBuffer.getChannelData(0)
+        const int16 = new Int16Array(float32.length)
+        for (let i = 0; i < float32.length; i++) {
+          int16[i] = Math.max(-32768, Math.min(32767, Math.floor(float32[i] * 32768)))
+        }
+        send('audio-chunk', { data: int16ToBase64(int16) })
+      }
+
+      captureRef.current = { ctx, stream, processor }
+      send('start-transcription', {})
+      setSaveStatus({ kind: 'idle' })
+      setRecording(true)
+    } catch (err) {
+      setSaveStatus({ kind: 'error', message: `microphone access failed: ${String(err)}` })
+    }
+  }, [send])
+
+  const stopRecording = useCallback(() => {
+    const capture = captureRef.current
+    captureRef.current = null
+    capture?.processor.disconnect()
+    capture?.stream.getTracks().forEach((t) => t.stop())
+    capture?.ctx.close()
+    send('stop-transcription', {})
+    setRecording(false)
+  }, [send])
+
+  // Stop any in-progress capture if the component unmounts mid-recording.
+  useEffect(() => () => { captureRef.current?.processor.disconnect() }, [])
+
+  const saveTranscript = useCallback(() => {
+    setSaveStatus({ kind: 'pending' })
+    send('save-transcript', {})
+  }, [send])
 
   return {
     connected,
@@ -116,8 +202,29 @@ function useConversationalistWS() {
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
+    recording,
+    transcript,
+    partialTranscript,
+    saveStatus,
+    startRecording,
+    stopRecording,
+    saveTranscript,
   }
 }
+
+// int16ToBase64 encodes a 16-bit PCM sample buffer as base64, chunked to
+// avoid blowing String.fromCharCode's argument-count limit on large buffers.
+function int16ToBase64(samples: Int16Array): string {
+  const bytes = new Uint8Array(samples.buffer)
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+  }
+  return btoa(binary)
+}
+
+type SaveStatus = { kind: 'idle' | 'pending' | 'success' | 'error'; message?: string }
 
 // ---- representable connect/disconnect widget ----
 
@@ -201,6 +308,71 @@ function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, 
   )
 }
 
+// ---- Transcription panel ----
+//
+// Replicates agent-scribe's "Start Transcription"/"Save to File" buttons
+// (ignored-scratch/AI-sandboxing/agent-scribe/index.html): press Start,
+// speak, press Stop, then Save writes the accumulated transcript into
+// local-representative's files area exactly as an upload would (see
+// transcribe.go's saveTranscript) instead of agent-scribe's HEURISTIC.md
+// intake.
+
+interface TranscriptionPanelProps {
+  connected: boolean
+  recording: boolean
+  transcript: string
+  partialTranscript: string
+  saveStatus: SaveStatus
+  onStart: () => void
+  onStop: () => void
+  onSave: () => void
+}
+
+function TranscriptionPanel({
+  connected,
+  recording,
+  transcript,
+  partialTranscript,
+  saveStatus,
+  onStart,
+  onStop,
+  onSave,
+}: TranscriptionPanelProps) {
+  const hasTranscript = Boolean(transcript.trim() || partialTranscript.trim())
+
+  return (
+    <div className="transcribe-panel">
+      <div className="transcribe-controls">
+        <button className="btn-secondary" disabled={!connected || recording} onClick={onStart}>
+          Start Transcription
+        </button>
+        <button className="btn-secondary" disabled={!recording} onClick={onStop}>
+          Stop Transcription
+        </button>
+        <button className="btn-secondary" disabled={!connected || !hasTranscript} onClick={onSave}>
+          Save to File
+        </button>
+        {recording && <span className="conn-dot connecting transcribe-recording-dot" title="recording" />}
+      </div>
+      <div className="transcribe-output">
+        {hasTranscript ? (
+          <>
+            {transcript}
+            {partialTranscript && <span className="transcribe-partial"> {partialTranscript}</span>}
+          </>
+        ) : (
+          <span className="transcribe-placeholder">Press "Start Transcription" and speak — the transcript appears here.</span>
+        )}
+      </div>
+      {saveStatus.kind !== 'idle' && (
+        <div className={`transcribe-save-status transcribe-save-${saveStatus.kind}`}>
+          {saveStatus.kind === 'pending' ? 'Saving…' : saveStatus.message}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const {
     connected,
@@ -214,6 +386,13 @@ export default function App() {
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
+    recording,
+    transcript,
+    partialTranscript,
+    saveStatus,
+    startRecording,
+    stopRecording,
+    saveTranscript,
   } = useConversationalistWS()
 
   return (
@@ -242,12 +421,16 @@ export default function App() {
         </div>
       </div>
       <div className="main-content">
-        <div className="empty-state">
-          <div>
-            <span className={`conn-dot ${connected ? 'connected' : 'disconnected'}`} />
-            The Conversationalist is running — its baseline functionality lands in a later condoc step.
-          </div>
-        </div>
+        <TranscriptionPanel
+          connected={connected}
+          recording={recording}
+          transcript={transcript}
+          partialTranscript={partialTranscript}
+          saveStatus={saveStatus}
+          onStart={startRecording}
+          onStop={stopRecording}
+          onSave={saveTranscript}
+        />
       </div>
     </div>
   )

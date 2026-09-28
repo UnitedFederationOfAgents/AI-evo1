@@ -26,7 +26,28 @@ export interface ModeMismatchMsg {
   peer_mode?: string
 }
 
+// TranscriptMsg is the "transcript" WebSocket payload pushed as AWS
+// Transcribe returns partial/final results for the in-progress recording
+// (see transcribe.go).
+export interface TranscriptMsg {
+  text: string
+  is_final: boolean
+}
+
+// SaveResultMsg is the "save-result" WebSocket payload reporting whether the
+// accumulated transcript was written into local-representative's files area
+// (see transcribe.go's saveTranscript).
+export interface SaveResultMsg {
+  success: boolean
+  error?: string
+  file_id?: string
+  name?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
+  | { type: 'transcript'; payload: TranscriptMsg }
+  | { type: 'save-result'; payload: SaveResultMsg }
+  | { type: 'error'; payload: string }

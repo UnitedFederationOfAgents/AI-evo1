@@ -34,6 +34,11 @@ type wsClient struct {
 	conn *websocket.Conn
 	send chan []byte
 	done chan struct{}
+
+	// transcribe holds this browser tab's in-progress AWS Transcribe
+	// streaming session, if any -- see transcribe.go. nil while idle.
+	transcribeMu sync.Mutex
+	transcribe   *transcribeSession
 }
 
 // Server manages WebSocket clients and this the-conversationalist's
@@ -58,6 +63,13 @@ type Server struct {
 	reprAutoConnect  bool          // persistent auto-connect toggle -- see repr.go's setAutoConnect
 	modeMismatch     bool          // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
 	modeMismatchPeer string        // the mismatched LR's disclosed mode ("dev" or "ops")
+
+	// awsRegion is the AWS region AWS Transcribe streaming sessions are
+	// started in (see transcribe.go). Empty defers to the AWS SDK's own
+	// default region resolution (env/shared config/instance role) -- see
+	// Revision D's note that we lean on host-level AWS credentials/config
+	// rather than anything app-managed.
+	awsRegion string
 }
 
 func newServer() *Server {
@@ -130,6 +142,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		delete(s.clients, c)
 		s.mu.Unlock()
+		// A dropped tab shouldn't leave AWS Transcribe billing for a
+		// session nobody's listening to anymore.
+		s.stopTranscription(c)
 	}()
 
 	for {
@@ -177,6 +192,27 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		}
 		json.Unmarshal(m.Payload, &p)
 		s.setAutoConnect(p.Enabled, strings.TrimSpace(p.Host), strings.TrimSpace(p.Port))
+
+	// Transcription: see transcribe.go. Mirrors agent-scribe's
+	// startTranscription/audioData/stopTranscription/saveTranscription
+	// socket.io events (ignored-scratch/AI-sandboxing/agent-scribe), but
+	// over this app's own typed WebSocket protocol and writing into
+	// local-representative's files area instead of a HEURISTIC.md intake.
+	case "start-transcription":
+		s.startTranscription(c)
+
+	case "audio-chunk":
+		var p struct {
+			Data string `json:"data"` // base64-encoded 16-bit PCM audio chunk
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.sendAudioChunk(c, p.Data)
+
+	case "stop-transcription":
+		s.stopTranscription(c)
+
+	case "save-transcript":
+		s.saveTranscript(c)
 	}
 }
 
@@ -253,12 +289,14 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
+	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role)")
 	flag.Parse()
 
 	s := newServer()
 	s.httpPort = *port
 	s.name = *name
 	s.devMode = *devMode
+	s.awsRegion = *awsRegion
 	go watchRestartSignal()
 
 	if *autoConnect {

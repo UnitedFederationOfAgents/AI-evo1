@@ -13,13 +13,23 @@ condoc:
 Create the applications and minimal baseline functionality for Session Manager (SM) and The Conversationalist (TC).
 
 
-### Step 1 - <REPLACE-TITLE>
+### Step 1 - We will begin by creating the application shells for Session Manager and The Conversationalist.
+
+[Step 1 Prompt](initialShellsSessionManagerAndTheConversationalistImpls/Step1Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+We will begin by creating the application shells for Session Manager (SM) and The Conversationalist (TC).
+
+Both of these sub-apps will be go-backend-with-UI-frontend just like condoccer.
+
+They will follow the same structure of standalone-UI-with-distinct-port/embed-inlocal-representative/embed-in-agent-coordinator.
+They will be included in 'make deploy-dev-binaries'.
+They will be launchable in the per-host system tab and visible in the global system tab.
+They will have auto-connect and dev-mode configurability.
+They will each have their own tab between 'condoccer' and 'worker' -- called 'convo' and 'sessions'.
 ```
 
 
 ## Human-Prompt
 
-Once you have added the Title and Prompt add the '!HANDOFF!' directive to execute the first step.
+The flow of the condoc is now within the first step.

@@ -187,3 +187,22 @@ The error persists from the laptop client.
 See 'DEBUGCONVOLAPTOP' resource for context - the error persists.
 
 Let's either fix this issue if it is obvious or decide how we should go about gathering data.
+
+
+prompt: [`362f067`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/362f067f17a360f35a204651237994e13c12432e) → reply: [`b20baf4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b20baf48840f1a85d18ee07b09250c137c7b0fe0)
+
+## Reply G
+
+This confirms it: the version string self-reported by the running binary is the smoking gun, no code change needed.
+
+I diagnosed this without touching any code: both DebugConvo screenshots show the byte-for-byte identical pre-fix error text ("starting AWS Transcribe: not found, Signing..."), but each one's own version banner tells the real story. Resource 1's instance reports `-362f067` (an old Revision-B-era build, expected — it predates Revision F entirely). Resource 2 ("DebugConvoLaptop", taken *after* Reply F shipped the region-check fix) reports `-fce731b` — I confirmed via `git show fce731b:the-conversationalist/transcribe.go` that this is the exact pre-fix commit, with no `cfg.Region == ""` check and no `log.Printf` on the AWS error path, which is exactly the untouched error text seen in that screenshot. The current branch (HEAD, well past `86b6b98`) already has the region check, the actionable message, and full error logging, and `go.sum`/the `go mod tidy` build step already cover the AWS SDK deps — so no further code fix is warranted. This is a stale deployment: the host the laptop reaches (`sioner01.tailee9ddd.ts.net`) is still running a the-conversationalist binary built before the Revision F fix landed. The action needed is operational, not code: rebuild and redeploy `the-conversationalist` on that host (e.g. re-run `make deploy-dev-binaries` from current `main`) and confirm the version banner advances past `fce731b`; if the region-related error still recurs on a truly up-to-date binary, the new log line will surface the full untruncated AWS SDK error for further diagnosis.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

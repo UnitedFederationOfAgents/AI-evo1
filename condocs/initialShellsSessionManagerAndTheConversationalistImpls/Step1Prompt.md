@@ -22,11 +22,12 @@ I've completed Step 1: created two new application shells, `session-manager` and
 Note: this sandbox blocks invoking `go`/`npm`/`make` (and even `git add`), so I wasn't able to actually build or test the changes — I'd recommend running `make build-all` and `make test-all` (or at least `make -C session-manager build`, `make -C the-conversationalist build`, `make -C local-representative build`, `make -C agent-coordinator build`) to confirm everything compiles before merging.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+The UIs look like the are functioning correctly, but it has become apparent that we are wasting too much screen real-estate on the UI-in-UI instances. Tabs with 'unique UI' work well, but we want to increase the size of the 'nested UI' (the area with the additional 'DEV MODE' border) within the nested UI tabs so that it fills the full area of the tab pane.
 
+If there were good reasons to have the nested UI take a much larger portion of the space instead (ie: 99%) of the full pane, then we would implement this choice instead and respond with why it is superior.
 
-## Human-Prompt
+We prefer to implement full-pane if this is feasible. (With minimal additional changes)
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We may want to keep a single slim bar under the tabs bar for status, since we do want to retain the 'meta-status' without flowing it back into the sub-app's UI. This would be acceptable as long as it was not overly generous.

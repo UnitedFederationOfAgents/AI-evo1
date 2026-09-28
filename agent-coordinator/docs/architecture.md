@@ -91,7 +91,11 @@ Viewing and downloading a file's bytes (`GET
 AC's ordinary `proxyToHost` transparent reverse proxy — a read isn't the
 arbitrary-filesystem-write upload is, so it isn't gated on the header below,
 and AC's files tab reuses LR's raw-serving route unmodified for its own
-viewer page and download button.
+viewer page and download button. The same is true of the file-details
+dialog's hold/persist/highlight actions and the markup dialog's
+`GET`/`POST /host/<id>/api/files/<file-id>/markup[/commit|/cancel|/copy]`
+routes -- none of these act on arbitrary new content the way upload does, so
+none are gated either; AC's markup dialog is a verbatim copy of LR's own.
 
 Upload (`POST /host/<id>/api/files`) is **relayed, not proxied**: `proxyToHost`
 recognizes that path+method and hands it to a dedicated `handleFileUploadRelay`

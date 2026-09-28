@@ -96,6 +96,31 @@ func manifestName(id string) string {
 	return manifestPrefix + id + ".yaml"
 }
 
+// markupPrefix marks a host-cache (or host-store) entry as the hidden,
+// in-progress markup sidecar for an image file rather than a file the
+// "files" tab should list: while the markup dialog (Step1SubstepCPrompt.md
+// Revision F) is being used on "<id>", its running composite (original image
+// plus whatever arrows/rectangles/text have been drawn so far) is saved here
+// as a flat JPEG, alongside "<id>" itself -- wherever that currently lives
+// (see locateFile), which is the host-cache by default. Its mere presence is
+// what drives FileInfo.MarkedUp (the files tab's bright-orange-border cue)
+// and lets a later "markup" open pick the session back up instead of
+// starting over from the plain original. "commit" bakes it into "<id>"
+// directly and removes it; "copy" spins it off into a brand new host-cache
+// entry and removes it; "cancel" just removes it, discarding the session
+// with "<id>" untouched throughout. Same as manifestPrefix, uploads whose
+// claimed filename starts with this prefix are refused, and the
+// sweep/listing both treat it as invisible to the files tab -- in either
+// directory.
+const markupPrefix = ".markup_"
+
+// markupName returns the in-progress markup sidecar filename for a
+// host-cache (or host-store) entry "id", e.g. "d992a7a9_shot.png" ->
+// ".markup_d992a7a9_shot.png.jpg". See markupPrefix.
+func markupName(id string) string {
+	return markupPrefix + id + ".jpg"
+}
+
 // FileInfo describes one file sitting in local-representative's host-cache or
 // host-store.
 type FileInfo struct {
@@ -114,6 +139,14 @@ type FileInfo struct {
 	// This increment only implements the marking itself -- a highlighted
 	// file's grid box gets a yellow ring -- no behavior yet hangs off it.
 	Highlighted bool `json:"highlighted"`
+
+	// MarkedUp mirrors whether an in-progress markup sidecar (see
+	// markupPrefix) currently sits alongside this entry: true from the
+	// moment the markup dialog's arrow/rectangle/text tools first save a
+	// stroke, until "commit"/"copy"/"cancel" removes the sidecar again. The
+	// files tab renders it as a bright orange border, independent of
+	// Highlighted's yellow ring.
+	MarkedUp bool `json:"marked_up"`
 }
 
 // FilesStateMsg is the payload of "files-state" messages: the current
@@ -232,6 +265,15 @@ func readManifest(dir, id string) (manifestFields, bool) {
 	return m, true
 }
 
+// isMarkedUp reports whether dir/.markup_<id>.jpg currently exists -- see
+// markupPrefix. Cheap enough to call per-listing (a single Stat) rather than
+// threading it through readManifest, since it's never written into the
+// manifest itself.
+func isMarkedUp(dir, id string) bool {
+	_, err := os.Stat(filepath.Join(dir, markupName(id)))
+	return err == nil
+}
+
 // listFiles scans the host-cache and host-store directories and returns
 // their combined current contents, newest first. The filesystem (plus each
 // host-cache entry's manifest, for hold state) is the source of truth -- no
@@ -253,7 +295,7 @@ func (s *Server) scanCacheDir() []FileInfo {
 	}
 	files := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), manifestPrefix) {
+		if e.IsDir() || strings.HasPrefix(e.Name(), manifestPrefix) || strings.HasPrefix(e.Name(), markupPrefix) {
 			continue
 		}
 		info, err := e.Info()
@@ -269,6 +311,7 @@ func (s *Server) scanCacheDir() []FileInfo {
 			State:      "cached",
 			UploadedAt: info.ModTime().Unix(),
 			ExpiresAt:  info.ModTime().Add(fileCacheTTL).Unix(),
+			MarkedUp:   isMarkedUp(s.fileCacheDir, id),
 		}
 		if m, ok := readManifest(s.fileCacheDir, id); ok {
 			fi.Highlighted = m.Highlighted
@@ -294,7 +337,7 @@ func (s *Server) scanStoreDir() []FileInfo {
 	}
 	files := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), manifestPrefix) {
+		if e.IsDir() || strings.HasPrefix(e.Name(), manifestPrefix) || strings.HasPrefix(e.Name(), markupPrefix) {
 			continue
 		}
 		info, err := e.Info()
@@ -309,6 +352,7 @@ func (s *Server) scanStoreDir() []FileInfo {
 			Kind:       classifyKind(id),
 			State:      "persisted",
 			UploadedAt: info.ModTime().Unix(),
+			MarkedUp:   isMarkedUp(s.hostStoreDir, id),
 		}
 		if m, ok := readManifest(s.hostStoreDir, id); ok {
 			fi.Highlighted = m.Highlighted
@@ -381,6 +425,15 @@ func (s *Server) sweepExpiredFiles() {
 			}
 			continue
 		}
+		if strings.HasPrefix(name, markupPrefix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(name, markupPrefix), ".jpg")
+			if !present[id] {
+				if err := os.Remove(filepath.Join(s.fileCacheDir, name)); err != nil {
+					log.Printf("files: failed to remove orphaned markup sidecar %s: %v", name, err)
+				}
+			}
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
@@ -396,6 +449,9 @@ func (s *Server) sweepExpiredFiles() {
 				continue
 			}
 			s.removeManifest(name)
+			if err := os.Remove(filepath.Join(s.fileCacheDir, markupName(name))); err != nil && !os.IsNotExist(err) {
+				log.Printf("files: failed to remove markup sidecar for expired %s: %v", name, err)
+			}
 			log.Printf("files: removed expired host-cache file %s (expired %s ago)",
 				name, time.Since(expiresAt).Round(time.Second))
 			removed = true
@@ -485,6 +541,9 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 	if strings.HasPrefix(name, manifestPrefix) {
 		return FileInfo{}, fmt.Errorf("upload rejected: filenames starting with %q are reserved for host-cache manifests", manifestPrefix)
 	}
+	if strings.HasPrefix(name, markupPrefix) {
+		return FileInfo{}, fmt.Errorf("upload rejected: filenames starting with %q are reserved for in-progress markup sidecars", markupPrefix)
+	}
 	id := randomID() + "_" + name
 	dst, err := os.OpenFile(filepath.Join(s.fileCacheDir, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -570,9 +629,11 @@ func dispositionFilename(name string) string {
 // handleFileItem dispatches the "/api/files/<id>" subtree: GET/DELETE act
 // directly on "<id>" (raw bytes / delete), while POST "<id>/hold", POST
 // "<id>/persist", and POST "<id>/highlight" drive the file-details dialog's
-// state-changing buttons. None of these are gated on proxiedHeader — see
-// relayedUploadHeader's comment for why that's a deliberate difference from
-// upload.
+// state-changing buttons, and GET/POST "<id>/markup" plus POST
+// "<id>/markup/commit", "<id>/markup/cancel", "<id>/markup/copy" drive the
+// markup dialog (see handleMarkupGet and friends below). None of these are
+// gated on proxiedHeader — see relayedUploadHeader's comment for why that's a
+// deliberate difference from upload.
 func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/files/")
 	id, action, hasAction := strings.Cut(rest, "/")
@@ -588,6 +649,16 @@ func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
 			s.handleFilePersist(w, r, id)
 		case r.Method == http.MethodPost && action == "highlight":
 			s.handleFileHighlight(w, r, id)
+		case r.Method == http.MethodGet && action == "markup":
+			s.handleMarkupGet(w, r, id)
+		case r.Method == http.MethodPost && action == "markup":
+			s.handleMarkupSave(w, r, id)
+		case r.Method == http.MethodPost && action == "markup/commit":
+			s.handleMarkupCommit(w, r, id)
+		case r.Method == http.MethodPost && action == "markup/cancel":
+			s.handleMarkupCancel(w, r, id)
+		case r.Method == http.MethodPost && action == "markup/copy":
+			s.handleMarkupCopy(w, r, id)
 		default:
 			http.NotFound(w, r)
 		}
@@ -678,6 +749,7 @@ func (s *Server) handleFileHold(w http.ResponseWriter, r *http.Request, id strin
 		UploadedAt:  fi.ModTime().Unix(),
 		ExpiresAt:   time.Now().Add(holdTTL).Unix(),
 		Highlighted: m.Highlighted,
+		MarkedUp:    isMarkedUp(s.fileCacheDir, id),
 	}
 	creator := s.lrName
 	if m.Creator != "" {
@@ -718,6 +790,7 @@ func (s *Server) handleFileHighlight(w http.ResponseWriter, r *http.Request, id 
 		Kind:        classifyKind(id),
 		UploadedAt:  fi.ModTime().Unix(),
 		Highlighted: !m.Highlighted,
+		MarkedUp:    isMarkedUp(dir, id),
 	}
 	switch {
 	case dir == s.hostStoreDir:
@@ -779,6 +852,18 @@ func (s *Server) handleFilePersist(w http.ResponseWriter, r *http.Request, id st
 	} else if !os.IsNotExist(err) {
 		log.Printf("files: failed to stat manifest for %s before persisting: %v", id, err)
 	}
+	// An in-progress markup sidecar (see markupPrefix) travels along with the
+	// file it annotates, same as the manifest above, so a "persist" press
+	// mid-edit doesn't strand or orphan it.
+	markupSrc := filepath.Join(s.fileCacheDir, markupName(id))
+	if _, err := os.Stat(markupSrc); err == nil {
+		markupDst := filepath.Join(s.hostStoreDir, markupName(id))
+		if err := moveFile(markupSrc, markupDst); err != nil {
+			log.Printf("files: failed to move markup sidecar for %s to host-store: %v", id, err)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("files: failed to stat markup sidecar for %s before persisting: %v", id, err)
+	}
 	log.Printf("files: persisted %s -> host-store/%s", id, id)
 
 	info := FileInfo{
@@ -788,6 +873,7 @@ func (s *Server) handleFilePersist(w http.ResponseWriter, r *http.Request, id st
 		Kind:       classifyKind(id),
 		State:      "persisted",
 		UploadedAt: fi.ModTime().Unix(),
+		MarkedUp:   isMarkedUp(s.hostStoreDir, id),
 	}
 	s.broadcastFiles()
 	w.Header().Set("Content-Type", "application/json")
@@ -811,9 +897,200 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request, id str
 	if err := os.Remove(filepath.Join(dir, manifestName(id))); err != nil && !os.IsNotExist(err) {
 		log.Printf("files: failed to remove manifest for %s: %v", id, err)
 	}
+	if err := os.Remove(filepath.Join(dir, markupName(id))); err != nil && !os.IsNotExist(err) {
+		log.Printf("files: failed to remove markup sidecar for %s: %v", id, err)
+	}
 	log.Printf("files: deleted %s", id)
 	s.broadcastFiles()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMarkupGet implements the markup dialog's "resume where I left off":
+// GET /api/files/<id>/markup serves the in-progress composite (original
+// image plus whatever's been drawn on it so far) if a markup session is
+// already open on "<id>", 404 otherwise -- the frontend falls back to
+// seeding the canvas from the plain image (GET /api/files/<id>) in that
+// case, i.e. starting a fresh session.
+func (s *Server) handleMarkupGet(w http.ResponseWriter, r *http.Request, id string) {
+	dir, ok := s.locateFile(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(filepath.Join(dir, markupName(id)))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	http.ServeContent(w, r, markupName(id), info.ModTime(), f)
+}
+
+// handleMarkupSave implements the markup dialog's autosave: every time a
+// tool finishes a stroke (arrow/rectangle/text), the browser flattens it into
+// the on-canvas composite and POSTs the whole thing here as a JPEG, which
+// simply overwrites the sidecar (see markupName). This is what actually
+// leaves a file "marked up" -- FileInfo.MarkedUp is nothing more than "does
+// this sidecar currently exist" (see isMarkedUp) -- and what a later
+// handleMarkupGet picks back up on re-entering the dialog.
+func (s *Server) handleMarkupSave(w http.ResponseWriter, r *http.Request, id string) {
+	dir, ok := s.locateFile(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	const maxMarkupSize = 32 << 20 // 32MiB -- generous for a full-resolution screenshot composite
+	r.Body = http.MaxBytesReader(w, r.Body, maxMarkupSize)
+	if err := r.ParseMultipartForm(16 << 20); err != nil {
+		http.Error(w, "invalid markup upload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	headers := r.MultipartForm.File["file"]
+	if len(headers) == 0 {
+		http.Error(w, `no markup image provided (expected multipart field "file")`, http.StatusBadRequest)
+		return
+	}
+	src, err := headers[0].Open()
+	if err != nil {
+		http.Error(w, "reading markup upload: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer src.Close()
+
+	dst, err := os.OpenFile(filepath.Join(dir, markupName(id)), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		http.Error(w, "saving markup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		http.Error(w, "saving markup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := dst.Close(); err != nil {
+		http.Error(w, "saving markup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("files: saved in-progress markup for %s", id)
+	s.broadcastFiles()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMarkupCancel implements the markup dialog's "cancel" button: drops
+// the in-progress sidecar (see markupName), discarding every stroke drawn
+// this session and leaving "<id>" itself completely untouched. A no-op
+// (still a success) if no session was open.
+func (s *Server) handleMarkupCancel(w http.ResponseWriter, r *http.Request, id string) {
+	dir, ok := s.locateFile(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if err := os.Remove(filepath.Join(dir, markupName(id))); err != nil && !os.IsNotExist(err) {
+		http.Error(w, "cancelling markup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Printf("files: cancelled in-progress markup for %s", id)
+	s.broadcastFiles()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMarkupCommit implements the markup dialog's "commit" button: writes
+// the in-progress composite's bytes over "<id>" itself -- "edit the markups
+// into the image file directly" (Step1SubstepCPrompt.md Revision F) -- then
+// removes the sidecar, ending the session. "<id>"'s name/extension is left
+// alone even though the composite is always a JPEG (see handleMarkupSave);
+// this increment doesn't attempt a format conversion, same MVP spirit as the
+// rest of this file.
+func (s *Server) handleMarkupCommit(w http.ResponseWriter, r *http.Request, id string) {
+	dir, ok := s.locateFile(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	markupPath := filepath.Join(dir, markupName(id))
+	data, err := os.ReadFile(markupPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "no in-progress markup to commit", http.StatusBadRequest)
+		} else {
+			http.Error(w, "reading markup: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, id), data, 0o644); err != nil {
+		http.Error(w, "committing markup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Remove(markupPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("files: failed to remove markup sidecar for %s after commit: %v", id, err)
+	}
+	log.Printf("files: committed markup into %s (%d bytes)", id, len(data))
+	s.broadcastFiles()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleMarkupCopy implements the markup dialog's "copy" button: spins the
+// in-progress composite off into a brand new host-cache entry (leaving
+// "<id>" itself byte-for-byte untouched) and removes the sidecar, ending the
+// session same as commit -- the difference is entirely in which file ends up
+// holding the markup. The duplicate always lands in the host-cache (a fresh,
+// ordinary upload-like entry, with its own manifest and TTL) regardless of
+// whether "<id>" itself is cached or already persisted to the host-store.
+func (s *Server) handleMarkupCopy(w http.ResponseWriter, r *http.Request, id string) {
+	dir, ok := s.locateFile(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	markupPath := filepath.Join(dir, markupName(id))
+	data, err := os.ReadFile(markupPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, "no in-progress markup to copy", http.StatusBadRequest)
+		} else {
+			http.Error(w, "reading markup: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	if err := ensureFileCacheDir(s.fileCacheDir); err != nil {
+		http.Error(w, "host-cache dir: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	origName := displayName(id)
+	base := strings.TrimSuffix(origName, filepath.Ext(origName))
+	newName := base + "-markup.jpg" // the composite is always a JPEG -- see handleMarkupSave
+	newID := randomID() + "_" + newName
+	if err := os.WriteFile(filepath.Join(s.fileCacheDir, newID), data, 0o644); err != nil {
+		http.Error(w, "copying markup: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+	info := FileInfo{
+		ID:         newID,
+		Name:       newName,
+		Size:       int64(len(data)),
+		Kind:       classifyKind(newName),
+		State:      "cached",
+		UploadedAt: now.Unix(),
+		ExpiresAt:  now.Add(fileCacheTTL).Unix(),
+	}
+	s.writeManifest(s.fileCacheDir, info, s.lrName)
+	if err := os.Remove(markupPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("files: failed to remove markup sidecar for %s after copy: %v", id, err)
+	}
+	log.Printf("files: copied markup of %s into new host-cache file %s", id, newID)
+	s.broadcastFiles()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 // moveFile renames src to dst, falling back to a copy-then-remove when

@@ -606,6 +606,14 @@ func writeTestManifest(t *testing.T, dir, id string, held bool, expiresAt time.T
 // single "file" field.
 func newUploadRequest(t *testing.T, filename string, content []byte) *http.Request {
 	t.Helper()
+	return newMultipartRequest(t, "/api/files", filename, content)
+}
+
+// newMultipartRequest builds a multipart POST to url carrying a single
+// "file" field -- the shape both plain upload (newUploadRequest) and the
+// markup dialog's autosave (POST .../markup) send.
+func newMultipartRequest(t *testing.T, url, filename string, content []byte) *http.Request {
+	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	part, err := w.CreateFormFile("file", filename)
@@ -618,7 +626,160 @@ func newUploadRequest(t *testing.T, filename string, content []byte) *http.Reque
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/files", &buf)
+	req := httptest.NewRequest(http.MethodPost, url, &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	return req
+}
+
+// TestMarkupSaveMarksFileAndStaysHidden covers the markup dialog's autosave:
+// POSTing a composite to .../markup writes the ".markup_<id>.jpg" sidecar,
+// flips FileInfo.MarkedUp on, and keeps the sidecar itself invisible to the
+// files tab listing.
+func TestMarkupSaveMarksFileAndStaysHidden(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "shot.png", []byte("original bytes"))
+
+	req := newMultipartRequest(t, "/api/files/"+id+"/markup", "composite.jpg", []byte("composite bytes"))
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("markup save: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	files := s.listFiles()
+	if len(files) != 1 || !files[0].MarkedUp {
+		t.Fatalf("listFiles() after markup save = %+v, want one file with marked_up=true", files)
+	}
+	if _, err := os.Stat(filepath.Join(s.fileCacheDir, markupName(id))); err != nil {
+		t.Errorf("markup save should have written the sidecar: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/files/"+id+"/markup", nil)
+	getRec := httptest.NewRecorder()
+	s.handleFileItem(getRec, getReq)
+	if getRec.Code != http.StatusOK || getRec.Body.String() != "composite bytes" {
+		t.Errorf("markup get: status = %d, body = %q, want 200 \"composite bytes\"", getRec.Code, getRec.Body.String())
+	}
+}
+
+// TestMarkupGetMissingIs404 verifies re-opening the markup dialog on a file
+// with no in-progress session 404s, so the frontend knows to seed the canvas
+// from the plain original instead.
+func TestMarkupGetMissingIs404(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "shot.png", []byte("original bytes"))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/files/"+id+"/markup", nil)
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("markup get with no session: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestMarkupCommitWritesIntoOriginalAndClearsSidecar covers the "commit"
+// button: the composite's bytes overwrite "<id>" directly, the sidecar goes
+// away, and MarkedUp drops back to false.
+func TestMarkupCommitWritesIntoOriginalAndClearsSidecar(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "shot.png", []byte("original bytes"))
+	s.handleFileItem(httptest.NewRecorder(), newMultipartRequest(t, "/api/files/"+id+"/markup", "composite.jpg", []byte("composite bytes")))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/markup/commit", nil)
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("markup commit: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	body, err := os.ReadFile(filepath.Join(s.fileCacheDir, id))
+	if err != nil || string(body) != "composite bytes" {
+		t.Errorf("committed file contents = %q, err = %v, want \"composite bytes\"", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.fileCacheDir, markupName(id))); !os.IsNotExist(err) {
+		t.Errorf("commit should have removed the markup sidecar, stat err = %v", err)
+	}
+	if files := s.listFiles(); len(files) != 1 || files[0].MarkedUp {
+		t.Errorf("listFiles() after commit = %+v, want marked_up=false", files)
+	}
+}
+
+// TestMarkupCopyCreatesNewFileAndLeavesOriginalUntouched covers the "copy"
+// button: the composite lands in a brand new host-cache entry, "<id>" itself
+// is untouched, and the sidecar is cleared same as commit.
+func TestMarkupCopyCreatesNewFileAndLeavesOriginalUntouched(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "shot.png", []byte("original bytes"))
+	s.handleFileItem(httptest.NewRecorder(), newMultipartRequest(t, "/api/files/"+id+"/markup", "composite.jpg", []byte("composite bytes")))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/markup/copy", nil)
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("markup copy: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	origBody, err := os.ReadFile(filepath.Join(s.fileCacheDir, id))
+	if err != nil || string(origBody) != "original bytes" {
+		t.Errorf("original file contents after copy = %q, err = %v, want untouched \"original bytes\"", origBody, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.fileCacheDir, markupName(id))); !os.IsNotExist(err) {
+		t.Errorf("copy should have removed the markup sidecar, stat err = %v", err)
+	}
+
+	files := s.listFiles()
+	if len(files) != 2 {
+		t.Fatalf("listFiles() after copy = %+v, want 2 files (original + duplicate)", files)
+	}
+	var dup FileInfo
+	for _, f := range files {
+		if f.ID != id {
+			dup = f
+		}
+	}
+	if dup.Name != "shot-markup.jpg" || dup.Kind != "image" {
+		t.Errorf("copied file info = %+v, want name \"shot-markup.jpg\", kind \"image\"", dup)
+	}
+}
+
+// TestMarkupCancelDiscardsSidecarWithoutTouchingOriginal covers the "cancel"
+// button.
+func TestMarkupCancelDiscardsSidecarWithoutTouchingOriginal(t *testing.T) {
+	s := newTestFileServer(t)
+	id := uploadOne(t, s, "shot.png", []byte("original bytes"))
+	s.handleFileItem(httptest.NewRecorder(), newMultipartRequest(t, "/api/files/"+id+"/markup", "composite.jpg", []byte("composite bytes")))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/files/"+id+"/markup/cancel", nil)
+	rec := httptest.NewRecorder()
+	s.handleFileItem(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("markup cancel: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	origBody, err := os.ReadFile(filepath.Join(s.fileCacheDir, id))
+	if err != nil || string(origBody) != "original bytes" {
+		t.Errorf("original file contents after cancel = %q, err = %v, want untouched \"original bytes\"", origBody, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.fileCacheDir, markupName(id))); !os.IsNotExist(err) {
+		t.Errorf("cancel should have removed the markup sidecar, stat err = %v", err)
+	}
+	if files := s.listFiles(); len(files) != 1 || files[0].MarkedUp {
+		t.Errorf("listFiles() after cancel = %+v, want marked_up=false", files)
+	}
+}
+
+// TestUploadRejectsMarkupPrefixedName mirrors
+// TestUploadRejectsManifestPrefixedName for the markup sidecar's own hidden
+// prefix.
+func TestUploadRejectsMarkupPrefixedName(t *testing.T) {
+	s := newTestFileServer(t)
+	req := newUploadRequest(t, markupPrefix+"whatever.jpg", []byte("x"))
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("upload of markup-prefixed name: status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+	if files := s.listFiles(); len(files) != 0 {
+		t.Errorf("listFiles() after rejected upload = %+v, want none", files)
+	}
 }

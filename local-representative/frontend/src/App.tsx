@@ -1006,6 +1006,28 @@ function fileDeleteUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}`
 }
 
+// markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F) --
+// GET markupUrl fetches the in-progress composite if a session is already
+// open (404 otherwise, meaning "start from the plain original"), POST
+// markupUrl saves the composite after every completed stroke, and the three
+// action routes below back its "commit"/"cancel"/"copy" buttons -- see
+// local-representative/files.go's handleMarkupGet and friends.
+function markupUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup`
+}
+
+function markupCommitUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/commit`
+}
+
+function markupCancelUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/cancel`
+}
+
+function markupCopyUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/copy`
+}
+
 function FilesPanel({
   state,
   selectedId,
@@ -1058,7 +1080,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}${f.marked_up ? ' files-item-markedup' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -1077,10 +1099,12 @@ function FileDetailPane({
   file,
   onClose,
   onEnter,
+  onMarkup,
 }: {
   file: FileInfo
   onClose: () => void
   onEnter: (id: string) => void
+  onMarkup: (id: string) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [busy, setBusy] = useState(false)
@@ -1157,7 +1181,7 @@ function FileDetailPane({
       </div>
       <div className="file-detail-actions">
         <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
-          enter →
+          view
         </button>
         <a
           className="file-detail-download"
@@ -1167,6 +1191,17 @@ function FileDetailPane({
           download
         </a>
       </div>
+      {file.kind === 'image' && (
+        <div className="file-detail-actions">
+          <button
+            className={`file-detail-markup${file.marked_up ? ' file-detail-markup-active' : ''}`}
+            onClick={() => onMarkup(file.id)}
+            title={file.marked_up ? 'keep editing the in-progress markup' : 'draw arrows, rectangles, or text on this image'}
+          >
+            markup
+          </button>
+        </div>
+      )}
       <div className="file-detail-actions">
         <button
           className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
@@ -1194,7 +1229,7 @@ function FileDetailPane({
 /* ---- File viewer ---- */
 
 // FileViewer is the files tab's "drill-down" page, reached by double-clicking
-// a grid item or the detail pane's "enter →" widget (reminiscent of
+// a grid item or the detail pane's "view" widget (reminiscent of
 // condoccer's substep entry). Images render inline; text is fetched and shown
 // as plain text; anything else falls back to a "use download" notice — this
 // increment's wireframe icon set is deliberately small (text/image/other),
@@ -1252,6 +1287,308 @@ function FileViewer({
         ) : (
           <div className="file-viewer-empty">no preview available for this file type — use download above</div>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ---- Markup dialog ---- */
+
+// MarkupTool is the markup dialog's small tool set (Step1SubstepCPrompt.md
+// Revision F): a click-drag arrow, a click-drag rectangle, and a click-to-place
+// text label. Each renders permanently into the canvas the instant its
+// stroke finishes (see MarkupDialog's pointer handlers) -- there's no
+// per-shape undo, just the flattened result, same MVP spirit as the rest of
+// the files tab.
+type MarkupTool = 'arrow' | 'rect' | 'text'
+
+// MARKUP_COLORS is the markup dialog's colour palette -- unlike the rest of
+// this file's grey-wireframe icon set, these render as-is (actual colour
+// swatches), since the whole point is to draw in a colour that stands out
+// against the screenshot underneath.
+const MARKUP_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#af52de', '#ffffff', '#111111']
+
+const MARKUP_TOOL_ICON: Record<MarkupTool, JSX.Element> = {
+  arrow: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20 18 6" />
+      <path d="M9 6h9v9" />
+    </svg>
+  ),
+  rect: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+      <rect x="4" y="6" width="16" height="12" rx="1" />
+    </svg>
+  ),
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 6h14M12 6v13" />
+    </svg>
+  ),
+}
+
+// canvasPoint converts a mouse event into canvas-backing-store coordinates,
+// accounting for the canvas being displayed smaller (via CSS) than its
+// natural-resolution backing store -- see MarkupDialog's `.markup-canvas`.
+function canvasPoint(e: React.MouseEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY }
+}
+
+function drawMarkupArrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  const headLen = Math.max(14, Math.hypot(x1 - x0, y1 - y0) * 0.18)
+  const angle = Math.atan2(y1 - y0, x1 - x0)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(x0, y0)
+  ctx.lineTo(x1, y1)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawMarkupRect(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0))
+  ctx.restore()
+}
+
+// MarkupDialog is the "convenient markup system" opened from the file
+// details pane's "markup" button on any image (Step1SubstepCPrompt.md
+// Revision F). It loads whichever composite is furthest along -- the
+// in-progress sidecar if a session is already open (GET markupUrl), else the
+// plain original (rawUrl) -- draws directly onto a full-resolution canvas,
+// and autosaves the flattened result (POST markupUrl) after every completed
+// arrow/rectangle/text stroke, which is what leaves the file "marked up"
+// (see FileInfo.marked_up). "cancel"/"commit"/"copy" all close the dialog on
+// success; which of the three is used decides whether that in-progress work
+// is discarded, baked into the original file, or spun off into a duplicate.
+function MarkupDialog({
+  file,
+  rawUrl,
+  onClose,
+}: {
+  file: FileInfo
+  rawUrl: string
+  onClose: () => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const snapshotRef = useRef<ImageData | null>(null)
+  const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [tool, setTool] = useState<MarkupTool>('arrow')
+  const [color, setColor] = useState(MARKUP_COLORS[0])
+  const [hasMarkup, setHasMarkup] = useState(file.marked_up)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  // Seed the canvas: continue the in-progress composite if one exists,
+  // otherwise start fresh from the plain original.
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setReady(false)
+    setLoadError(null)
+
+    const draw = (src: string) => {
+      const img = new Image()
+      img.onload = () => {
+        if (cancelled) return
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        canvas.getContext('2d')!.drawImage(img, 0, 0)
+        setReady(true)
+      }
+      img.onerror = () => { if (!cancelled) setLoadError("couldn't load the image") }
+      img.src = src
+    }
+
+    fetch(markupUrl(file.id))
+      .then(resp => {
+        if (cancelled) return
+        if (resp.ok) {
+          setHasMarkup(true)
+          return resp.blob().then(b => {
+            if (cancelled) return
+            objectUrl = URL.createObjectURL(b)
+            draw(objectUrl)
+          })
+        }
+        draw(rawUrl)
+      })
+      .catch(() => { if (!cancelled) draw(rawUrl) })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [file.id, rawUrl])
+
+  const saveComposite = useCallback(async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    if (!blob) return
+    const form = new FormData()
+    form.append('file', blob, 'markup.jpg')
+    try {
+      const resp = await fetch(markupUrl(file.id), { method: 'POST', body: form })
+      if (resp.ok) setHasMarkup(true)
+      else setActionError('failed to save markup')
+    } catch {
+      setActionError('failed to save markup')
+    }
+  }, [file.id])
+
+  const handlePointerDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!ready || busy) return
+    const canvas = canvasRef.current!
+    const pt = canvasPoint(e, canvas)
+    if (tool === 'text') {
+      const text = window.prompt('markup text:')
+      if (text) {
+        const ctx = canvas.getContext('2d')!
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.font = `${Math.max(20, Math.round(canvas.width * 0.028))}px sans-serif`
+        ctx.textBaseline = 'top'
+        ctx.fillText(text, pt.x, pt.y)
+        ctx.restore()
+        void saveComposite()
+      }
+      return
+    }
+    snapshotRef.current = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+    dragStartRef.current = pt
+  }
+
+  const handlePointerMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+    else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+  }
+
+  const handlePointerUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    const moved = Math.hypot(pt.x - start.x, pt.y - start.y) > 2
+    if (moved) {
+      if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+      else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+    }
+    dragStartRef.current = null
+    snapshotRef.current = null
+    if (moved) void saveComposite()
+  }
+
+  const runAction = async (url: string) => {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const resp = await fetch(url, { method: 'POST' })
+      if (resp.ok) onClose()
+      else setActionError('action failed')
+    } catch {
+      setActionError('action failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="markup-overlay">
+      <div className="markup-dialog">
+        <div className="markup-header">
+          <span className="markup-title">markup</span>
+          <span className="markup-filename" title={file.name}>{file.name}</span>
+        </div>
+        <div className="markup-canvas-wrap">
+          {!ready && !loadError && <div className="markup-status">loading…</div>}
+          {loadError && <div className="markup-status markup-status-error">{loadError}</div>}
+          <canvas
+            ref={canvasRef}
+            className="markup-canvas"
+            style={{ visibility: ready ? 'visible' : 'hidden' }}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onMouseLeave={handlePointerUp}
+          />
+        </div>
+        <div className="markup-toolbar">
+          <div className="markup-tools">
+            {(Object.keys(MARKUP_TOOL_ICON) as MarkupTool[]).map(t => (
+              <button
+                key={t}
+                className={`markup-tool-btn${tool === t ? ' markup-tool-active' : ''}`}
+                onClick={() => setTool(t)}
+                title={t}
+              >
+                {MARKUP_TOOL_ICON[t]}
+              </button>
+            ))}
+          </div>
+          <div className="markup-palette">
+            {MARKUP_COLORS.map(c => (
+              <button
+                key={c}
+                className={`markup-swatch${color === c ? ' markup-swatch-active' : ''}`}
+                style={{ background: c }}
+                onClick={() => setColor(c)}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+        {actionError && <div className="markup-status markup-status-error">{actionError}</div>}
+        <div className="markup-actions">
+          <button className="markup-btn markup-btn-cancel" onClick={() => runAction(markupCancelUrl(file.id))} disabled={busy}>
+            cancel
+          </button>
+          <button
+            className="markup-btn markup-btn-copy"
+            onClick={() => runAction(markupCopyUrl(file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'create a file duplicate with the markup included' : 'draw something first'}
+          >
+            copy
+          </button>
+          <button
+            className="markup-btn markup-btn-commit"
+            onClick={() => runAction(markupCommitUrl(file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'edit the markup into the image file directly' : 'draw something first'}
+          >
+            commit
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -1403,6 +1740,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab)
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // markupFile is snapshotted at the moment the dialog opens (rather than
+  // re-derived from the live filesState listing, like selectedFile/viewerFile
+  // below) so an in-flight files-state broadcast can't yank the dialog's
+  // target out from under an open editing session.
+  const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
   const [screenshotBusy, setScreenshotBusy] = useState(false)
   // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
   // so condoccer's own hash-based resume (Layer 1) never survives a refresh
@@ -1626,11 +1968,19 @@ export default function App() {
                 file={selectedFile}
                 onClose={() => setSelectedFileId(null)}
                 onEnter={setViewerFileId}
+                onMarkup={id => setMarkupFile(filesState?.files.find(f => f.id === id) ?? null)}
               />
             )}
           </div>
         )}
       </div>
+      {markupFile && (
+        <MarkupDialog
+          file={markupFile}
+          rawUrl={fileRawUrl(markupFile.id)}
+          onClose={() => setMarkupFile(null)}
+        />
+      )}
     </div>
   )
 }

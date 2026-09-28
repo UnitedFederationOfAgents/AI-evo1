@@ -856,6 +856,11 @@ body {
 /* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
    independent of (and layered outside) the active-selection border above. */
 .files-item-highlighted { box-shadow: 0 0 0 2px #d7c22b; }
+/* Marked up (Step1SubstepCPrompt.md Revision F): a bright orange border --
+   an in-progress markup-dialog session is open on this file. Independent of
+   (and can combine with) the highlighted ring above. */
+.files-item-markedup { box-shadow: 0 0 0 2px #ff6a00; }
+.files-item-highlighted.files-item-markedup { box-shadow: 0 0 0 2px #d7c22b, 0 0 0 4px #ff6a00; }
 .file-icon { display: inline-flex; width: 28px; height: 28px; }
 .file-icon svg { width: 100%; height: 100%; }
 /* File-details-dialog cache state: orange while short-term cached, yellow
@@ -907,6 +912,13 @@ body {
 .file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
 .file-detail-highlight-active { background: #3a341a; border-color: #d7c22b; color: #d7c22b; }
 .file-detail-highlight-active:hover { background: #5a4e2e; }
+.file-detail-markup {
+  flex: 1; background: #2a1e14; border: 1px solid #7a4e2e; border-radius: 3px; color: #ff9d5c;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-markup:hover { background: #4a2e1a; border-color: #c47a4e; }
+.file-detail-markup-active { background: #4a2e14; border-color: #ff6a00; color: #ff6a00; }
+.file-detail-markup-active:hover { background: #5a3a1a; }
 .file-detail-delete {
   flex: 1; background: #3a1a1a; border: 1px solid #7a2e2e; border-radius: 3px; color: #e06a6a;
   font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
@@ -937,6 +949,54 @@ body {
   white-space: pre-wrap; word-break: break-word;
 }
 .file-viewer-empty { color: #888; font-style: italic; font-size: 13px; }
+
+/* ---- Markup dialog (Step1SubstepCPrompt.md Revision F) ---- */
+
+.markup-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px;
+}
+.markup-dialog {
+  display: flex; flex-direction: column; gap: 12px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; padding: 16px;
+  max-width: min(94vw, 1100px); max-height: 94vh;
+}
+.markup-header { display: flex; align-items: baseline; gap: 10px; }
+.markup-title { font-size: 11px; font-weight: 600; color: #ff9d5c; text-transform: uppercase; letter-spacing: 0.05em; }
+.markup-filename { font-size: 13px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.markup-canvas-wrap {
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 6px; min-height: 200px; min-width: 300px;
+  display: flex; align-items: center; justify-content: center; overflow: auto; flex: 1;
+}
+.markup-canvas { max-width: min(88vw, 1000px); max-height: 62vh; cursor: crosshair; }
+.markup-status { color: #888; font-style: italic; font-size: 13px; }
+.markup-status-error { color: #e06a6a; }
+.markup-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.markup-tools { display: flex; gap: 6px; }
+.markup-tool-btn {
+  display: flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #aaa; cursor: pointer; padding: 5px;
+}
+.markup-tool-btn svg { width: 100%; height: 100%; }
+.markup-tool-btn:hover { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
+.markup-tool-active { background: #14283a; border-color: #4e8cca; color: #5bb8ff; }
+.markup-palette { display: flex; gap: 6px; }
+.markup-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid #3c3c3c; cursor: pointer; padding: 0; }
+.markup-swatch:hover { border-color: #777; }
+.markup-swatch-active { border-color: #fff; box-shadow: 0 0 0 2px #007acc; }
+.markup-actions { display: flex; gap: 8px; }
+.markup-btn {
+  flex: 1; background: #262626; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 7px 0; cursor: pointer; text-align: center;
+}
+.markup-btn:hover { background: #2e2e2e; border-color: #555; }
+.markup-btn:disabled { opacity: 0.5; cursor: default; }
+.markup-btn-cancel { color: #e06a6a; }
+.markup-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+.markup-btn-copy { color: #6ec96e; }
+.markup-btn-copy:hover:not(:disabled) { background: #1a3a1a; border-color: #2e7a2e; }
+.markup-btn-commit { color: #ff9d5c; }
+.markup-btn-commit:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
 
 /* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
  *

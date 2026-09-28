@@ -41,6 +41,34 @@ func TestFileInfoHighlightedRoundTrips(t *testing.T) {
 	}
 }
 
+// TestFileInfoMarkedUpRoundTrips mirrors TestFileInfoHighlightedRoundTrips
+// for FileInfo.MarkedUp (Step1SubstepCPrompt.md Revision F): without it, the
+// markup dialog's bright-orange-border cue could never render as active when
+// viewed through agent-coordinator.
+func TestFileInfoMarkedUpRoundTrips(t *testing.T) {
+	raw := []byte(`{"id":"a1_x.png","name":"x.png","kind":"image","state":"cached","marked_up":true}`)
+
+	var fi FileInfo
+	if err := json.Unmarshal(raw, &fi); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !fi.MarkedUp {
+		t.Fatal("expected MarkedUp=true after decoding a payload with marked_up:true")
+	}
+
+	out, err := json.Marshal(fi)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTripped map[string]any
+	if err := json.Unmarshal(out, &roundTripped); err != nil {
+		t.Fatalf("unmarshal round-tripped output: %v", err)
+	}
+	if v, ok := roundTripped["marked_up"]; !ok || v != true {
+		t.Fatalf("re-encoded FileInfo missing/false marked_up: %v", roundTripped)
+	}
+}
+
 // newTestServerWithHost creates an agent-coordinator Server with one
 // connected host, "lr-a", whose local-representative HTTP dashboard is
 // resolved to backend's address -- as if backend's port had been reported

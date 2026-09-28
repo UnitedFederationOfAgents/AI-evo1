@@ -175,6 +175,12 @@ type FileInfo struct {
 	// file-details dialog's "highlight" toggle could never render as active
 	// when viewed through agent-coordinator.
 	Highlighted bool `json:"highlighted"`
+
+	// MarkedUp mirrors local-representative's FileInfo.MarkedUp (see
+	// local-representative/files.go) -- same reasoning as Highlighted above,
+	// so the markup dialog's bright-orange-border cue renders correctly when
+	// viewed through agent-coordinator's per-host files tab.
+	MarkedUp bool `json:"marked_up"`
 }
 
 // FilesStateMsg matches the files-state payload sent from LR over representable.

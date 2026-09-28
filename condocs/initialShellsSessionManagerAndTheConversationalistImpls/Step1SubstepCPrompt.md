@@ -42,3 +42,20 @@ You've hit your session limit · resets 6:30pm (UTC)
 This functionality works well in local-representative, but despite seeing the version number in the 'No agent-coordinator view update' on the system global tab, we do not see the UI updates working in AC.
 
 Let's revisit this and either fix it or explain why we should plan the fix in more detail first.
+
+
+prompt: [`f738bb2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f738bb27edfd9affe1c3e07d695f0b636058f072) → reply: [`99a84b9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/99a84b91450c049a440abdd1ec1fb21512e097ae)
+
+## Reply B
+
+You've hit your session limit · resets 6:30pm (UTC)
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

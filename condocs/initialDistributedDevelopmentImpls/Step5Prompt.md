@@ -319,6 +319,11 @@ I traced the reported empty space in agent-coordinator's top bar to its `.nav-ar
 [Step 5 Substep R](Step5SubstepRPrompt.md)
 
 
+## <REPLACE-Revision|Retry> R
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep R is now active. Interact with the substep file (Step5SubstepRPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

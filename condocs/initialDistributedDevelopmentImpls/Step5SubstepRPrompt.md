@@ -161,11 +161,6 @@ Implemented Revision E of Step5SubstepR:
 As with prior revisions, `tsc`/`npm build` are denied in this environment (attempted and blocked), so this was verified by careful read-through; there's still no frontend test harness in either app to add regression coverage to.
 
 
-## <REPLACE-Revision|Retry> F
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1790599285 (Mon Sep 28 12:41:25 PM UTC 2026).

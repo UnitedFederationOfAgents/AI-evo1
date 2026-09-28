@@ -59,11 +59,8 @@ Applied the same full-pane treatment to agent-coordinator's per-host view that l
 [Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+We have completed the substep to add feedback improvements to the system, but in doing so we discovered two bugs:
+- The substep text is deleted
+- We trigger a rebuild (likely by removing the .condoc lockfile -- we should not do this)

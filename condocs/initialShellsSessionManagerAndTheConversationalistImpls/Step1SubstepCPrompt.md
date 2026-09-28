@@ -89,11 +89,8 @@ No condoc files were touched. The implementation is complete and consistent acro
 Extended AC's `selfVersionWatch` (mirroring local-representative's) with `autoUpdate`/`pendingVersion` fields and a `restart` callback wired to `requestRestart("auto-update")`, so agent-coordinator now restarts itself automatically once an update lands on disk while auto-update is on — not just when an operator clicks "restart AC" manually. The global topology view's existing "agent-coordinator" section auto-update checkbox (next to "network update all") now also arms AC's own toggle via a new `ac-set-auto-update` WebSocket message, in addition to sweeping every host's LR as before; a new `agent-coordinator/reststate.go` carries that toggle across AC's own restart (via `restartsignal.AnnounceState`) so it doesn't silently turn itself back off after firing once. Updated `docs/DevMode.md` and added Go tests covering the new poll/toggle/restart behavior; as with prior steps, `npm`/`tsc`/`go build` are blocked in this sandbox, so I reviewed the diffs by hand — recommend `make -C agent-coordinator build` before merging.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Let's further clarify the agent-coordinator 'auto-update' control by changing the label just slightly to 'auto-update-all' (but keeping everything else identical)
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also add an 'uptime' field for agent-coordinator (AC UPTIME) and distinguish it from the 'LR UPTIME'. The VERSION in the global system pane can also distinguish 'LR VERSION'.

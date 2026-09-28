@@ -71,11 +71,8 @@ Investigated why AC's UI update wasn't showing despite the version bump being vi
 No fix is warranted in the screenshot-tool code itself; I'd recommend closing this out as expected behavior rather than a defect, unless you want the "network update all"/auto-update semantics extended to cover AC's own restart automatically, which would be a separate, larger design change.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+This explains the issue - we expect that the 'auto-update' in the agent-coordinator controls will cause AC to restart itself as well.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's update the behaviour to ensure this happens.

@@ -2331,6 +2331,66 @@ function LRView({
   )
 }
 
+// CAMERA_ICON is a grey-palette wireframe icon (Step1SubstepCPrompt.md),
+// matching the files tab's own outline icon set so the quick-feedback
+// screenshot button reads as part of the same icon family. Kept identical to
+// local-representative's copy -- see App.tsx there for the file-icon
+// convention this follows.
+const CAMERA_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+    <path d="M9 4 7.5 6H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-3.5L15 4z" strokeLinecap="round" />
+    <circle cx="12" cy="13" r="3.5" />
+  </svg>
+)
+
+// captureScreenshot grabs a single frame of "the current display"
+// (Step1SubstepCPrompt.md) via the browser's screen-capture API rather than
+// rasterizing the DOM, so it genuinely captures whatever's on screen
+// (including an embedded tab's own iframe content) without pulling in a
+// DOM-to-canvas dependency. The capture stream is stopped immediately after
+// the one frame is drawn -- this is a screenshot, not a recording.
+async function captureScreenshot(): Promise<File> {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+  try {
+    const track = stream.getVideoTracks()[0]
+    const video = document.createElement('video')
+    video.srcObject = stream
+    await video.play()
+    // Give the first frame a tick to actually land before drawing it.
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    canvas.getContext('2d')!.drawImage(video, 0, 0)
+    track.stop()
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))), 'image/png'),
+    )
+    return new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })
+  } finally {
+    stream.getTracks().forEach(t => t.stop())
+  }
+}
+
+// ScreenshotButton sits immediately left of the nav arrows. `enabled`
+// reflects whether there's at least one file store to save into -- see
+// callers for what that means in each app -- independent of `busy`, which
+// just covers the capture/upload round-trip so a slow save can't be
+// double-fired.
+function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
+  const active = enabled && !busy
+  return (
+    <button
+      className={`screenshot-btn${active ? ' screenshot-btn-active' : ''}`}
+      onClick={onClick}
+      disabled={!active}
+      title={enabled ? (busy ? 'saving screenshot…' : 'save a screenshot to the most-preferred file store') : 'no file store available -- select a connected host first'}
+    >
+      {CAMERA_ICON}
+    </button>
+  )
+}
+
 export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
@@ -2353,6 +2413,7 @@ export default function App() {
   // sidebar. Desktop layout is untouched -- this state has no visible effect
   // above the breakpoint.
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [screenshotBusy, setScreenshotBusy] = useState(false)
 
   const handleSelectHost = (id: string) => {
     setSelectedHostId(id)
@@ -2368,6 +2429,28 @@ export default function App() {
   }
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+
+  // "At least one file store available" (Step1SubstepCPrompt.md): AC has no
+  // file store of its own -- a screenshot can only ever land somewhere by
+  // relaying through the selected host's local-representative (same route
+  // uploadFiles already uses), which only works once a host is both picked
+  // and actually connected. uploadFiles below already prefers a cloud cache
+  // over the host-cache wherever the target LR has one; today that's
+  // nowhere, so every screenshot lands in that host's host-cache.
+  const hasFileStore = !!selectedHost && selectedHost.status === 'connected'
+
+  const handleScreenshot = async () => {
+    if (screenshotBusy || !selectedHostId) return
+    setScreenshotBusy(true)
+    try {
+      const file = await captureScreenshot()
+      await uploadFiles(selectedHostId, [file])
+    } catch (err) {
+      console.error('screenshot failed:', err)
+    } finally {
+      setScreenshotBusy(false)
+    }
+  }
 
   // Files tab picker's highlighted-file indicator (Step5SubstepR Revision E).
   // Computed across every known host -- not just whichever one is currently
@@ -2444,6 +2527,8 @@ export default function App() {
       )}
       <div className="app-header">
         <span className="app-title">agent-coordinator</span>
+        <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
         <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}

@@ -114,6 +114,37 @@ body {
 .conn-dot-ok  { background: #4ec94e; }
 .conn-dot-err { background: #cc4444; }
 
+/* Quick-feedback version string + screenshot button (Step1SubstepCPrompt.md)
+   -- sit immediately left of the nav arrows, in that order (version, then
+   camera icon). Mirrors local-representative's copy of the same rules. */
+.header-version-tag {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.screenshot-btn {
+  background: none;
+  border: none;
+  color: #666;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 3px;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.screenshot-btn svg { width: 100%; height: 100%; display: block; }
+
+.screenshot-btn.screenshot-btn-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.screenshot-btn.screenshot-btn-active:hover { background: #333; }
+
 /* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
    right corner alongside the connection dot. Unlike local-representative's
    tab-bar, this app's header has nothing else in the middle, so the arrows

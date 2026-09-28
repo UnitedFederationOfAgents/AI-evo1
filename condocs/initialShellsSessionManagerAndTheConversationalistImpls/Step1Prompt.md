@@ -40,11 +40,8 @@ prompt: [`636efba`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6
 Done. For the three embedded-app tabs (`condoccer`, `sessions`, `convo`), I removed the padded header treatment (`service-name` heading, 40px pane padding, 16px stacked gaps) and made the iframe flex to fill the entire tab pane, while keeping a slim (24px) status bar directly under the tab bar showing the tab name and health so meta-status doesn't disappear. Other tabs (`federation-command`, `system`, `files`, `worker`) are untouched. This was feasible as a full-pane change with minimal additional code (one `EMBED_TABS` set, a restructured conditional render, and a few new/adjusted CSS rules in `index.css`), so I implemented that directly rather than a 99%-partial variant.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+This now looks good in local-representative.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's ensure that the agent-coordinator view looks equally good.

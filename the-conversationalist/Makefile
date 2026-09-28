@@ -14,6 +14,14 @@ build-frontend:
 	cd frontend && npm install && npm run build
 
 build-go:
+	# go.sum is missing entries for the AWS SDK deps added in Revision D --
+	# they were added from a sandbox with no network access to resolve them
+	# (see that step's Reply), so `go build`'s default -mod=readonly refuses
+	# to build. Reconcile against the network here as a stopgap; once
+	# someone with network access runs `make deps` and commits the
+	# resulting go.sum, this line is a fast no-op and can be dropped to
+	# match the other subprojects' build-go.
+	go mod tidy
 	go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 run: build

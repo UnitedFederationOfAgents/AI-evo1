@@ -264,10 +264,17 @@ would silently turn itself back off after firing once. The global topology
 view's "agent-coordinator" section additionally grows its own **auto-update**
 checkbox alongside **network update all**, mirroring **auto-rebuild**'s
 pairing with **rebuild all**: it sweeps every connected, loader-managed
-host's toggle at once rather than the single selected host, reads checked
-only once all of them already have it on, and — like the per-host toggle
-above it in this same view — never reaches into `agent-coordinator`'s own
-restart, which stays a manual, one-shot action via **restart AC**.
+host's toggle at once rather than the single selected host, and — unlike
+**rebuild all**'s neighboring checkbox — also arms `agent-coordinator`'s own
+auto-update alongside them (sending a dedicated `ac-set-auto-update`
+WebSocket message, no host to target, mirroring `ac-restart-app`), so AC
+restarts itself the moment its own `selfVersionWatch` next notices an update
+too, rather than only ever coming back up via a manual **restart AC**. It
+reads checked only once every connected host's toggle, and AC's own, already
+have it on. AC's half is carried across its own restart the same way LR's
+is, via `acState.AutoUpdate` (`agent-coordinator/reststate.go`) — see
+[`condocs/initialShellsSessionManagerAndTheConversationalistImpls/Step1SubstepCPrompt.md`](../condocs/initialShellsSessionManagerAndTheConversationalistImpls/Step1SubstepCPrompt.md)
+Revision D.
 
 See [`ufa-loader/README.md`](../ufa-loader/README.md) for the full protocol
 and flags.

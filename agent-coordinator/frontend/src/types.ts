@@ -87,6 +87,13 @@ export interface SelfInfoMsg {
   host_id: string
   loader_managed: boolean
   update_available: boolean
+  // auto_update: whether AC restarts itself the instant update_available
+  // flips true, rather than waiting for an operator to press "restart and
+  // update AC" -- mirrors ProcInfo's same-named field for a
+  // local-representative's own self row. See the global topology view's
+  // "agent-coordinator" section auto-update checkbox (Step1SubstepCPrompt.md
+  // Revision D).
+  auto_update: boolean
   version: string // this process's own build version -- see BrowserRefreshStrategy.md
 }
 

@@ -444,11 +444,18 @@ func newServer() *Server {
 // the frontend to detect a rebuild+restart out from under an already-open
 // tab and reload itself -- see
 // condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md.
+// AutoUpdate mirrors ProcInfo's same-named field for a local-representative's
+// own self row: whether an available update should make AC restart itself
+// the moment selfVersion next notices it, rather than waiting for an
+// operator to press "restart and update AC" -- see selfversion.go and
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1SubstepCPrompt.md Revision D.
 type SelfInfoMsg struct {
 	DevMode         bool   `json:"dev_mode"`
 	HostID          string `json:"host_id"`
 	LoaderManaged   bool   `json:"loader_managed"`
 	UpdateAvailable bool   `json:"update_available"`
+	AutoUpdate      bool   `json:"auto_update"`
 	Version         string `json:"version"`
 }
 
@@ -494,6 +501,7 @@ func (s *Server) selfInfo() SelfInfoMsg {
 		HostID:          s.selfHostID,
 		LoaderManaged:   s.loaderManaged,
 		UpdateAvailable: s.selfVersion.available(),
+		AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		Version:         ufaversion.Version,
 	}
 }
@@ -862,6 +870,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			// (Step4Prompt.md Revision E). No payload: there's only ever one
 			// agent-coordinator to restart.
 			s.requestRestart("operator")
+		case "ac-set-auto-update":
+			// Toggles whether AC restarts itself the instant an update
+			// becomes available -- the global topology view's
+			// "agent-coordinator" section's own auto-update checkbox. No
+			// host to target, mirroring ac-restart-app; see selfversion.go
+			// and condocs/
+			// initialShellsSessionManagerAndTheConversationalistImpls/
+			// Step1SubstepCPrompt.md Revision D.
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoUpdate(payload.Enabled)
+			}
 		}
 	}
 }
@@ -1034,12 +1056,16 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 
 // announceRestartAndExit writes the restartsignal announcement (see
 // ufa-loader/README.md and docs/DevMode.md's "Loader" section) as this
-// process's final act before exiting 0. Callers are expected to have already
-// decided a restart is appropriate; this never returns.
+// process's final act before exiting 0, attaching this AC's own live state
+// (see reststate.go) for the instance replacing it to pick back up --
+// otherwise an auto-update-triggered restart would silently turn
+// auto-update back off. Callers are expected to have already decided a
+// restart is appropriate; this never returns.
 func (s *Server) announceRestartAndExit(reason string) {
 	log.Printf("announcing a restart (%s) and exiting", reason)
-	if err := restartsignal.Announce(os.Stdout, "agent-coordinator", reason); err != nil {
-		log.Printf("restartsignal.Announce: %v", err)
+	st := s.currentACState()
+	if err := restartsignal.AnnounceState(os.Stdout, "agent-coordinator", reason, st); err != nil {
+		log.Printf("restartsignal.AnnounceState: %v", err)
 	}
 	os.Exit(0)
 }
@@ -1093,12 +1119,21 @@ func main() {
 	s.devMode = *devMode
 	s.selfHostID = ufahostid.GetHostID()
 
+	prevACState, havePrevACState := loadPreviousACState()
+
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
 		// Only worth polling for an on-disk update when a restart could
-		// actually pick it up -- see selfversion.go.
-		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSelfInfo)
+		// actually pick it up -- see selfversion.go. restart wires AC's own
+		// "auto-update" toggle to the same requestRestart the "restart and
+		// update AC" button drives, per condocs/
+		// initialShellsSessionManagerAndTheConversationalistImpls/
+		// Step1SubstepCPrompt.md Revision D.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSelfInfo, func() { s.requestRestart("auto-update") })
 		if s.selfVersion != nil {
+			if havePrevACState && prevACState.AutoUpdate {
+				s.selfVersion.setAutoUpdate(true)
+			}
 			go s.selfVersion.watchLoop()
 		}
 	}

@@ -76,3 +76,24 @@ No fix is warranted in the screenshot-tool code itself; I'd recommend closing th
 This explains the issue - we expect that the 'auto-update' in the agent-coordinator controls will cause AC to restart itself as well.
 
 Let's update the behaviour to ensure this happens.
+
+
+prompt: [`95d9865`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/95d9865872c3df39a9661cf2db6ca229e64b4bc5) → reply: [`27b3e20`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/27b3e200a675cd20850188d77486dac497ef8d4a)
+
+## Reply D
+
+No condoc files were touched. The implementation is complete and consistent across backend and frontend.
+
+## Summary
+
+Extended AC's `selfVersionWatch` (mirroring local-representative's) with `autoUpdate`/`pendingVersion` fields and a `restart` callback wired to `requestRestart("auto-update")`, so agent-coordinator now restarts itself automatically once an update lands on disk while auto-update is on — not just when an operator clicks "restart AC" manually. The global topology view's existing "agent-coordinator" section auto-update checkbox (next to "network update all") now also arms AC's own toggle via a new `ac-set-auto-update` WebSocket message, in addition to sweeping every host's LR as before; a new `agent-coordinator/reststate.go` carries that toggle across AC's own restart (via `restartsignal.AnnounceState`) so it doesn't silently turn itself back off after firing once. Updated `docs/DevMode.md` and added Go tests covering the new poll/toggle/restart behavior; as with prior steps, `npm`/`tsc`/`go build` are blocked in this sandbox, so I reviewed the diffs by hand — recommend `make -C agent-coordinator build` before merging.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

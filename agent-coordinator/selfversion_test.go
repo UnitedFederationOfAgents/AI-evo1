@@ -77,4 +77,108 @@ func TestSelfVersionWatchNilSafe(t *testing.T) {
 	if w.available() {
 		t.Fatal("a nil watch should report no update available")
 	}
+	if w.autoUpdateEnabled() {
+		t.Fatal("a nil watch should report auto-update disabled")
+	}
+	if p := w.pending(); p != "" {
+		t.Fatalf("a nil watch's pending() = %q, want empty", p)
+	}
+}
+
+// TestSelfVersionWatchPollPending verifies poll() surfaces the observed
+// on-disk version via pending() exactly while an update is available, and
+// that it goes back to empty once running catches up.
+func TestSelfVersionWatchPollPending(t *testing.T) {
+	bin := fakeVersionBin(t, "v2")
+	w := &selfVersionWatch{binPath: bin, running: "v1", notify: func() {}}
+
+	if p := w.pending(); p != "" {
+		t.Fatalf("pending() before any poll = %q, want empty", p)
+	}
+
+	w.poll()
+	if p := w.pending(); p != "v2" {
+		t.Fatalf("pending() after poll = %q, want %q", p, "v2")
+	}
+
+	w.running = "v2"
+	w.poll()
+	if p := w.pending(); p != "" {
+		t.Fatalf("pending() once running catches up = %q, want empty", p)
+	}
+}
+
+// TestSelfVersionWatchAutoUpdateFiresOnPoll verifies that with auto-update
+// on, poll() fires restart the moment it notices an update landed -- see
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1SubstepCPrompt.md Revision D.
+func TestSelfVersionWatchAutoUpdateFiresOnPoll(t *testing.T) {
+	bin := fakeVersionBin(t, "v2")
+
+	restarted := 0
+	w := &selfVersionWatch{binPath: bin, running: "v1", notify: func() {}, restart: func() { restarted++ }}
+	w.setAutoUpdate(true)
+	if restarted != 0 {
+		t.Fatalf("restart fired %d times before any update was available, want 0", restarted)
+	}
+
+	w.poll()
+	if !w.available() {
+		t.Fatal("expected an update to be available: on-disk v2 != running v1")
+	}
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after the update landed, want 1", restarted)
+	}
+
+	// A further unchanged poll must not fire restart again -- the process is
+	// expected to actually go down and come back up once restart() runs.
+	w.poll()
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after an unchanged poll, want still 1", restarted)
+	}
+}
+
+// TestSelfVersionWatchAutoUpdateFiresOnToggle verifies that turning
+// auto-update on while an update is already available fires restart right
+// away, rather than waiting for the next poll to notice nothing changed.
+func TestSelfVersionWatchAutoUpdateFiresOnToggle(t *testing.T) {
+	bin := fakeVersionBin(t, "v2")
+
+	restarted := 0
+	w := &selfVersionWatch{binPath: bin, running: "v1", notify: func() {}, restart: func() { restarted++ }}
+	w.poll()
+	if !w.available() {
+		t.Fatal("expected an update to be available: on-disk v2 != running v1")
+	}
+	if restarted != 0 {
+		t.Fatalf("restart fired %d times with auto-update still off, want 0", restarted)
+	}
+
+	w.setAutoUpdate(true)
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after turning auto-update on with an update already available, want 1", restarted)
+	}
+	if !w.autoUpdateEnabled() {
+		t.Fatal("expected auto-update to read enabled after setAutoUpdate(true)")
+	}
+
+	w.setAutoUpdate(false)
+	if restarted != 1 {
+		t.Fatalf("restart fired %d times after turning auto-update back off, want still 1", restarted)
+	}
+}
+
+// TestServerSetAutoUpdateNoSelfVersion verifies the Server-level entry point
+// (the "ac-set-auto-update" WebSocket message routes through
+// Server.setAutoUpdate) is a safe, logged no-op when this AC isn't
+// loader-managed -- s.selfVersion is nil in that case.
+func TestServerSetAutoUpdateNoSelfVersion(t *testing.T) {
+	s := newServer()
+
+	// Must not panic on a nil s.selfVersion.
+	s.setAutoUpdate(true)
+
+	if s.selfInfo().AutoUpdate {
+		t.Fatalf("expected AutoUpdate=false with no selfVersion to toggle")
+	}
 }

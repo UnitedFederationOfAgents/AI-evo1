@@ -51,6 +51,7 @@ function useCoordinatorWS() {
   // types.ts SelfInfoMsg and Step4Prompt.md Revision E).
   const [acLoaderManaged, setACLoaderManaged] = useState(false)
   const [acUpdateAvailable, setACUpdateAvailable] = useState(false)
+  const [acAutoUpdate, setACAutoUpdate] = useState(false)
   // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
   const wsRef = useRef<WebSocket | null>(null)
@@ -113,6 +114,14 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'ac-restart-app', payload: {} }))
   }, [])
 
+  // Toggles whether agent-coordinator restarts itself the instant an update
+  // becomes available, instead of waiting for the "restart and update AC"
+  // control -- mirrors sendLRSetAutoUpdate but for AC's own process, with no
+  // host to target (see Step1SubstepCPrompt.md Revision D).
+  const sendACSetAutoUpdate = useCallback((enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'ac-set-auto-update', payload: { enabled } }))
+  }, [])
+
   const selectHost = useCallback((hostId: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'select-host', payload: { host_id: hostId } }))
   }, [])
@@ -165,6 +174,7 @@ function useCoordinatorWS() {
             setSelfHostId(p.host_id || null)
             setACLoaderManaged(p.loader_managed)
             setACUpdateAvailable(p.update_available)
+            setACAutoUpdate(p.auto_update)
             // A rebuild+restart is invisible to an already-open tab -- the
             // reconnect above is the only signal it gets. Compare the
             // server's own reported version against this bundle's
@@ -322,9 +332,9 @@ function useCoordinatorWS() {
 
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
-    acLoaderManaged, acUpdateAvailable,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -1675,7 +1685,7 @@ function TopologyNodeCard({
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1687,7 +1697,9 @@ function GlobalTopologyPanel({
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
+  acAutoUpdate: boolean
   sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
 }) {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1759,14 +1771,18 @@ function GlobalTopologyPanel({
   // Accompanying auto-update toggle-selector, mirroring auto-rebuild's above:
   // applies to every connected, loader-managed host at once (not just ones
   // currently stale, since like auto-rebuild this is a standing setting, not
-  // a one-shot action) -- Step5Prompt.md Revision E. Deliberately scoped to
-  // hosts, same as "network update all" is scoped to *restartable* hosts
-  // plus AC handled separately by its own "restart AC" control above; this
-  // doesn't reach into AC's own restart at all.
+  // a one-shot action) -- Step5Prompt.md Revision E. Also arms AC's own
+  // auto-update alongside every host's, so agent-coordinator restarts itself
+  // the moment it notices an update too, rather than only ever coming back
+  // up via a manual "restart AC" -- see Step1SubstepCPrompt.md Revision D.
   const updatableHosts = devMode ? allHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed) : []
-  const allAutoUpdateOn = updatableHosts.length > 0 && updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update)
-  const handleSetAutoUpdateAll = (enabled: boolean) =>
+  const allAutoUpdateOn = (updatableHosts.length > 0 || acLoaderManaged) &&
+    updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update) &&
+    (!acLoaderManaged || acAutoUpdate)
+  const handleSetAutoUpdateAll = (enabled: boolean) => {
     updatableHosts.forEach(h => sendLRSetAutoUpdate(h.id, enabled))
+    if (acLoaderManaged) sendACSetAutoUpdate(enabled)
+  }
 
   return (
     <div className="topo-panel">
@@ -1959,11 +1975,11 @@ function GlobalTopologyPanel({
               </button>
               <label
                 className="sys-auto-rebuild"
-                title="restart automatically, per host, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once (agent-coordinator's own restart above isn't included)"
+                title="restart automatically, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once, plus agent-coordinator's own restart above"
               >
                 <input
                   type="checkbox"
-                  disabled={updatableHosts.length === 0}
+                  disabled={updatableHosts.length === 0 && !acLoaderManaged}
                   checked={allAutoUpdateOn}
                   onChange={e => handleSetAutoUpdateAll(e.target.checked)}
                 />
@@ -1979,7 +1995,7 @@ function GlobalTopologyPanel({
 
 function GlobalSystemPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1991,7 +2007,9 @@ function GlobalSystemPanel({
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
+  acAutoUpdate: boolean
   sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
 }) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
   const troughEntries = useAggregateTrough(hosts, hostData)
@@ -2022,7 +2040,9 @@ function GlobalSystemPanel({
           sendLRSetAutoUpdate={sendLRSetAutoUpdate}
           acLoaderManaged={acLoaderManaged}
           acUpdateAvailable={acUpdateAvailable}
+          acAutoUpdate={acAutoUpdate}
           sendACRestartApp={sendACRestartApp}
+          sendACSetAutoUpdate={sendACSetAutoUpdate}
         />
       ) : (
         <div className="service-empty">not yet implemented</div>
@@ -2034,7 +2054,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp, hasHighlighted, onGoToHighlighted,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2048,7 +2068,9 @@ function GlobalView({
   setActiveTab: (tab: LRTab) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
+  acAutoUpdate: boolean
   sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
   hasHighlighted: boolean
   onGoToHighlighted: () => void
 }) {
@@ -2091,7 +2113,9 @@ function GlobalView({
             sendLRSetAutoUpdate={sendLRSetAutoUpdate}
             acLoaderManaged={acLoaderManaged}
             acUpdateAvailable={acUpdateAvailable}
+            acAutoUpdate={acAutoUpdate}
             sendACRestartApp={sendACRestartApp}
+            sendACSetAutoUpdate={sendACSetAutoUpdate}
           />
         ) : (
           <div className="service-empty">not yet implemented</div>
@@ -2394,9 +2418,9 @@ function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: 
 export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
-    acLoaderManaged, acUpdateAvailable,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -2604,7 +2628,9 @@ export default function App() {
               setActiveTab={setActiveTab}
               acLoaderManaged={acLoaderManaged}
               acUpdateAvailable={acUpdateAvailable}
+              acAutoUpdate={acAutoUpdate}
               sendACRestartApp={sendACRestartApp}
+              sendACSetAutoUpdate={sendACSetAutoUpdate}
               hasHighlighted={!!firstHighlighted}
               onGoToHighlighted={goToFirstHighlighted}
             />

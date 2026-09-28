@@ -54,11 +54,11 @@ prompt: [`7f28bb1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7
 Applied the same full-pane treatment to agent-coordinator's per-host view that local-representative got in Revision A: added an `EMBED_TABS` set (condoccer/sessions/convo) in `agent-coordinator/frontend/src/App.tsx`, restructured `LRView` so those tabs render the iframe (renamed `condoccer-frame` → `embed-frame`) directly filling the pane with a slim 24px `embed-status-bar` under the tab bar instead of the padded `service-view`/`service-name` header, while `federation-command`/`system`/`files` keep their existing padded layout unchanged. Mirrored the corresponding CSS (`main-pane-embed`, `embed-frame`, `embed-status-bar`, `service-empty-embed`, plus the mobile override) into `agent-coordinator/frontend/src/index.css`, removing the now-dead `condoccer-frame` rule. Same sandbox restriction as before — I couldn't run `tsc`/`vite build` to confirm it compiles, so I'd recommend `make -C agent-coordinator build` before merging.
 
 
-## <REPLACE-Revision|Retry> C
+## Substep C - Implement quick-feedback improvements.
 
-<REPLACE-PROMPT>
+[Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep C is now active. Interact with the substep file (Step1SubstepCPrompt.md).

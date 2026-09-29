@@ -51,19 +51,32 @@ func resourceTargetFile(root string, info CondocInfo) (string, error) {
 	}
 }
 
-// addResource implements the "add_resource" action: resolves the active
-// step/substep file the same way "revision"/"retry" do, pulls every
-// highlighted file from local-representative into the condoc's Impls folder,
-// and inserts a "## Resource N" block linking to them just above the
-// pending revision/retry placeholder. The .condoc lock is asserted for the
+// addResource implements the "add_resource" action, dispatching on
+// ResourceType to whichever source produced it: "highlighted" (pulled from
+// local-representative) or "voice-note" (Revision B -- dictated text, no
+// file at all). "upload"'s own source (Revision C) never reaches here; it's
+// a plain HTTP multipart POST handled by handleUploadResource instead.
+func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequest) error {
+	switch action.ResourceType {
+	case "highlighted":
+		return s.addHighlightedResource(mainPath, info, action)
+	case "voice-note":
+		return s.addVoiceNoteResource(info, action)
+	default:
+		return fmt.Errorf("unknown resource type: %q", action.ResourceType)
+	}
+}
+
+// addHighlightedResource implements the "Highlighted" source of Add
+// Resources: resolves the active step/substep file the same way
+// "revision"/"retry" do, pulls every highlighted file from
+// local-representative into the condoc's Impls folder, and inserts a
+// "## Resource N" block linking to them just above the pending
+// revision/retry placeholder. The .condoc lock is asserted for the
 // duration -- unlike an ordinary phase transition, this doesn't change
 // info.Phase, so nothing else would otherwise stop local-representative's
 // dev-repo watcher from rebuilding out from under the copy+edit.
-func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequest) error {
-	if action.ResourceType != "highlighted" {
-		return fmt.Errorf("unknown resource type: %q", action.ResourceType)
-	}
-
+func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action ActionRequest) error {
 	targetFile, err := resourceTargetFile(s.root, info)
 	if err != nil {
 		return err
@@ -85,6 +98,33 @@ func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequ
 	}
 
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, links)
+}
+
+// addVoiceNoteResource implements the "Voice Note" source of Add Resources
+// (Revision B of Step2Prompt.md): a third alternative alongside "Highlighted"
+// and "Upload" that, unlike either, links no file at all -- it's built
+// entirely from text the operator dictated through The Conversationalist's
+// existing per-field mic button (see condoccer/frontend/src/App.tsx's
+// MicButton) into the same description field the other two sources already
+// share. Gated to only appear in the UI when TC availability is up, since
+// there'd be nothing to dictate otherwise. Still asserted under the .condoc
+// lock like its siblings: it edits the step/substep file, a working-tree
+// change local-representative's dev-repo watcher could notice, even though
+// it never touches the Impls folder.
+func (s *Server) addVoiceNoteResource(info CondocInfo, action ActionRequest) error {
+	if strings.TrimSpace(action.Content) == "" {
+		return fmt.Errorf("voice note has no dictated text")
+	}
+
+	targetFile, err := resourceTargetFile(s.root, info)
+	if err != nil {
+		return err
+	}
+
+	s.writeCondocLock(fmt.Sprintf("adding a voice-note resource to %s", info.Name))
+	defer s.removeCondocLock()
+
+	return insertResourceBlock(targetFile, action.ResourceName, action.Content, nil)
 }
 
 // fetchHighlightedFiles asks local-representative (over the same connection

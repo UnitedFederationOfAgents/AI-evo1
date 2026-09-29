@@ -1637,7 +1637,8 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [fromSel, setFromSel] = useState('start')
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
-  const [resourceType, setResourceType] = useState<'highlighted' | 'upload'>('highlighted')
+  const [resourceType, setResourceType] = useState<'highlighted' | 'upload' | 'voice-note'>('highlighted')
+  const { available: tcAvailable } = useContext(TCCaptureContext)
   const [resourceName, setResourceName] = useState('')
   const [resourceDescription, setResourceDescription] = useState('')
   // "Upload" source (Revision C): the up-arrow button locks in the file
@@ -1660,6 +1661,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setUploadFiles([])
     setUploadError('')
   }, [info.path, info.stepNum, info.substepLetter])
+
+  // Falls back to "Highlighted" if TC availability drops out from under an
+  // open "Voice Note" selection (its <option> disappears from the <select>
+  // above the instant tcAvailable does) -- there'd be no way left to dictate
+  // anything into it.
+  useEffect(() => {
+    if (!tcAvailable && resourceType === 'voice-note') setResourceType('highlighted')
+  }, [tcAvailable, resourceType])
 
   if (info.phase === 'agent_running') {
     return (
@@ -1903,13 +1912,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               value={resourceType}
               disabled={resourceType === 'upload' && uploadFiles.length > 0}
               onChange={(e) => {
-                setResourceType(e.target.value as 'highlighted' | 'upload')
+                setResourceType(e.target.value as 'highlighted' | 'upload' | 'voice-note')
                 setUploadFiles([])
                 setUploadError('')
               }}
             >
               <option value="highlighted">Highlighted</option>
               <option value="upload">Upload</option>
+              {tcAvailable && <option value="voice-note">Voice Note</option>}
             </select>
             {resourceType === 'upload' && (
               <>
@@ -1955,7 +1965,11 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           </div>
           <div className="field-with-mic">
             <textarea
-              placeholder="Describe why these resources are included…"
+              placeholder={
+                resourceType === 'voice-note'
+                  ? 'Dictate your voice note with the mic below…'
+                  : 'Describe why these resources are included…'
+              }
               value={resourceDescription}
               onChange={(e) => setResourceDescription(e.target.value)}
               rows={3}
@@ -1968,7 +1982,11 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           <div className="action-row">
             <button
               className="btn-primary"
-              disabled={(resourceType === 'upload' && uploadFiles.length === 0) || uploading}
+              disabled={
+                (resourceType === 'upload' && uploadFiles.length === 0) ||
+                (resourceType === 'voice-note' && !resourceDescription.trim()) ||
+                uploading
+              }
               onClick={async () => {
                 if (resourceType === 'upload') {
                   if (uploadFiles.length === 0) return
@@ -2005,6 +2023,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                   content: resourceDescription.trim(),
                 })
                 setMode(null)
+                setResourceType('highlighted')
                 setResourceName('')
                 setResourceDescription('')
               }}

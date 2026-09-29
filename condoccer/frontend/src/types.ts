@@ -119,6 +119,6 @@ export interface ActionRequest {
   revertStep?: number
   revertIter?: string
   revertSubIter?: string
-  resourceType?: 'highlighted' // for add_resource action; only option so far
+  resourceType?: 'highlighted' | 'voice-note' // for add_resource action; 'upload' goes through /api/upload-resource instead
   resourceName?: string // for add_resource action: optional display name -> "## Resource N -- <name>"
 }

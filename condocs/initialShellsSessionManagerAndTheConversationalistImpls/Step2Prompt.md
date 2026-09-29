@@ -46,3 +46,27 @@ Recap of everything delivered for Step 2 overall: aggregate TC-availability trac
 Let's also add a 'Voice Note' type to the condoccer's add-resources capability (An alternate selection to highlighted or upload).
 
 (Available only with TC availability)
+
+
+prompt: [`7e8c63a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7e8c63accbb2d4aa228e5562f12df3c6b128afff) → reply: [`2ddebc5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2ddebc52f401e9a1a59cd37a2ba6a73ae0b31d63)
+
+## Reply B
+
+## Summary
+
+Added a **Voice Note** resource type to condoccer's Add Resources form, per Revision B — a third alternative alongside Highlighted and Upload that carries only dictated text (no linked file), gated to appear only when TC availability is up:
+
+- **Backend** (`condoccer/resources.go`, `main.go`): split `addResource` into a dispatcher plus `addHighlightedResource` (unchanged behavior) and a new `addVoiceNoteResource`, which rejects empty transcripts and inserts a `## Resource N` block with the dictated content and no file links, under the same `.condoc` lock discipline as its siblings. Added two backend tests covering the happy path and the empty-content rejection.
+- **Frontend** (`condoccer/frontend/src/App.tsx`, `types.ts`): the Source `<select>` now offers "Voice Note" only when `TCCaptureContext.available` is true (auto-falls back to Highlighted if TC availability drops mid-selection), the existing per-field mic button on the description textarea is reused for dictation (placeholder text changes to prompt it), and submission is disabled until there's actual dictated text.
+
+Couldn't run `go build`/`tsc` in this session (bash commands are being blocked pending approval), so this is verified by careful manual review and by mirroring the existing Highlighted/Upload code paths and tests rather than an actual compile/test run — worth a build/test pass before merging.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -104,7 +104,7 @@ type ActionRequest struct {
 	RevertStep    int    `json:"revertStep,omitempty"`    // for revert action
 	RevertIter    string `json:"revertIter,omitempty"`    // for revert action (optional iteration letter)
 	RevertSubIter string `json:"revertSubIter,omitempty"` // for revert action (optional substep iter letter)
-	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" (only option so far)
+	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" or "voice-note" (Revision B); "upload" goes through /api/upload-resource instead
 	ResourceName  string `json:"resourceName,omitempty"`  // for add_resource action: optional display name -> "## Resource N -- <name>"
 }
 

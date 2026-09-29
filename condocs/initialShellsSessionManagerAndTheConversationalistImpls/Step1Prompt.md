@@ -203,6 +203,11 @@ I diagnosed this without touching any code: both DebugConvo screenshots show the
 [Step 1 Substep H](Step1SubstepHPrompt.md)
 
 
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep H is now active. Interact with the substep file (Step1SubstepHPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

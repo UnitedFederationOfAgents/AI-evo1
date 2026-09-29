@@ -65,11 +65,6 @@ Only intended files changed (`.condoc` is expected to be handled by the condoc h
 **Summary:** Diagnosed the "no transcript to save" bug as a lifecycle mismatch: the accumulated final transcript lived on `transcribeSession.final`, but `stopTranscription` (fired by the frontend's Stop button, before Save is even clickable) sets `c.transcribe = nil`, so by the time `saveTranscript` ran there was no session left to read text from. Moved the accumulator to `wsClient.finalText` (guarded by the existing `transcribeMu`) so it survives past `stopTranscription`, updated `readTranscriptEvents` to write there and `saveTranscript` to read/reset it directly, and updated `transcribe_test.go`'s regression test accordingly (now exercising the exact "stopped, then save" path). `go`/`make` remain blocked in this sandbox, so verified by read-through only — recommend `make -C the-conversationalist build test` before merging.
 
 
-## <REPLACE-Revision|Retry> D
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1790685434 (Tue Sep 29 12:37:14 PM UTC 2026).

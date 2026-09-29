@@ -1735,12 +1735,15 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
       {mode === 'revision' && (
         <div className="action-form">
           <div className="action-form-title">Revision {nextLetter}</div>
-          <textarea
-            placeholder="Describe the revision you want…"
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe the revision you want…"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPromptText(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row">
             <button
               className="btn-warning"
@@ -1770,12 +1773,15 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               ))}
             </select>
           </div>
-          <textarea
-            placeholder="Describe what to try differently…"
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe what to try differently…"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPromptText(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row">
             <button
               className="btn-secondary"
@@ -1797,19 +1803,25 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
       {mode === 'substep' && (
         <div className="action-form">
           <div className="action-form-title">Substep {nextLetter}</div>
-          <input
-            className="step-form-input"
-            type="text"
-            placeholder="Substep title…"
-            value={substepTitle}
-            onChange={(e) => setSubstepTitle(e.target.value)}
-          />
-          <textarea
-            placeholder="Describe what the substep should accomplish…"
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <input
+              className="step-form-input"
+              type="text"
+              placeholder="Substep title…"
+              value={substepTitle}
+              onChange={(e) => setSubstepTitle(e.target.value)}
+            />
+            <MicButton onTranscript={(text) => setSubstepTitle(prev => appendTranscript(prev, text))} />
+          </div>
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe what the substep should accomplish…"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPromptText(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row">
             <button
               className="btn-primary"
@@ -1931,19 +1943,25 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               </>
             )}
           </div>
-          <input
-            className="step-form-input"
-            type="text"
-            placeholder="Name (optional) — e.g. Screenshots…"
-            value={resourceName}
-            onChange={(e) => setResourceName(e.target.value)}
-          />
-          <textarea
-            placeholder="Describe why these resources are included…"
-            value={resourceDescription}
-            onChange={(e) => setResourceDescription(e.target.value)}
-            rows={3}
-          />
+          <div className="field-with-mic">
+            <input
+              className="step-form-input"
+              type="text"
+              placeholder="Name (optional) — e.g. Screenshots…"
+              value={resourceName}
+              onChange={(e) => setResourceName(e.target.value)}
+            />
+            <MicButton onTranscript={(text) => setResourceName(prev => appendTranscript(prev, text))} />
+          </div>
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe why these resources are included…"
+              value={resourceDescription}
+              onChange={(e) => setResourceDescription(e.target.value)}
+              rows={3}
+            />
+            <MicButton onTranscript={(text) => setResourceDescription(prev => appendTranscript(prev, text))} />
+          </div>
           {uploadError && (
             <div className="action-status resource-upload-error">{uploadError}</div>
           )}

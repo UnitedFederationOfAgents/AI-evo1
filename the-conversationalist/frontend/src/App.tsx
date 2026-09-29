@@ -373,7 +373,90 @@ function TranscriptionPanel({
   )
 }
 
+// ---- Capture mode (Step2Prompt.md) ----
+//
+// condoccer embeds this app in an iframe with "?embed=capture" (see
+// condoccer/frontend/src/App.tsx's tcCaptureURL/TCCaptureOverlay) to dictate
+// straight into one of its own text fields, rather than the full
+// TranscriptionPanel/Save-to-file flow above. This is the only thing about
+// The Conversationalist condoccer ever sees: recording starts itself the
+// instant the WebSocket connects, and the one "Insert Transcript" action
+// posts the accumulated text back to the parent window instead of saving it
+// anywhere (Step2Prompt.md: "we only want the text to get into other text
+// boxes"). The embedding parent is trusted with '*' as postMessage's target
+// origin -- same-origin already for the two proxied cases (see
+// tcCaptureURL), and the standalone case's parent is whatever page the
+// operator chose to iframe this into.
+
+function isCaptureMode(): boolean {
+  return new URLSearchParams(window.location.search).get('embed') === 'capture'
+}
+
+function CaptureApp() {
+  const { connected, recording, transcript, partialTranscript, saveStatus, startRecording, stopRecording } =
+    useConversationalistWS()
+  const startedRef = useRef(false)
+
+  useEffect(() => {
+    if (connected && !startedRef.current) {
+      startedRef.current = true
+      startRecording()
+    }
+  }, [connected, startRecording])
+
+  const insertTranscript = useCallback(() => {
+    stopRecording()
+    const text = `${transcript} ${partialTranscript}`.trim()
+    window.parent.postMessage({ type: 'tc-transcript', text }, '*')
+  }, [stopRecording, transcript, partialTranscript])
+
+  const cancel = useCallback(() => {
+    stopRecording()
+    window.parent.postMessage({ type: 'tc-transcript-cancel' }, '*')
+  }, [stopRecording])
+
+  const hasTranscript = Boolean(transcript.trim() || partialTranscript.trim())
+
+  return (
+    <div className="tc-capture-app">
+      <div className="tc-capture-status">
+        {recording ? (
+          <>
+            <span className="conn-dot connecting transcribe-recording-dot" title="recording" />
+            Listening…
+          </>
+        ) : saveStatus.kind === 'error' ? (
+          <span className="tc-capture-error">{saveStatus.message}</span>
+        ) : (
+          <span>Connecting…</span>
+        )}
+      </div>
+      <div className="tc-capture-output">
+        {hasTranscript ? (
+          <>
+            {transcript}
+            {partialTranscript && <span className="transcribe-partial"> {partialTranscript}</span>}
+          </>
+        ) : (
+          <span className="transcribe-placeholder">Speak now…</span>
+        )}
+      </div>
+      <div className="tc-capture-actions">
+        <button className="btn-primary" disabled={!recording && !hasTranscript} onClick={insertTranscript}>
+          Insert Transcript
+        </button>
+        <button className="btn-secondary" onClick={cancel}>Cancel</button>
+        {saveStatus.kind === 'error' && (
+          <button className="btn-secondary" onClick={startRecording}>Retry</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
+  if (isCaptureMode()) return <CaptureApp />
+
   const {
     connected,
     reprStatus,

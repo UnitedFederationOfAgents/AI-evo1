@@ -37,9 +37,10 @@ type wsClient struct {
 }
 
 // Server manages WebSocket clients and this session-manager's representable
-// link to local-representative. This is a minimal application shell (see
-// condocs/InitialShellsSessionManagerAndTheConversationalist.md) -- domain
-// functionality for managing sessions lands in a later step.
+// link to local-representative. Revision I adds its first domain
+// functionality: parity with federation-command's "ufa session" sub-menu
+// (list/new/set/get/describe/rename/archive, see sessions.go) plus a "view"
+// mode that renders a session's session.jsonl as a readable transcript.
 type Server struct {
 	httpPort string // HTTP port this instance serves on (reported to local-representative)
 	name     string // identifier reported to local-representative -- "sessions" by default
@@ -47,6 +48,16 @@ type Server struct {
 	upgrader websocket.Upgrader
 	mu       sync.RWMutex
 	clients  map[*wsClient]bool
+
+	recordsPath string // AGENT_RECORDS_PATH (or its default) -- where session directories live, see sessions.go
+
+	// currentSession mirrors federation-command's per-instance "current
+	// session" (AGENT_SESSION/m.sessionID): the session "ufa session
+	// set"/"get" parity (set-session/get-session below) act on. Empty until
+	// a client sets one -- session-manager has no session of its own to
+	// default to the way a TUI invoking commands would.
+	sessMu         sync.RWMutex
+	currentSession string
 
 	// representable link to local-representative (see repr.go). nil until connected.
 	reprMu           sync.Mutex
@@ -65,8 +76,9 @@ func newServer() *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:    make(map[*wsClient]bool),
-		reprStatus: "disconnected",
+		clients:     make(map[*wsClient]bool),
+		reprStatus:  "disconnected",
+		recordsPath: resolveRecordsPath(),
 	}
 }
 
@@ -105,6 +117,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
+	go s.sendSessions(c)
 
 	// Write pump.
 	go func() {
@@ -177,6 +190,50 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		}
 		json.Unmarshal(m.Payload, &p)
 		s.setAutoConnect(p.Enabled, strings.TrimSpace(p.Host), strings.TrimSpace(p.Port))
+
+	// Session management: "ufa session" sub-menu parity plus "view" --
+	// see sessions.go.
+	case "list-sessions":
+		s.sendSessions(c)
+
+	case "new-session":
+		var p struct {
+			Name string `json:"name"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleNewSession(c, strings.TrimSpace(p.Name))
+
+	case "set-session":
+		var p struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleSetSession(c, strings.TrimSpace(p.ID))
+
+	case "rename-session":
+		var p struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleRenameSession(c, strings.TrimSpace(p.ID), strings.TrimSpace(p.Name))
+
+	case "describe-session":
+		var p struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.sendSessionInfo(c, strings.TrimSpace(p.ID))
+
+	case "view-session":
+		var p struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.sendSessionView(c, strings.TrimSpace(p.ID))
+
+	case "archive-sessions":
+		s.handleArchiveSessions(c)
 	}
 }
 

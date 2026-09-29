@@ -26,7 +26,67 @@ export interface ModeMismatchMsg {
   peer_mode?: string
 }
 
+// ---- Session management ("ufa session" sub-menu parity, see sessions.go) ----
+
+// SessionSummary is one row of the session list (the "sessions" payload).
+export interface SessionSummary {
+  id: string
+  name: string
+  file_count: number
+  current: boolean
+}
+
+// SessionsMsg is the "sessions" WebSocket payload: the full session list
+// plus which one (if any) is current, pushed on connect and after any
+// mutation (new/set/rename/archive).
+export interface SessionsMsg {
+  sessions: SessionSummary[]
+  current: string
+}
+
+// SessionInfo is the "session-info" payload ("ufa session describe" parity):
+// a session's on-disk location plus every field its session.yaml carries.
+export interface SessionInfo {
+  id: string
+  location: string
+  fields: [string, string][]
+}
+
+// SessionEntry is one readable turn of a session's transcript.
+export interface SessionEntry {
+  timestamp: string
+  event_type?: string
+  agent?: string
+  model?: string
+  duration_ms: number
+  exit_code: number
+  input?: string
+  output?: string
+  error?: string
+}
+
+// SessionView is the "session-view" payload: a session's transcript parsed
+// out of session.jsonl into readable entries.
+export interface SessionView {
+  id: string
+  name: string
+  entries: SessionEntry[]
+}
+
+// ArchiveResultMsg is the "archive-result" payload ("ufa session archive"
+// parity's outcome).
+export interface ArchiveResultMsg {
+  count: number
+  path?: string
+  error?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
+  | { type: 'sessions'; payload: SessionsMsg }
+  | { type: 'session-info'; payload: SessionInfo }
+  | { type: 'session-view'; payload: SessionView }
+  | { type: 'archive-result'; payload: ArchiveResultMsg }
+  | { type: 'error'; payload: string }

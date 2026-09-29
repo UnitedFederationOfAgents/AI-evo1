@@ -108,11 +108,16 @@ func TestSaveTranscriptNoSession(t *testing.T) {
 // TestSaveTranscriptNoReprConnection verifies saveTranscript reports a clean
 // error (rather than a nil-pointer panic) when there's an accumulated
 // transcript but no live connection to local-representative to upload it to.
+// c.transcribe is deliberately left nil here -- the frontend's normal flow
+// sends save-transcript after stop-transcription (see App.tsx's Save
+// button), by which point stopTranscription has already cleared
+// c.transcribe, so this also guards against Revision C's regression where
+// saveTranscript read the (by-then-nil) session instead of c.finalText and
+// always reported "no transcript to save".
 func TestSaveTranscriptNoReprConnection(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
-	c.transcribe = &transcribeSession{}
-	c.transcribe.final.WriteString("some transcript text")
+	c.finalText.WriteString("some transcript text")
 
 	s.saveTranscript(c)
 

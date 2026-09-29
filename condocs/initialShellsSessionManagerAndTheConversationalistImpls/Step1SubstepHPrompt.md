@@ -54,3 +54,22 @@ Only the intended files changed (`the-conversationalist/transcribe.go` and `the-
 Now we have made good progress and the transcription works. It populates our text box and transcribing stops when we press 'stop'.
 
 The 'Save to File' fails with a trough message 'no transcript to save' even when a transcript has been collected now. Let's fix that.
+
+
+prompt: [`a078aaf`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a078aafce9eec1177e0fcc296b3a0087e154c8b5) → reply: [`33f99b2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/33f99b26e2e586f595e48c9d4e51688bfe2a4ee3)
+
+## Reply C
+
+Only intended files changed (`.condoc` is expected to be handled by the condoc handler). Diagnosis, fix, and tests are complete.
+
+**Summary:** Diagnosed the "no transcript to save" bug as a lifecycle mismatch: the accumulated final transcript lived on `transcribeSession.final`, but `stopTranscription` (fired by the frontend's Stop button, before Save is even clickable) sets `c.transcribe = nil`, so by the time `saveTranscript` ran there was no session left to read text from. Moved the accumulator to `wsClient.finalText` (guarded by the existing `transcribeMu`) so it survives past `stopTranscription`, updated `readTranscriptEvents` to write there and `saveTranscript` to read/reset it directly, and updated `transcribe_test.go`'s regression test accordingly (now exercising the exact "stopped, then save" path). `go`/`make` remain blocked in this sandbox, so verified by read-through only — recommend `make -C the-conversationalist build test` before merging.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

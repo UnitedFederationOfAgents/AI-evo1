@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -52,14 +51,12 @@ type SaveResultMsg struct {
 }
 
 // transcribeSession holds one browser tab's in-progress AWS Transcribe
-// streaming session: the live event stream plus the transcript accumulated
-// from its final results so far, ready to be handed to saveTranscript.
+// streaming session: just the live event stream and its cancellation.
+// The transcript itself accumulates on the owning wsClient (c.finalText),
+// not here -- see wsClient's finalText comment in main.go.
 type transcribeSession struct {
 	cancel context.CancelFunc
 	stream *transcribestreaming.StartStreamTranscriptionEventStream
-
-	mu    sync.Mutex
-	final strings.Builder
 }
 
 // startTranscription opens a new AWS Transcribe streaming session for c,
@@ -141,7 +138,9 @@ func (s *Server) startTranscription(c *wsClient) {
 
 // readTranscriptEvents drains sess's AWS Transcribe result stream, pushing
 // each partial/final segment to c as a "transcript" message and accumulating
-// final segments into sess.final for a later saveTranscript. Runs until the
+// final segments into c.finalText for a later saveTranscript -- on c rather
+// than sess so the accumulated text survives stopTranscription clearing
+// c.transcribe (see wsClient's finalText comment in main.go). Runs until the
 // stream ends (stopTranscription cancelling its context, or AWS closing it),
 // then closes it. Runs in its own goroutine.
 func (s *Server) readTranscriptEvents(c *wsClient, sess *transcribeSession) {
@@ -161,12 +160,12 @@ func (s *Server) readTranscriptEvents(c *wsClient, sess *transcribeSession) {
 			}
 			isFinal := !res.IsPartial
 			if isFinal {
-				sess.mu.Lock()
-				if sess.final.Len() > 0 {
-					sess.final.WriteString(" ")
+				c.transcribeMu.Lock()
+				if c.finalText.Len() > 0 {
+					c.finalText.WriteString(" ")
 				}
-				sess.final.WriteString(text)
-				sess.mu.Unlock()
+				c.finalText.WriteString(text)
+				c.transcribeMu.Unlock()
 			}
 			s.sendToClient(c, "transcript", TranscriptMsg{Text: text, IsFinal: isFinal})
 		}
@@ -222,17 +221,18 @@ func (s *Server) stopTranscription(c *wsClient) {
 // existing representable link to local-representative to resolve LR's HTTP
 // base URL, the same way condoccer/resources.go's fetchHighlightedFiles
 // does.
+//
+// Revision C: this reads c.finalText rather than the (possibly nil)
+// c.transcribe session, since the frontend's normal flow is Start, speak,
+// Stop, *then* Save (App.tsx's Save button is only gated on there being
+// transcript text, not on still recording) -- by the time this runs,
+// stopTranscription has already cleared c.transcribe, which previously made
+// this always report "no transcript to save".
 func (s *Server) saveTranscript(c *wsClient) {
 	c.transcribeMu.Lock()
-	sess := c.transcribe
+	text := strings.TrimSpace(c.finalText.String())
 	c.transcribeMu.Unlock()
 
-	var text string
-	if sess != nil {
-		sess.mu.Lock()
-		text = strings.TrimSpace(sess.final.String())
-		sess.mu.Unlock()
-	}
 	if text == "" {
 		s.sendToClient(c, "save-result", SaveResultMsg{Success: false, Error: "no transcript to save"})
 		return
@@ -263,11 +263,9 @@ func (s *Server) saveTranscript(c *wsClient) {
 	// Clear the accumulated transcript on a successful save, mirroring
 	// agent-scribe's saveTranscription/storeTranscription clearing
 	// sessionTranscript.
-	if sess != nil {
-		sess.mu.Lock()
-		sess.final.Reset()
-		sess.mu.Unlock()
-	}
+	c.transcribeMu.Lock()
+	c.finalText.Reset()
+	c.transcribeMu.Unlock()
 	s.sendToClient(c, "save-result", SaveResultMsg{Success: true, FileID: uploaded.ID, Name: uploaded.Name})
 }
 

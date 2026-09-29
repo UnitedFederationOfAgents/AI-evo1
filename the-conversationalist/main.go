@@ -37,8 +37,16 @@ type wsClient struct {
 
 	// transcribe holds this browser tab's in-progress AWS Transcribe
 	// streaming session, if any -- see transcribe.go. nil while idle.
+	//
+	// finalText accumulates the final results from that session (and any
+	// prior one) across stop/start cycles, guarded by the same mutex --
+	// it lives here on the client rather than on transcribeSession because
+	// stopTranscription clears transcribe entirely, and saveTranscript (sent
+	// after the frontend's Stop button, see App.tsx) must still find the
+	// transcript once that happens.
 	transcribeMu sync.Mutex
 	transcribe   *transcribeSession
+	finalText    strings.Builder
 }
 
 // Server manages WebSocket clients and this the-conversationalist's

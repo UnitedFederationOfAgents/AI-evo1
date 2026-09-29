@@ -20,11 +20,6 @@ prompt: [`befa39c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b
 You've hit your session limit · resets 2:50pm (UTC)
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's complete this integration now that we have capacity, and let's recap all performed changes.

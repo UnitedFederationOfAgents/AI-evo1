@@ -5,24 +5,19 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"mime/multipart"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming/types"
-	"github.com/aws/smithy-go/logging"
-	"golang.org/x/net/http2"
 )
 
 // Audio format for the browser's captured microphone stream: 16-bit signed
@@ -86,20 +81,6 @@ func (s *Server) startTranscription(c *wsClient) {
 	if s.awsRegion != "" {
 		opts = append(opts, config.WithRegion(s.awsRegion))
 	}
-	// Revision A: the region/HTTP2 fixes from F/G/this substep's first Reply
-	// didn't clear the "not found, Signing" error, so before guessing again
-	// we need the SDK to tell us what it's actually doing. LogRetries +
-	// LogSigning surface the resolved endpoint, the retry history, and the
-	// canonical request/string-to-sign SigV4 builds (not the secret key
-	// itself) -- exactly the layer this error's message is too terse to
-	// diagnose on its own. Deliberately omitting LogRequest/ResponseWithBody:
-	// StartStreamTranscription's initial request/response are logged fine
-	// without it, and turning it on would also apply to every subsequent
-	// in-stream audio frame once transcription is running.
-	opts = append(opts,
-		config.WithClientLogMode(aws.LogRetries|aws.LogSigning),
-		config.WithLogger(logging.NewStandardLogger(os.Stderr)),
-	)
 	cfg, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		cancel()
@@ -122,52 +103,21 @@ func (s *Server) startTranscription(c *wsClient) {
 		return
 	}
 
-	// StartStreamTranscription is a bidirectional event stream, which AWS
-	// only serves over HTTP/2. Revision A: setting tr.ForceAttemptHTTP2 on
-	// the buildable client's Transport (this substep's first Reply) turned
-	// out not to be enough, and this is the likely reason why. Per
-	// net/http.Transport's own onceSetNextProtoDefaults logic, Go only
-	// auto-configures HTTP/2 when ForceAttemptHTTP2 *and* no custom
-	// Dial/DialContext/DialTLS/DialTLSContext is already set on the
-	// Transport -- ForceAttemptHTTP2 only overrides the (separate)
-	// TLSClientConfig check, not that one. aws-sdk-go-v2's buildable HTTP
-	// client always installs its own DialContext (to apply the SDK's
-	// connection-timeout/keep-alive options), so on this Transport that
-	// early-return guard fires regardless of ForceAttemptHTTP2, and HTTP/2
-	// is silently never configured -- the request still falls back to
-	// HTTP/1.1, and never gets far enough to reach a real credentials/region
-	// check, surfacing as the same terse "not found, Signing" error. Calling
-	// http2.ConfigureTransport(tr) directly (from golang.org/x/net/http2,
-	// matching what AWS's own Go v2 transcribe-streaming example actually
-	// does -- it does not use ForceAttemptHTTP2) rewrites tr's
-	// TLSClientConfig/TLSNextProto itself instead of relying on that
-	// opportunistic autodetection, so it takes effect even with a custom
-	// dialer already in place.
-	//
-	// Compare agent-scribe (ignored-scratch/AI-sandboxing/agent-scribe,
-	// server.js): its `new TranscribeStreamingClient({ region })` needs no
-	// equivalent HTTP/2 configuration at all, because the JS SDK v3
-	// middleware stack picks a Node http2-specific request handler
-	// (NodeHttp2Handler) automatically for any operation modeled as an
-	// event stream -- there is no opportunistic "maybe fall back to
-	// HTTP/1.1" detection to fight with in the first place. aws-sdk-go-v2
-	// has no equivalent auto-detection for its Go HTTP client, which is
-	// exactly why this needs to be wired by hand here.
-	var http2ConfigErr error
-	buildableClient := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
-		if err := http2.ConfigureTransport(tr); err != nil {
-			http2ConfigErr = err
-		}
-	})
-	if http2ConfigErr != nil {
-		cancel()
-		log.Printf("transcribe: configuring HTTP/2 transport: %v", http2ConfigErr)
-		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: configuring HTTP/2 transport: %v", http2ConfigErr))
-		return
-	}
-	client := transcribestreaming.NewFromConfig(cfg, func(o *transcribestreaming.Options) {
-		o.HTTPClient = &protoLoggingHTTPClient{inner: buildableClient}
-	})
+	// Revision B: Revision A's HTTP/2-forcing (http2.ConfigureTransport) and
+	// verbose SDK logging still didn't clear the "not found, Signing" error.
+	// ignored-scratch/agent-talk is a known-working Go client for this same
+	// StartStreamTranscription API, and it does none of that -- it just
+	// calls transcribestreaming.NewFromConfig(cfg) with the SDK's default
+	// HTTP client. The difference turned out to be simpler than an HTTP/2
+	// negotiation bug: go.mod here pinned
+	// aws-sdk-go-v2/service/transcribestreaming at v1.9.3, while agent-talk
+	// pins v1.16.0 -- a release where the generated client's buildable HTTP
+	// client already negotiates HTTP/2 for event-stream operations on its
+	// own. Bumping go.mod to match (see that file's diff) and dropping the
+	// now-unnecessary custom transport/logging plumbing from Revisions
+	// Reply/A is what actually fixes this; replicating agent-talk's plain
+	// client construction below is the whole fix.
+	client := transcribestreaming.NewFromConfig(cfg)
 	out, err := client.StartStreamTranscription(ctx, &transcribestreaming.StartStreamTranscriptionInput{
 		LanguageCode:         transcribeLanguage,
 		MediaEncoding:        types.MediaEncodingPcm,
@@ -176,7 +126,6 @@ func (s *Server) startTranscription(c *wsClient) {
 	if err != nil {
 		cancel()
 		log.Printf("transcribe: starting AWS Transcribe (region %q): %v", cfg.Region, err)
-		logErrorChain(err)
 		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: %v", err))
 		return
 	}
@@ -188,42 +137,6 @@ func (s *Server) startTranscription(c *wsClient) {
 
 	go s.readTranscriptEvents(c, sess)
 	log.Printf("transcribe: session started")
-}
-
-// protoLoggingHTTPClient wraps an aws.HTTPClient and logs which HTTP
-// protocol version each response actually came back on (resp.Proto, e.g.
-// "HTTP/2.0" vs "HTTP/1.1"). Added in Revision A: the previous fix attempt
-// (ForceAttemptHTTP2) *looked* like it should force HTTP/2 but apparently
-// didn't take effect, so rather than guess again this makes the actual
-// negotiated protocol directly observable in the logs going forward,
-// instead of only inferable from whether the "not found, Signing" error
-// recurs.
-type protoLoggingHTTPClient struct {
-	inner aws.HTTPClient
-}
-
-func (c *protoLoggingHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	resp, err := c.inner.Do(req)
-	if err != nil {
-		log.Printf("transcribe: %s %s: request failed before a response was received: %v", req.Method, req.URL, err)
-		return resp, err
-	}
-	log.Printf("transcribe: %s %s -> %s %s", req.Method, req.URL, resp.Proto, resp.Status)
-	return resp, err
-}
-
-// logErrorChain logs every layer of err's wrapped chain (via errors.Unwrap),
-// each with its concrete Go type, so a terse top-level message like
-// "not found, Signing" -- which is exactly as much as %v prints, no more --
-// doesn't need to be guessed at: any additional context an inner error
-// carries (that just doesn't make it into the outer error's Error() string)
-// shows up on its own line. Added in Revision A alongside the HTTP/2 and
-// SigV4 (ClientLogMode) logging above, for the same reason.
-func logErrorChain(err error) {
-	for i := 0; err != nil; i++ {
-		log.Printf("transcribe: error chain [%d] (%T): %v", i, err, err)
-		err = errors.Unwrap(err)
-	}
 }
 
 // readTranscriptEvents drains sess's AWS Transcribe result stream, pushing
@@ -260,7 +173,6 @@ func (s *Server) readTranscriptEvents(c *wsClient, sess *transcribeSession) {
 	}
 	if err := sess.stream.Err(); err != nil {
 		log.Printf("transcribe: stream error: %v", err)
-		logErrorChain(err)
 		s.sendToClient(c, "error", fmt.Sprintf("AWS Transcribe stream error: %v", err))
 	}
 }

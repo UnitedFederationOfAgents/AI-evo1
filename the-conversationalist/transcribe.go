@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming/types"
@@ -103,7 +104,21 @@ func (s *Server) startTranscription(c *wsClient) {
 		return
 	}
 
-	client := transcribestreaming.NewFromConfig(cfg)
+	// StartStreamTranscription is a bidirectional event stream, which AWS
+	// only serves over HTTP/2. aws-sdk-go-v2's buildable HTTP client sets
+	// its own TLSClientConfig, and per net/http.Transport's docs that
+	// disables Go's automatic HTTP/2 (ALPN) negotiation unless
+	// ForceAttemptHTTP2 is set explicitly -- so without this, the SDK
+	// falls back to HTTP/1.1 and the request never gets far enough to
+	// reach a credentials/region problem, surfacing instead as the terse
+	// low-level "not found, Signing" error seen even with region and
+	// credentials both set correctly. This matches AWS's own Go v2
+	// transcribe-streaming example, which forces HTTP/2 the same way.
+	client := transcribestreaming.NewFromConfig(cfg, func(o *transcribestreaming.Options) {
+		o.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+			tr.ForceAttemptHTTP2 = true
+		})
+	})
 	out, err := client.StartStreamTranscription(ctx, &transcribestreaming.StartStreamTranscriptionInput{
 		LanguageCode:         transcribeLanguage,
 		MediaEncoding:        types.MediaEncodingPcm,

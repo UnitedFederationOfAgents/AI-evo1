@@ -226,11 +226,10 @@ Root cause: The Conversationalist's `.app` uses a fixed row layout (260px sideba
 Fix (CSS-only, `the-conversationalist/frontend/src/index.css`): added a `@media (max-width: 760px)` block (same breakpoint condoccer already uses) that stacks `.app` into a column (sidebar full-width on top, main content below) and lets `.transcribe-controls` wrap, so all three buttons stay visible and reachable on mobile without needing condoccer's heavier off-canvas drawer pattern.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+Now we will populate a basic interaction for session-manager.
 
+We will begin by adding functionality to create parity with federation-command's 'ufa session' sub-menu.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will also have a 'view' option which allows us to see the text of the session, presented in an ice readable way.

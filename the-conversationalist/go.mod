@@ -6,7 +6,9 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.30.3
 	github.com/aws/aws-sdk-go-v2/config v1.27.27
 	github.com/aws/aws-sdk-go-v2/service/transcribestreaming v1.9.3
+	github.com/aws/smithy-go v1.20.3
 	github.com/gorilla/websocket v1.5.3
+	golang.org/x/net v0.28.0
 	representable v0.0.0
 	ufa-loader v0.0.0
 	ufa-version v0.0.0
@@ -24,7 +26,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.22.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.26.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.30.3 // indirect
-	github.com/aws/smithy-go v1.20.3 // indirect
 )
 
 replace representable => ../representable

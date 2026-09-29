@@ -49,11 +49,8 @@ Only the intended files changed (`the-conversationalist/transcribe.go` and `the-
 **Summary:** Diagnosed the real cause behind the still-failing "not found, Signing" error: `go.mod` pinned `aws-sdk-go-v2/service/transcribestreaming` at v1.9.3, an old release whose buildable HTTP client never negotiates HTTP/2 for event-stream operations — no amount of `ForceAttemptHTTP2`/`http2.ConfigureTransport` fiddling around it could fix that. `ignored-scratch/agent-talk`, a confirmed-working Go client for this same API, simply pins v1.16.0 and calls `transcribestreaming.NewFromConfig(cfg)` with the SDK's default HTTP client — no custom transport at all. Replicated that: bumped `transcribestreaming` to v1.16.0 (and its `aws/protocol/eventstream` indirect dep to v1.6.0) in `go.mod`, dropped the now-unused `golang.org/x/net` requirement, and gutted `transcribe.go`'s `startTranscription` back down to a plain `NewFromConfig` call, removing the Reply/Revision-A-era `http2.ConfigureTransport`/`protoLoggingHTTPClient` transport wrapping and the `ClientLogMode`/`logErrorChain` diagnostic scaffolding that came with it (no longer needed now that the actual cause is known). Region validation and the file-saving path are untouched. As before, `go`/`make` are blocked in this sandbox, so this is verified by read-through only — go.sum will self-heal via the Makefile's existing `go mod tidy` step; recommend `make -C the-conversationalist build test` to confirm before merging.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Now we have made good progress and the transcription works. It populates our text box and transcribing stops when we press 'stop'.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The 'Save to File' fails with a trough message 'no transcript to save' even when a transcript has been collected now. Let's fix that.

@@ -41,11 +41,8 @@ This revision completed both gaps:
 Recap of everything delivered for Step 2 overall: aggregate TC-availability tracking and broadcast in agent-coordinator (`tcavailability.go`), relay through local-representative down to condoccer over the representable command channel, illuminated mic icons beside the camera icon in agent-coordinator's and local-representative's header bars, and mic-to-dictate buttons on every condoccer text input that open a small floating iframe into The Conversationalist's own capture mode and insert the resulting transcript into the field.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's also add a 'Voice Note' type to the condoccer's add-resources capability (An alternate selection to highlighted or upload).
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+(Available only with TC availability)

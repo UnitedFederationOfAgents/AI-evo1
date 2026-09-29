@@ -202,12 +202,12 @@ I diagnosed this without touching any code: both DebugConvo screenshots show the
 
 [Step 1 Substep H](Step1SubstepHPrompt.md)
 
+## Resource 3 -- ConvoMobile
 
-## <REPLACE-Revision|Retry> H
+Layout
 
-<REPLACE-PROMPT>
+- [Screenshot_20260929-093918.png](2393763b_Screenshot_20260929-093918.png)
 
+## Revision H
 
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make one more quick adjustment to convo - see 'convomobile' resource. We need to be able to access the buttons on mobile.

@@ -294,3 +294,31 @@ button:disabled {
   cursor: pointer;
   white-space: nowrap;
 }
+
+/* ---- Mobile layout (Revision H) ----
+ *
+ * `.app`'s row layout (fixed 260px sidebar + flex:1 main-content) is fine
+ * at desktop widths, but an embedding iframe (local-representative's/
+ * agent-coordinator's embed-frame) takes on the real device viewport width
+ * on a phone, so the sidebar alone ate most of a narrow screen and the
+ * transcribe-controls button row (Start/Stop Transcription, Save to File)
+ * overflowed past `.app`'s `overflow: hidden` -- reachable only by scrolling
+ * a container that doesn't scroll. Same breakpoint condoccer uses for its
+ * mobile nav collapse, kept to a CSS-only fix here since the sidebar has no
+ * per-tab navigation to justify condoccer's off-canvas drawer. */
+@media (max-width: 760px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    border-bottom: 1px solid #3c3c3c;
+  }
+
+  .transcribe-controls {
+    flex-wrap: wrap;
+  }
+}

@@ -211,3 +211,26 @@ Layout
 ## Revision H
 
 Let's make one more quick adjustment to convo - see 'convomobile' resource. We need to be able to access the buttons on mobile.
+
+
+prompt: [`469a142`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/469a142eb70e2eab8b1a7b64854fb9f691dcddf4) → reply: [`60992f1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/60992f1000fe292c1376d07945e66cfdc208847d)
+
+## Reply H
+
+The CSS reads correctly — valid syntax, plain edit, no JS/TSX touched. Since `npm`/`vite` are blocked in this sandbox (same constraint noted in prior revisions of this step), I verified by careful read-through only.
+
+## Summary
+
+Root cause: The Conversationalist's `.app` uses a fixed row layout (260px sidebar + flex:1 main content) with `overflow: hidden`, and `.transcribe-controls` never wrapped. When embedded in an iframe on a phone (the iframe takes on the real device viewport width, since a parent page's `<meta viewport>` doesn't apply inside it), the sidebar alone consumed most of the narrow width, and the Stop Transcription / Save to File buttons got clipped off-screen — exactly what the ConvoMobile screenshot shows.
+
+Fix (CSS-only, `the-conversationalist/frontend/src/index.css`): added a `@media (max-width: 760px)` block (same breakpoint condoccer already uses) that stacks `.app` into a column (sidebar full-width on top, main content below) and lets `.transcribe-controls` wrap, so all three buttons stay visible and reachable on mobile without needing condoccer's heavier off-canvas drawer pattern.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

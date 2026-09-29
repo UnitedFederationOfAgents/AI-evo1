@@ -269,6 +269,14 @@ type Server struct {
 	// mutex-guarded state is needed here.
 	fileCacheDir string
 	hostStoreDir string
+
+	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
+	// available on any host" verdict, relayed down from agent-coordinator's
+	// own aggregate -- see tcavailability.go and
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	tcMu        sync.RWMutex
+	tcAvailable bool
 }
 
 func newServer(lrName string) *Server {
@@ -542,6 +550,10 @@ func (s *Server) connectAC(host, port string) {
 			s.handleSystemCommand(cmd)
 			return
 		}
+		if strings.HasPrefix(cmd, "__tc-availability:") {
+			s.handleTCAvailabilityCommand(cmd)
+			return
+		}
 		if s.reprServer != nil {
 			s.reprServer.SendCommand("federation-command", cmd)
 		}
@@ -768,6 +780,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if cv := s.getConvoState(); cv != nil {
 			s.sendToClient(c, "convo-state", *cv)
 		}
+		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 		for _, mm := range s.currentModeMismatches() {
 			s.sendToClient(c, "mode-mismatch", mm)
 		}
@@ -1435,6 +1448,13 @@ func main() {
 			var payload VersionMsg
 			if err := json.Unmarshal(data, &payload); err == nil && payload.Version != "" {
 				s.setManagedVersion(name, payload.Version)
+			}
+			if name == "condoccer" {
+				// condoccer has never received a tc-availability command
+				// before this (re)connection -- push the current aggregate
+				// now, even if it hasn't changed since before condoccer
+				// dropped (setTCAvailability only re-pushes on a change).
+				s.sendTCAvailabilityToCondoccer()
 			}
 			return
 		}

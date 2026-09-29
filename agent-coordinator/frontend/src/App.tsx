@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
-  SelfInfoMsg, ModeMismatchMsg,
+  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -55,6 +55,10 @@ function useCoordinatorWS() {
   const [acStartedAt, setACStartedAt] = useState(0)
   // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
+  // Aggregate "is a the-conversationalist instance available on any host" --
+  // see tcavailability.go and Step2Prompt.md. Drives the mic icon beside the
+  // camera/screenshot icon in the header.
+  const [tcAvailable, setTCAvailable] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRefs = useRef<Record<string, string>>({})
@@ -317,6 +321,11 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'tc-availability': {
+            const p = msg.payload as TCAvailabilityMsg
+            setTCAvailable(p.available)
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -333,7 +342,7 @@ function useCoordinatorWS() {
   }, [connect])
 
   return {
-    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
@@ -2741,6 +2750,41 @@ async function captureScreenshot(): Promise<File> {
   }
 }
 
+// MIC_ICON follows the same grey-palette wireframe convention as CAMERA_ICON
+// (Step1SubstepCPrompt.md) so the mic-availability indicator reads as part of
+// the same icon family. Kept identical to local-representative's copy -- see
+// App.tsx there -- and to condoccer's per-input mic button, which reuses this
+// same path. See
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// TCAvailabilityIndicator sits beside the camera/screenshot icon in the
+// header: illuminated (mic-btn-active) once at least one
+// the-conversationalist instance is available on any connected host (the
+// aggregate agent-coordinator itself computes -- see tcavailability.go).
+// Unlike ScreenshotButton this is a passive indicator, not a control -- the
+// actual mic-to-transcribe action lives on condoccer's own text inputs (see
+// Step2Prompt.md: "we will keep the TC functionality as contained in that
+// sub-app as we can").
+function TCAvailabilityIndicator({ available }: { available: boolean }) {
+  return (
+    <span
+      className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+    >
+      {MIC_ICON}
+    </span>
+  )
+}
+
 // ScreenshotButton sits immediately left of the nav arrows. `enabled`
 // reflects whether there's at least one file store to save into -- see
 // callers for what that means in each app -- independent of `busy`, which
@@ -2762,7 +2806,7 @@ function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: 
 
 export default function App() {
   const {
-    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
@@ -2897,6 +2941,7 @@ export default function App() {
       <div className="app-header">
         <span className="app-title">agent-coordinator</span>
         <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <TCAvailabilityIndicator available={tcAvailable} />
         <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
         <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span

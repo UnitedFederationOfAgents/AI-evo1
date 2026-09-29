@@ -43,6 +43,15 @@ type ReprStatusMsg struct {
 	// currently connected/connecting -- it stays true across a successful
 	// connection, and only an explicit disconnect turns it off.
 	AutoConnect bool `json:"auto_connect,omitempty"`
+	// HTTPPort is local-representative's own HTTP dashboard port, disclosed
+	// over representable's "hello" message (see Client.PeerHTTPPort) once
+	// connected; empty while disconnected. The frontend uses host+HTTPPort to
+	// reach local-representative's /convo/ reverse proxy directly for TC's
+	// mic-capture iframe when condoccer isn't itself running embedded in LR's
+	// own page (see App.tsx's tcCaptureURL) -- see
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	HTTPPort string `json:"http_port,omitempty"`
 }
 
 // SelfInfoMsg discloses this condoccer instance's own dev-mode status and
@@ -277,10 +286,25 @@ func (s *Server) setReprStatus(status string) {
 	s.broadcastReprStatus(status, host, port, autoConnect)
 }
 
+// reprHTTPPort returns local-representative's disclosed HTTP dashboard port
+// for the current connection, or "" while disconnected -- see
+// ReprStatusMsg.HTTPPort.
+func (s *Server) reprHTTPPort() string {
+	s.reprMu.Lock()
+	client := s.reprClient
+	s.reprMu.Unlock()
+	if client == nil {
+		return ""
+	}
+	return client.PeerHTTPPort()
+}
+
 // broadcastReprStatus sends a "repr-status" message to every connected
 // WebSocket client.
 func (s *Server) broadcastReprStatus(status, host, port string, autoConnect bool) {
-	msg := s.marshalMsg("repr-status", ReprStatusMsg{Status: status, Host: host, Port: port, AutoConnect: autoConnect})
+	msg := s.marshalMsg("repr-status", ReprStatusMsg{
+		Status: status, Host: host, Port: port, AutoConnect: autoConnect, HTTPPort: s.reprHTTPPort(),
+	})
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for c := range s.clients {
@@ -297,7 +321,9 @@ func (s *Server) sendReprStatus(c *wsClient) {
 	s.reprMu.Lock()
 	status, host, port, autoConnect := s.reprStatus, s.reprHost, s.reprPort, s.reprAutoConnect
 	s.reprMu.Unlock()
-	s.sendToClient(c, "repr-status", ReprStatusMsg{Status: status, Host: host, Port: port, AutoConnect: autoConnect})
+	s.sendToClient(c, "repr-status", ReprStatusMsg{
+		Status: status, Host: host, Port: port, AutoConnect: autoConnect, HTTPPort: s.reprHTTPPort(),
+	})
 }
 
 // pushCondoccerState sends the current condoc summary to local-representative.
@@ -344,6 +370,10 @@ func (s *Server) sendVersion() {
 //	__condoccer:action <json ActionRequest>
 //	__condoccer:refresh
 func (s *Server) handleReprCommand(raw string) {
+	if strings.HasPrefix(raw, "__tc-availability:") {
+		s.handleTCAvailabilityCommand(raw)
+		return
+	}
 	if !strings.HasPrefix(raw, "__condoccer:") {
 		return
 	}

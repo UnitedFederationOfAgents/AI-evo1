@@ -292,6 +292,26 @@ body {
 
 .screenshot-btn.screenshot-btn-active:hover { background: #333; }
 
+/* Mic-availability indicator (Step2Prompt.md) -- sits beside the camera
+   icon, illuminated once agent-coordinator reports at least one
+   the-conversationalist instance available on any connected host. Mirrors
+   screenshot-btn's sizing/palette, but it's a passive indicator (no
+   hover/active-cursor state) rather than a control -- the actual
+   mic-to-transcribe action lives on condoccer's own text inputs. Mirrors
+   agent-coordinator's copy of the same rules. */
+.mic-indicator {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.mic-indicator svg { width: 100%; height: 100%; display: block; }
+
+.mic-indicator.mic-indicator-active { color: #6fcf8f; }
+
 /* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
    right corner alongside the connection dot. */
 .nav-arrows {

@@ -618,6 +618,15 @@ type Server struct {
 	reprAutoConnect  bool
 	modeMismatch     bool   // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
 	modeMismatchPeer string // the mismatched LR's disclosed mode ("dev" or "ops")
+
+	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
+	// available on any host" verdict, relayed down from local-representative
+	// (which in turn relays it from agent-coordinator's own aggregate) -- see
+	// tcavailability.go and
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	tcMu        sync.RWMutex
+	tcAvailable bool
 }
 
 func newServer(root string) *Server {
@@ -714,6 +723,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
+	go s.sendTCAvailability(c)
 
 	// Write pump.
 	go func() {

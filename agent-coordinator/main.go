@@ -418,6 +418,13 @@ type Server struct {
 
 	modeMu         sync.RWMutex
 	modeMismatches map[string]ModeMismatchMsg // LR host id -> current mismatch disclosure, mismatched entries only
+
+	// tcMu/tcAvailable track the aggregate "is a the-conversationalist
+	// instance available on any host" verdict -- see tcavailability.go and
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	tcMu        sync.RWMutex
+	tcAvailable bool
 }
 
 func newServer() *Server {
@@ -729,6 +736,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial state.
 	go func() {
 		s.sendToClient(c, "self-info", s.selfInfo())
+		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.anyConvoAvailable()})
 		s.sendToClient(c, "hosts", HostsMsg{Hosts: s.getHosts()})
 		s.hostsMu.RLock()
 		names := make([]string, 0, len(s.hostStates))
@@ -1182,6 +1190,7 @@ func main() {
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
+			s.broadcastTCAvailability()
 		}
 	})
 
@@ -1205,6 +1214,11 @@ func main() {
 
 		if !wasConnected || isNew {
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
+			// A freshly-connected LR has never received a tc-availability
+			// command before -- push the current aggregate to it directly,
+			// even if the aggregate hasn't changed (broadcastTCAvailability
+			// below only re-pushes to hosts on a change).
+			s.sendTCAvailabilityTo(name)
 		}
 
 		switch dataType {
@@ -1301,6 +1315,7 @@ func main() {
 				hs.convo = cv
 				hs.mu.Unlock()
 				s.broadcast("lr-convo-state", convoMsg(name, cv))
+				s.broadcastTCAvailability()
 			}
 		case "lr-http":
 			var payload LRHTTPMsg

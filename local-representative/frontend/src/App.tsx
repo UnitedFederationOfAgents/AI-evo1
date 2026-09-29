@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -47,6 +47,10 @@ function useStatusWS() {
   // Peer name -> current mismatch disclosure -- see docs/DevMode.md. A
   // mismatched peer only ever exchanges health information with this LR.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
+  // Aggregate "is a the-conversationalist instance available on any host",
+  // relayed down from agent-coordinator -- see tcavailability.go and
+  // Step2Prompt.md. Drives the mic icon beside the camera/screenshot icon.
+  const [tcAvailable, setTCAvailable] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -254,6 +258,11 @@ function useStatusWS() {
             })
             break
           }
+          case 'tc-availability': {
+            const payload = msg.payload as TCAvailabilityMsg
+            setTCAvailable(payload.available)
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -270,7 +279,7 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
+    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
     rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
@@ -1717,6 +1726,40 @@ async function captureScreenshot(): Promise<File> {
   }
 }
 
+// MIC_ICON follows the same grey-palette wireframe convention as CAMERA_ICON
+// (Step1SubstepCPrompt.md) so the mic-availability indicator reads as part of
+// the same icon family. Kept identical to agent-coordinator's copy -- see
+// App.tsx there -- and to condoccer's per-input mic button, which reuses this
+// same path. See
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// TCAvailabilityIndicator sits beside the camera/screenshot icon in the
+// header: illuminated (mic-indicator-active) once agent-coordinator reports
+// at least one the-conversationalist instance available on any connected
+// host. Mirrors agent-coordinator's own copy -- a passive indicator, not a
+// control; the actual mic-to-transcribe action lives on condoccer's own text
+// inputs (Step2Prompt.md: "we will keep the TC functionality as contained in
+// that sub-app as we can").
+function TCAvailabilityIndicator({ available }: { available: boolean }) {
+  return (
+    <span
+      className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+    >
+      {MIC_ICON}
+    </span>
+  )
+}
+
 // ScreenshotButton sits immediately left of the nav arrows. `enabled`
 // reflects whether there's at least one file store to save into -- see
 // callers for what that means in each app -- independent of `busy`, which
@@ -1766,7 +1809,7 @@ export default function App() {
   }
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
+    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
     launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
@@ -1868,6 +1911,7 @@ export default function App() {
           ))}
         </div>
         <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <TCAvailabilityIndicator available={tcAvailable} />
         <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
         <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span

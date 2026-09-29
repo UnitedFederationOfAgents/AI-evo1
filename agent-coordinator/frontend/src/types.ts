@@ -107,6 +107,16 @@ export interface ModeMismatchMsg {
   peer_mode?: string
 }
 
+// TCAvailabilityMsg is the aggregate answer to "is a the-conversationalist
+// instance available on any host" -- see tcavailability.go. Drives the mic
+// icon shown beside the camera/screenshot icon in the header (illuminated
+// when available) -- see
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+export interface TCAvailabilityMsg {
+  available: boolean
+}
+
 export interface LRSystemStateMsg {
   host_id: string
   active: boolean

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary } from './types'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
 
@@ -29,6 +29,13 @@ function useCondocWS() {
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
   const [reprAutoConnect, setReprAutoConnect] = useState(false)
+  // local-representative's own HTTP dashboard port -- see
+  // ReprStatusMsg.http_port and tcCaptureURL below.
+  const [reprHTTPPort, setReprHTTPPort] = useState('')
+  // Aggregate "is a the-conversationalist instance available on any host",
+  // relayed down through local-representative -- see tcavailability.go and
+  // Step2Prompt.md. Gates the mic icon on every text input.
+  const [tcAvailable, setTCAvailable] = useState(false)
   const [devMode, setDevMode] = useState(false)
   const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
@@ -148,6 +155,10 @@ function useCondocWS() {
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
             setReprAutoConnect(!!p.auto_connect)
+            setReprHTTPPort(p.http_port ?? '')
+          } else if (msg.type === 'tc-availability') {
+            const p = msg.payload as TCAvailabilityMsg
+            setTCAvailable(p.available)
           } else if (msg.type === 'self-info') {
             const p = msg.payload as SelfInfoMsg
             setDevMode(p.dev_mode)
@@ -197,6 +208,8 @@ function useCondocWS() {
     reprHost,
     reprPort,
     reprAutoConnect,
+    reprHTTPPort,
+    tcAvailable,
     devMode,
     version,
     modeMismatch,
@@ -214,6 +227,164 @@ function useCondocWS() {
     fileDiffHunks,
     setFileDiffHunks,
   }
+}
+
+// ---- The Conversationalist mic-capture ----
+//
+// condoccer never touches audio or AWS itself (Step2Prompt.md: "we will keep
+// the TC functionality as contained in that sub-app as we can, we only want
+// the text to get into other text boxes"). Clicking a MicButton opens
+// the-conversationalist's own UI in a small iframe, running in a lightweight
+// "capture mode" (see the-conversationalist/frontend/src/App.tsx) that
+// auto-starts recording and, on Stop, posts the final transcript back via
+// window.postMessage rather than saving it to a file -- the only thing that
+// ever crosses the app boundary is that one string.
+
+// MIC_ICON follows the same grey-palette wireframe convention as
+// agent-coordinator's and local-representative's header mic-availability
+// indicator (Step2Prompt.md) -- kept identical so the affordance reads as
+// part of the same icon family everywhere it appears.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// tcCaptureURL resolves the address of the-conversationalist's own UI,
+// running in capture mode, regardless of which of the three ways condoccer
+// itself is currently being viewed (see Step1Prompt.md:
+// "standalone-UI-with-distinct-port/embed-in-local-representative/
+// embed-in-agent-coordinator"):
+//   - embedded in local-representative (path ".../condoccer/...") or
+//     agent-coordinator (path ".../host/<id>/condoccer/...") -- swap the
+//     trailing "condoccer" path segment for "convo" and stay on the same
+//     origin, which reaches the right local-representative's reverse proxy
+//     (see local-representative/main.go's proxyToConvo) no matter what
+//     hostname the browser is actually using.
+//   - standalone, on condoccer's own distinct port -- there's no sibling
+//     path to swap, so reach local-representative directly using the
+//     host/HTTP port it disclosed over representable (see
+//     ReprStatusMsg.http_port).
+function tcCaptureURL(reprHost: string, reprHTTPPort: string): string | null {
+  const path = window.location.pathname
+  const idx = path.lastIndexOf('/condoccer/')
+  if (idx !== -1) {
+    const prefix = path.slice(0, idx)
+    return `${window.location.origin}${prefix}/convo/?embed=capture`
+  }
+  if (!reprHost || !reprHTTPPort) return null
+  const proto = window.location.protocol === 'https:' ? 'https' : 'http'
+  return `${proto}://${reprHost}:${reprHTTPPort}/convo/?embed=capture`
+}
+
+interface TCCaptureContextValue {
+  available: boolean
+  capture: (onTranscript: (text: string) => void) => void
+}
+
+// Default value only ever matters if a MicButton somehow renders outside
+// App's own TCCaptureContext.Provider -- available: false keeps it inert
+// rather than throwing.
+const TCCaptureContext = createContext<TCCaptureContextValue>({ available: false, capture: () => {} })
+
+// useTCCapture owns the one hidden-until-active iframe condoccer ever opens
+// into the-conversationalist, and the postMessage listener that receives its
+// transcript back. `available` gates every MicButton in the tree; `capture`
+// starts a capture, invoking its callback once (and only once) with the
+// final text.
+function useTCCapture(tcAvailable: boolean, reprHost: string, reprHTTPPort: string) {
+  const [captureURL, setCaptureURL] = useState<string | null>(null)
+  const onTranscriptRef = useRef<((text: string) => void) | null>(null)
+
+  const capture = useCallback(
+    (onTranscript: (text: string) => void) => {
+      const url = tcCaptureURL(reprHost, reprHTTPPort)
+      if (!url) return
+      onTranscriptRef.current = onTranscript
+      setCaptureURL(url)
+    },
+    [reprHost, reprHTTPPort],
+  )
+
+  const cancel = useCallback(() => {
+    onTranscriptRef.current = null
+    setCaptureURL(null)
+  }, [])
+
+  useEffect(() => {
+    if (!captureURL) return
+    let expectedOrigin: string
+    try {
+      expectedOrigin = new URL(captureURL).origin
+    } catch {
+      return
+    }
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== expectedOrigin) return
+      const data = ev.data as { type?: string; text?: string } | undefined
+      if (data?.type === 'tc-transcript') {
+        onTranscriptRef.current?.(data.text ?? '')
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      } else if (data?.type === 'tc-transcript-cancel') {
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [captureURL])
+
+  return { available: tcAvailable, capture, captureURL, cancel }
+}
+
+// MicButton is the per-field affordance (Step2Prompt.md: "Whenever we have a
+// text input field for condoccer and it sees TC is available we will see a
+// 'mic' icon become visible"). Renders nothing while TC isn't available.
+function MicButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const { available, capture } = useContext(TCCaptureContext)
+  if (!available) return null
+  return (
+    <button
+      type="button"
+      className="mic-btn"
+      title="dictate with The Conversationalist"
+      onClick={() => capture(onTranscript)}
+    >
+      {MIC_ICON}
+    </button>
+  )
+}
+
+// appendTranscript is the shared "insert dictated text" behaviour every
+// MicButton call site uses: appended after any existing content, space-
+// separated, rather than overwriting it.
+function appendTranscript(prev: string, text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return prev
+  return prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed
+}
+
+// TCCaptureOverlay hosts the actual iframe while a capture is in progress --
+// a small floating panel rather than a hidden iframe, since
+// the-conversationalist's capture-mode UI (Start is automatic; Stop &
+// Cancel are not) needs to be visible and interactive. Unmounted (iframe
+// destroyed, mic released) the instant a transcript or cancellation arrives.
+function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void }) {
+  return (
+    <div className="tc-capture-backdrop" onClick={onCancel}>
+      <div className="tc-capture-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="tc-capture-panel-header">
+          <span>The Conversationalist</span>
+          <button type="button" className="tc-capture-close" onClick={onCancel} aria-label="Cancel dictation">×</button>
+        </div>
+        <iframe className="tc-capture-frame" src={url} title="the-conversationalist capture" allow="microphone" />
+      </div>
+    </div>
+  )
 }
 
 // ---- Navigation ----
@@ -1273,21 +1444,27 @@ function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, 
         <div className="step-card-header">Step {step.num}</div>
         <div className="step-form">
           <label className="step-form-label">Title</label>
-          <input
-            className="step-form-input"
-            type="text"
-            placeholder="Step title…"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
+          <div className="field-with-mic">
+            <input
+              className="step-form-input"
+              type="text"
+              placeholder="Step title…"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+            <MicButton onTranscript={(text) => setTitle(prev => appendTranscript(prev, text))} />
+          </div>
           <label className="step-form-label">Prompt</label>
-          <textarea
-            className="step-form-textarea"
-            placeholder="Describe what the AI should do…"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <textarea
+              className="step-form-textarea"
+              placeholder="Describe what the AI should do…"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPrompt(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row" style={{ marginTop: 8 }}>
             <button
               className="btn-primary"
@@ -2053,6 +2230,8 @@ export default function App() {
     reprHost,
     reprPort,
     reprAutoConnect,
+    reprHTTPPort,
+    tcAvailable,
     devMode,
     version,
     modeMismatch,
@@ -2096,6 +2275,8 @@ export default function App() {
   // `mobile-breakpoint` width (see index.css). Desktop layout is untouched —
   // this state simply has no visible effect above the breakpoint.
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  const tcCapture = useTCCapture(tcAvailable, reprHost, reprHTTPPort)
 
   const handleSelectCondoc = (path: string) => {
     setSelectedCondocPath(path)
@@ -2312,7 +2493,9 @@ export default function App() {
   }, [subscribeError, activeState, navLevel])
 
   return (
+    <TCCaptureContext.Provider value={tcCapture}>
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {tcCapture.captureURL && <TCCaptureOverlay url={tcCapture.captureURL} onCancel={tcCapture.cancel} />}
       {modeMismatch && (
         <div className="mode-mismatch-banner">
           ⚠ dev/ops mode mismatch with local-representative ({modeMismatch.peer_mode}):
@@ -2458,5 +2641,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </TCCaptureContext.Provider>
   )
 }

@@ -68,6 +68,21 @@ export interface ReprStatusMsg {
   // stays true across a successful connection, and only an explicit
   // disconnect turns it off.
   auto_connect?: boolean
+  // http_port is local-representative's own HTTP dashboard port, disclosed
+  // once connected; empty while disconnected. Used to reach LR's /convo/
+  // reverse proxy directly for TC's mic-capture iframe -- see App.tsx's
+  // tcCaptureURL and
+  // condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+  // Step2Prompt.md.
+  http_port?: string
+}
+
+// TCAvailabilityMsg is the aggregate answer to "is a the-conversationalist
+// instance available on any host", relayed down through local-representative
+// from agent-coordinator's own aggregate -- see tcavailability.go. Gates the
+// mic icon shown on condoccer's text input fields.
+export interface TCAvailabilityMsg {
+  available: boolean
 }
 
 // SelfInfoMsg discloses this condoccer instance's own dev-mode status and

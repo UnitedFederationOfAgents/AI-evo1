@@ -33,11 +33,8 @@ Structure is intact and consistent with the rest of the file. The changes are co
 **Summary:** Diagnosed why the Reply's `ForceAttemptHTTP2` fix didn't take: Go's `net/http.Transport` only auto-enables HTTP/2 when `ForceAttemptHTTP2` is set *and* no custom `Dial`/`DialContext`/`DialTLS(Context)` is already on the Transport — but `aws-sdk-go-v2`'s buildable HTTP client always installs its own `DialContext`, so that guard silently blocks HTTP/2 regardless of the flag, leaving the request on HTTP/1.1. Fixed `the-conversationalist/transcribe.go` to call `http2.ConfigureTransport` (from `golang.org/x/net/http2`, matching AWS's own Go v2 example) instead, which rewrites the transport directly rather than relying on that opportunistic autodetection; added `golang.org/x/net` to `go.mod` accordingly (go.sum will self-heal via the Makefile's existing `go mod tidy` step, same as prior AWS SDK additions). Also added the requested verbose logging: SDK-level `ClientLogMode` (retries + SigV4 signing details) with a stderr logger, a wrapping HTTP client that logs the actual negotiated protocol (`HTTP/2.0` vs `HTTP/1.1`) per request, and an `errors.Unwrap` chain-logger applied to both AWS error paths — plus inline comments contrasting this with agent-scribe's JS SDK, which needs no equivalent configuration because it auto-selects a Node HTTP/2 handler for event-stream operations. As before, `go`/`make` are blocked in this sandbox, so this is verified by read-through only.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+We now have a working go implementation in ignored-scratch/agent-talk.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's gut our implementation as-necessary and replicate the working logic from agent-talk to the extent necessary to get the functional chain of 'start-transcription' working. (And we will keep our saving to the file in 'files' side of the interaction which we can assume works correctly)

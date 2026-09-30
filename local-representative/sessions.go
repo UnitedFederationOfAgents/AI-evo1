@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +45,19 @@ const (
 	// or fetching one file from one peer, or listing hosts from
 	// agent-coordinator) so one unresponsive peer can't hang the whole pull.
 	sessionsPullHTTPTimeout = 5 * time.Second
+
+	// sessionsDiscoverHTTPTimeout bounds each per-host indexing hop a
+	// discover fan-out makes (see indexSessionsFrom). Kept well below
+	// sessionsPullHTTPTimeout -- listing a peer's session index is a single
+	// cheap directory read, nothing like pulling actual file bytes -- and,
+	// critically, well below the callers' own end-to-end budget
+	// (federation-command's sessionsDiscoveryTimeout, session-manager's
+	// repr.go sessionsDiscoveryTimeout): those bound the *entire* discover
+	// round trip (this host's own hop included), so every hop this host
+	// makes on a caller's behalf has to leave headroom for it, not match or
+	// exceed it -- see handleSessionsDiscover's concurrent fan-out, which
+	// keeps the worst case close to a single hop regardless of peer count.
+	sessionsDiscoverHTTPTimeout = 2 * time.Second
 )
 
 // resolveRecordsPath returns AGENT_RECORDS_PATH, falling back to
@@ -219,9 +233,28 @@ func (s *Server) handleSessionsDiscover(w http.ResponseWriter, r *http.Request) 
 	acBase := "http://" + acAddr
 
 	hosts := s.listPeerHosts(acBase)
+
+	// Fan out to every peer concurrently rather than one at a time: a
+	// sequential loop's worst case is N * sessionsDiscoverHTTPTimeout, which
+	// easily exceeds a caller's own end-to-end budget (federation-command's
+	// and session-manager's own discovery timeouts) once there's more than
+	// one peer -- see sessionsDiscoverHTTPTimeout's doc comment. Run in
+	// parallel, the worst case stays close to a single hop regardless of
+	// how many peers there are.
+	results := make([][]RemoteSessionEntry, len(hosts))
+	var wg sync.WaitGroup
+	for i, hostID := range hosts {
+		wg.Add(1)
+		go func(i int, hostID string) {
+			defer wg.Done()
+			results[i] = s.indexSessionsFrom(acBase, hostID)
+		}(i, hostID)
+	}
+	wg.Wait()
+
 	var sessions []RemoteSessionEntry
-	for _, hostID := range hosts {
-		sessions = append(sessions, s.indexSessionsFrom(acBase, hostID)...)
+	for _, entries := range results {
+		sessions = append(sessions, entries...)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(SessionDiscoveryMsg{Hosts: len(hosts), Sessions: sessions})
@@ -229,15 +262,25 @@ func (s *Server) handleSessionsDiscover(w http.ResponseWriter, r *http.Request) 
 
 // indexSessionsFrom asks hostID's local-representative (through
 // agent-coordinator's transparent "/host/<id>/*" proxy) which sessions it
-// has, tagging each with hostID.
+// has, tagging each with hostID. Bounded by sessionsDiscoverHTTPTimeout,
+// not sessionsPullHTTPTimeout -- see that constant's doc comment.
 func (s *Server) indexSessionsFrom(acBase, hostID string) []RemoteSessionEntry {
 	indexURL := fmt.Sprintf("%s/host/%s/api/sessions", acBase, url.PathEscape(hostID))
-	resp, err := httpGetWithTimeout(indexURL)
+	resp, err := httpGetWithTimeout(indexURL, sessionsDiscoverHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions discover: indexing host %s: %v", hostID, err)
 		return nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// agent-coordinator's "/host/<id>/*" proxy (or the peer itself) can
+		// legitimately answer a non-200 (e.g. a 502 plain-text body when
+		// that host isn't reachable, or a 404 for an unknown host) --
+		// decoding that as JSON would always fail and spam the log with a
+		// misleading "decoding index" error instead of the real cause.
+		log.Printf("sessions discover: indexing host %s: unexpected status %d", hostID, resp.StatusCode)
+		return nil
+	}
 	var msg SessionIndexMsg
 	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
 		log.Printf("sessions discover: decoding index from host %s: %v", hostID, err)
@@ -388,12 +431,16 @@ type acHostEntry struct {
 // listPeerHosts asks agent-coordinator which other hosts it currently shows
 // as connected ("LR-active"), excluding this one.
 func (s *Server) listPeerHosts(acBase string) []string {
-	resp, err := httpGetWithTimeout(acBase + "/api/hosts")
+	resp, err := httpGetWithTimeout(acBase+"/api/hosts", sessionsPullHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions pull: listing hosts via agent-coordinator: %v", err)
 		return nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("sessions pull: listing hosts via agent-coordinator: unexpected status %d", resp.StatusCode)
+		return nil
+	}
 	var msg struct {
 		Hosts []acHostEntry `json:"hosts"`
 	}
@@ -419,12 +466,16 @@ func (s *Server) listPeerHosts(acBase string) []string {
 func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, once bool) int {
 	listURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/list?glob=%s",
 		acBase, url.PathEscape(hostID), url.PathEscape(sessionID), url.QueryEscape(glob))
-	resp, err := httpGetWithTimeout(listURL)
+	resp, err := httpGetWithTimeout(listURL, sessionsPullHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions pull: listing %s on host %s: %v", sessionID, hostID, err)
 		return 0
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("sessions pull: listing %s on host %s: unexpected status %d", sessionID, hostID, resp.StatusCode)
+		return 0
+	}
 	var msg SessionFilesMsg
 	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
 		log.Printf("sessions pull: decoding listing from host %s: %v", hostID, err)
@@ -465,7 +516,7 @@ func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, on
 // fetchSessionFile downloads fileURL into localPath, via a same-directory
 // temp-then-rename so a reader never sees a partially-written file.
 func fetchSessionFile(fileURL, localPath string) error {
-	resp, err := httpGetWithTimeout(fileURL)
+	resp, err := httpGetWithTimeout(fileURL, sessionsPullHTTPTimeout)
 	if err != nil {
 		return err
 	}
@@ -491,9 +542,10 @@ func fetchSessionFile(fileURL, localPath string) error {
 	return os.Rename(tmp, localPath)
 }
 
-// httpGetWithTimeout issues a bounded GET -- see sessionsPullHTTPTimeout.
-func httpGetWithTimeout(target string) (*http.Response, error) {
-	client := &http.Client{Timeout: sessionsPullHTTPTimeout}
+// httpGetWithTimeout issues a GET bounded by timeout -- see
+// sessionsPullHTTPTimeout and sessionsDiscoverHTTPTimeout.
+func httpGetWithTimeout(target string, timeout time.Duration) (*http.Response, error) {
+	client := &http.Client{Timeout: timeout}
 	return client.Get(target)
 }
 

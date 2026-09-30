@@ -445,6 +445,24 @@ type sessionDiscoveryMsg struct {
 // handles every other failure mode already).
 const sessionsDiscoveryDelay = 500 * time.Millisecond
 
+// sessionsDiscoveryTimeout bounds triggerSessionsDiscovery's HTTP request,
+// deliberately distinct from (and longer than) sessionSyncTimeout: this has
+// to cover local-representative's own worst-case round trip through
+// handleSessionsDiscover -- a bounded call to list peers via
+// agent-coordinator (up to local-representative's sessionsPullHTTPTimeout,
+// 5s) followed by a concurrent per-peer indexing fan-out (up to its
+// sessionsDiscoverHTTPTimeout, 2s, regardless of peer count) -- not just the
+// network hop to it. sessionSyncTimeout's 2s is fine for a sync-pull (a
+// single hop LR makes on our behalf with its own short-lived fetch), but was
+// too short reused here: it let this call give up before
+// handleSessionsDiscover could ever have succeeded, silently discarding
+// real results on a live multi-host setup. This runs in its own goroutine
+// (triggerSessionsDiscovery is always called off listSessionsWithRemote,
+// itself only ever invoked from sendSessions/broadcastSessions's "go"
+// callers -- see main.go/sessions.go), so a longer bound here doesn't risk
+// blocking anything.
+const sessionsDiscoveryTimeout = 8 * time.Second
+
 // refreshSessionsAfterConnect fires the discovery poll once more shortly
 // after connecting -- Step1SubstepBPrompt.md Revision A: "It will also
 // happen on connect of FC or SM" (renderSessions' callers already cover
@@ -485,7 +503,7 @@ func (s *Server) triggerSessionsDiscovery() []remoteSessionEntry {
 		return nil
 	}
 	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/api/sessions/discover"}
-	httpClient := &http.Client{Timeout: sessionSyncTimeout}
+	httpClient := &http.Client{Timeout: sessionsDiscoveryTimeout}
 	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
 	if err != nil {
 		return nil

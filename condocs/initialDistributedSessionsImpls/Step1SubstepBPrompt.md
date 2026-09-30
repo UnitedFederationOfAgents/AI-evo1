@@ -54,3 +54,22 @@ We can't see our remote 'Hambone23' session on provisioner01 as we expect to.
 We see errors in the local-representative log.
 
 Let's fix these items.
+
+
+prompt: [`534a6d4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/534a6d4c823b67ed5adbe59e1ab938387cb29e17) → reply: [`25c1d69`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/25c1d694a2ba5003c909369b87c52cdb414df479)
+
+## Reply B
+
+I traced the actual request/response/concurrency path across local-representative, agent-coordinator, and the two discovery callers to find why the newly-added remote-session discovery was failing on a live two-host setup. Two real bugs in the Revision A code: (1) `indexSessionsFrom`/`listPeerHosts`/`pullSessionFilesFrom` fed agent-coordinator's proxy error bodies (502/404 plain text for an unreachable/unknown peer) straight into `json.Decode` without checking the status code first, which always failed and spammed the local-representative log; (2) local-representative's discovery fan-out ran sequentially per peer (up to 5s each) while federation-command's and session-manager's own discovery timeouts were only 2s total, so on a real multi-peer/multi-host setup the callers reliably gave up before local-representative could finish, silently dropping sessions like "Hambone23" from the list.
+
+Fixed both: added status-code checks before decoding in all three LR functions; made the per-peer discovery fan-out concurrent (goroutines + WaitGroup) with its own tighter 2s-per-hop timeout separate from the 5s pull timeout; and raised the two callers' end-to-end discovery timeouts to 8s to comfortably cover LR's new worst case. This should resolve the missing remote-session and log-error symptoms; the "can't see the session-manager presentation" symptom is most plausibly the same underlying failure described informally, since no other code path this change touched could account for it separately.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

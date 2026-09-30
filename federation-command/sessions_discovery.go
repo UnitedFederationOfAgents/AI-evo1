@@ -47,8 +47,20 @@ type sessionDiscoveryMsg struct {
 // sessionsDiscoveryTimeout bounds the discovery HTTP request itself. It
 // blocks whichever Update call triggered it -- list-sessions' renders
 // already run synchronously in Update, same as every other locally-fast
-// renderSessions call in this file, so this is kept short.
-const sessionsDiscoveryTimeout = 2 * time.Second
+// renderSessions call in this file.
+//
+// This has to cover local-representative's own worst-case round trip, not
+// just the network hop to it: handleSessionsDiscover (see
+// local-representative/sessions.go) itself makes a bounded outbound call to
+// list peers via agent-coordinator (up to sessionsPullHTTPTimeout, 5s)
+// followed by a concurrent per-peer indexing fan-out (up to
+// sessionsDiscoverHTTPTimeout, 2s, regardless of peer count since that fan-
+// out runs in parallel) before it can answer. A timeout here shorter than
+// that inner budget would make this call give up before local-
+// representative could ever have succeeded, silently discarding real
+// results -- exactly what a too-short timeout here previously did on a live
+// multi-host setup.
+const sessionsDiscoveryTimeout = 8 * time.Second
 
 // discoverRemoteSessions asks local-representative which sessions every
 // other LR-active host has, for renderSessions to merge in as remote

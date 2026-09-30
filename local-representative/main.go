@@ -36,6 +36,10 @@ const (
 
 	defaultACHost = "localhost"
 	defaultACPort = "8084"
+	// defaultACHTTPPort matches agent-coordinator's own "-port" flag default
+	// (see agent-coordinator/main.go) -- distinct from defaultACPort above,
+	// which is its representable port.
+	defaultACHTTPPort = "8083"
 )
 
 // ServiceStatus is the health status of a monitored service.
@@ -269,6 +273,18 @@ type Server struct {
 	// mutex-guarded state is needed here.
 	fileCacheDir string
 	hostStoreDir string
+
+	// Session sync (see sessions.go and
+	// docs/DistributedSessionsBrainstorm.md): recordsPath is where clauditable
+	// session directories live (AGENT_RECORDS_PATH, resolved the same way
+	// clauditable itself does); acHTTPPort is agent-coordinator's own HTTP
+	// port (distinct from acPort above, which is its representable port),
+	// used to reach both agent-coordinator's "/api/hosts" and its
+	// "/host/<id>/*" transparent proxy when pulling another host's session
+	// files. Both are set once at startup, unlike acHost/acPort, which can
+	// change at runtime via the "connect to AC" widget.
+	recordsPath string
+	acHTTPPort  string
 
 	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
 	// available on any host" verdict, relayed down from agent-coordinator's
@@ -1026,6 +1042,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/convo/", s.proxyToConvo)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
+	mux.HandleFunc("/api/sessions/", s.handleSessionsAPI)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1072,6 +1089,7 @@ type appConfig struct {
 	autoConnect   bool
 	acHost        string
 	acPort        string
+	acHTTPPort    string   // agent-coordinator's HTTP port -- see Server.acHTTPPort
 	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
 	fcBin         string   // explicit path to the federation-command binary
 	terminal      string   // command prefix used to host an interactive child in a terminal
@@ -1120,6 +1138,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		name:          pick("name", defaults.name),
 		acHost:        pick("ac-host", defaults.acHost),
 		acPort:        pick("ac-port", defaults.acPort),
+		acHTTPPort:    pick("ac-http-port", defaults.acHTTPPort),
 		autoLaunch:    splitList(pick("auto-launch", strings.Join(defaults.autoLaunch, ","))),
 		fcBin:         pick("fc-bin", defaults.fcBin),
 		terminal:      pick("terminal", defaults.terminal),
@@ -1220,6 +1239,7 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
+	acHTTPPort := flag.String("ac-http-port", defaultACHTTPPort, "agent-coordinator HTTP port (for session-file pulls via its /host/<id>/* proxy and /api/hosts -- see sessions.go)")
 	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup; each token is \"app\" or \"app:N\" (e.g. federation-command:2)")
 	fcBin := flag.String("fc-bin", "", "path to the federation-command binary (default: search next to LR, the dev bin dir, then PATH)")
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
@@ -1249,6 +1269,7 @@ func main() {
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
+		acHTTPPort:    *acHTTPPort,
 		autoLaunch:    splitList(*autoLaunch),
 		fcBin:         *fcBin,
 		terminal:      *terminal,
@@ -1319,6 +1340,8 @@ func main() {
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
 	s.hostStoreDir = cfg.hostStoreDir
+	s.acHTTPPort = cfg.acHTTPPort
+	s.recordsPath = resolveRecordsPath()
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}

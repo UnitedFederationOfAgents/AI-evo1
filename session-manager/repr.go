@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -350,4 +352,69 @@ func (s *Server) handleReprCommand(raw string) {
 	default:
 		log.Printf("repr: ignoring unrecognised command %q", raw)
 	}
+}
+
+// sessionSyncGlobs are the file patterns a session-view read keeps fresh --
+// see triggerSessionSync.
+var sessionSyncGlobs = []string{"session.jsonl", "*-processed.txt"}
+
+// sessionSyncTimeout bounds each glob's pull request -- see
+// triggerSessionSync.
+const sessionSyncTimeout = 2 * time.Second
+
+// triggerSessionSync asks local-representative to refresh id's
+// "session.jsonl" and "*-processed.txt" files from every other LR-active
+// host before this view is rendered -- see
+// docs/DistributedSessionsBrainstorm.md: "Whenever any host is about to read
+// a session (ie: ... bringing it up in session-manager for viewing) then it
+// will request the jsonl and the -processed glob for sync (refreshed any
+// number of times)." Called from sendSessionView (sessions.go) right before
+// it reads the local session directory.
+//
+// Best-effort and bounded: with no live local-representative connection, or
+// one that hasn't disclosed its HTTP port yet (see
+// representable.Client.PeerHTTPPort, set from local-representative's "hello"
+// message on connect), this is a no-op and the view renders exactly as it
+// would have before this increment -- a purely local read.
+func (s *Server) triggerSessionSync(id string) {
+	s.reprMu.Lock()
+	client := s.reprClient
+	host := s.reprHost
+	s.reprMu.Unlock()
+	if client == nil {
+		return
+	}
+	port := client.PeerHTTPPort()
+	if port == "" {
+		return
+	}
+	for _, glob := range sessionSyncGlobs {
+		requestSessionPull(host, port, id, glob)
+	}
+}
+
+// requestSessionPull issues one best-effort POST asking local-representative
+// to sync-pull id's files matching glob from every other LR-active host --
+// the mirror image of clauditable/distsync.go's requestSessionPull (mode
+// "once" there, "sync" here).
+func requestSessionPull(lrHost, lrPort, sessionID, glob string) {
+	u := url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(lrHost, lrPort),
+		// Path holds the unescaped form -- url.URL.String() escapes it (and
+		// any special characters sessionID carries) itself; pre-escaping
+		// here too would double-encode it.
+		Path: "/api/sessions/" + sessionID + "/pull",
+	}
+	q := u.Query()
+	q.Set("glob", glob)
+	q.Set("mode", "sync")
+	u.RawQuery = q.Encode()
+
+	client := &http.Client{Timeout: sessionSyncTimeout}
+	resp, err := client.Post(u.String(), "application/octet-stream", nil)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }

@@ -586,6 +586,21 @@ func (s *Server) getHosts() []Host {
 	return hosts
 }
 
+// handleHostsAPI answers GET /api/hosts: the same host list/status the "hosts"
+// WebSocket message carries, as plain JSON -- for a local-representative's
+// own outbound calls (discovering which other hosts are LR-active before a
+// session-file pull -- see local-representative/sessions.go and
+// docs/DistributedSessionsBrainstorm.md) rather than only for browsers over
+// the WebSocket.
+func (s *Server) handleHostsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(HostsMsg{Hosts: s.getHosts()})
+}
+
 func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	s.hostsMu.RLock()
 	hs, ok := s.hostStates[name]
@@ -1036,6 +1051,7 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/hosts", s.handleHostsAPI)
 	mux.HandleFunc("/host/", s.proxyToHost)
 
 	if devMode {

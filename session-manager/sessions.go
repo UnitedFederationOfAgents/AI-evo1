@@ -150,12 +150,17 @@ func (s *Server) sendSessionInfo(c *wsClient, id string) {
 }
 
 // sendSessionView renders id's session.jsonl as a readable transcript,
-// replying to c only.
+// replying to c only. Before reading, it asks local-representative to
+// sync-refresh id's "session.jsonl"/"-processed" files from every other
+// LR-active host (see repr.go's triggerSessionSync) -- this is "bringing it
+// up in session-manager for viewing" from
+// docs/DistributedSessionsBrainstorm.md's sync trigger.
 func (s *Server) sendSessionView(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "view-session: id is required")
 		return
 	}
+	s.triggerSessionSync(id)
 	view, err := viewSession(s.recordsPath, id)
 	if err != nil {
 		s.sendToClient(c, "error", "view-session: "+err.Error())

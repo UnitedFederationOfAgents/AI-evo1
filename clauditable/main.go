@@ -166,6 +166,15 @@ func main() {
 		if err := os.Rename(writingFilePath, secondaryPath); err == nil {
 			writingFilePath = secondaryPath
 		}
+	} else {
+		// A freshly-declared primary is "about to write a CLBL record" — ask
+		// the local local-representative to once-transfer any not-yet-seen
+		// "-s-processed" records for this session in from other LR-active
+		// hosts before we do anything else, so this primary's eventual
+		// consolidation (see consolidatePrimaryToJSONL) can fold remote
+		// secondaries in alongside local ones. See distsync.go and
+		// docs/DistributedSessionsBrainstorm.md.
+		triggerOnceTransfer(session)
 	}
 
 	if verbosity.enabled {
@@ -540,7 +549,7 @@ func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record
 		return "", fmt.Errorf("failed to write written file: %w", err)
 	}
 
-	if err := writeProcessedFile(sessionDir, timestamp, content); err != nil {
+	if err := writeProcessedFile(sessionDir, timestamp, isPrimary, content); err != nil {
 		// The raw/s-raw file (the permanent record) is already written; a failure
 		// to also produce the processed file is a warning, not a fatal error.
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write processed file: %v\n", err)
@@ -550,22 +559,45 @@ func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record
 }
 
 // writeProcessedFile applies auto-maintenance (secret redaction, loading-bar stripping,
-// truncation) to a just-produced raw/s-raw file's content and writes {timestamp}-processed.txt.
-// Each call processes exactly one file on behalf of its own producer, so it is always the
-// first (and only) file in its batch and emits a no-op header when nothing needed processing.
-func writeProcessedFile(sessionDir string, timestamp int64, writtenContent string) error {
+// truncation) to a just-produced raw/s-raw file's content and writes {timestamp}-processed.txt
+// for a primary, or {timestamp}-s-processed.txt for a secondary. Keeping the "-s-" infix on a
+// secondary's processed file (rather than writing straight to its final {timestamp}-processed.txt
+// name) is what lets a later consolidation -- local or fed by a once-transferred remote copy,
+// see distsync.go and docs/DistributedSessionsBrainstorm.md -- tell "already processed, not yet
+// folded into session.jsonl" apart from "fully consolidated", and is exactly what a remote
+// host's once-transfer glob ("*-s-processed.txt") targets. Each call processes exactly one file
+// on behalf of its own producer, so it is always the first (and only) file in its batch and
+// emits a no-op header when nothing needed processing.
+func writeProcessedFile(sessionDir string, timestamp int64, isPrimary bool, writtenContent string) error {
 	processedContent, headers := records.ApplyAutoMaintenance(writtenContent, true)
 	processedFileContent := records.FormatProcessedFile(processedContent, headers)
-	processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", timestamp))
+	suffix := "-processed.txt"
+	if !isPrimary {
+		suffix = "-s-processed.txt"
+	}
+	processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d%s", timestamp, suffix))
 	return os.WriteFile(processedPath, []byte(processedFileContent), 0644)
 }
 
-// consolidatePrimaryToJSONL is called by the primary on completion. It collects all
-// secondary written files ({ts}-s-raw.txt) and its own written file ({primaryTs}-raw.txt),
-// then reads each one's already-processed {ts}-processed.txt (written by that file's own
-// producer via writeProcessedFile) and appends its session log portion to session.jsonl in
-// timestamp order, renaming secondaries to {ts}-raw.txt (promoting them). If a processed file
-// is unexpectedly missing, it is produced here as a fallback so consolidation never skips it.
+// consolidatePrimaryToJSONL is called by the primary on completion. It folds its own
+// record (via its already-produced {primaryTs}-processed.txt) and every secondary's
+// already-processed record currently sitting in the session directory
+// ({ts}-s-processed.txt, written by that record's own producer via writeProcessedFile)
+// into session.jsonl, in timestamp order.
+//
+// Folding from {ts}-s-processed.txt rather than {ts}-s-raw.txt (unlike the primary's
+// own always-local -raw.txt) is what lets this pick up BOTH a local secondary's
+// concurrent invocation on this same host (which also leaves a sibling {ts}-s-raw.txt
+// next to its {ts}-s-processed.txt, promoted to {ts}-raw.txt below) and a remote
+// secondary's record, once-transferred in from another LR-active host by
+// local-representative ahead of this call (see distsync.go and
+// docs/DistributedSessionsBrainstorm.md). A remote transfer only ever brings across the
+// already-processed file, never the pre-redaction raw one, so there is no sibling
+// -s-raw.txt to promote in that case — nothing else is needed for it. Either way, no
+// one-time auto-maintenance (redaction, etc.) ever runs again here: it only ever runs
+// once, at raw.txt-->processed.txt time, by a record's own producer. If a processed file
+// is unexpectedly missing but its raw/s-raw counterpart is available locally, it is
+// produced here as a fallback so consolidation never skips it.
 func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int64) error {
 	sessionDir := filepath.Join(recordsPath, session)
 	sessionLogPath := filepath.Join(sessionDir, "session.jsonl")
@@ -575,41 +607,68 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 		return fmt.Errorf("failed to read session directory: %w", err)
 	}
 
-	type writtenEntry struct {
-		ts          int64
-		path        string
-		isSecondary bool
-	}
-	var toProcess []writtenEntry
-
+	sProcessedByTS := make(map[int64]string)
+	sRawByTS := make(map[int64]string)
 	for _, entry := range dirEntries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if strings.HasSuffix(name, "-s-raw.txt") {
-			tsStr := strings.TrimSuffix(name, "-s-raw.txt")
-			ts, err := strconv.ParseInt(tsStr, 10, 64)
-			if err != nil {
-				continue
+		switch {
+		case strings.HasSuffix(name, "-s-processed.txt"):
+			if ts, err := strconv.ParseInt(strings.TrimSuffix(name, "-s-processed.txt"), 10, 64); err == nil {
+				sProcessedByTS[ts] = filepath.Join(sessionDir, name)
 			}
-			toProcess = append(toProcess, writtenEntry{ts, filepath.Join(sessionDir, name), true})
-		} else if strings.HasSuffix(name, "-raw.txt") {
-			tsStr := strings.TrimSuffix(name, "-raw.txt")
-			ts, err := strconv.ParseInt(tsStr, 10, 64)
-			if err != nil || ts != primaryTimestamp {
-				continue
+		case strings.HasSuffix(name, "-s-raw.txt"):
+			if ts, err := strconv.ParseInt(strings.TrimSuffix(name, "-s-raw.txt"), 10, 64); err == nil {
+				sRawByTS[ts] = filepath.Join(sessionDir, name)
 			}
-			toProcess = append(toProcess, writtenEntry{ts, filepath.Join(sessionDir, name), false})
 		}
 	}
 
-	if len(toProcess) == 0 {
-		return nil
+	// foldEntry describes one record to append to session.jsonl: where to read its
+	// already-processed session-log text from (processedPath), a raw fallback to
+	// reprocess from if that's missing/unreadable, and what to rename once folded.
+	type foldEntry struct {
+		ts             int64
+		processedPath  string // "" means "reconstruct from rawFallback"
+		rawFallback    string // raw content to reprocess from if processedPath is empty/unreadable
+		sProcessedPath string // {ts}-s-processed.txt to promote to {ts}-processed.txt once folded, if any
+		sRawPath       string // {ts}-s-raw.txt to promote to {ts}-raw.txt once folded, if any
 	}
 
-	sort.Slice(toProcess, func(i, j int) bool {
-		return toProcess[i].ts < toProcess[j].ts
+	entries := []foldEntry{{
+		ts:            primaryTimestamp,
+		processedPath: filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", primaryTimestamp)),
+		rawFallback:   filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", primaryTimestamp)),
+	}}
+
+	seen := map[int64]bool{primaryTimestamp: true}
+	addSecondary := func(ts int64) {
+		if seen[ts] {
+			return
+		}
+		seen[ts] = true
+		e := foldEntry{ts: ts}
+		if p, ok := sProcessedByTS[ts]; ok {
+			e.processedPath = p
+			e.sProcessedPath = p
+		}
+		if r, ok := sRawByTS[ts]; ok {
+			e.sRawPath = r
+			e.rawFallback = r
+		}
+		entries = append(entries, e)
+	}
+	for ts := range sProcessedByTS {
+		addSecondary(ts)
+	}
+	for ts := range sRawByTS {
+		addSecondary(ts)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ts < entries[j].ts
 	})
 
 	f, err := os.OpenFile(sessionLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -619,21 +678,31 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 	defer f.Close()
 
 	noOpEligible := true
-	for _, entry := range toProcess {
-		processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", entry.ts))
-		processedFileContent, err := os.ReadFile(processedPath)
-		if err != nil {
-			// The file's producer should already have written this alongside its
-			// raw/s-raw file; fall back to producing it here if it's missing.
-			data, err := os.ReadFile(entry.path)
-			if err != nil {
+	for _, e := range entries {
+		var processedFileContent []byte
+		readErr := os.ErrNotExist
+		if e.processedPath != "" {
+			processedFileContent, readErr = os.ReadFile(e.processedPath)
+		}
+		if readErr != nil {
+			if e.rawFallback == "" {
+				// A remote-origin secondary with no local raw counterpart and
+				// no processed file either (a broken transfer) -- nothing to
+				// reconstruct from locally; skip it until a future
+				// consolidation sees it.
+				continue
+			}
+			data, rerr := os.ReadFile(e.rawFallback)
+			if rerr != nil {
 				continue
 			}
 			content, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
 			noOpEligible = false
 			fallback := records.FormatProcessedFile(content, headers)
-			os.WriteFile(processedPath, []byte(fallback), 0644)
+			finalProcessedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", e.ts))
+			os.WriteFile(finalProcessedPath, []byte(fallback), 0644)
 			processedFileContent = []byte(fallback)
+			e.sProcessedPath = "" // already written straight to the final name -- nothing to rename
 		}
 
 		sessionLogContent := records.ExtractSessionLogFromWrittenFile(string(processedFileContent))
@@ -647,9 +716,11 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 			f.WriteString("\n")
 		}
 
-		if entry.isSecondary {
-			renamedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", entry.ts))
-			os.Rename(entry.path, renamedPath)
+		if e.sProcessedPath != "" {
+			os.Rename(e.sProcessedPath, filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", e.ts)))
+		}
+		if e.sRawPath != "" {
+			os.Rename(e.sRawPath, filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", e.ts)))
 		}
 	}
 

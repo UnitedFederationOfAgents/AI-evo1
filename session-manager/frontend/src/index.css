@@ -221,6 +221,20 @@ body {
   font-size: 10px;
 }
 
+/* A discovered-but-not-yet-pulled session (see sessions.go's
+   listSessionsWithRemote) -- shown but not selectable, since nothing pulls
+   its files just from appearing in this list. */
+.session-row-remote {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.session-row-remote:hover { background: transparent; }
+
+.session-row-remote-badge {
+  color: #6b9fd4;
+}
+
 /* ---- Session detail pane ---- */
 
 .session-detail {

@@ -64,7 +64,7 @@ func (s *Server) setCurrentSession(id string) {
 
 // sendSessions replies to c only.
 func (s *Server) sendSessions(c *wsClient) {
-	sessions, err := listSessions(s.recordsPath, s.getCurrentSession())
+	sessions, err := s.listSessionsWithRemote()
 	if err != nil {
 		s.sendToClient(c, "error", err.Error())
 		return
@@ -75,7 +75,7 @@ func (s *Server) sendSessions(c *wsClient) {
 // broadcastSessions notifies every connected client -- used after a
 // mutation (new/set/rename/archive) so other open tabs stay in sync.
 func (s *Server) broadcastSessions() {
-	sessions, err := listSessions(s.recordsPath, s.getCurrentSession())
+	sessions, err := s.listSessionsWithRemote()
 	msg := SessionsMsg{Current: s.getCurrentSession()}
 	if err != nil {
 		s.mu.RLock()
@@ -215,12 +215,16 @@ func resolveRecordsPath() string {
 
 // ---- listing / describing ----
 
-// SessionSummary is one row of "ufa session list" parity data.
+// SessionSummary is one row of "ufa session list" parity data. Remote/Host
+// are set only for a session discovered on another host but not (yet)
+// present in this host's own AGENT_RECORDS_PATH -- see listSessionsWithRemote.
 type SessionSummary struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	FileCount int    `json:"file_count"`
 	Current   bool   `json:"current"`
+	Remote    bool   `json:"remote,omitempty"`
+	Host      string `json:"host,omitempty"`
 }
 
 // listSessions returns every session directory under recordsPath, newest
@@ -253,6 +257,37 @@ func listSessions(recordsPath, currentID string) ([]SessionSummary, error) {
 			FileCount: len(files),
 			Current:   id == currentID,
 		})
+	}
+	return summaries, nil
+}
+
+// listSessionsWithRemote returns listSessions's purely-local summaries plus
+// every session triggerSessionsDiscovery (repr.go) reports from another
+// LR-active host whose ID isn't already in that local list, tagged Remote
+// and with which host it came from -- closing the gap
+// condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md
+// describes: "list-sessions never leaves the local filesystem." Called by
+// sendSessions/broadcastSessions, so "any list-sessions behaviour" (both the
+// WS "list-sessions" verb and every other trigger that reaches those two --
+// a new browser connection, a mutation, or the connect-time refresh --
+// initiates the same discovery poll (Step1SubstepBPrompt.md Revision A). A
+// session already present locally (e.g. because it was previously pulled)
+// is left as its local entry, never duplicated as remote.
+func (s *Server) listSessionsWithRemote() ([]SessionSummary, error) {
+	summaries, err := listSessions(s.recordsPath, s.getCurrentSession())
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool, len(summaries))
+	for _, sum := range summaries {
+		known[sum.ID] = true
+	}
+	for _, r := range s.triggerSessionsDiscovery() {
+		if known[r.ID] {
+			continue
+		}
+		known[r.ID] = true
+		summaries = append(summaries, SessionSummary{ID: r.ID, Name: r.Name, Remote: true, Host: r.HostID})
 	}
 	return summaries, nil
 }

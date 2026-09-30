@@ -23,3 +23,26 @@ Let's follow up first by closing this gap.
 Any list-sessions behaviour will initiate this poll.
 
 It will also happen on connect of FC or SM.
+
+
+prompt: [`020bf6f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/020bf6f565d218f19eb9e41a7980df183ca3bcef) → reply: [`f66197b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f66197b6a61384d614bb145975915f7c69c1e3ca)
+
+## Reply A
+
+All looks correct. The implementation is complete and internally consistent across all four binaries plus the session-manager frontend and docs. Let me provide the final summary.
+
+## Summary
+
+I closed the remote-session-listing gap by implementing the sketch from `RemoteSessionListingGap.md`: `local-representative` gained an unscoped `GET /api/sessions` index and a `POST /api/sessions/discover` fan-out (queries every LR-active peer's index via the existing `agent-coordinator` proxy, read-only — never materializes a local session directory). Both `federation-command` and `session-manager` now merge that fan-out's results into every `list-sessions`/`ufa session list` render (federation-command's three `renderSessions` call sites; session-manager's `sendSessions`/`broadcastSessions` via a new `listSessionsWithRemote`), tagging unseen IDs as remote — satisfying "any list-sessions behaviour will initiate this poll." I also added a poll fired once more right after each binary connects to its own local-representative (session-manager re-broadcasts to open tabs; federation-command prints a one-line notice), delayed 500ms so LR's HTTP-port disclosure has time to arrive first.
+
+I added Go tests for the new local-representative handlers and session-manager's discovery/merge logic, updated the session-manager frontend (types/UI/CSS) to show a "remote" badge for undiscovered-but-not-pulled sessions, and updated both `RemoteSessionListingGap.md` and `docs/DistributedSessionsBrainstorm.md` to document what was added. As before, the sandbox blocks `go build`/`go test`/frontend builds, so everything was verified by careful manual read rather than compiling.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

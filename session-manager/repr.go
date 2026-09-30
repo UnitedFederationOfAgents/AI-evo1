@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -231,6 +232,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		})
 		s.pushSessionsState()
 		s.sendVersion()
+		go s.refreshSessionsAfterConnect(client)
 
 		<-client.DisconnectCh()
 
@@ -417,4 +419,81 @@ func requestSessionPull(lrHost, lrPort, sessionID, glob string) {
 		return
 	}
 	resp.Body.Close()
+}
+
+// remoteSessionEntry mirrors local-representative's RemoteSessionEntry (see
+// sessions.go's handleSessionsDiscover) -- this binary's own copy of the
+// wire shape, same posture as this file's/sessions.go's other mirrored
+// helpers.
+type remoteSessionEntry struct {
+	HostID string `json:"host_id"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+// sessionDiscoveryMsg mirrors local-representative's SessionDiscoveryMsg --
+// only Sessions is read here; Hosts is purely informational.
+type sessionDiscoveryMsg struct {
+	Sessions []remoteSessionEntry `json:"sessions"`
+}
+
+// sessionsDiscoveryDelay gives local-representative's "hello" time to
+// disclose its HTTP port (see representable.Client.PeerHTTPPort) before the
+// on-connect discovery poll fires -- without it, a poll fired the instant
+// connectLoop adopts a client would almost always race the hello and
+// silently no-op (triggerSessionsDiscovery's own bounded-timeout posture
+// handles every other failure mode already).
+const sessionsDiscoveryDelay = 500 * time.Millisecond
+
+// refreshSessionsAfterConnect fires the discovery poll once more shortly
+// after connecting -- Step1SubstepBPrompt.md Revision A: "It will also
+// happen on connect of FC or SM" (renderSessions' callers already cover
+// "any list-sessions behaviour", since sendSessions/broadcastSessions run on
+// every browser connect/mutation too). Run in its own goroutine from
+// connectLoop so it never delays adopting the connection; client guards
+// against firing for a connection already superseded by the time the delay
+// elapses.
+func (s *Server) refreshSessionsAfterConnect(client *representable.Client) {
+	time.Sleep(sessionsDiscoveryDelay)
+	s.reprMu.Lock()
+	stillCurrent := s.reprClient == client
+	s.reprMu.Unlock()
+	if stillCurrent {
+		s.broadcastSessions()
+	}
+}
+
+// triggerSessionsDiscovery asks local-representative which sessions every
+// other LR-active host has, for listSessionsWithRemote (sessions.go) to
+// merge into a rendered session list as remote entries -- the fan-out half
+// of closing condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md's
+// gap. Best-effort and bounded, same posture as triggerSessionSync: returns
+// nil with no live local-representative connection, one that hasn't
+// disclosed its HTTP port yet, or on any request/decode failure --
+// listSessionsWithRemote then returns exactly listSessions's purely-local
+// result.
+func (s *Server) triggerSessionsDiscovery() []remoteSessionEntry {
+	s.reprMu.Lock()
+	client := s.reprClient
+	host := s.reprHost
+	s.reprMu.Unlock()
+	if client == nil {
+		return nil
+	}
+	port := client.PeerHTTPPort()
+	if port == "" {
+		return nil
+	}
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/api/sessions/discover"}
+	httpClient := &http.Client{Timeout: sessionSyncTimeout}
+	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var msg sessionDiscoveryMsg
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		return nil
+	}
+	return msg.Sessions
 }

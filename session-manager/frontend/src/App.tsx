@@ -345,13 +345,18 @@ function SessionList({ sessions, currentId, selectedId, onSelect, onNew, onArchi
           sessions.map((s) => (
             <button
               key={s.id}
-              className={`session-row${s.id === selectedId ? ' selected' : ''}`}
-              onClick={() => onSelect(s.id)}
-              title={s.id}
+              className={`session-row${s.id === selectedId ? ' selected' : ''}${s.remote ? ' session-row-remote' : ''}`}
+              onClick={() => !s.remote && onSelect(s.id)}
+              disabled={s.remote}
+              title={s.remote ? `${s.id} — discovered on ${s.host}, not yet pulled locally` : s.id}
             >
               <span className={`session-row-current-dot${s.id === currentId ? ' is-current' : ''}`} title={s.id === currentId ? 'current session' : ''} />
               <span className="session-row-name">{s.name || s.id}</span>
-              <span className="session-row-meta">{s.file_count}</span>
+              {s.remote ? (
+                <span className="session-row-meta session-row-remote-badge">remote · {s.host}</span>
+              ) : (
+                <span className="session-row-meta">{s.file_count}</span>
+              )}
             </button>
           ))
         )}

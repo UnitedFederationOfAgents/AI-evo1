@@ -134,6 +134,12 @@ func fakeACAndPeer(t *testing.T, peerSrv *Server) *httptest.Server {
 	})
 	mux.HandleFunc("/host/host-b/", func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/host/host-b")
+		// Mirrors setupRoutes' exact-vs-prefix split between the unscoped
+		// index and the per-session subtree.
+		if r.URL.Path == "/api/sessions" {
+			peerSrv.handleSessionsIndex(w, r)
+			return
+		}
 		peerSrv.handleSessionsAPI(w, r)
 	})
 	ac := httptest.NewServer(mux)
@@ -239,5 +245,110 @@ func TestPullSessionFilesFromSyncRefetchesOnChecksumMismatch(t *testing.T) {
 	fetched = s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "session.jsonl", false)
 	if fetched != 0 {
 		t.Errorf("fetched = %d on an unchanged file, want 0", fetched)
+	}
+}
+
+// TestHandleSessionsIndexListsEverySessionWithName exercises the unscoped
+// listing route RemoteSessionListingGap.md identified as missing: given no
+// session ID at all, every session this host has, each with its
+// session.yaml name.
+func TestHandleSessionsIndexListsEverySessionWithName(t *testing.T) {
+	s := newTestSessionsServer(t)
+	for _, sess := range []struct{ id, name string }{{"sess-1", "First"}, {"sess-2", "Second"}} {
+		dir := filepath.Join(s.recordsPath, sess.id)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "session.yaml"), []byte("id: "+sess.id+"\nname: "+sess.name+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	w := httptest.NewRecorder()
+	s.handleSessionsIndex(w, req)
+
+	var msg SessionIndexMsg
+	if err := json.NewDecoder(w.Body).Decode(&msg); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	got := map[string]string{}
+	for _, e := range msg.Sessions {
+		got[e.ID] = e.Name
+	}
+	want := map[string]string{"sess-1": "First", "sess-2": "Second"}
+	if len(got) != len(want) || got["sess-1"] != want["sess-1"] || got["sess-2"] != want["sess-2"] {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestHandleSessionsDiscoverRefusesProxiedRequest mirrors
+// TestHandleSessionsPullRefusesProxiedRequest: discovery is this host acting
+// as a client on its own behalf, so it too is refused when it arrives
+// through agent-coordinator's transparent proxy.
+func TestHandleSessionsDiscoverRefusesProxiedRequest(t *testing.T) {
+	s := newTestSessionsServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/discover", nil)
+	req.Header.Set(proxiedHeader, "agent-coordinator")
+	w := httptest.NewRecorder()
+	s.handleSessionsAPI(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("proxied discover request: got status %d, want 403", w.Code)
+	}
+}
+
+// TestIndexSessionsFromTagsEachEntryWithItsHost exercises discovery's
+// per-peer fetch (see handleSessionsDiscover) through a fake
+// agent-coordinator standing in front of a real peer Server -- the same
+// shape as pullSessionFilesFrom's own tests above, since handleSessionsPull
+// has no full-path test through acHTTPAddr either (see
+// TestHandleSessionsPullNoACIsANoOp). Nothing is fetched or written into
+// this host's own AGENT_RECORDS_PATH: discovery only ever lists, it never
+// materializes a local session directory (see RemoteSessionListingGap.md's
+// "What would need to be added").
+func TestIndexSessionsFromTagsEachEntryWithItsHost(t *testing.T) {
+	s := newTestSessionsServer(t)
+	peer := newTestSessionsServer(t)
+	peerDir := filepath.Join(peer.recordsPath, "sess-remote")
+	if err := os.MkdirAll(peerDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(peerDir, "session.yaml"), []byte("id: sess-remote\nname: Remote Session\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ac := fakeACAndPeer(t, peer)
+
+	entries := s.indexSessionsFrom(ac.URL, "host-b")
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	got := entries[0]
+	if got.HostID != "host-b" || got.ID != "sess-remote" || got.Name != "Remote Session" {
+		t.Errorf("got %+v, want {host-b sess-remote Remote Session}", got)
+	}
+
+	if dirEntries, err := os.ReadDir(s.recordsPath); err != nil || len(dirEntries) != 0 {
+		t.Errorf("discovery must not create local session directories, found %d entries (err %v)", len(dirEntries), err)
+	}
+}
+
+// TestHandleSessionsDiscoverNoACIsANoOp mirrors
+// TestHandleSessionsPullNoACIsANoOp: discovery with no live
+// agent-coordinator connection succeeds trivially rather than erroring.
+func TestHandleSessionsDiscoverNoACIsANoOp(t *testing.T) {
+	s := newTestSessionsServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/discover", nil)
+	w := httptest.NewRecorder()
+	s.handleSessionsAPI(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", w.Code)
+	}
+	var msg SessionDiscoveryMsg
+	if err := json.NewDecoder(w.Body).Decode(&msg); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if msg.Hosts != 0 || len(msg.Sessions) != 0 {
+		t.Errorf("got %+v, want zero hosts/sessions with no agent-coordinator connection", msg)
 	}
 }

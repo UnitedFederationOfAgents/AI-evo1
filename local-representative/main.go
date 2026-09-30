@@ -1042,6 +1042,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/convo/", s.proxyToConvo)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
+	mux.HandleFunc("/api/sessions", s.handleSessionsIndex)
 	mux.HandleFunc("/api/sessions/", s.handleSessionsAPI)
 
 	if devMode {

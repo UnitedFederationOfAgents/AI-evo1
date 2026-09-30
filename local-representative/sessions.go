@@ -68,6 +68,32 @@ type SessionFilesMsg struct {
 	Files []SessionFileInfo `json:"files"`
 }
 
+// SessionIndexEntry is one session this host knows about -- see
+// handleSessionsIndex.
+type SessionIndexEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// SessionIndexMsg is handleSessionsIndex's response body.
+type SessionIndexMsg struct {
+	Sessions []SessionIndexEntry `json:"sessions"`
+}
+
+// RemoteSessionEntry is one session a peer host reported, tagged with which
+// host it came from -- see handleSessionsDiscover.
+type RemoteSessionEntry struct {
+	HostID string `json:"host_id"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+// SessionDiscoveryMsg is handleSessionsDiscover's response body.
+type SessionDiscoveryMsg struct {
+	Hosts    int                  `json:"hosts"`    // how many other LR-active hosts were queried
+	Sessions []RemoteSessionEntry `json:"sessions"` // every session reported by any of them
+}
+
 // SessionPullResultMsg is handleSessionsPull's response body -- mostly useful
 // for tests/debugging; callers (clauditable, session-manager) treat the pull
 // as fire-and-forget and don't inspect it.
@@ -86,9 +112,18 @@ func validSessionPathSegment(s string) bool {
 // ".../list" and GET ".../file/<name>" are read-only lookups into this LR's
 // own AGENT_RECORDS_PATH (ungated -- see the file-level comment above); POST
 // ".../pull" is this LR reaching out as a client to pull from others (gated
-// -- see handleSessionsPull).
+// -- see handleSessionsPull). "/api/sessions/discover" is the one path in
+// this subtree with no session ID segment at all -- see handleSessionsDiscover.
 func (s *Server) handleSessionsAPI(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+	if rest == "discover" {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleSessionsDiscover(w, r)
+		return
+	}
 	sessionID, action, hasAction := strings.Cut(rest, "/")
 	if !validSessionPathSegment(sessionID) || !hasAction {
 		http.NotFound(w, r)
@@ -104,6 +139,115 @@ func (s *Server) handleSessionsAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleSessionsIndex answers GET /api/sessions: every session this host
+// has at all -- id plus its session.yaml name, no file contents -- so a peer
+// (via handleSessionsDiscover, through agent-coordinator's transparent
+// "/host/<id>/*" proxy, same as handleSessionsList) can learn which session
+// IDs exist here without already knowing one to ask about. This is the route
+// condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md
+// identified as missing: every existing lookup in this file takes a session
+// ID in its path, so nothing could answer "what sessions do you have at
+// all" until now. Ungated, same posture as handleSessionsList/handleSessionsFile.
+func (s *Server) handleSessionsIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	entries, err := os.ReadDir(s.recordsPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(SessionIndexMsg{Sessions: []SessionIndexEntry{}})
+		return
+	}
+	sessions := make([]SessionIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		sessions = append(sessions, SessionIndexEntry{ID: e.Name(), Name: readSessionYAMLName(filepath.Join(s.recordsPath, e.Name()))})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(SessionIndexMsg{Sessions: sessions})
+}
+
+// readSessionYAMLName reads a session directory's session.yaml "name" field,
+// mirroring federation-command's/session-manager's own copies of the same
+// lookup (each binary in this codebase keeps its own rather than sharing a
+// library -- see sessions.go's file-level comment in session-manager).
+func readSessionYAMLName(sessionDir string) string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "name: "); ok {
+			return name
+		}
+	}
+	return ""
+}
+
+// handleSessionsDiscover answers POST /api/sessions/discover: this LR
+// reaching out, as a client, to every other host agent-coordinator
+// currently shows as connected and asking each one's handleSessionsIndex
+// which sessions it has -- the fan-out half of closing
+// RemoteSessionListingGap.md's gap, called by whichever of
+// federation-command/session-manager is about to render "list-sessions"
+// (see Step1SubstepBPrompt.md Revision A: "any list-sessions behaviour will
+// initiate this poll", plus a poll fired once more right after either binary
+// connects to this LR). Deliberately read-only on both ends: unlike
+// handleSessionsPull, nothing is fetched or written to this host's own
+// AGENT_RECORDS_PATH -- a session appearing here does not materialize a
+// local directory for it, since nobody has asked to view its contents yet
+// (see RemoteSessionListingGap.md's "What would need to be added"). Refused
+// through agent-coordinator's transparent passthrough for the same reason
+// handleSessionsPull is: this is this host acting as a client on its own
+// behalf.
+func (s *Server) handleSessionsDiscover(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(proxiedHeader) != "" {
+		http.Error(w, "session discovery is only permitted from a direct local-representative client", http.StatusForbidden)
+		return
+	}
+	acAddr, ok := s.acHTTPAddr()
+	if !ok {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(SessionDiscoveryMsg{})
+		return
+	}
+	acBase := "http://" + acAddr
+
+	hosts := s.listPeerHosts(acBase)
+	var sessions []RemoteSessionEntry
+	for _, hostID := range hosts {
+		sessions = append(sessions, s.indexSessionsFrom(acBase, hostID)...)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(SessionDiscoveryMsg{Hosts: len(hosts), Sessions: sessions})
+}
+
+// indexSessionsFrom asks hostID's local-representative (through
+// agent-coordinator's transparent "/host/<id>/*" proxy) which sessions it
+// has, tagging each with hostID.
+func (s *Server) indexSessionsFrom(acBase, hostID string) []RemoteSessionEntry {
+	indexURL := fmt.Sprintf("%s/host/%s/api/sessions", acBase, url.PathEscape(hostID))
+	resp, err := httpGetWithTimeout(indexURL)
+	if err != nil {
+		log.Printf("sessions discover: indexing host %s: %v", hostID, err)
+		return nil
+	}
+	defer resp.Body.Close()
+	var msg SessionIndexMsg
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		log.Printf("sessions discover: decoding index from host %s: %v", hostID, err)
+		return nil
+	}
+	entries := make([]RemoteSessionEntry, 0, len(msg.Sessions))
+	for _, sess := range msg.Sessions {
+		entries = append(entries, RemoteSessionEntry{HostID: hostID, ID: sess.ID, Name: sess.Name})
+	}
+	return entries
 }
 
 // handleSessionsList answers GET /api/sessions/<id>/list?glob=<pattern>:

@@ -1337,6 +1337,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
 			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
 			listenForDisconnectCmd(m.reprClient),
+			sessionsDiscoveryDelayCmd(m.reprClient),
 		}
 		if !wantsRemote {
 			cmds = append(cmds, textinput.Blink)
@@ -1380,6 +1381,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
 			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
 			listenForDisconnectCmd(m.reprClient),
+			sessionsDiscoveryDelayCmd(m.reprClient),
 		)
 
 	case reprConnectFailedMsg:
@@ -1387,6 +1389,18 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Failed to connect — return to select mode so user can try again.
 			m.blinker.SetState(BlinkerSelect)
 			return m, m.blinker.ResetTick()
+		}
+		return m, nil
+
+	case sessionsDiscoveryTickMsg:
+		if m.reprClient != msg.client {
+			// Superseded (disconnected, or replaced by a fresh connect) by
+			// the time sessionsDiscoveryDelay elapsed -- drop it rather than
+			// poll a connection nothing still points at.
+			return m, nil
+		}
+		if remote := m.discoverRemoteSessions(); len(remote) > 0 {
+			return m, tea.Println(sessionsDiscoveryNotice(remote))
 		}
 		return m, nil
 
@@ -2231,7 +2245,8 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// list-sessions
 	if line == "list-sessions" {
-		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
+		remote := m.discoverRemoteSessions()
+		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir), remote), 0)
 	}
 
 	// version / ufa version
@@ -3378,7 +3393,8 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "list-sessions" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
+		remote := m.discoverRemoteSessions()
+		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir), remote))
 	}
 
 	// version (also available as "ufa version", handled by the "ufa "
@@ -3734,7 +3750,8 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 
 	case "session list":
 		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID))
+		remote := m.discoverRemoteSessions()
+		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID, remote))
 
 	case "session get":
 		m.logRecord(line, cmdTime, deltaMs, 0)
@@ -5049,8 +5066,12 @@ func modeDescription(mode string) string {
 	}
 }
 
-// renderSessions returns a styled string listing available sessions
-func renderSessions(recordsPath string, currentSession string) string {
+// renderSessions returns a styled string listing available sessions, plus
+// any remote entries returned so far -- see discoverRemoteSessions. remote
+// entries whose ID is already among the local sessions are skipped: that ID
+// isn't "remote" to this host once it has its own copy (e.g. already
+// pulled).
+func renderSessions(recordsPath string, currentSession string, remote []remoteSessionEntry) string {
 	var b strings.Builder
 	entries, err := os.ReadDir(recordsPath)
 	if err != nil {
@@ -5061,9 +5082,11 @@ func renderSessions(recordsPath string, currentSession string) string {
 	b.WriteString("\n\n")
 
 	var sessions []string
+	known := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			sessions = append(sessions, entry.Name())
+			known[entry.Name()] = true
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(sessions)))
@@ -5084,6 +5107,19 @@ func renderSessions(recordsPath string, currentSession string) string {
 			nameStr = " — " + name
 		}
 		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)%s", prefix, session, suffix, fileCount, nameStr)))
+		b.WriteString("\n")
+	}
+
+	for _, r := range remote {
+		if known[r.ID] {
+			continue
+		}
+		known[r.ID] = true
+		nameStr := ""
+		if r.Name != "" {
+			nameStr = " — " + r.Name
+		}
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("    %s (remote on %s)%s", r.ID, r.HostID, nameStr)))
 		b.WriteString("\n")
 	}
 

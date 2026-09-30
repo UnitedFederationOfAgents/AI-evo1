@@ -29,11 +29,16 @@ export interface ModeMismatchMsg {
 // ---- Session management ("ufa session" sub-menu parity, see sessions.go) ----
 
 // SessionSummary is one row of the session list (the "sessions" payload).
+// remote/host are set only for a session discovered on another host but not
+// (yet) present in this host's own AGENT_RECORDS_PATH -- see sessions.go's
+// listSessionsWithRemote.
 export interface SessionSummary {
   id: string
   name: string
   file_count: number
   current: boolean
+  remote?: boolean
+  host?: string
 }
 
 // SessionsMsg is the "sessions" WebSocket payload: the full session list

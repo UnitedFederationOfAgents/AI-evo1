@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -147,4 +150,138 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 	if q.Get("glob") != "*-processed.txt" || q.Get("mode") != "sync" {
 		t.Errorf("query = %q, want glob=*-processed.txt&mode=sync", gotQuery)
 	}
+}
+
+// TestTriggerSessionsDiscoveryNoClientIsANoOp mirrors
+// TestTriggerSessionSyncNoClientIsANoOp: listSessionsWithRemote must still
+// render a purely local list before any local-representative connection
+// exists.
+func TestTriggerSessionsDiscoveryNoClientIsANoOp(t *testing.T) {
+	s := newServer()
+	s.name = "sessions"
+	if got := s.triggerSessionsDiscovery(); got != nil {
+		t.Errorf("got %+v, want nil with no local-representative connection", got)
+	}
+}
+
+// TestTriggerSessionsDiscoveryPostsToPeerHTTPPort verifies the wiring for
+// Step1SubstepBPrompt.md Revision A's poll: once connected to
+// local-representative, triggerSessionsDiscovery POSTs to
+// "/api/sessions/discover" and returns the sessions it reports.
+func TestTriggerSessionsDiscoveryPostsToPeerHTTPPort(t *testing.T) {
+	var mu sync.Mutex
+	var gotPath, gotMethod string
+	lr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sessionDiscoveryMsg{Sessions: []remoteSessionEntry{
+			{HostID: "host-b", ID: "sess-remote", Name: "Remote Session"},
+		}})
+	}))
+	defer lr.Close()
+	lrURL, err := url.Parse(lr.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reprAddr := freeTCPAddr(t)
+	reprSrv, err := representable.NewServer(reprAddr, representable.Mode(false))
+	if err != nil {
+		t.Fatalf("representable.NewServer: %v", err)
+	}
+	reprSrv.SetHTTPPort(lrURL.Port())
+
+	host, port, err := net.SplitHostPort(reprAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := newServer()
+	s.name = "sessions"
+	s.startConnectLoop(host, port)
+	waitForReprStatus(t, s, "connected")
+
+	got := s.triggerSessionsDiscovery()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotMethod != http.MethodPost || gotPath != "/api/sessions/discover" {
+		t.Errorf("request = %s %s, want POST /api/sessions/discover", gotMethod, gotPath)
+	}
+	if len(got) != 1 || got[0].HostID != "host-b" || got[0].ID != "sess-remote" {
+		t.Errorf("got %+v, want one entry from host-b", got)
+	}
+
+	s.disconnectRepr()
+}
+
+// TestListSessionsWithRemoteSkipsAlreadyKnownIDs verifies
+// listSessionsWithRemote's merge: a discovered session is appended as a
+// Remote entry only when its ID isn't already in the local list (e.g.
+// already pulled).
+func TestListSessionsWithRemoteSkipsAlreadyKnownIDs(t *testing.T) {
+	lr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sessionDiscoveryMsg{Sessions: []remoteSessionEntry{
+			{HostID: "host-b", ID: "sess-local", Name: "Already have this one"},
+			{HostID: "host-b", ID: "sess-remote-only", Name: "Remote Session"},
+		}})
+	}))
+	defer lr.Close()
+	lrURL, err := url.Parse(lr.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reprAddr := freeTCPAddr(t)
+	reprSrv, err := representable.NewServer(reprAddr, representable.Mode(false))
+	if err != nil {
+		t.Fatalf("representable.NewServer: %v", err)
+	}
+	reprSrv.SetHTTPPort(lrURL.Port())
+	host, port, err := net.SplitHostPort(reprAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := newServer()
+	s.name = "sessions"
+	s.recordsPath = t.TempDir()
+	localDir := filepath.Join(s.recordsPath, "sess-local")
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSessionYAMLIfAbsent(localDir, "sess-local", "Already have this one"); err != nil {
+		t.Fatal(err)
+	}
+	s.startConnectLoop(host, port)
+	waitForReprStatus(t, s, "connected")
+
+	summaries, err := s.listSessionsWithRemote()
+	if err != nil {
+		t.Fatalf("listSessionsWithRemote: %v", err)
+	}
+	var sawRemoteOnly, sawLocalAsRemote bool
+	for _, sum := range summaries {
+		if sum.ID == "sess-remote-only" {
+			sawRemoteOnly = true
+			if !sum.Remote || sum.Host != "host-b" {
+				t.Errorf("sess-remote-only summary = %+v, want Remote=true Host=host-b", sum)
+			}
+		}
+		if sum.ID == "sess-local" && sum.Remote {
+			sawLocalAsRemote = true
+		}
+	}
+	if !sawRemoteOnly {
+		t.Errorf("got %+v, want a remote entry for sess-remote-only", summaries)
+	}
+	if sawLocalAsRemote {
+		t.Errorf("got %+v, sess-local should never be tagged remote (it's a local ID, coincidentally also reported by a peer)", summaries)
+	}
+
+	s.disconnectRepr()
 }

@@ -215,3 +215,42 @@ infrastructure — no push primitive, no representable protocol change.
   different times, never having synced with each other in between) is also
   out of scope — sync is a one-way "catch this host up" pull, not a CRDT-style
   merge.
+
+### InitialDistributedSessions Step 1 Substep B Revision A — discovering a session neither host has heard of
+
+Closes the gap traced in
+[`condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md`](../condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md):
+until now `list-sessions` never left the local filesystem on either
+`federation-command` or `session-manager`, because every existing pull
+(once-transfer, sync) takes a session ID the caller already has — nothing
+answered "what sessions do you have at all."
+
+- **`local-representative` gained a `GET /api/sessions` unscoped index**
+  (`sessions.go`'s `handleSessionsIndex`) — every session ID this host has
+  plus its `session.yaml` name, no file contents — and a `POST
+  /api/sessions/discover` (`handleSessionsDiscover`) that fans that same
+  question out to every LR-active peer (via the existing `GET /api/hosts` /
+  `listPeerHosts`) and returns everything found, each entry tagged with
+  which host reported it. Both are read-only on every host involved:
+  discovery never fetches a file or creates a local session directory —
+  only a pull (unchanged) still does that, and only once something actually
+  asks to view the session.
+- **`federation-command`'s `renderSessions` and `session-manager`'s
+  `listSessions`/`sendSessions`/`broadcastSessions`** now merge in
+  `discoverRemoteSessions()`'s/`triggerSessionsDiscovery()`'s result (each
+  binary's own copy of the discovery HTTP call, same posture as their
+  existing sync/once pull callers), skipping any ID already present
+  locally. This fires every time either binary is about to render a session
+  list — the WS "list-sessions" verb, a new browser connection, and any
+  mutation all flow through session-manager's two functions; `list-sessions`,
+  `ufa session list`, and the ridealong builtin all flow through
+  federation-command's `renderSessions`.
+- **Both also fire the same poll once more right after connecting** to
+  their own `local-representative` — `session-manager`'s `connectLoop`
+  re-broadcasts the merged list to open browser tabs;
+  `federation-command`'s two connect-success paths print a one-line notice
+  if anything new turns up. Each waits 500ms first so local-representative's
+  "hello" has had time to disclose its HTTP port (see
+  `representable.Client.PeerHTTPPort`) before polling — otherwise the very
+  first poll right after `Connect` returns would almost always race the
+  hello and silently no-op.

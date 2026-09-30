@@ -1,5 +1,10 @@
 # Does `list-sessions` show a session created on another host?
 
+**Update (Step 1 Substep B Revision A): the gap described below is now
+closed.** See "What was added" at the end of this document for what
+changed; the rest of the document is left as written (the trace of why the
+gap existed in the first place is still accurate background).
+
 Scenario: a session gets created on host A. Host B is connected to the same
 chain — `X <--> LR <--> AC <--> LR <--> X`, i.e. host A's clauditable-using
 app talking to its own `local-representative`, over `agent-coordinator`, to
@@ -84,3 +89,55 @@ Closing the gap would need, at minimum:
 None of this exists yet; it is a reasonable next increment on top of the
 once-transfer/sync wiring already in place, not a fix to something broken
 within that wiring.
+
+## What was added (Step 1 Substep B Revision A)
+
+Both pieces sketched above now exist, plus one more: a live poll fired every
+time either entry point is about to render, not just a mechanism that would
+work if called.
+
+- **`local-representative` gained the unscoped listing route**: `GET
+  /api/sessions` (`sessions.go`'s `handleSessionsIndex`) returns every
+  session ID this host has plus its `session.yaml` name -- no file contents,
+  registered as its own exact-path route alongside the existing
+  `/api/sessions/` per-session subtree (mirroring `/api/files` vs
+  `/api/files/`). Reachable unmodified through `agent-coordinator`'s
+  transparent `/host/<id>/*` proxy, same as the existing `list`/`file`
+  routes.
+- **`local-representative` gained the fan-out**: `POST
+  /api/sessions/discover` (`handleSessionsDiscover`) asks `agent-coordinator`
+  for every LR-active peer (the same `listPeerHosts` the pull already used)
+  and calls each one's `GET /api/sessions`, returning every session it
+  found tagged with which host reported it. Deliberately read-only on both
+  ends -- unlike a pull, nothing is fetched or written into this host's own
+  `AGENT_RECORDS_PATH`; a session showing up here does not materialize a
+  local directory for it, matching the "most plausibly not" call made
+  above. Refused through the transparent proxy for the same reason a pull
+  is: it's this host acting as a client on its own behalf.
+- **`federation-command` and `session-manager` both now call the fan-out
+  before rendering `list-sessions`**, merging in any discovered session
+  whose ID isn't already in the local list, tagged as remote:
+  `federation-command`'s three `renderSessions` call sites
+  (`list-sessions`, `ufa session list`, and the ridealong builtin) each pass
+  in a fresh `discoverRemoteSessions()` result; `session-manager`'s
+  `sendSessions`/`broadcastSessions` (which back the `list-sessions` WS verb,
+  every new browser connection, and every mutation) go through a new
+  `listSessionsWithRemote` that merges in `triggerSessionsDiscovery()`'s
+  result the same way. Both are the synchronous "any list-sessions
+  behaviour initiates this poll" half of Step 1 Substep B's Revision A.
+- **Both also poll once more right after connecting to their own
+  `local-representative`**, independent of whether `list-sessions` is ever
+  run: `session-manager`'s `connectLoop` fires `refreshSessionsAfterConnect`
+  (which re-broadcasts the merged session list to any open browser tabs);
+  `federation-command`'s `reprConnectedMsg`/`autoConnectResultMsg` success
+  paths queue `sessionsDiscoveryDelayCmd`, which prints a one-line notice if
+  the poll turns up anything. Both wait `sessionsDiscoveryDelay` (500ms)
+  first so local-representative's "hello" has time to disclose its HTTP
+  port (see `representable.Client.PeerHTTPPort`) -- without it, a poll fired
+  the instant `Connect` returns would almost always race the hello and
+  silently no-op.
+
+A session discovered this way stays a synthesized remote entry (`id`/`name`
+plus which host reported it) until something actually asks to view it --
+discovery alone still never pulls a file or creates a local session
+directory, exactly as sketched above.

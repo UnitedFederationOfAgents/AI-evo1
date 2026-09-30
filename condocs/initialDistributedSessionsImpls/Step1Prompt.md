@@ -43,11 +43,11 @@ prompt: [`b7530ac`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b
 I've implemented the distributed-sessions flow from the diagram across four binaries: `clauditable` now once-transfer-triggers before a primary write and keys consolidation off `-s-processed.txt` (giving secondaries their own `-s-` processed file, whether produced locally or pulled in from a remote host, with no raw content ever crossing hosts); `local-representative` gained a `/api/sessions/<id>/{list,file,pull}` surface that performs the actual cross-host fetch over `agent-coordinator`'s existing `/host/<id>/*` proxy (plus a new `agent-coordinator` `/api/hosts` route to discover LR-active peers); and `session-manager` now sync-pulls `session.jsonl`/`-processed` before rendering a view. All of it is best-effort and degrades silently to today's purely local behavior when local-representative isn't running or connected. I added unit/integration-style tests for each piece (including an end-to-end pull test using a fake agent-coordinator), and updated `clauditable/FILE_PROCESSING_SEQUENCE.md` and `docs/DistributedSessionsBrainstorm.md` accordingly — as before, this sandbox blocks `go build`/`go test`, so I verified everything by careful manual read rather than compiling.
 
 
-## <REPLACE-Revision|Retry> B
+## Substep B - Use distributed feedback to debug our current state
 
-<REPLACE-PROMPT>
+[Step 1 Substep B](Step1SubstepBPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep B is now active. Interact with the substep file (Step1SubstepBPrompt.md).

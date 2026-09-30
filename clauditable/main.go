@@ -524,6 +524,10 @@ func checkIsPrimary(sessionDir string, ourTimestamp int64) bool {
 // writeWrittenFile writes the completed record as the "written file" at completion time.
 // Primaries produce {timestamp}-raw.txt; secondaries produce {timestamp}-s-raw.txt.
 // The record's RecordPath is set to the written file path before formatting.
+//
+// The producer of the raw/s-raw file always handles its own raw-->processed step
+// immediately afterward (see writeProcessedFile), rather than leaving that work for
+// whichever process later happens to run primary consolidation.
 func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record *records.Record) (string, error) {
 	suffix := "-raw.txt"
 	if !isPrimary {
@@ -535,14 +539,33 @@ func writeWrittenFile(sessionDir string, timestamp int64, isPrimary bool, record
 	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
 		return "", fmt.Errorf("failed to write written file: %w", err)
 	}
+
+	if err := writeProcessedFile(sessionDir, timestamp, content); err != nil {
+		// The raw/s-raw file (the permanent record) is already written; a failure
+		// to also produce the processed file is a warning, not a fatal error.
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write processed file: %v\n", err)
+	}
+
 	return filePath, nil
+}
+
+// writeProcessedFile applies auto-maintenance (secret redaction, loading-bar stripping,
+// truncation) to a just-produced raw/s-raw file's content and writes {timestamp}-processed.txt.
+// Each call processes exactly one file on behalf of its own producer, so it is always the
+// first (and only) file in its batch and emits a no-op header when nothing needed processing.
+func writeProcessedFile(sessionDir string, timestamp int64, writtenContent string) error {
+	processedContent, headers := records.ApplyAutoMaintenance(writtenContent, true)
+	processedFileContent := records.FormatProcessedFile(processedContent, headers)
+	processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", timestamp))
+	return os.WriteFile(processedPath, []byte(processedFileContent), 0644)
 }
 
 // consolidatePrimaryToJSONL is called by the primary on completion. It collects all
 // secondary written files ({ts}-s-raw.txt) and its own written file ({primaryTs}-raw.txt),
-// applies auto-maintenance processing (secret redaction, loading-bar stripping, truncation),
-// writes {ts}-processed.txt for each, appends their processed session log portions to
-// session.jsonl in timestamp order, and renames secondaries to {ts}-raw.txt (promoting them).
+// then reads each one's already-processed {ts}-processed.txt (written by that file's own
+// producer via writeProcessedFile) and appends its session log portion to session.jsonl in
+// timestamp order, renaming secondaries to {ts}-raw.txt (promoting them). If a processed file
+// is unexpectedly missing, it is produced here as a fallback so consolidation never skips it.
 func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int64) error {
 	sessionDir := filepath.Join(recordsPath, session)
 	sessionLogPath := filepath.Join(sessionDir, "session.jsonl")
@@ -597,19 +620,23 @@ func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int
 
 	noOpEligible := true
 	for _, entry := range toProcess {
-		data, err := os.ReadFile(entry.path)
+		processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", entry.ts))
+		processedFileContent, err := os.ReadFile(processedPath)
 		if err != nil {
-			continue
+			// The file's producer should already have written this alongside its
+			// raw/s-raw file; fall back to producing it here if it's missing.
+			data, err := os.ReadFile(entry.path)
+			if err != nil {
+				continue
+			}
+			content, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
+			noOpEligible = false
+			fallback := records.FormatProcessedFile(content, headers)
+			os.WriteFile(processedPath, []byte(fallback), 0644)
+			processedFileContent = []byte(fallback)
 		}
 
-		processedContent, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
-		noOpEligible = false
-		processedFileContent := records.FormatProcessedFile(processedContent, headers)
-
-		processedPath := filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", entry.ts))
-		os.WriteFile(processedPath, []byte(processedFileContent), 0644)
-
-		sessionLogContent := records.ExtractSessionLogFromWrittenFile(processedFileContent)
+		sessionLogContent := records.ExtractSessionLogFromWrittenFile(string(processedFileContent))
 		if _, err := f.WriteString(sessionLogContent); err != nil {
 			continue
 		}

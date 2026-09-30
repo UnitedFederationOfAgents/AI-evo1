@@ -364,6 +364,20 @@ func TestWriteWrittenFile(t *testing.T) {
 		t.Error("written file JSON should reference the written file path")
 	}
 
+	// The producer of the raw file must also handle its own raw-->processed step
+	// immediately, rather than leaving it for a later primary consolidation.
+	processedPath := filepath.Join(sessionDir, "1705312200-processed.txt")
+	processedData, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("writeWrittenFile (primary) should produce a processed file: %v", err)
+	}
+	if !strings.Contains(string(processedData), "IN>> echo hello") {
+		t.Error("processed file should contain IN>> prefixed command")
+	}
+	if !strings.Contains(string(processedData), `"processing_type":"no_op"`) {
+		t.Error("processed file should contain a no_op header when nothing needed processing")
+	}
+
 	// Test secondary: creates {ts}-s-raw.txt
 	record2 := &records.Record{
 		Event: records.Event{
@@ -380,6 +394,11 @@ func TestWriteWrittenFile(t *testing.T) {
 	expectedPath2 := filepath.Join(sessionDir, "1705312260-s-raw.txt")
 	if path2 != expectedPath2 {
 		t.Errorf("secondary written file path: got %s, want %s", path2, expectedPath2)
+	}
+
+	// Secondaries also produce their own processed file immediately.
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312260-processed.txt")); os.IsNotExist(err) {
+		t.Error("writeWrittenFile (secondary) should also produce a processed file")
 	}
 }
 
@@ -542,5 +561,62 @@ func TestConsolidatePrimaryToJSONL(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-processed.txt")); os.IsNotExist(err) {
 		t.Error("processed file should be created for primary record")
+	}
+}
+
+// TestConsolidatePrimaryToJSONLUsesProducersProcessedFile verifies that consolidation
+// trusts a processed file already produced by a raw/s-raw file's own producer (as
+// writeWrittenFile now does) instead of reprocessing it from scratch.
+func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	session := "test-session"
+	sessionDir := filepath.Join(tmpDir, session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	primary := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:01:00Z",
+			EventType: "command_execution",
+			Agent:     "claude",
+		},
+		Command: "echo primary",
+		Stdout:  "primary\n",
+	}
+
+	// Simulate the producer already having written its own raw + processed
+	// files via writeWrittenFile, with a sentinel processed marker that would
+	// NOT be present if consolidation reprocessed the raw content itself.
+	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+		t.Fatalf("writeWrittenFile failed: %v", err)
+	}
+	processedPath := filepath.Join(sessionDir, "1705312860-processed.txt")
+	sentinel, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("expected producer to have written processed file: %v", err)
+	}
+	marked := string(sentinel) + "\nSENTINEL-FROM-PRODUCER\n"
+	if err := os.WriteFile(processedPath, []byte(marked), 0644); err != nil {
+		t.Fatalf("failed to mark processed file: %v", err)
+	}
+
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
+	}
+
+	// The processed file on disk should be untouched (still carries the sentinel) —
+	// consolidation must not have regenerated it from the raw content.
+	after, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("failed to read processed file after consolidation: %v", err)
+	}
+	if !strings.Contains(string(after), "SENTINEL-FROM-PRODUCER") {
+		t.Error("consolidation should not overwrite a processed file already produced by its own producer")
 	}
 }

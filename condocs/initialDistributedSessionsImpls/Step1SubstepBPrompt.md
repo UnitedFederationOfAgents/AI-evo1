@@ -16,11 +16,10 @@ prompt: [`e8d4784`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e
 I traced the actual code path for this scenario (`clauditable`'s session creation, `federation-command`'s `renderSessions`, `session-manager`'s `listSessions`, `local-representative`'s `/api/sessions/*` routes, and `agent-coordinator`'s `/api/hosts`) and wrote `condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md`. It concludes the expected behavior does **not** currently happen: `list-sessions` never leaves the local filesystem on either host, and the existing once-transfer/sync pull mechanisms only refresh files *within* a session ID both hosts already know — there's no route or trigger anywhere that discovers a session neither host has heard of yet. The doc lays out the exact chain of events that leads to that gap and sketches the minimal addition (an unscoped `GET /api/sessions` listing route, fanned out the same way existing pulls are) that would close it.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's follow up first by closing this gap.
 
+Any list-sessions behaviour will initiate this poll.
 
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+It will also happen on connect of FC or SM.

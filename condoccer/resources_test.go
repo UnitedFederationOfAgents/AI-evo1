@@ -204,6 +204,59 @@ func TestAddResourceUnknownType(t *testing.T) {
 	}
 }
 
+// TestAddVoiceNoteResource verifies the "Voice Note" source (Revision B of
+// Step2Prompt.md) inserts a "## Resource N" block carrying the dictated text
+// as its description, with no linked files at all -- unlike "Highlighted"
+// and "Upload", it never touches the condoc's Impls folder, connected
+// local-representative or not.
+func TestAddVoiceNoteResource(t *testing.T) {
+	root, mainRelPath, stepPath := newUploadResourceFixture(t)
+	s := newServer(root)
+	info := CondocInfo{Name: "X", StepFile: "condocs/xImpls/Step1Prompt.md"}
+
+	err := s.addResource(filepath.Join(s.root, mainRelPath), info, ActionRequest{
+		ResourceType: "voice-note",
+		ResourceName: "Meeting recap",
+		Content:      "we agreed to ship on Friday",
+	})
+	if err != nil {
+		t.Fatalf("addResource: %v", err)
+	}
+
+	got, err := os.ReadFile(stepPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(got)
+	if !strings.Contains(content, "## Resource 1 -- Meeting recap") {
+		t.Errorf("expected resource heading, got:\n%s", content)
+	}
+	if !strings.Contains(content, "we agreed to ship on Friday") {
+		t.Errorf("expected dictated text, got:\n%s", content)
+	}
+
+	implDirPath := filepath.Dir(stepPath)
+	entries, err := os.ReadDir(implDirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no files written to the Impls folder, got %+v", entries)
+	}
+}
+
+// TestAddVoiceNoteResourceRequiresContent verifies an empty (or
+// whitespace-only) transcript is rejected rather than inserting an empty
+// resource block.
+func TestAddVoiceNoteResourceRequiresContent(t *testing.T) {
+	s := newServer(t.TempDir())
+	info := CondocInfo{Name: "X", StepFile: "condocs/xImpls/Step1Prompt.md"}
+	err := s.addResource(filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "voice-note", Content: "   "})
+	if err == nil {
+		t.Fatal("expected an error for an empty voice note")
+	}
+}
+
 // TestParseIterationsResource verifies "## Resource N[ -- <name>]" headings
 // get their own Iteration entry (Revision B) -- interleaved by position with
 // Reply/Revision/Retry/Substep, rather than folded into whichever section

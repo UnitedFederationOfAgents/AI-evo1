@@ -133,6 +133,24 @@ type CondoccerStateMsg struct {
 	Condocs  []CondocInfo `json:"condocs"`
 }
 
+// SessionsStateMsg matches the sessions-state payload forwarded up from LR
+// (originating at a managed session-manager). HTTPPort is session-manager's
+// own port on the LR box; the coordinator reverse-proxies its UI at
+// /host/<id>/sessions/. Grows domain-specific fields in a later step (see
+// condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+type SessionsStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
+// ConvoStateMsg matches the convo-state payload forwarded up from LR
+// (originating at a managed the-conversationalist). HTTPPort is
+// the-conversationalist's own port on the LR box; the coordinator
+// reverse-proxies its UI at /host/<id>/convo/. Grows domain-specific fields
+// in a later step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+type ConvoStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
 // LRHTTPMsg matches the lr-http payload: the HTTP port an LR's dashboard listens
 // on, used to build the /host/<id>/ reverse-proxy target.
 type LRHTTPMsg struct {
@@ -157,6 +175,12 @@ type FileInfo struct {
 	// file-details dialog's "highlight" toggle could never render as active
 	// when viewed through agent-coordinator.
 	Highlighted bool `json:"highlighted"`
+
+	// MarkedUp mirrors local-representative's FileInfo.MarkedUp (see
+	// local-representative/files.go) -- same reasoning as Highlighted above,
+	// so the markup dialog's bright-orange-border cue renders correctly when
+	// viewed through agent-coordinator's per-host files tab.
+	MarkedUp bool `json:"marked_up"`
 }
 
 // FilesStateMsg matches the files-state payload sent from LR over representable.
@@ -171,6 +195,22 @@ type LRCondoccerMsg struct {
 	Available bool         `json:"available"`
 	Root      string       `json:"root,omitempty"`
 	Condocs   []CondocInfo `json:"condocs,omitempty"`
+}
+
+// LRSessionsMsg is the host-scoped "lr-sessions-state" message sent to
+// browser clients: whether a managed session-manager's forwarded UI is
+// available on that host -- mirrors LRCondoccerMsg.
+type LRSessionsMsg struct {
+	HostID    string `json:"host_id"`
+	Available bool   `json:"available"`
+}
+
+// LRConvoMsg is the host-scoped "lr-convo-state" message sent to browser
+// clients: whether a managed the-conversationalist's forwarded UI is
+// available on that host -- mirrors LRCondoccerMsg.
+type LRConvoMsg struct {
+	HostID    string `json:"host_id"`
+	Available bool   `json:"available"`
 }
 
 // ProcInfo mirrors one row of local-representative's system tab: LR itself or a
@@ -343,6 +383,8 @@ type hostState struct {
 	system     *SystemStateMsg
 	repo       *RepoStateMsg
 	condoccer  *CondoccerStateMsg
+	sessions   *SessionsStateMsg
+	convo      *ConvoStateMsg
 	files      *FilesStateMsg
 	lrHTTPPort string
 }
@@ -353,8 +395,9 @@ type Server struct {
 	mu         sync.RWMutex
 	clients    map[*wsClient]bool
 	reprServer *representable.Server
-	devMode    bool   // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
-	selfHostID string // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
+	devMode    bool      // --dev-mode: this agent-coordinator instance -- see docs/DevMode.md
+	selfHostID string    // ufahostid.GetHostID() for this machine -- see SelfInfoMsg
+	startedAt  time.Time // when this agent-coordinator process started -- see SelfInfoMsg.StartedAt
 
 	// loaderManaged is true when this process was launched by ufa-loader (see
 	// restartsignal.IsLoaderManaged), i.e. when an operator-driven "restart
@@ -375,6 +418,13 @@ type Server struct {
 
 	modeMu         sync.RWMutex
 	modeMismatches map[string]ModeMismatchMsg // LR host id -> current mismatch disclosure, mismatched entries only
+
+	// tcMu/tcAvailable track the aggregate "is a the-conversationalist
+	// instance available on any host" verdict -- see tcavailability.go and
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	tcMu        sync.RWMutex
+	tcAvailable bool
 }
 
 func newServer() *Server {
@@ -385,6 +435,7 @@ func newServer() *Server {
 		clients:        make(map[*wsClient]bool),
 		hostStates:     make(map[string]*hostState),
 		modeMismatches: make(map[string]ModeMismatchMsg),
+		startedAt:      time.Now(),
 	}
 }
 
@@ -408,12 +459,20 @@ func newServer() *Server {
 // the frontend to detect a rebuild+restart out from under an already-open
 // tab and reload itself -- see
 // condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md.
+// AutoUpdate mirrors ProcInfo's same-named field for a local-representative's
+// own self row: whether an available update should make AC restart itself
+// the moment selfVersion next notices it, rather than waiting for an
+// operator to press "restart and update AC" -- see selfversion.go and
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1SubstepCPrompt.md Revision D.
 type SelfInfoMsg struct {
 	DevMode         bool   `json:"dev_mode"`
 	HostID          string `json:"host_id"`
 	LoaderManaged   bool   `json:"loader_managed"`
 	UpdateAvailable bool   `json:"update_available"`
+	AutoUpdate      bool   `json:"auto_update"`
 	Version         string `json:"version"`
+	StartedAt       int64  `json:"started_at"` // unix seconds this process started -- see ProcInfo.StartedAt for LR's equivalent
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode
@@ -458,7 +517,9 @@ func (s *Server) selfInfo() SelfInfoMsg {
 		HostID:          s.selfHostID,
 		LoaderManaged:   s.loaderManaged,
 		UpdateAvailable: s.selfVersion.available(),
+		AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		Version:         ufaversion.Version,
+		StartedAt:       s.startedAt.Unix(),
 	}
 }
 
@@ -541,6 +602,8 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	system := hs.system
 	repo := hs.repo
 	condoccer := hs.condoccer
+	sessions := hs.sessions
+	convo := hs.convo
 	files := hs.files
 	hs.mu.RUnlock()
 
@@ -565,6 +628,8 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	s.sendToClient(c, "lr-repo-state", repoStateMsg(name, repo))
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
+	s.sendToClient(c, "lr-sessions-state", sessionsMsg(name, sessions))
+	s.sendToClient(c, "lr-convo-state", convoMsg(name, convo))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
@@ -579,6 +644,26 @@ func condoccerMsg(hostID string, cc *CondoccerStateMsg) LRCondoccerMsg {
 		return LRCondoccerMsg{HostID: hostID, Available: false}
 	}
 	return LRCondoccerMsg{HostID: hostID, Available: true, Root: cc.Root, Condocs: cc.Condocs}
+}
+
+// sessionsMsg builds a host-scoped lr-sessions-state payload; a nil state
+// means no managed session-manager is currently reporting on that host --
+// mirrors condoccerMsg.
+func sessionsMsg(hostID string, sm *SessionsStateMsg) LRSessionsMsg {
+	if sm == nil || sm.HTTPPort == "" {
+		return LRSessionsMsg{HostID: hostID, Available: false}
+	}
+	return LRSessionsMsg{HostID: hostID, Available: true}
+}
+
+// convoMsg builds a host-scoped lr-convo-state payload; a nil state means no
+// managed the-conversationalist is currently reporting on that host --
+// mirrors condoccerMsg.
+func convoMsg(hostID string, cv *ConvoStateMsg) LRConvoMsg {
+	if cv == nil || cv.HTTPPort == "" {
+		return LRConvoMsg{HostID: hostID, Available: false}
+	}
+	return LRConvoMsg{HostID: hostID, Available: true}
 }
 
 func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
@@ -651,6 +736,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial state.
 	go func() {
 		s.sendToClient(c, "self-info", s.selfInfo())
+		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.anyConvoAvailable()})
 		s.sendToClient(c, "hosts", HostsMsg{Hosts: s.getHosts()})
 		s.hostsMu.RLock()
 		names := make([]string, 0, len(s.hostStates))
@@ -802,6 +888,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			// (Step4Prompt.md Revision E). No payload: there's only ever one
 			// agent-coordinator to restart.
 			s.requestRestart("operator")
+		case "ac-set-auto-update":
+			// Toggles whether AC restarts itself the instant an update
+			// becomes available -- the global topology view's
+			// "agent-coordinator" section's own auto-update checkbox. No
+			// host to target, mirroring ac-restart-app; see selfversion.go
+			// and condocs/
+			// initialShellsSessionManagerAndTheConversationalistImpls/
+			// Step1SubstepCPrompt.md Revision D.
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setAutoUpdate(payload.Enabled)
+			}
 		}
 	}
 }
@@ -974,12 +1074,16 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 
 // announceRestartAndExit writes the restartsignal announcement (see
 // ufa-loader/README.md and docs/DevMode.md's "Loader" section) as this
-// process's final act before exiting 0. Callers are expected to have already
-// decided a restart is appropriate; this never returns.
+// process's final act before exiting 0, attaching this AC's own live state
+// (see reststate.go) for the instance replacing it to pick back up --
+// otherwise an auto-update-triggered restart would silently turn
+// auto-update back off. Callers are expected to have already decided a
+// restart is appropriate; this never returns.
 func (s *Server) announceRestartAndExit(reason string) {
 	log.Printf("announcing a restart (%s) and exiting", reason)
-	if err := restartsignal.Announce(os.Stdout, "agent-coordinator", reason); err != nil {
-		log.Printf("restartsignal.Announce: %v", err)
+	st := s.currentACState()
+	if err := restartsignal.AnnounceState(os.Stdout, "agent-coordinator", reason, st); err != nil {
+		log.Printf("restartsignal.AnnounceState: %v", err)
 	}
 	os.Exit(0)
 }
@@ -1033,12 +1137,21 @@ func main() {
 	s.devMode = *devMode
 	s.selfHostID = ufahostid.GetHostID()
 
+	prevACState, havePrevACState := loadPreviousACState()
+
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
 		// Only worth polling for an on-disk update when a restart could
-		// actually pick it up -- see selfversion.go.
-		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSelfInfo)
+		// actually pick it up -- see selfversion.go. restart wires AC's own
+		// "auto-update" toggle to the same requestRestart the "restart and
+		// update AC" button drives, per condocs/
+		// initialShellsSessionManagerAndTheConversationalistImpls/
+		// Step1SubstepCPrompt.md Revision D.
+		s.selfVersion = newSelfVersionWatch(ufaversion.Version, s.broadcastSelfInfo, func() { s.requestRestart("auto-update") })
 		if s.selfVersion != nil {
+			if havePrevACState && prevACState.AutoUpdate {
+				s.selfVersion.setAutoUpdate(true)
+			}
 			go s.selfVersion.watchLoop()
 		}
 	}
@@ -1060,6 +1173,8 @@ func main() {
 			hs.system = nil
 			hs.repo = nil
 			hs.condoccer = nil
+			hs.sessions = nil
+			hs.convo = nil
 			hs.files = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
@@ -1071,8 +1186,11 @@ func main() {
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-repo-state", LRRepoStateMsg{HostID: name})
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
+			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
+			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
+			s.broadcastTCAvailability()
 		}
 	})
 
@@ -1096,6 +1214,11 @@ func main() {
 
 		if !wasConnected || isNew {
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
+			// A freshly-connected LR has never received a tc-availability
+			// command before -- push the current aggregate to it directly,
+			// even if the aggregate hasn't changed (broadcastTCAvailability
+			// below only re-pushes to hosts on a change).
+			s.sendTCAvailabilityTo(name)
 		}
 
 		switch dataType {
@@ -1168,6 +1291,31 @@ func main() {
 				hs.condoccer = cc
 				hs.mu.Unlock()
 				s.broadcast("lr-condoccer-state", condoccerMsg(name, cc))
+			}
+		case "sessions-state":
+			var payload SessionsStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var sm *SessionsStateMsg
+				if payload.HTTPPort != "" {
+					sm = &payload
+				}
+				hs.mu.Lock()
+				hs.sessions = sm
+				hs.mu.Unlock()
+				s.broadcast("lr-sessions-state", sessionsMsg(name, sm))
+			}
+		case "convo-state":
+			var payload ConvoStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var cv *ConvoStateMsg
+				if payload.HTTPPort != "" {
+					cv = &payload
+				}
+				hs.mu.Lock()
+				hs.convo = cv
+				hs.mu.Unlock()
+				s.broadcast("lr-convo-state", convoMsg(name, cv))
+				s.broadcastTCAvailability()
 			}
 		case "lr-http":
 			var payload LRHTTPMsg

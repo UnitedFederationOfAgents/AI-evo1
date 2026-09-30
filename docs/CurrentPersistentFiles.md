@@ -94,6 +94,20 @@ manifest whose data file is already gone). A "persist" press moves the
 manifest into the host-store along with its data file rather than dropping
 it (see below).
 
+An image file being edited in the files tab's "markup" dialog gets a second
+hidden sidecar while that's in progress: `.markup_<id>.jpg`, a flat JPEG
+holding the running composite (original image plus whatever arrows,
+rectangles, or text have been drawn on it so far), written alongside `<id>`
+wherever it currently lives. Its mere presence is what marks a file "marked
+up" (bright orange border in the files tab) and lets re-opening the dialog
+pick the session back up instead of starting over. The dialog's "commit"
+button writes those bytes over `<id>` directly and removes the sidecar;
+"copy" spins them off into a brand-new host-cache entry instead (`<id>`
+untouched) and also removes the sidecar; "cancel" just removes it. Like
+`.manifest_`, uploads whose claimed filename starts with `.markup_` are
+refused, it's invisible to the files tab listing, and it's swept/moved/
+deleted alongside its data file the same way a manifest is.
+
 ---
 
 ## `/host-agent-files/exchange/host-store/`

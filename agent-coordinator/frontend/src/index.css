@@ -114,6 +114,56 @@ body {
 .conn-dot-ok  { background: #4ec94e; }
 .conn-dot-err { background: #cc4444; }
 
+/* Quick-feedback version string + screenshot button (Step1SubstepCPrompt.md)
+   -- sit immediately left of the nav arrows, in that order (version, then
+   camera icon). Mirrors local-representative's copy of the same rules. */
+.header-version-tag {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.screenshot-btn {
+  background: none;
+  border: none;
+  color: #666;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 3px;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.screenshot-btn svg { width: 100%; height: 100%; display: block; }
+
+.screenshot-btn.screenshot-btn-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.screenshot-btn.screenshot-btn-active:hover { background: #333; }
+
+/* Mic-availability indicator (Step2Prompt.md) -- sits beside the camera
+   icon, illuminated once at least one the-conversationalist instance is
+   available on any host. Mirrors screenshot-btn's sizing/palette, but it's a
+   passive indicator (no hover/active-cursor state) rather than a control --
+   the actual mic-to-transcribe action lives on condoccer's own text inputs.
+   Mirrors local-representative's copy of the same rules. */
+.mic-indicator {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.mic-indicator svg { width: 100%; height: 100%; display: block; }
+
+.mic-indicator.mic-indicator-active { color: #6fcf8f; }
+
 /* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
    right corner alongside the connection dot. Unlike local-representative's
    tab-bar, this app's header has nothing else in the middle, so the arrows
@@ -371,6 +421,18 @@ body {
   padding: 40px;
 }
 
+/* Embedded-app tabs (condoccer/sessions/convo -- see .embed-status-bar and
+   EMBED_TABS in App.tsx, Step1Prompt.md Revision A/B): the nested app's own
+   UI should fill the whole tab pane rather than sit in a padded,
+   header-topped box, so this drops main-pane's padding entirely and lets
+   .embed-frame flex to fill what's left. Mirrors local-representative's
+   identically-named rules. */
+.main-pane-embed {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
 .service-view {
   display: flex;
   flex-direction: column;
@@ -413,12 +475,40 @@ body {
   margin-top: 8px;
 }
 
-.condoccer-frame {
+.service-empty-embed {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px;
+  margin-top: 0;
+}
+
+.embed-frame {
+  flex: 1;
   width: 100%;
-  min-height: 70vh;
-  border: 1px solid #333;
-  border-radius: 6px;
+  height: 100%;
+  border: none;
   background: #1e1e1e;
+}
+
+/* Slim meta-status bar for embedded-app tabs, standing in for the
+   service-name/health-indicator header those tabs no longer render inline
+   (see .main-pane-embed above) -- keeps a sliver of "is this healthy" status
+   visible under the tab bar without taking space back from the nested UI. */
+.embed-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 12px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 /* ---- FC control panel ---- */
@@ -559,13 +649,15 @@ body {
   border: 1px solid #3c3c3c;
   border-radius: 6px;
   padding: 12px 14px;
-  width: 180px;
+  /* Wide enough for the bottom row's five sub-app boxes (FC/CO/TC/SM/W) at
+     .topo-node-box's min-width + .topo-node-row's gap without wrapping. */
+  width: 208px;
 }
 
 /* Self (agent-coordinator collapsed with its own LR) always leads, on its
    own row -- flex-basis: 100% forces every card after it in .topo-main's
    wrap onto the next line. */
-.topo-node-self { flex-basis: 100%; width: auto; max-width: 180px; }
+.topo-node-self { flex-basis: 100%; width: auto; max-width: 208px; }
 
 /* Faint separator between the self card and the per-host cards below --
    flex-basis: 100% pushes it onto its own line, same trick as
@@ -588,16 +680,16 @@ body {
 .topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
 
 .topo-node-diagram { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.topo-node-row { display: flex; gap: 8px; }
+.topo-node-row { display: flex; gap: 6px; }
 .topo-node-box {
   display: flex; align-items: center; justify-content: center;
-  min-width: 30px; height: 22px; padding: 0 6px;
+  min-width: 26px; height: 22px; padding: 0 5px;
   background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
   font-size: 10px; color: #9c9c9c;
 }
 .topo-node-box-ac { border-color: #245a7a; color: #6ea6c9; }
 .topo-node-box-lr { border-color: #2e7a2e; color: #6ec96e; }
-/* A sub-application box (FC/CO/W) turns the same green as the LR box once
+/* A sub-application box (FC/CO/TC/SM/W) turns the same green as the LR box once
    that host's LR reports it healthy (see serviceHealthy in App.tsx) AND LR
    itself launched it (see subAppManaged) -- i.e. it's a managed instance. */
 .topo-node-box-healthy { border-color: #2e7a2e; color: #6ec96e; }
@@ -783,6 +875,11 @@ body {
 /* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
    independent of (and layered outside) the active-selection border above. */
 .files-item-highlighted { box-shadow: 0 0 0 2px #d7c22b; }
+/* Marked up (Step1SubstepCPrompt.md Revision F): a bright orange border --
+   an in-progress markup-dialog session is open on this file. Independent of
+   (and can combine with) the highlighted ring above. */
+.files-item-markedup { box-shadow: 0 0 0 2px #ff6a00; }
+.files-item-highlighted.files-item-markedup { box-shadow: 0 0 0 2px #d7c22b, 0 0 0 4px #ff6a00; }
 .file-icon { display: inline-flex; width: 28px; height: 28px; }
 .file-icon svg { width: 100%; height: 100%; }
 /* File-details-dialog cache state: orange while short-term cached, yellow
@@ -834,6 +931,13 @@ body {
 .file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
 .file-detail-highlight-active { background: #3a341a; border-color: #d7c22b; color: #d7c22b; }
 .file-detail-highlight-active:hover { background: #5a4e2e; }
+.file-detail-markup {
+  flex: 1; background: #2a1e14; border: 1px solid #7a4e2e; border-radius: 3px; color: #ff9d5c;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-markup:hover { background: #4a2e1a; border-color: #c47a4e; }
+.file-detail-markup-active { background: #4a2e14; border-color: #ff6a00; color: #ff6a00; }
+.file-detail-markup-active:hover { background: #5a3a1a; }
 .file-detail-delete {
   flex: 1; background: #3a1a1a; border: 1px solid #7a2e2e; border-radius: 3px; color: #e06a6a;
   font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
@@ -864,6 +968,54 @@ body {
   white-space: pre-wrap; word-break: break-word;
 }
 .file-viewer-empty { color: #888; font-style: italic; font-size: 13px; }
+
+/* ---- Markup dialog (Step1SubstepCPrompt.md Revision F) ---- */
+
+.markup-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px;
+}
+.markup-dialog {
+  display: flex; flex-direction: column; gap: 12px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; padding: 16px;
+  max-width: min(94vw, 1100px); max-height: 94vh;
+}
+.markup-header { display: flex; align-items: baseline; gap: 10px; }
+.markup-title { font-size: 11px; font-weight: 600; color: #ff9d5c; text-transform: uppercase; letter-spacing: 0.05em; }
+.markup-filename { font-size: 13px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.markup-canvas-wrap {
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 6px; min-height: 200px; min-width: 300px;
+  display: flex; align-items: center; justify-content: center; overflow: auto; flex: 1;
+}
+.markup-canvas { max-width: min(88vw, 1000px); max-height: 62vh; cursor: crosshair; }
+.markup-status { color: #888; font-style: italic; font-size: 13px; }
+.markup-status-error { color: #e06a6a; }
+.markup-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.markup-tools { display: flex; gap: 6px; }
+.markup-tool-btn {
+  display: flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #aaa; cursor: pointer; padding: 5px;
+}
+.markup-tool-btn svg { width: 100%; height: 100%; }
+.markup-tool-btn:hover { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
+.markup-tool-active { background: #14283a; border-color: #4e8cca; color: #5bb8ff; }
+.markup-palette { display: flex; gap: 6px; }
+.markup-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid #3c3c3c; cursor: pointer; padding: 0; }
+.markup-swatch:hover { border-color: #777; }
+.markup-swatch-active { border-color: #fff; box-shadow: 0 0 0 2px #007acc; }
+.markup-actions { display: flex; gap: 8px; }
+.markup-btn {
+  flex: 1; background: #262626; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 7px 0; cursor: pointer; text-align: center;
+}
+.markup-btn:hover { background: #2e2e2e; border-color: #555; }
+.markup-btn:disabled { opacity: 0.5; cursor: default; }
+.markup-btn-cancel { color: #e06a6a; }
+.markup-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+.markup-btn-copy { color: #6ec96e; }
+.markup-btn-copy:hover:not(:disabled) { background: #1a3a1a; border-color: #2e7a2e; }
+.markup-btn-commit { color: #ff9d5c; }
+.markup-btn-commit:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
 
 /* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
  *
@@ -956,6 +1108,10 @@ body {
 
   .main-pane {
     padding: 16px;
+  }
+
+  .main-pane-embed {
+    padding: 0;
   }
 
   .tab-bar {

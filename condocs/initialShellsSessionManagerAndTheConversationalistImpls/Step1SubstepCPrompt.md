@@ -1,0 +1,134 @@
+# Prompt
+
+[Step1Prompt](Step1Prompt.md)
+
+We will take a detour to add quick-feedback tools:
+- We will add a 'screenshot' tool immediately to the left of the navigation arrows in both AC and LR
+- We will add a simple 'version string' to the left of the 'screenshot' tool
+
+The screenshots tool will be a simple grey-pallet-monochrome camera icon. It will work if there is at least one file store available. When the icon is clicked it will save the image of the current display to the most-preferred file store. (By default this will prefer the cloud cache first, then will prefer a host-cache)
+
+The file will appear in the same 'short cache' arrangement as a standard upload and will behave the same once in the system.
+
+
+prompt: [`dad3f28`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/dad3f28b1170209e813b6c7c12b2a10e810ff7e8) → reply: [`f7cb367`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f7cb367ed68110ddf94c1e7065459fd27238d4ba)
+
+## Reply
+
+Implemented the quick-feedback screenshot tool and version string in both `local-representative` and `agent-coordinator` frontends: a grey-monochrome wireframe camera icon button (matching the existing file-icon style) placed immediately left of the nav arrows, with the build version (`__APP_VERSION__`) just to its left. Clicking it captures a single frame via `getDisplayMedia`, packages it as a PNG `File`, and feeds it through each app's existing upload path (`uploadFiles` → `/api/files` for LR, `/host/<id>/api/files` relay for AC), so it lands in the host-cache exactly like a drag-and-drop upload — no backend changes needed. The button is enabled whenever a file store is reachable (always true for LR, which owns its own host-cache; gated on a selected + connected host for AC, whose only path there is the relay), with room left for a future cloud-cache preference to slot in ahead of the host-cache. As with prior steps, the sandbox blocks `npm`/`tsc`, so I reviewed the diff by hand instead of building — recommend `make -C local-representative build` and `make -C agent-coordinator build` before merging.
+
+## Resource 1 -- No agent-coordinator view update
+
+Feedback
+
+- [screenshot-1790616409671.png](84febfab_screenshot-1790616409671.png)
+
+## Revision A
+
+This functionality works well in local-representative, but despite seeing the version number in the 'No agent-coordinator view update' on the system global tab, we do not see the UI updates working in AC.
+
+Let's revisit this and either fix it or explain why we should plan the fix in more detail first.
+
+
+prompt: [`ee33346`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ee333462c3cd5e097b6897dc584b977e559eba25) → reply: [`324741e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/324741ed716f4880fd9371ceca19b0e8267e9540)
+
+## Reply A
+
+You've hit your session limit · resets 6:30pm (UTC)
+
+
+## Revision B
+
+This functionality works well in local-representative, but despite seeing the version number in the 'No agent-coordinator view update' on the system global tab, we do not see the UI updates working in AC.
+
+Let's revisit this and either fix it or explain why we should plan the fix in more detail first.
+
+
+prompt: [`f738bb2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f738bb27edfd9affe1c3e07d695f0b636058f072) → reply: [`99a84b9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/99a84b91450c049a440abdd1ec1fb21512e097ae)
+
+## Reply B
+
+You've hit your session limit · resets 6:30pm (UTC)
+
+
+## Revision C
+
+This functionality works well in local-representative, but despite seeing the version number in the 'No agent-coordinator view update' on the system global tab, we do not see the UI updates working in AC.
+
+Let's revisit this and either fix it or explain why we should plan the fix in more detail first.
+
+
+prompt: [`f5077e8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f5077e878ab91685a2fdbb783da36df40107ae34) → reply: [`3e985c2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3e985c2c9e638c5f7929f711b12a7ba569001223)
+
+## Reply C
+
+Investigated why AC's UI update wasn't showing despite the version bump being visible. No code changes were needed — this is existing, documented behavior, not a bug:
+
+**Root cause:** `local-representative`'s dev-repo watcher runs `make deploy-dev-binaries`, which rebuilds *every* sub-project's binary (including `agent-coordinator`'s, frontend and all) onto disk. But per `docs/DevMode.md`'s "Loader" section, AC's own restart is deliberately **not** automatic the way LR's can be — it's a manual, one-shot action ("`agent-coordinator`'s own restart... stays a manual, one-shot action via **restart AC**"). So a fresh AC binary landing on disk only flips AC's `update_available`/pending-version state (which is what you saw update in the system/global tab — that's fed straight from the freshly-rebuilt on-disk `--version`, independent of which process is actually running). The AC *process* itself — and therefore the JS bundle it's still serving to your open tab — stays on the old build until it's actually restarted.
+
+**Resolution:** click **restart AC** (or **restart and update AC**, shown orange when an update's pending) in the global topology view's Details & Control pane — select the host AC runs on, then use the "agent-coordinator" section's restart control. Once that process restarts, your browser tab's WS reconnects, the existing version-mismatch check (`App.tsx`'s `self-info` handler) will see the new version and auto-reload, and the header version tag + screenshot button will appear — exactly like LR did after its own auto-update fired.
+
+No fix is warranted in the screenshot-tool code itself; I'd recommend closing this out as expected behavior rather than a defect, unless you want the "network update all"/auto-update semantics extended to cover AC's own restart automatically, which would be a separate, larger design change.
+
+
+## Revision D
+
+This explains the issue - we expect that the 'auto-update' in the agent-coordinator controls will cause AC to restart itself as well.
+
+Let's update the behaviour to ensure this happens.
+
+
+prompt: [`95d9865`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/95d9865872c3df39a9661cf2db6ca229e64b4bc5) → reply: [`27b3e20`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/27b3e200a675cd20850188d77486dac497ef8d4a)
+
+## Reply D
+
+No condoc files were touched. The implementation is complete and consistent across backend and frontend.
+
+## Summary
+
+Extended AC's `selfVersionWatch` (mirroring local-representative's) with `autoUpdate`/`pendingVersion` fields and a `restart` callback wired to `requestRestart("auto-update")`, so agent-coordinator now restarts itself automatically once an update lands on disk while auto-update is on — not just when an operator clicks "restart AC" manually. The global topology view's existing "agent-coordinator" section auto-update checkbox (next to "network update all") now also arms AC's own toggle via a new `ac-set-auto-update` WebSocket message, in addition to sweeping every host's LR as before; a new `agent-coordinator/reststate.go` carries that toggle across AC's own restart (via `restartsignal.AnnounceState`) so it doesn't silently turn itself back off after firing once. Updated `docs/DevMode.md` and added Go tests covering the new poll/toggle/restart behavior; as with prior steps, `npm`/`tsc`/`go build` are blocked in this sandbox, so I reviewed the diffs by hand — recommend `make -C agent-coordinator build` before merging.
+
+
+## Revision E
+
+Let's further clarify the agent-coordinator 'auto-update' control by changing the label just slightly to 'auto-update-all' (but keeping everything else identical)
+
+Let's also add an 'uptime' field for agent-coordinator (AC UPTIME) and distinguish it from the 'LR UPTIME'. The VERSION in the global system pane can also distinguish 'LR VERSION'.
+
+
+prompt: [`962ba8a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/962ba8af8fc692e17cde6e48321c3fb5fc714e68) → reply: [`5ed570c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5ed570c8d5e4a1e012e3c1a0ffb0654425903649)
+
+## Reply E
+
+That's the pre-existing `ProcInfo` (AC's mirror of LR's own struct), unrelated to my change — confirms `StartedAt` naming convention is consistent with what I added to `SelfInfoMsg`. All changes are complete and consistent.
+
+## Summary
+
+Implemented Revision E: renamed the agent-coordinator section's own auto-update checkbox label from "auto-update" to "auto-update-all" in the global topology view (`agent-coordinator/frontend/src/App.tsx`, plus a matching doc update in `docs/DevMode.md`), leaving the per-host LR auto-update checkbox and all underlying logic untouched. Relabeled the global system pane's "version"/"uptime" readouts to "LR VERSION"/"LR UPTIME" (they already reflected LR's own process), and added a new "AC UPTIME" readout by threading a new `started_at` field through AC's backend (`Server.startedAt`, `SelfInfoMsg.StartedAt`) and frontend (`types.ts`, `acStartedAt` state/props) down to the topology panel, mirroring LR's existing uptime pattern.
+
+
+## Revision F
+
+Now that we have a good auto-capture system we will also add a convenient markup system.
+
+Whenever we have a file in our files tab which is an image we will be able to click a 'markup' button - this will bring us to a dialog where we have a colour pallet, a click-drag arrow drawing tool, a click-drag rectangle tool, and a text tool.
+
+When we use these tools it will leave a file 'marked up' (bright orange border) and we can re-enter the markup dialog to keep editing.
+
+In the mark-up dialog we also get controls for 'cancel', 'commit', and 'copy'. These will cancel, edit the markups into the image file directly, or create a file duplicate with the markups included.
+
+When the markup is ongoing it will be persisted in '/host-agent-files/exchange/host-cache/' alongside the image file '<imagefile>' in a file named '.markup_<imagefile>.jpg' and that name will be disallowed from upload.
+
+We will also change the 'enter ->' control to be simply 'view'.
+
+
+prompt: [`4e28eaf`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4e28eaf51821831273c5f9d7dd1379b187b4f23c) → reply: [`a7f8de0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a7f8de0e95cf780be431d983d20d171dc37a83e7)
+
+## Reply F
+
+Implemented Revision F's markup system: local-representative's `files.go` gained a `.markup_<id>.jpg` sidecar convention (disallowed from upload, hidden from listing, swept/moved/deleted alongside its image, mirroring `.manifest_`) plus five new routes (`GET`/`POST .../markup`, `.../markup/commit`, `.../markup/cancel`, `.../markup/copy`) and a `FileInfo.MarkedUp` field, all ungated on the AC-proxy header so agent-coordinator's files tab picks them up for free through its existing transparent proxy (mirrored into its own `FileInfo` struct). Both frontends got a new `MarkupDialog` — a colour palette plus click-drag arrow/rectangle and click-to-place text tools drawn onto a canvas, autosaving the flattened composite after every stroke — reachable via a new "markup" button on any image file, with a bright-orange grid-box border while a session is open; the file-detail pane's "enter →" button is now just "view" in both apps. Added Go tests for the new sidecar/route behavior (including a JSON round-trip guard on AC's mirrored field) and updated `docs/CurrentPersistentFiles.md`, `local-representative/README.md`, and `agent-coordinator/docs/architecture.md`; as before, `tsc`/`go build` are blocked in this sandbox, so I reviewed everything by hand — recommend `make -C local-representative build` and `make -C agent-coordinator build` before merging.
+
+
+## Substep Completed
+
+This substep was completed at 1790632257 (Mon Sep 28 09:50:57 PM UTC 2026).

@@ -120,6 +120,24 @@ type CondoccerStateMsg struct {
 	Condocs  []CondocInfo `json:"condocs"`
 }
 
+// SessionsStateMsg is the "sessions-state" payload: a managed session-manager
+// pushes it to LR over representable, and LR forwards a copy up to
+// agent-coordinator and out to browser clients so the forwarded 'sessions'
+// view has the port to reverse-proxy from. Grows domain-specific fields in a
+// later step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+type SessionsStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
+// ConvoStateMsg is the "convo-state" payload: a managed the-conversationalist
+// pushes it to LR over representable, and LR forwards a copy up to
+// agent-coordinator and out to browser clients so the forwarded 'convo' view
+// has the port to reverse-proxy from. Grows domain-specific fields in a later
+// step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+type ConvoStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
 // LRHTTPMsg tells agent-coordinator which HTTP port this LR's dashboard listens
 // on, so AC can reverse-proxy the forwarded condoccer UI back through this LR.
 type LRHTTPMsg struct {
@@ -198,6 +216,8 @@ type Server struct {
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
 	condoccerPort string                  // HTTP port a managed condoccer serves on / is proxied from
 	condoccerRoot string                  // repo root a managed condoccer scans (empty: condoccer's default)
+	sessionsPort  string                  // HTTP port a managed session-manager serves on / is proxied from
+	convoPort     string                  // HTTP port a managed the-conversationalist serves on / is proxied from
 	selfStart     time.Time               // when this LR process started
 	binOverrides  map[string]string       // app name -> explicit binary path (from config)
 	terminalCmd   string                  // command prefix that hosts an interactive child in a terminal
@@ -237,11 +257,26 @@ type Server struct {
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
 
+	// Latest state pushed up by a managed session-manager / the-conversationalist
+	// over representable -- see condoccerState above.
+	sessionsMu    sync.RWMutex
+	sessionsState *SessionsStateMsg
+	convoMu       sync.RWMutex
+	convoState    *ConvoStateMsg
+
 	// Files tab: where uploaded files land, and where "persist" moves them to
 	// (see files.go). listFiles() scans these directly, so no further
 	// mutex-guarded state is needed here.
 	fileCacheDir string
 	hostStoreDir string
+
+	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
+	// available on any host" verdict, relayed down from agent-coordinator's
+	// own aggregate -- see tcavailability.go and
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	tcMu        sync.RWMutex
+	tcAvailable bool
 }
 
 func newServer(lrName string) *Server {
@@ -337,10 +372,20 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("condoccer") {
 		condoccerStatus = "healthy"
 	}
+	sessionsStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("sessions") {
+		sessionsStatus = "healthy"
+	}
+	convoStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("convo") {
+		convoStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
 			{Name: "condoccer", Status: condoccerStatus},
+			{Name: "convo", Status: convoStatus},
+			{Name: "sessions", Status: sessionsStatus},
 			{Name: "worker", Status: "healthy"},
 		},
 	}
@@ -387,6 +432,18 @@ func (s *Server) getCondoccerState() *CondoccerStateMsg {
 	s.condoccerMu.RLock()
 	defer s.condoccerMu.RUnlock()
 	return s.condoccerState
+}
+
+func (s *Server) getSessionsState() *SessionsStateMsg {
+	s.sessionsMu.RLock()
+	defer s.sessionsMu.RUnlock()
+	return s.sessionsState
+}
+
+func (s *Server) getConvoState() *ConvoStateMsg {
+	s.convoMu.RLock()
+	defer s.convoMu.RUnlock()
+	return s.convoState
 }
 
 func (s *Server) getACClient() *representable.Client {
@@ -441,6 +498,12 @@ func (s *Server) pushStateToAC() {
 	if cc := s.getCondoccerState(); cc != nil {
 		ac.SendData("condoccer-state", *cc)
 	}
+	if sm := s.getSessionsState(); sm != nil {
+		ac.SendData("sessions-state", *sm)
+	}
+	if cv := s.getConvoState(); cv != nil {
+		ac.SendData("convo-state", *cv)
+	}
 }
 
 // connectAC dials agent-coordinator and maintains the connection lifecycle.
@@ -485,6 +548,10 @@ func (s *Server) connectAC(host, port string) {
 	client.SetCommandHandler(func(cmd string) {
 		if strings.HasPrefix(cmd, "__system:") {
 			s.handleSystemCommand(cmd)
+			return
+		}
+		if strings.HasPrefix(cmd, "__tc-availability:") {
+			s.handleTCAvailabilityCommand(cmd)
 			return
 		}
 		if s.reprServer != nil {
@@ -707,6 +774,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
 		}
+		if sm := s.getSessionsState(); sm != nil {
+			s.sendToClient(c, "sessions-state", *sm)
+		}
+		if cv := s.getConvoState(); cv != nil {
+			s.sendToClient(c, "convo-state", *cv)
+		}
+		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 		for _, mm := range s.currentModeMismatches() {
 			s.sendToClient(c, "mode-mismatch", mm)
 		}
@@ -886,10 +960,70 @@ func (s *Server) proxyToCondoccer(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// proxyToSessions reverse-proxies /sessions/* to a managed session-manager's
+// HTTP server on loopback, stripping the /sessions prefix -- mirrors
+// proxyToCondoccer.
+func (s *Server) proxyToSessions(w http.ResponseWriter, r *http.Request) {
+	port := s.sessionsPort
+	if sm := s.getSessionsState(); sm != nil && sm.HTTPPort != "" {
+		port = sm.HTTPPort // trust the port session-manager actually reported
+	}
+	if port == "" {
+		http.Error(w, "session-manager port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/sessions")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "session-manager not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+// proxyToConvo reverse-proxies /convo/* to a managed the-conversationalist's
+// HTTP server on loopback, stripping the /convo prefix -- mirrors
+// proxyToCondoccer.
+func (s *Server) proxyToConvo(w http.ResponseWriter, r *http.Request) {
+	port := s.convoPort
+	if cv := s.getConvoState(); cv != nil && cv.HTTPPort != "" {
+		port = cv.HTTPPort // trust the port the-conversationalist actually reported
+	}
+	if port == "" {
+		http.Error(w, "the-conversationalist port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/convo")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "the-conversationalist not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
+	mux.HandleFunc("/sessions/", s.proxyToSessions)
+	mux.HandleFunc("/convo/", s.proxyToConvo)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
 
@@ -943,6 +1077,8 @@ type appConfig struct {
 	terminal      string   // command prefix used to host an interactive child in a terminal
 	condoccerPort string   // HTTP port a managed condoccer serves on / is reverse-proxied from
 	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
+	sessionsPort  string   // HTTP port a managed session-manager serves on / is reverse-proxied from
+	convoPort     string   // HTTP port a managed the-conversationalist serves on / is reverse-proxied from
 	fileCacheDir  string   // directory uploaded files land in for the files tab
 	hostStoreDir  string   // directory a "persist" press moves a file into
 }
@@ -989,6 +1125,8 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		terminal:      pick("terminal", defaults.terminal),
 		condoccerPort: pick("condoccer-port", defaults.condoccerPort),
 		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
+		sessionsPort:  pick("sessions-port", defaults.sessionsPort),
+		convoPort:     pick("convo-port", defaults.convoPort),
 		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
 		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
 	}
@@ -1087,6 +1225,8 @@ func main() {
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
 	condoccerPort := flag.String("condoccer-port", "8080", "HTTP port a managed condoccer serves on; its UI is reverse-proxied at /condoccer/")
 	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
+	sessionsPort := flag.String("sessions-port", "8085", "HTTP port a managed session-manager serves on; its UI is reverse-proxied at /sessions/")
+	convoPort := flag.String("convo-port", "8086", "HTTP port a managed the-conversationalist serves on; its UI is reverse-proxied at /convo/")
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	flag.Parse()
@@ -1114,6 +1254,8 @@ func main() {
 		terminal:      *terminal,
 		condoccerPort: *condoccerPort,
 		condoccerRoot: *condoccerRoot,
+		sessionsPort:  *sessionsPort,
+		convoPort:     *convoPort,
 		fileCacheDir:  *fileCacheDir,
 		hostStoreDir:  *hostStoreDir,
 	})
@@ -1172,6 +1314,8 @@ func main() {
 	s.httpPort = cfg.httpPort
 	s.condoccerPort = cfg.condoccerPort
 	s.condoccerRoot = cfg.condoccerRoot
+	s.sessionsPort = cfg.sessionsPort
+	s.convoPort = cfg.convoPort
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
 	s.hostStoreDir = cfg.hostStoreDir
@@ -1227,6 +1371,34 @@ func main() {
 			}
 			return
 		}
+		if name == "sessions" {
+			if state == "disconnected" {
+				s.sessionsMu.Lock()
+				s.sessionsState = nil
+				s.sessionsMu.Unlock()
+				empty := SessionsStateMsg{}
+				s.broadcast("sessions-state", empty)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("sessions-state", empty)
+				}
+				s.setModeMismatch("sessions", false, "")
+			}
+			return
+		}
+		if name == "convo" {
+			if state == "disconnected" {
+				s.convoMu.Lock()
+				s.convoState = nil
+				s.convoMu.Unlock()
+				empty := ConvoStateMsg{}
+				s.broadcast("convo-state", empty)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("convo-state", empty)
+				}
+				s.setModeMismatch("convo", false, "")
+			}
+			return
+		}
 		if name == "federation-command" {
 			s.setFCState(state)
 			if state == "disconnected" {
@@ -1277,6 +1449,13 @@ func main() {
 			if err := json.Unmarshal(data, &payload); err == nil && payload.Version != "" {
 				s.setManagedVersion(name, payload.Version)
 			}
+			if name == "condoccer" {
+				// condoccer has never received a tc-availability command
+				// before this (re)connection -- push the current aggregate
+				// now, even if it hasn't changed since before condoccer
+				// dropped (setTCAvailability only re-pushes on a change).
+				s.sendTCAvailabilityToCondoccer()
+			}
 			return
 		}
 		if name == "condoccer" {
@@ -1289,6 +1468,36 @@ func main() {
 					s.broadcast("condoccer-state", payload)
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("condoccer-state", payload)
+					}
+				}
+			}
+			return
+		}
+		if name == "sessions" {
+			if dataType == "sessions-state" {
+				var payload SessionsStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.sessionsMu.Lock()
+					s.sessionsState = &payload
+					s.sessionsMu.Unlock()
+					s.broadcast("sessions-state", payload)
+					if ac := s.getACClient(); ac != nil {
+						ac.SendData("sessions-state", payload)
+					}
+				}
+			}
+			return
+		}
+		if name == "convo" {
+			if dataType == "convo-state" {
+				var payload ConvoStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.convoMu.Lock()
+					s.convoState = &payload
+					s.convoMu.Unlock()
+					s.broadcast("convo-state", payload)
+					if ac := s.getACClient(); ac != nil {
+						ac.SendData("convo-state", payload)
 					}
 				}
 			}

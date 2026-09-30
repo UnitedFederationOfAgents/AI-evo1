@@ -2172,10 +2172,18 @@ func (m appModel) condocCompleteSubstep() (appModel, tea.Cmd) {
 	cs.commitTarget = condocPhaseAwaitingAction
 	cs.statusMsg = fmt.Sprintf("substep %s completed, returning to step…", substepLetter)
 
-	// This lands the condoc at "awaiting action" -- remove the lock file so its
-	// removal is captured by the same commit. (See removeCondocLockFile.)
-	removeCondocLockFile(cs.repoRoot)
-
+	// Unlike the other call sites that land a condoc at "awaiting action"
+	// (see removeCondocLockFile), this one deliberately does NOT remove the
+	// '.condoc' lock file: completing a substep is bookkeeping only -- no
+	// fresh agent-produced code lands in this commit -- and the step it
+	// returns to is almost always about to receive more work (another
+	// revision, another substep). condoccer's own watchLoop recognizes this
+	// exact transition (a step file whose latest event is a substep heading
+	// rather than a Reply/Revision/Retry) and holds the lock in place, so
+	// local-representative's dev-repo watcher doesn't consider a rebuild
+	// "ready" until the step reaches a real safe point of its own. See
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/Step1Prompt.md
+	// Revision C.
 	gitCmds := [][]string{
 		{"add", "."},
 		{"commit", "-m", fmt.Sprintf("condoc: step %d substep %s completed", cs.stepNum, substepLetter)},

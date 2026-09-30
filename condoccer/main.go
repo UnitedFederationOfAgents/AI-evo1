@@ -49,6 +49,14 @@ type CondocInfo struct {
 	StepFile      string `json:"stepFile,omitempty"`
 	SubstepFile   string `json:"substepFile,omitempty"`
 	SubstepLetter string `json:"substepLetter,omitempty"`
+
+	// JustResumedFromSubstep is true when Phase is PhaseAwaitingAction purely
+	// because a substep just completed and control returned to the step (the
+	// step file's most recent event is a "## Substep X - ..." heading, not a
+	// Reply/Revision/Retry) -- see stepLastEventIsSubstep. It's condoccer-
+	// internal bookkeeping for updateCondocLock (see Step1Prompt.md Revision
+	// C), not something the UI needs, hence json:"-".
+	JustResumedFromSubstep bool `json:"-"`
 }
 
 // CondocState is the full detail for the selected condoc.
@@ -65,6 +73,18 @@ type CondocState struct {
 	Steps                 []StepSummary     `json:"steps"`
 	Iterations            []Iteration       `json:"iterations"`
 	CompletedStepContents map[int]string    `json:"completedStepContents,omitempty"`
+
+	// CompletedSubstepContents holds the full raw content of every substep of
+	// the active step other than the one currently active (keyed by substep
+	// letter). SubstepContent/SubstepIterations above are only ever populated
+	// for a *currently active* substep (info.SubstepFile != ""), so without
+	// this a completed substep's entire history (all its replies, revisions,
+	// resources) would vanish from the UI the instant "## Substep Completed"
+	// landed and control returned to the step, even though nothing was
+	// actually deleted on disk -- see
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/Step1Prompt.md
+	// Revision C.
+	CompletedSubstepContents map[string]string `json:"completedSubstepContents,omitempty"`
 }
 
 // wsMsg is the wire format for WebSocket messages.
@@ -84,7 +104,7 @@ type ActionRequest struct {
 	RevertStep    int    `json:"revertStep,omitempty"`    // for revert action
 	RevertIter    string `json:"revertIter,omitempty"`    // for revert action (optional iteration letter)
 	RevertSubIter string `json:"revertSubIter,omitempty"` // for revert action (optional substep iter letter)
-	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" (only option so far)
+	ResourceType  string `json:"resourceType,omitempty"`  // for add_resource action: "highlighted" or "voice-note" (Revision B); "upload" goes through /api/upload-resource instead
 	ResourceName  string `json:"resourceName,omitempty"`  // for add_resource action: optional display name -> "## Resource N -- <name>"
 }
 
@@ -160,6 +180,12 @@ func stepFilePath(mainPath string, stepNum int) string {
 	return filepath.Join(implDir(mainPath), fmt.Sprintf("Step%dPrompt.md", stepNum))
 }
 
+// substepFilePath returns the absolute path to StepNSubstepLPrompt.md,
+// mirroring federation-command's condocSubstepFilePath naming convention.
+func substepFilePath(mainPath string, stepNum int, letter string) string {
+	return filepath.Join(implDir(mainPath), fmt.Sprintf("Step%dSubstep%sPrompt.md", stepNum, letter))
+}
+
 // parseMaxStepNum returns the highest step number found in main file content, or 0.
 func parseMaxStepNum(content string) int {
 	matches := stepNumRe.FindAllStringSubmatch(content, -1)
@@ -224,7 +250,7 @@ func detectPhase(root, absPath string) (CondocInfo, error) {
 			}
 			if substepCompletedRe.Match(substepContent) {
 				// Substep completed but step not yet resumed — treat as awaiting action on step.
-				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel}, nil
+				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel, JustResumedFromSubstep: true}, nil
 			}
 			if handoffDirectiveRe.Match(substepContent) || completedDirectiveRe.Match(substepContent) {
 				return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel, SubstepFile: substepRel, SubstepLetter: substepLetter}, nil
@@ -238,9 +264,38 @@ func detectPhase(root, absPath string) (CondocInfo, error) {
 		if handoffDirectiveRe.Match(sfContent) || completedDirectiveRe.Match(sfContent) {
 			return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel}, nil
 		}
-		return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel}, nil
+		// No substep currently active. This is either an ordinary
+		// revision/retry reply having just landed on the step, or -- if the
+		// step file's most recent event is a substep heading rather than a
+		// Reply/Revision/Retry -- a substep having just completed and handed
+		// control back to the step with no fresh work of the step's own yet.
+		// JustResumedFromSubstep distinguishes the two for updateCondocLock's
+		// benefit (see its doc comment).
+		return CondocInfo{Path: relPath, Name: name, Phase: PhaseAwaitingAction, StepNum: stepNum, StepFile: sfRel, JustResumedFromSubstep: stepLastEventIsSubstep(string(sfContent))}, nil
 	}
 	return CondocInfo{Path: relPath, Name: name, Phase: PhaseAgentRunning, StepNum: stepNum, StepFile: sfRel}, nil
+}
+
+// stepLastEventIsSubstep reports whether a step file's most recent top-level
+// event (by position) is a "## Substep X - ..." heading rather than a
+// "## Reply/Revision/Retry" one -- i.e. the step reached "awaiting action"
+// purely because a substep just completed and handed control back, with no
+// fresh agent-produced work of the step's own since. Used by detectPhase to
+// set JustResumedFromSubstep.
+func stepLastEventIsSubstep(stepContent string) bool {
+	lastSubstepPos := -1
+	for _, loc := range substepHeadingRe.FindAllStringIndex(stepContent, -1) {
+		lastSubstepPos = loc[0]
+	}
+	if lastSubstepPos < 0 {
+		return false
+	}
+	for _, loc := range iterHeadingRe.FindAllStringIndex(stepContent, -1) {
+		if loc[0] > lastSubstepPos {
+			return false
+		}
+	}
+	return true
 }
 
 // nextRevLetter returns the next revision/retry letter based on existing ## Reply X lines.
@@ -463,19 +518,35 @@ func getCondocState(root, absPath string) (CondocState, error) {
 		}
 	}
 
+	// Load every other substep of the active step (all but the currently
+	// active one, already covered by SubstepContent above) so the UI can
+	// still show a completed substep's full history -- see
+	// CompletedSubstepContents' doc comment.
+	completedSubstepContents := make(map[string]string)
+	for _, m := range substepHeadingRe.FindAllStringSubmatch(stepStr, -1) {
+		sLetter := m[1]
+		if sLetter == info.SubstepLetter {
+			continue // currently-active substep is already in SubstepContent
+		}
+		if b, readErr := os.ReadFile(substepFilePath(absPath, info.StepNum, sLetter)); readErr == nil {
+			completedSubstepContents[sLetter] = string(b)
+		}
+	}
+
 	return CondocState{
-		Info:                  info,
-		MainContent:           mainStr,
-		StepContent:           stepStr,
-		SubstepContent:        substepStr,
-		SubstepIterations:     parseIterations(substepStr),
-		NextLetter:            letter,
-		FromOptions:           opts,
-		Meta:                  parseCondocMeta(mainStr),
-		Description:           parseDescription(mainStr),
-		Steps:                 parseSteps(mainStr),
-		Iterations:            parseIterations(stepStr),
-		CompletedStepContents: completedStepContents,
+		Info:                     info,
+		MainContent:              mainStr,
+		StepContent:              stepStr,
+		SubstepContent:           substepStr,
+		SubstepIterations:        parseIterations(substepStr),
+		NextLetter:               letter,
+		FromOptions:              opts,
+		Meta:                     parseCondocMeta(mainStr),
+		Description:              parseDescription(mainStr),
+		Steps:                    parseSteps(mainStr),
+		Iterations:               parseIterations(stepStr),
+		CompletedStepContents:    completedStepContents,
+		CompletedSubstepContents: completedSubstepContents,
 	}, nil
 }
 
@@ -547,6 +618,15 @@ type Server struct {
 	reprAutoConnect  bool
 	modeMismatch     bool   // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
 	modeMismatchPeer string // the mismatched LR's disclosed mode ("dev" or "ops")
+
+	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
+	// available on any host" verdict, relayed down from local-representative
+	// (which in turn relays it from agent-coordinator's own aggregate) -- see
+	// tcavailability.go and
+	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+	// Step2Prompt.md.
+	tcMu        sync.RWMutex
+	tcAvailable bool
 }
 
 func newServer(root string) *Server {
@@ -643,6 +723,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
+	go s.sendTCAvailability(c)
 
 	// Write pump.
 	go func() {
@@ -1034,10 +1115,21 @@ func (s *Server) removeCondocLock() {
 //   - every other transition (re-)creates the lock, so it stays present for
 //     the duration of anything else in flight (e.g. an agent about to run,
 //     or having just been handed off to)
+//
+// One exception, per
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/Step1Prompt.md
+// Revision C: reaching "awaiting action" because a substep just completed
+// (info.JustResumedFromSubstep) is bookkeeping only, not "an agent completing
+// work" -- no fresh code landed in that commit, and the step it returns to
+// is almost always about to receive more work. That case keeps the lock in
+// place (treated like any other in-flight transition) instead of unlocking,
+// so LR doesn't consider a rebuild "ready" until the step reaches a real
+// safe point of its own.
 func (s *Server) updateCondocLock(info CondocInfo, prev Phase, existed bool) {
+	safeToRebuild := (info.Phase == PhaseAwaitingAction && !info.JustResumedFromSubstep) || info.Phase == PhaseCompleted
 	switch {
 	case !existed:
-		if info.Phase == PhaseAwaitingAction || info.Phase == PhaseCompleted {
+		if safeToRebuild {
 			// Already sitting at a safe-to-rebuild point the first time we
 			// see it -- e.g. condoccer just (re)started mid-condoc. Nothing
 			// to lock until it actually transitions.
@@ -1046,7 +1138,7 @@ func (s *Server) updateCondocLock(info CondocInfo, prev Phase, existed bool) {
 		s.writeCondocLock(fmt.Sprintf("began work on %s", info.Name))
 	case prev == info.Phase:
 		// no transition
-	case info.Phase == PhaseAwaitingAction, info.Phase == PhaseCompleted:
+	case safeToRebuild:
 		s.removeCondocLock()
 	default:
 		s.writeCondocLock(fmt.Sprintf("advanced %s to %s", info.Name, info.Phase))

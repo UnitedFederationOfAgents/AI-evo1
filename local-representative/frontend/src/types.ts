@@ -82,6 +82,16 @@ export interface ModeMismatchMsg {
   peer_mode?: string
 }
 
+// TCAvailabilityMsg is the aggregate answer to "is a the-conversationalist
+// instance available on any host", relayed down from agent-coordinator's own
+// aggregate -- see tcavailability.go. Drives the mic icon shown beside the
+// camera/screenshot icon in the header (illuminated when available) -- see
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+export interface TCAvailabilityMsg {
+  available: boolean
+}
+
 export interface FileInfo {
   id: string
   name: string
@@ -91,6 +101,7 @@ export interface FileInfo {
   uploaded_at: number // unix seconds
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
   highlighted: boolean // plain operator-set toggle, independent of state
+  marked_up: boolean  // an in-progress markup-dialog session (arrow/rect/text) is open on this file
 }
 
 export interface FilesStateMsg {

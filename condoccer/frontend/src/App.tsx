@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary } from './types'
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
 
@@ -29,6 +29,13 @@ function useCondocWS() {
   const [reprHost, setReprHost] = useState('')
   const [reprPort, setReprPort] = useState('')
   const [reprAutoConnect, setReprAutoConnect] = useState(false)
+  // local-representative's own HTTP dashboard port -- see
+  // ReprStatusMsg.http_port and tcCaptureURL below.
+  const [reprHTTPPort, setReprHTTPPort] = useState('')
+  // Aggregate "is a the-conversationalist instance available on any host",
+  // relayed down through local-representative -- see tcavailability.go and
+  // Step2Prompt.md. Gates the mic icon on every text input.
+  const [tcAvailable, setTCAvailable] = useState(false)
   const [devMode, setDevMode] = useState(false)
   const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
@@ -148,6 +155,10 @@ function useCondocWS() {
             if (p.host) setReprHost(p.host)
             if (p.port) setReprPort(p.port)
             setReprAutoConnect(!!p.auto_connect)
+            setReprHTTPPort(p.http_port ?? '')
+          } else if (msg.type === 'tc-availability') {
+            const p = msg.payload as TCAvailabilityMsg
+            setTCAvailable(p.available)
           } else if (msg.type === 'self-info') {
             const p = msg.payload as SelfInfoMsg
             setDevMode(p.dev_mode)
@@ -197,6 +208,8 @@ function useCondocWS() {
     reprHost,
     reprPort,
     reprAutoConnect,
+    reprHTTPPort,
+    tcAvailable,
     devMode,
     version,
     modeMismatch,
@@ -214,6 +227,164 @@ function useCondocWS() {
     fileDiffHunks,
     setFileDiffHunks,
   }
+}
+
+// ---- The Conversationalist mic-capture ----
+//
+// condoccer never touches audio or AWS itself (Step2Prompt.md: "we will keep
+// the TC functionality as contained in that sub-app as we can, we only want
+// the text to get into other text boxes"). Clicking a MicButton opens
+// the-conversationalist's own UI in a small iframe, running in a lightweight
+// "capture mode" (see the-conversationalist/frontend/src/App.tsx) that
+// auto-starts recording and, on Stop, posts the final transcript back via
+// window.postMessage rather than saving it to a file -- the only thing that
+// ever crosses the app boundary is that one string.
+
+// MIC_ICON follows the same grey-palette wireframe convention as
+// agent-coordinator's and local-representative's header mic-availability
+// indicator (Step2Prompt.md) -- kept identical so the affordance reads as
+// part of the same icon family everywhere it appears.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// tcCaptureURL resolves the address of the-conversationalist's own UI,
+// running in capture mode, regardless of which of the three ways condoccer
+// itself is currently being viewed (see Step1Prompt.md:
+// "standalone-UI-with-distinct-port/embed-in-local-representative/
+// embed-in-agent-coordinator"):
+//   - embedded in local-representative (path ".../condoccer/...") or
+//     agent-coordinator (path ".../host/<id>/condoccer/...") -- swap the
+//     trailing "condoccer" path segment for "convo" and stay on the same
+//     origin, which reaches the right local-representative's reverse proxy
+//     (see local-representative/main.go's proxyToConvo) no matter what
+//     hostname the browser is actually using.
+//   - standalone, on condoccer's own distinct port -- there's no sibling
+//     path to swap, so reach local-representative directly using the
+//     host/HTTP port it disclosed over representable (see
+//     ReprStatusMsg.http_port).
+function tcCaptureURL(reprHost: string, reprHTTPPort: string): string | null {
+  const path = window.location.pathname
+  const idx = path.lastIndexOf('/condoccer/')
+  if (idx !== -1) {
+    const prefix = path.slice(0, idx)
+    return `${window.location.origin}${prefix}/convo/?embed=capture`
+  }
+  if (!reprHost || !reprHTTPPort) return null
+  const proto = window.location.protocol === 'https:' ? 'https' : 'http'
+  return `${proto}://${reprHost}:${reprHTTPPort}/convo/?embed=capture`
+}
+
+interface TCCaptureContextValue {
+  available: boolean
+  capture: (onTranscript: (text: string) => void) => void
+}
+
+// Default value only ever matters if a MicButton somehow renders outside
+// App's own TCCaptureContext.Provider -- available: false keeps it inert
+// rather than throwing.
+const TCCaptureContext = createContext<TCCaptureContextValue>({ available: false, capture: () => {} })
+
+// useTCCapture owns the one hidden-until-active iframe condoccer ever opens
+// into the-conversationalist, and the postMessage listener that receives its
+// transcript back. `available` gates every MicButton in the tree; `capture`
+// starts a capture, invoking its callback once (and only once) with the
+// final text.
+function useTCCapture(tcAvailable: boolean, reprHost: string, reprHTTPPort: string) {
+  const [captureURL, setCaptureURL] = useState<string | null>(null)
+  const onTranscriptRef = useRef<((text: string) => void) | null>(null)
+
+  const capture = useCallback(
+    (onTranscript: (text: string) => void) => {
+      const url = tcCaptureURL(reprHost, reprHTTPPort)
+      if (!url) return
+      onTranscriptRef.current = onTranscript
+      setCaptureURL(url)
+    },
+    [reprHost, reprHTTPPort],
+  )
+
+  const cancel = useCallback(() => {
+    onTranscriptRef.current = null
+    setCaptureURL(null)
+  }, [])
+
+  useEffect(() => {
+    if (!captureURL) return
+    let expectedOrigin: string
+    try {
+      expectedOrigin = new URL(captureURL).origin
+    } catch {
+      return
+    }
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== expectedOrigin) return
+      const data = ev.data as { type?: string; text?: string } | undefined
+      if (data?.type === 'tc-transcript') {
+        onTranscriptRef.current?.(data.text ?? '')
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      } else if (data?.type === 'tc-transcript-cancel') {
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [captureURL])
+
+  return { available: tcAvailable, capture, captureURL, cancel }
+}
+
+// MicButton is the per-field affordance (Step2Prompt.md: "Whenever we have a
+// text input field for condoccer and it sees TC is available we will see a
+// 'mic' icon become visible"). Renders nothing while TC isn't available.
+function MicButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const { available, capture } = useContext(TCCaptureContext)
+  if (!available) return null
+  return (
+    <button
+      type="button"
+      className="mic-btn"
+      title="dictate with The Conversationalist"
+      onClick={() => capture(onTranscript)}
+    >
+      {MIC_ICON}
+    </button>
+  )
+}
+
+// appendTranscript is the shared "insert dictated text" behaviour every
+// MicButton call site uses: appended after any existing content, space-
+// separated, rather than overwriting it.
+function appendTranscript(prev: string, text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return prev
+  return prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed
+}
+
+// TCCaptureOverlay hosts the actual iframe while a capture is in progress --
+// a small floating panel rather than a hidden iframe, since
+// the-conversationalist's capture-mode UI (Start is automatic; Stop &
+// Cancel are not) needs to be visible and interactive. Unmounted (iframe
+// destroyed, mic released) the instant a transcript or cancellation arrives.
+function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void }) {
+  return (
+    <div className="tc-capture-backdrop" onClick={onCancel}>
+      <div className="tc-capture-panel" onClick={(e) => e.stopPropagation()}>
+        <div className="tc-capture-panel-header">
+          <span>The Conversationalist</span>
+          <button type="button" className="tc-capture-close" onClick={onCancel} aria-label="Cancel dictation">×</button>
+        </div>
+        <iframe className="tc-capture-frame" src={url} title="the-conversationalist capture" allow="microphone" />
+      </div>
+    </div>
+  )
 }
 
 // ---- Navigation ----
@@ -491,6 +662,28 @@ function sectionsToIterations(sections: StepSection[]): Iteration[] {
   return sections
     .filter((s) => s.kind !== 'prompt')
     .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
+}
+
+// resolveSubstepView picks which substep's content/iterations to show:
+// state.substepContent/substepIterations are only ever populated for the
+// *currently active* substep (info.substepLetter), so viewing an already-
+// completed one (letter !== the active one, or there's no active one at
+// all) instead falls back to completedSubstepContents and parses it
+// client-side the same way a completed step's raw content is (see
+// StepDetailView's non-active branch) -- otherwise the pane would just go
+// blank the moment a substep finished. Falls back to the active substep when
+// letter is null (e.g. right after entering via the sidebar's "→" button).
+function resolveSubstepView(
+  state: CondocState,
+  letter: string | null,
+): { letter: string; isActive: boolean; content: string; iterations: Iteration[] } {
+  const activeLetter = state.info.substepLetter ?? ''
+  const resolvedLetter = letter ?? activeLetter
+  if (resolvedLetter !== '' && resolvedLetter === activeLetter) {
+    return { letter: resolvedLetter, isActive: true, content: state.substepContent ?? '', iterations: state.substepIterations ?? [] }
+  }
+  const content = state.completedSubstepContents?.[resolvedLetter] ?? ''
+  return { letter: resolvedLetter, isActive: false, content, iterations: content ? sectionsToIterations(parseStepSections(content)) : [] }
 }
 
 // ---- Resource rendering (Revision B of Step5SubstepRPrompt.md) ----
@@ -884,6 +1077,7 @@ interface SidebarProps {
   selectedCondocPath: string | null
   selectedStepNum: number | null
   selectedIterId: string | null
+  selectedSubstepLetter: string | null
   selectedSubstepIterId: string | null
   diffFiles: string[]
   diffFilesLoaded: boolean
@@ -917,6 +1111,7 @@ function Sidebar({
   selectedCondocPath,
   selectedStepNum,
   selectedIterId,
+  selectedSubstepLetter,
   selectedSubstepIterId,
   diffFiles,
   diffFilesLoaded,
@@ -1073,9 +1268,8 @@ function Sidebar({
   }
 
   if (navLevel === 'substep' && activeState) {
-    const substepIterations: Iteration[] = activeState.substepIterations ?? []
-    const substepLetter = activeState.info.substepLetter ?? ''
-    const substepCommitRanges = parseCommitRanges(activeState.substepContent ?? '')
+    const { letter: substepLetter, content: substepContent, iterations: substepIterations } = resolveSubstepView(activeState, selectedSubstepLetter)
+    const substepCommitRanges = parseCommitRanges(substepContent)
 
     return (
       <div className="sidebar">
@@ -1117,7 +1311,7 @@ function Sidebar({
 
   if (navLevel === 'files-changed') {
     const upLabel = diffReturnLevel === 'substep'
-      ? `↑ Substep ${activeState?.info.substepLetter ?? ''}`
+      ? `↑ Substep ${selectedSubstepLetter ?? activeState?.info.substepLetter ?? ''}`
       : `↑ Step ${selectedStepNum ?? ''}`
 
     return (
@@ -1250,21 +1444,27 @@ function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, 
         <div className="step-card-header">Step {step.num}</div>
         <div className="step-form">
           <label className="step-form-label">Title</label>
-          <input
-            className="step-form-input"
-            type="text"
-            placeholder="Step title…"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-          />
+          <div className="field-with-mic">
+            <input
+              className="step-form-input"
+              type="text"
+              placeholder="Step title…"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+            />
+            <MicButton onTranscript={(text) => setTitle(prev => appendTranscript(prev, text))} />
+          </div>
           <label className="step-form-label">Prompt</label>
-          <textarea
-            className="step-form-textarea"
-            placeholder="Describe what the AI should do…"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <textarea
+              className="step-form-textarea"
+              placeholder="Describe what the AI should do…"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPrompt(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row" style={{ marginTop: 8 }}>
             <button
               className="btn-primary"
@@ -1437,7 +1637,8 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [fromSel, setFromSel] = useState('start')
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
-  const [resourceType, setResourceType] = useState<'highlighted' | 'upload'>('highlighted')
+  const [resourceType, setResourceType] = useState<'highlighted' | 'upload' | 'voice-note'>('highlighted')
+  const { available: tcAvailable } = useContext(TCCaptureContext)
   const [resourceName, setResourceName] = useState('')
   const [resourceDescription, setResourceDescription] = useState('')
   // "Upload" source (Revision C): the up-arrow button locks in the file
@@ -1460,6 +1661,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setUploadFiles([])
     setUploadError('')
   }, [info.path, info.stepNum, info.substepLetter])
+
+  // Falls back to "Highlighted" if TC availability drops out from under an
+  // open "Voice Note" selection (its <option> disappears from the <select>
+  // above the instant tcAvailable does) -- there'd be no way left to dictate
+  // anything into it.
+  useEffect(() => {
+    if (!tcAvailable && resourceType === 'voice-note') setResourceType('highlighted')
+  }, [tcAvailable, resourceType])
 
   if (info.phase === 'agent_running') {
     return (
@@ -1535,12 +1744,15 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
       {mode === 'revision' && (
         <div className="action-form">
           <div className="action-form-title">Revision {nextLetter}</div>
-          <textarea
-            placeholder="Describe the revision you want…"
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe the revision you want…"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPromptText(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row">
             <button
               className="btn-warning"
@@ -1570,12 +1782,15 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               ))}
             </select>
           </div>
-          <textarea
-            placeholder="Describe what to try differently…"
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe what to try differently…"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPromptText(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row">
             <button
               className="btn-secondary"
@@ -1597,19 +1812,25 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
       {mode === 'substep' && (
         <div className="action-form">
           <div className="action-form-title">Substep {nextLetter}</div>
-          <input
-            className="step-form-input"
-            type="text"
-            placeholder="Substep title…"
-            value={substepTitle}
-            onChange={(e) => setSubstepTitle(e.target.value)}
-          />
-          <textarea
-            placeholder="Describe what the substep should accomplish…"
-            value={promptText}
-            onChange={(e) => setPromptText(e.target.value)}
-            rows={4}
-          />
+          <div className="field-with-mic">
+            <input
+              className="step-form-input"
+              type="text"
+              placeholder="Substep title…"
+              value={substepTitle}
+              onChange={(e) => setSubstepTitle(e.target.value)}
+            />
+            <MicButton onTranscript={(text) => setSubstepTitle(prev => appendTranscript(prev, text))} />
+          </div>
+          <div className="field-with-mic">
+            <textarea
+              placeholder="Describe what the substep should accomplish…"
+              value={promptText}
+              onChange={(e) => setPromptText(e.target.value)}
+              rows={4}
+            />
+            <MicButton onTranscript={(text) => setPromptText(prev => appendTranscript(prev, text))} />
+          </div>
           <div className="action-row">
             <button
               className="btn-primary"
@@ -1691,13 +1912,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               value={resourceType}
               disabled={resourceType === 'upload' && uploadFiles.length > 0}
               onChange={(e) => {
-                setResourceType(e.target.value as 'highlighted' | 'upload')
+                setResourceType(e.target.value as 'highlighted' | 'upload' | 'voice-note')
                 setUploadFiles([])
                 setUploadError('')
               }}
             >
               <option value="highlighted">Highlighted</option>
               <option value="upload">Upload</option>
+              {tcAvailable && <option value="voice-note">Voice Note</option>}
             </select>
             {resourceType === 'upload' && (
               <>
@@ -1731,26 +1953,40 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               </>
             )}
           </div>
-          <input
-            className="step-form-input"
-            type="text"
-            placeholder="Name (optional) — e.g. Screenshots…"
-            value={resourceName}
-            onChange={(e) => setResourceName(e.target.value)}
-          />
-          <textarea
-            placeholder="Describe why these resources are included…"
-            value={resourceDescription}
-            onChange={(e) => setResourceDescription(e.target.value)}
-            rows={3}
-          />
+          <div className="field-with-mic">
+            <input
+              className="step-form-input"
+              type="text"
+              placeholder="Name (optional) — e.g. Screenshots…"
+              value={resourceName}
+              onChange={(e) => setResourceName(e.target.value)}
+            />
+            <MicButton onTranscript={(text) => setResourceName(prev => appendTranscript(prev, text))} />
+          </div>
+          <div className="field-with-mic">
+            <textarea
+              placeholder={
+                resourceType === 'voice-note'
+                  ? 'Dictate your voice note with the mic below…'
+                  : 'Describe why these resources are included…'
+              }
+              value={resourceDescription}
+              onChange={(e) => setResourceDescription(e.target.value)}
+              rows={3}
+            />
+            <MicButton onTranscript={(text) => setResourceDescription(prev => appendTranscript(prev, text))} />
+          </div>
           {uploadError && (
             <div className="action-status resource-upload-error">{uploadError}</div>
           )}
           <div className="action-row">
             <button
               className="btn-primary"
-              disabled={(resourceType === 'upload' && uploadFiles.length === 0) || uploading}
+              disabled={
+                (resourceType === 'upload' && uploadFiles.length === 0) ||
+                (resourceType === 'voice-note' && !resourceDescription.trim()) ||
+                uploading
+              }
               onClick={async () => {
                 if (resourceType === 'upload') {
                   if (uploadFiles.length === 0) return
@@ -1787,6 +2023,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                   content: resourceDescription.trim(),
                 })
                 setMode(null)
+                setResourceType('highlighted')
                 setResourceName('')
                 setResourceDescription('')
               }}
@@ -1815,14 +2052,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
 
 interface SubstepDetailViewProps {
   state: CondocState
+  substepLetter: string
   selectedSubstepIterId: string | null
   onAction: (action: ActionRequest) => void
 }
 
-function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDetailViewProps) {
+function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onAction }: SubstepDetailViewProps) {
   const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({})
-  const substepLetter = state.info.substepLetter ?? ''
-  const content = state.substepContent ?? ''
+  const { isActive, content } = resolveSubstepView(state, substepLetter)
 
   useEffect(() => {
     if (selectedSubstepIterId && sectionRefs.current[selectedSubstepIterId]) {
@@ -1831,6 +2068,35 @@ function SubstepDetailView({ state, selectedSubstepIterId, onAction }: SubstepDe
   }, [selectedSubstepIterId])
 
   const sections = parseStepSections(content)
+
+  // A completed substep is read-only: the action buttons (revision/retry/
+  // revert/complete) act on whichever substep condoccer currently considers
+  // active, which this one no longer is -- see resolveSubstepView.
+  if (!isActive) {
+    return (
+      <div className="detail-view">
+        <div className="detail-header">
+          <h2>Substep {substepLetter}</h2>
+          <PhaseBadge phase="completed" />
+        </div>
+        <div className="detail-body">
+          {sections.map((sec) => (
+            <div
+              key={sec.id}
+              className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+              ref={(el) => { sectionRefs.current[sec.id] = el }}
+            >
+              <div className="iter-section-label">{sec.label}</div>
+              {sectionBody(sec, state.info.path)}
+            </div>
+          ))}
+          <div className="action-panel">
+            <div className="action-status" style={{ color: '#4ec94e' }}>✓ Substep completed.</div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="detail-view">
@@ -2001,6 +2267,8 @@ export default function App() {
     reprHost,
     reprPort,
     reprAutoConnect,
+    reprHTTPPort,
+    tcAvailable,
     devMode,
     version,
     modeMismatch,
@@ -2028,6 +2296,11 @@ export default function App() {
   const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(initialNav.condocPath)
   const [selectedStepNum, setSelectedStepNum] = useState<number | null>(initialNav.stepNum)
   const [selectedIterId, setSelectedIterId] = useState<string | null>(initialNav.iterId)
+  // Which substep letter is being viewed -- distinct from
+  // activeState.info.substepLetter (the currently *active* one), since
+  // entering an already-completed substep via the step's sidebar/detail view
+  // still needs to know which one to look up in completedSubstepContents.
+  const [selectedSubstepLetter, setSelectedSubstepLetter] = useState<string | null>(null)
   const [selectedSubstepIterId, setSelectedSubstepIterId] = useState<string | null>(initialNav.substepIterId)
   const [diffFromCommit, setDiffFromCommit] = useState<string | null>(initialNav.diffFromCommit)
   const [diffToCommit, setDiffToCommit] = useState<string | null>(initialNav.diffToCommit)
@@ -2040,10 +2313,13 @@ export default function App() {
   // this state simply has no visible effect above the breakpoint.
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
+  const tcCapture = useTCCapture(tcAvailable, reprHost, reprHTTPPort)
+
   const handleSelectCondoc = (path: string) => {
     setSelectedCondocPath(path)
     setSelectedStepNum(null)
     setSelectedIterId(null)
+    setSelectedSubstepLetter(null)
     setSelectedSubstepIterId(null)
     setNavLevel('condoc')
     subscribe(path)
@@ -2053,6 +2329,7 @@ export default function App() {
   const handleSelectStep = (num: number) => {
     setSelectedStepNum(num)
     setSelectedIterId(null)
+    setSelectedSubstepLetter(null)
     setSelectedSubstepIterId(null)
     setNavLevel('step')
   }
@@ -2061,7 +2338,8 @@ export default function App() {
     setSelectedIterId(id)
   }
 
-  const handleEnterSubstep = (_substepLetter: string) => {
+  const handleEnterSubstep = (substepLetter: string) => {
+    setSelectedSubstepLetter(substepLetter)
     setSelectedSubstepIterId(null)
     setNavLevel('substep')
   }
@@ -2115,6 +2393,7 @@ export default function App() {
       setSelectedDiffHunkIdx(null)
     } else if (navLevel === 'substep') {
       setNavLevel('step')
+      setSelectedSubstepLetter(null)
       setSelectedSubstepIterId(null)
     } else if (navLevel === 'step') {
       setNavLevel('condoc')
@@ -2138,6 +2417,7 @@ export default function App() {
       if (navLevel === 'substep') {
         // After completing a substep, go back to the step view.
         setNavLevel('step')
+        setSelectedSubstepLetter(null)
         setSelectedSubstepIterId(null)
       } else if (navLevel === 'step') {
         setNavLevel('condoc')
@@ -2148,6 +2428,7 @@ export default function App() {
       // After reverting, go up a level — the federation-command will reset state.
       if (navLevel === 'substep') {
         setNavLevel('step')
+        setSelectedSubstepLetter(null)
         setSelectedSubstepIterId(null)
       } else if (navLevel === 'step') {
         setNavLevel('condoc')
@@ -2249,7 +2530,9 @@ export default function App() {
   }, [subscribeError, activeState, navLevel])
 
   return (
+    <TCCaptureContext.Provider value={tcCapture}>
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {tcCapture.captureURL && <TCCaptureOverlay url={tcCapture.captureURL} onCancel={tcCapture.cancel} />}
       {modeMismatch && (
         <div className="mode-mismatch-banner">
           ⚠ dev/ops mode mismatch with local-representative ({modeMismatch.peer_mode}):
@@ -2300,6 +2583,7 @@ export default function App() {
           selectedCondocPath={selectedCondocPath}
           selectedStepNum={selectedStepNum}
           selectedIterId={selectedIterId}
+          selectedSubstepLetter={selectedSubstepLetter}
           selectedSubstepIterId={selectedSubstepIterId}
           diffFiles={diffFiles}
           diffFilesLoaded={diffFilesLoaded}
@@ -2371,6 +2655,7 @@ export default function App() {
         {navLevel === 'substep' && activeState && (
           <SubstepDetailView
             state={activeState}
+            substepLetter={selectedSubstepLetter ?? activeState.info.substepLetter ?? ''}
             selectedSubstepIterId={selectedSubstepIterId}
             onAction={handleAction}
           />
@@ -2393,5 +2678,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </TCCaptureContext.Provider>
   )
 }

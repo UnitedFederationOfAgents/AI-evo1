@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
-  SelfInfoMsg, ModeMismatchMsg,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -10,6 +10,8 @@ import type {
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'federation-command', multi: true },
   { name: 'condoccer', multi: false },
+  { name: 'sessions', multi: false },
+  { name: 'convo', multi: false },
 ]
 
 interface LogEntry {
@@ -26,6 +28,8 @@ interface HostClientState {
   system?: LRSystemStateMsg
   repo?: LRRepoStateMsg
   condoccer?: LRCondoccerMsg
+  sessions?: LRSessionsMsg
+  convo?: LRConvoMsg
   files?: LRFilesMsg
 }
 
@@ -47,8 +51,14 @@ function useCoordinatorWS() {
   // types.ts SelfInfoMsg and Step4Prompt.md Revision E).
   const [acLoaderManaged, setACLoaderManaged] = useState(false)
   const [acUpdateAvailable, setACUpdateAvailable] = useState(false)
+  const [acAutoUpdate, setACAutoUpdate] = useState(false)
+  const [acStartedAt, setACStartedAt] = useState(0)
   // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
+  // Aggregate "is a the-conversationalist instance available on any host" --
+  // see tcavailability.go and Step2Prompt.md. Drives the mic icon beside the
+  // camera/screenshot icon in the header.
+  const [tcAvailable, setTCAvailable] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRefs = useRef<Record<string, string>>({})
@@ -109,6 +119,14 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'ac-restart-app', payload: {} }))
   }, [])
 
+  // Toggles whether agent-coordinator restarts itself the instant an update
+  // becomes available, instead of waiting for the "restart and update AC"
+  // control -- mirrors sendLRSetAutoUpdate but for AC's own process, with no
+  // host to target (see Step1SubstepCPrompt.md Revision D).
+  const sendACSetAutoUpdate = useCallback((enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'ac-set-auto-update', payload: { enabled } }))
+  }, [])
+
   const selectHost = useCallback((hostId: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'select-host', payload: { host_id: hostId } }))
   }, [])
@@ -161,6 +179,8 @@ function useCoordinatorWS() {
             setSelfHostId(p.host_id || null)
             setACLoaderManaged(p.loader_managed)
             setACUpdateAvailable(p.update_available)
+            setACAutoUpdate(p.auto_update)
+            setACStartedAt(p.started_at)
             // A rebuild+restart is invisible to an already-open tab -- the
             // reconnect above is the only signal it gets. Compare the
             // server's own reported version against this bundle's
@@ -277,12 +297,33 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-sessions-state': {
+            const p = msg.payload as LRSessionsMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), sessions: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-convo-state': {
+            const p = msg.payload as LRConvoMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), convo: p.available ? p : undefined },
+            }))
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), files: p.active ? p : undefined },
             }))
+            break
+          }
+          case 'tc-availability': {
+            const p = msg.payload as TCAvailabilityMsg
+            setTCAvailable(p.available)
             break
           }
         }
@@ -301,10 +342,10 @@ function useCoordinatorWS() {
   }, [connect])
 
   return {
-    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
-    acLoaderManaged, acUpdateAvailable,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -351,7 +392,7 @@ function HostSidebar({
   )
 }
 
-const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
+const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'] as const
 // "system" and "files" sit to the right of the service tabs, mirroring
 // local-representative's own dashboard: they drive/view that LR's process
 // management and host-cache from the coordinator. Upload on this files tab is
@@ -359,6 +400,17 @@ const LR_SERVICES = ['federation-command', 'condoccer', 'worker'] as const
 // its own copy of the file (see docs/DistributedExchange.md, Path 1).
 const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
+
+// Tabs whose content is another app's own UI, embedded via same-origin
+// iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1Prompt.md Revision A: "nested UI" tabs; Revision B: bring this host
+// view up to the same full-pane treatment local-representative already got).
+// These skip the service-name heading and health-indicator every other tab
+// gets and instead get a full tab pane for the iframe plus a slim status bar
+// under the tab bar, so the embedded app's own UI (including its own
+// "DEV MODE" border, when that sub-app runs in dev mode) fills the space
+// instead of floating in a padded, header-topped box.
+const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo'])
 
 // Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
 // BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
@@ -1187,6 +1239,25 @@ function fileDeleteUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
 }
 
+// markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F),
+// through the same transparent proxy as hold/persist/highlight above -- see
+// local-representative/files.go's handleMarkupGet and friends.
+function markupUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup`
+}
+
+function markupCommitUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/commit`
+}
+
+function markupCancelUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/cancel`
+}
+
+function markupCopyUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/copy`
+}
+
 function FilesPanel({
   files, active, selectedId, onSelect, onEnter, onUpload,
 }: {
@@ -1236,7 +1307,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}${f.marked_up ? ' files-item-markedup' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -1252,12 +1323,13 @@ function FilesPanel({
 }
 
 function FileDetailPane({
-  file, hostId, onClose, onEnter,
+  file, hostId, onClose, onEnter, onMarkup,
 }: {
   file: FileInfo
   hostId: string
   onClose: () => void
   onEnter: (id: string) => void
+  onMarkup: (id: string) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [busy, setBusy] = useState(false)
@@ -1334,12 +1406,23 @@ function FileDetailPane({
       </div>
       <div className="file-detail-actions">
         <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
-          enter →
+          view
         </button>
         <a className="file-detail-download" href={fileDownloadUrl(hostId, file.id)} download={file.name}>
           download
         </a>
       </div>
+      {file.kind === 'image' && (
+        <div className="file-detail-actions">
+          <button
+            className={`file-detail-markup${file.marked_up ? ' file-detail-markup-active' : ''}`}
+            onClick={() => onMarkup(file.id)}
+            title={file.marked_up ? 'keep editing the in-progress markup' : 'draw arrows, rectangles, or text on this image'}
+          >
+            markup
+          </button>
+        </div>
+      )}
       <div className="file-detail-actions">
         <button
           className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
@@ -1367,7 +1450,7 @@ function FileDetailPane({
 /* ---- File viewer ---- */
 
 // FileViewer mirrors local-representative's own files-tab viewer, reached the
-// same way (double-click a grid item, or the detail pane's "enter →"), just
+// same way (double-click a grid item, or the detail pane's "view" button), just
 // fetching through this host's /host/<id>/* proxy instead of same-origin.
 function FileViewer({
   hostId, fileId, file, onBack,
@@ -1421,6 +1504,293 @@ function FileViewer({
         ) : (
           <div className="file-viewer-empty">no preview available for this file type — use download above</div>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ---- Markup dialog (Step1SubstepCPrompt.md Revision F) ---- */
+
+// MarkupTool/MARKUP_COLORS/MARKUP_TOOL_ICON/canvasPoint/drawMarkupArrow/
+// drawMarkupRect all mirror local-representative's own copies verbatim (see
+// local-representative/frontend/src/App.tsx) -- this file has no shared
+// module to hang them off, same duplication as the rest of the files-tab UI
+// (FileIcon, FilesPanel, FileDetailPane, FileViewer above).
+type MarkupTool = 'arrow' | 'rect' | 'text'
+
+const MARKUP_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#af52de', '#ffffff', '#111111']
+
+const MARKUP_TOOL_ICON: Record<MarkupTool, JSX.Element> = {
+  arrow: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20 18 6" />
+      <path d="M9 6h9v9" />
+    </svg>
+  ),
+  rect: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+      <rect x="4" y="6" width="16" height="12" rx="1" />
+    </svg>
+  ),
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 6h14M12 6v13" />
+    </svg>
+  ),
+}
+
+function canvasPoint(e: React.MouseEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY }
+}
+
+function drawMarkupArrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  const headLen = Math.max(14, Math.hypot(x1 - x0, y1 - y0) * 0.18)
+  const angle = Math.atan2(y1 - y0, x1 - x0)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(x0, y0)
+  ctx.lineTo(x1, y1)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawMarkupRect(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0))
+  ctx.restore()
+}
+
+// MarkupDialog mirrors local-representative's own copy, fetching/saving
+// through this host's /host/<id>/* proxy (markupUrl et al. above) instead of
+// same-origin -- see that file's MarkupDialog for the full rationale.
+function MarkupDialog({
+  file,
+  hostId,
+  rawUrl,
+  onClose,
+}: {
+  file: FileInfo
+  hostId: string
+  rawUrl: string
+  onClose: () => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const snapshotRef = useRef<ImageData | null>(null)
+  const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [tool, setTool] = useState<MarkupTool>('arrow')
+  const [color, setColor] = useState(MARKUP_COLORS[0])
+  const [hasMarkup, setHasMarkup] = useState(file.marked_up)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setReady(false)
+    setLoadError(null)
+
+    const draw = (src: string) => {
+      const img = new Image()
+      img.onload = () => {
+        if (cancelled) return
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        canvas.getContext('2d')!.drawImage(img, 0, 0)
+        setReady(true)
+      }
+      img.onerror = () => { if (!cancelled) setLoadError("couldn't load the image") }
+      img.src = src
+    }
+
+    fetch(markupUrl(hostId, file.id))
+      .then(resp => {
+        if (cancelled) return
+        if (resp.ok) {
+          setHasMarkup(true)
+          return resp.blob().then(b => {
+            if (cancelled) return
+            objectUrl = URL.createObjectURL(b)
+            draw(objectUrl)
+          })
+        }
+        draw(rawUrl)
+      })
+      .catch(() => { if (!cancelled) draw(rawUrl) })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [hostId, file.id, rawUrl])
+
+  const saveComposite = useCallback(async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    if (!blob) return
+    const form = new FormData()
+    form.append('file', blob, 'markup.jpg')
+    try {
+      const resp = await fetch(markupUrl(hostId, file.id), { method: 'POST', body: form })
+      if (resp.ok) setHasMarkup(true)
+      else setActionError('failed to save markup')
+    } catch {
+      setActionError('failed to save markup')
+    }
+  }, [hostId, file.id])
+
+  const handlePointerDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!ready || busy) return
+    const canvas = canvasRef.current!
+    const pt = canvasPoint(e, canvas)
+    if (tool === 'text') {
+      const text = window.prompt('markup text:')
+      if (text) {
+        const ctx = canvas.getContext('2d')!
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.font = `${Math.max(20, Math.round(canvas.width * 0.028))}px sans-serif`
+        ctx.textBaseline = 'top'
+        ctx.fillText(text, pt.x, pt.y)
+        ctx.restore()
+        void saveComposite()
+      }
+      return
+    }
+    snapshotRef.current = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+    dragStartRef.current = pt
+  }
+
+  const handlePointerMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+    else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+  }
+
+  const handlePointerUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    const moved = Math.hypot(pt.x - start.x, pt.y - start.y) > 2
+    if (moved) {
+      if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+      else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+    }
+    dragStartRef.current = null
+    snapshotRef.current = null
+    if (moved) void saveComposite()
+  }
+
+  const runAction = async (url: string) => {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const resp = await fetch(url, { method: 'POST' })
+      if (resp.ok) onClose()
+      else setActionError('action failed')
+    } catch {
+      setActionError('action failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="markup-overlay">
+      <div className="markup-dialog">
+        <div className="markup-header">
+          <span className="markup-title">markup</span>
+          <span className="markup-filename" title={file.name}>{file.name}</span>
+        </div>
+        <div className="markup-canvas-wrap">
+          {!ready && !loadError && <div className="markup-status">loading…</div>}
+          {loadError && <div className="markup-status markup-status-error">{loadError}</div>}
+          <canvas
+            ref={canvasRef}
+            className="markup-canvas"
+            style={{ visibility: ready ? 'visible' : 'hidden' }}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onMouseLeave={handlePointerUp}
+          />
+        </div>
+        <div className="markup-toolbar">
+          <div className="markup-tools">
+            {(Object.keys(MARKUP_TOOL_ICON) as MarkupTool[]).map(t => (
+              <button
+                key={t}
+                className={`markup-tool-btn${tool === t ? ' markup-tool-active' : ''}`}
+                onClick={() => setTool(t)}
+                title={t}
+              >
+                {MARKUP_TOOL_ICON[t]}
+              </button>
+            ))}
+          </div>
+          <div className="markup-palette">
+            {MARKUP_COLORS.map(c => (
+              <button
+                key={c}
+                className={`markup-swatch${color === c ? ' markup-swatch-active' : ''}`}
+                style={{ background: c }}
+                onClick={() => setColor(c)}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+        {actionError && <div className="markup-status markup-status-error">{actionError}</div>}
+        <div className="markup-actions">
+          <button className="markup-btn markup-btn-cancel" onClick={() => runAction(markupCancelUrl(hostId, file.id))} disabled={busy}>
+            cancel
+          </button>
+          <button
+            className="markup-btn markup-btn-copy"
+            onClick={() => runAction(markupCopyUrl(hostId, file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'create a file duplicate with the markup included' : 'draw something first'}
+          >
+            copy
+          </button>
+          <button
+            className="markup-btn markup-btn-commit"
+            onClick={() => runAction(markupCommitUrl(hostId, file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'edit the markup into the image file directly' : 'draw something first'}
+          >
+            commit
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -1516,7 +1886,7 @@ function hostOutOfDate(data: HostClientState | undefined): boolean {
 function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
   const services = data?.lrState?.services
   const managed = data?.system?.managed
-  return ['federation-command', 'condoccer', 'worker'].some(
+  return ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'].some(
     name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
   )
 }
@@ -1550,12 +1920,18 @@ function TopologyNodeCard({
 }) {
   const fcHealthy = serviceHealthy(services, 'federation-command')
   const coHealthy = serviceHealthy(services, 'condoccer')
+  const tcHealthy = serviceHealthy(services, 'convo')
+  const smHealthy = serviceHealthy(services, 'sessions')
   const wHealthy = serviceHealthy(services, 'worker')
   const fcManaged = subAppManaged(managed, 'federation-command')
   const coManaged = subAppManaged(managed, 'condoccer')
+  const tcManaged = subAppManaged(managed, 'convo')
+  const smManaged = subAppManaged(managed, 'sessions')
   const wManaged = subAppManaged(managed, 'worker')
   const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
   const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
+  const tcOutdated = devMode && tcHealthy && subAppOutOfDate(managed, 'convo')
+  const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
 
   return (
@@ -1583,6 +1959,14 @@ function TopologyNodeCard({
             className={subAppBoxClass(coHealthy, coManaged, !!coOutdated)}
             title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
           >CO</span>
+          <span
+            className={subAppBoxClass(tcHealthy, tcManaged, !!tcOutdated)}
+            title={tcOutdated ? "convo is connected but running an older build than what's on disk" : undefined}
+          >TC</span>
+          <span
+            className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
+            title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
+          >SM</span>
           <span
             className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
@@ -1630,7 +2014,7 @@ function TopologyNodeCard({
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1642,7 +2026,10 @@ function GlobalTopologyPanel({
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
+  acAutoUpdate: boolean
+  acStartedAt: number
   sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
 }) {
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1714,14 +2101,18 @@ function GlobalTopologyPanel({
   // Accompanying auto-update toggle-selector, mirroring auto-rebuild's above:
   // applies to every connected, loader-managed host at once (not just ones
   // currently stale, since like auto-rebuild this is a standing setting, not
-  // a one-shot action) -- Step5Prompt.md Revision E. Deliberately scoped to
-  // hosts, same as "network update all" is scoped to *restartable* hosts
-  // plus AC handled separately by its own "restart AC" control above; this
-  // doesn't reach into AC's own restart at all.
+  // a one-shot action) -- Step5Prompt.md Revision E. Also arms AC's own
+  // auto-update alongside every host's, so agent-coordinator restarts itself
+  // the moment it notices an update too, rather than only ever coming back
+  // up via a manual "restart AC" -- see Step1SubstepCPrompt.md Revision D.
   const updatableHosts = devMode ? allHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed) : []
-  const allAutoUpdateOn = updatableHosts.length > 0 && updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update)
-  const handleSetAutoUpdateAll = (enabled: boolean) =>
+  const allAutoUpdateOn = (updatableHosts.length > 0 || acLoaderManaged) &&
+    updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update) &&
+    (!acLoaderManaged || acAutoUpdate)
+  const handleSetAutoUpdateAll = (enabled: boolean) => {
     updatableHosts.forEach(h => sendLRSetAutoUpdate(h.id, enabled))
+    if (acLoaderManaged) sendACSetAutoUpdate(enabled)
+  }
 
   return (
     <div className="topo-panel">
@@ -1771,13 +2162,13 @@ function GlobalTopologyPanel({
           </span>
         </div>
         <div className="topo-readout-row">
-          <span className="topo-readout-label">version</span>
+          <span className="topo-readout-label">LR version</span>
           <span className={`topo-readout-value${selfProc?.version ? '' : ' topo-readout-placeholder'}`}>
             {selfProc?.version ?? '—'}
           </span>
         </div>
         <div className="topo-readout-row">
-          <span className="topo-readout-label">uptime</span>
+          <span className="topo-readout-label">LR uptime</span>
           <span className={`topo-readout-value${selfProc ? '' : ' topo-readout-placeholder'}`}>
             {selfProc ? formatUptime(selfProc.started_at, nowSec) : '—'}
           </span>
@@ -1830,6 +2221,12 @@ function GlobalTopologyPanel({
         {isSelfSelected && (
           <div className="topo-ac-controls">
             <div className="topo-controls-label">agent-coordinator</div>
+            <div className="topo-readout-row">
+              <span className="topo-readout-label">AC uptime</span>
+              <span className={`topo-readout-value${acStartedAt ? '' : ' topo-readout-placeholder'}`}>
+                {acStartedAt ? formatUptime(acStartedAt, nowSec) : '—'}
+              </span>
+            </div>
             {devMode && (
               <div className="topo-controls-buttons">
                 <button
@@ -1914,15 +2311,15 @@ function GlobalTopologyPanel({
               </button>
               <label
                 className="sys-auto-rebuild"
-                title="restart automatically, per host, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once (agent-coordinator's own restart above isn't included)"
+                title="restart automatically, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once, plus agent-coordinator's own restart above"
               >
                 <input
                   type="checkbox"
-                  disabled={updatableHosts.length === 0}
+                  disabled={updatableHosts.length === 0 && !acLoaderManaged}
                   checked={allAutoUpdateOn}
                   onChange={e => handleSetAutoUpdateAll(e.target.checked)}
                 />
-                auto-update
+                auto-update-all
               </label>
             </div>
           </div>
@@ -1934,7 +2331,7 @@ function GlobalTopologyPanel({
 
 function GlobalSystemPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -1946,7 +2343,10 @@ function GlobalSystemPanel({
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
+  acAutoUpdate: boolean
+  acStartedAt: number
   sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
 }) {
   const [subTab, setSubTab] = useState<GlobalSystemTab>('topology')
   const troughEntries = useAggregateTrough(hosts, hostData)
@@ -1977,7 +2377,10 @@ function GlobalSystemPanel({
           sendLRSetAutoUpdate={sendLRSetAutoUpdate}
           acLoaderManaged={acLoaderManaged}
           acUpdateAvailable={acUpdateAvailable}
+          acAutoUpdate={acAutoUpdate}
+          acStartedAt={acStartedAt}
           sendACRestartApp={sendACRestartApp}
+          sendACSetAutoUpdate={sendACSetAutoUpdate}
         />
       ) : (
         <div className="service-empty">not yet implemented</div>
@@ -1989,7 +2392,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, sendACRestartApp, hasHighlighted, onGoToHighlighted,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2003,7 +2406,10 @@ function GlobalView({
   setActiveTab: (tab: LRTab) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
+  acAutoUpdate: boolean
+  acStartedAt: number
   sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
   hasHighlighted: boolean
   onGoToHighlighted: () => void
 }) {
@@ -2046,7 +2452,10 @@ function GlobalView({
             sendLRSetAutoUpdate={sendLRSetAutoUpdate}
             acLoaderManaged={acLoaderManaged}
             acUpdateAvailable={acUpdateAvailable}
+            acAutoUpdate={acAutoUpdate}
+            acStartedAt={acStartedAt}
             sendACRestartApp={sendACRestartApp}
+            sendACSetAutoUpdate={sendACSetAutoUpdate}
           />
         ) : (
           <div className="service-empty">not yet implemented</div>
@@ -2082,6 +2491,11 @@ function LRView({
 }) {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // markupFile is snapshotted at the moment the dialog opens (rather than
+  // re-derived from `files` below) so an in-flight files-state broadcast
+  // can't yank the dialog's target out from under an open editing session --
+  // see local-representative/frontend/src/App.tsx's own copy of this.
+  const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
 
@@ -2134,6 +2548,7 @@ function LRView({
   const viewerFile = activeTab === 'files' && viewerFileId
     ? files.find(f => f.id === viewerFileId) ?? null
     : null
+  const isEmbedTab = EMBED_TABS.has(activeTab)
 
   return (
     <div className="lr-view">
@@ -2164,109 +2579,237 @@ function LRView({
           ))}
         </div>
       </div>
-      <div className="main-pane">
-        <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
-          <div className="service-view">
-            <div className="service-name">{activeTab}</div>
-            {activeTab !== 'system' && activeTab !== 'files' && (
-              <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
-                <span className="health-dot" />
-                <span className="health-label">{getServiceStatus(activeTab)}</span>
+      {isEmbedTab && (
+        <div className={`embed-status-bar health-${getServiceStatus(activeTab)}`}>
+          <span className="health-dot" />
+          <span className="health-label">{activeTab} — {getServiceStatus(activeTab)}</span>
+        </div>
+      )}
+      <div className={`main-pane${isEmbedTab ? ' main-pane-embed' : ''}`}>
+        {isEmbedTab ? (
+          !active ? (
+            <div className="service-empty service-empty-embed">local-representative on this host is not connected</div>
+          ) : activeTab === 'condoccer' ? (
+            data.condoccer ? (
+              <iframe
+                ref={condoccerFrameRef}
+                className="embed-frame"
+                src={`/host/${host.id}/condoccer/${condoccerHash}`}
+                title={`condoccer on ${host.label}`}
+                onLoad={handleCondoccerLoad}
+              />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                condoccer is not running on this host — launch it from the system tab
               </div>
-            )}
-            {activeTab === 'system' && (
-              <SystemPanel
-                hostId={host.id}
-                state={data.system}
-                active={active}
-                fcState={data.fcState}
-                repoState={data.repo}
-                onLaunch={sendLRLaunchApp}
-                onTerminate={sendLRTerminateApp}
-                onRestart={sendLRRestartApp}
-                onRestartManaged={sendLRRestartManagedApp}
-                onRebuild={sendLRRebuildApp}
-                onSetAutoRebuild={sendLRSetAutoRebuild}
-                onSetAutoUpdate={sendLRSetAutoUpdate}
-              />
-            )}
-            {activeTab === 'files' && viewerFileId ? (
-              <FileViewer
-                hostId={host.id}
-                fileId={viewerFileId}
-                file={viewerFile}
-                onBack={() => setViewerFileId(null)}
-              />
-            ) : activeTab === 'files' && (
-              <FilesPanel
-                files={files}
-                active={active}
-                selectedId={selectedFileId}
-                onSelect={setSelectedFileId}
-                onEnter={setViewerFileId}
-                onUpload={f => uploadFiles(host.id, f)}
-              />
-            )}
-            {activeTab === 'federation-command' && (
-              <>
-                {data.ridealong && (
-                  <RidealongPanel
-                    hostId={host.id}
-                    state={data.ridealong}
-                    fcState={data.fcState}
-                    sendLRRidealongCommand={sendLRRidealongCommand}
-                  />
-                )}
-                {data.condoc && !data.ridealong && (
-                  <CondocPanel state={data.condoc} fcState={data.fcState} />
-                )}
-                <FCCommandPanel
-                  hostId={host.id}
-                  fcState={data.fcState}
-                  fcLog={data.fcLog}
-                  sendLRCommand={sendLRCommand}
-                />
-              </>
-            )}
-            {activeTab === 'condoccer' && active && (
-              data.condoccer ? (
-                <iframe
-                  ref={condoccerFrameRef}
-                  className="condoccer-frame"
-                  src={`/host/${host.id}/condoccer/${condoccerHash}`}
-                  title={`condoccer on ${host.label}`}
-                  onLoad={handleCondoccerLoad}
-                />
-              ) : (
-                <div className="service-empty">
-                  condoccer is not running on this host — launch it from the system tab
+            )
+          ) : activeTab === 'sessions' ? (
+            data.sessions ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/sessions/`} title={`sessions on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                sessions is not running on this host — launch it from the system tab
+              </div>
+            )
+          ) : (
+            data.convo ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/convo/`} title={`convo on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                convo is not running on this host — launch it from the system tab
+              </div>
+            )
+          )
+        ) : (
+          <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+            <div className="service-view">
+              <div className="service-name">{activeTab}</div>
+              {activeTab === 'federation-command' && (
+                <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
+                  <span className="health-dot" />
+                  <span className="health-label">{getServiceStatus(activeTab)}</span>
                 </div>
-              )
-            )}
-            {activeTab !== 'federation-command' && activeTab !== 'system' && activeTab !== 'files' && !active && (
-              <div className="service-empty">local-representative on this host is not connected</div>
+              )}
+              {activeTab === 'system' && (
+                <SystemPanel
+                  hostId={host.id}
+                  state={data.system}
+                  active={active}
+                  fcState={data.fcState}
+                  repoState={data.repo}
+                  onLaunch={sendLRLaunchApp}
+                  onTerminate={sendLRTerminateApp}
+                  onRestart={sendLRRestartApp}
+                  onRestartManaged={sendLRRestartManagedApp}
+                  onRebuild={sendLRRebuildApp}
+                  onSetAutoRebuild={sendLRSetAutoRebuild}
+                  onSetAutoUpdate={sendLRSetAutoUpdate}
+                />
+              )}
+              {activeTab === 'files' && viewerFileId ? (
+                <FileViewer
+                  hostId={host.id}
+                  fileId={viewerFileId}
+                  file={viewerFile}
+                  onBack={() => setViewerFileId(null)}
+                />
+              ) : activeTab === 'files' && (
+                <FilesPanel
+                  files={files}
+                  active={active}
+                  selectedId={selectedFileId}
+                  onSelect={setSelectedFileId}
+                  onEnter={setViewerFileId}
+                  onUpload={f => uploadFiles(host.id, f)}
+                />
+              )}
+              {activeTab === 'federation-command' && (
+                <>
+                  {data.ridealong && (
+                    <RidealongPanel
+                      hostId={host.id}
+                      state={data.ridealong}
+                      fcState={data.fcState}
+                      sendLRRidealongCommand={sendLRRidealongCommand}
+                    />
+                  )}
+                  {data.condoc && !data.ridealong && (
+                    <CondocPanel state={data.condoc} fcState={data.fcState} />
+                  )}
+                  <FCCommandPanel
+                    hostId={host.id}
+                    fcState={data.fcState}
+                    fcLog={data.fcLog}
+                    sendLRCommand={sendLRCommand}
+                  />
+                </>
+              )}
+            </div>
+            {selectedFile && (
+              <FileDetailPane
+                file={selectedFile}
+                hostId={host.id}
+                onClose={() => setSelectedFileId(null)}
+                onEnter={setViewerFileId}
+                onMarkup={id => setMarkupFile(files.find(f => f.id === id) ?? null)}
+              />
             )}
           </div>
-          {selectedFile && (
-            <FileDetailPane
-              file={selectedFile}
-              hostId={host.id}
-              onClose={() => setSelectedFileId(null)}
-              onEnter={setViewerFileId}
-            />
-          )}
-        </div>
+        )}
       </div>
+      {markupFile && (
+        <MarkupDialog
+          file={markupFile}
+          hostId={host.id}
+          rawUrl={fileRawUrl(host.id, markupFile.id)}
+          onClose={() => setMarkupFile(null)}
+        />
+      )}
     </div>
+  )
+}
+
+// CAMERA_ICON is a grey-palette wireframe icon (Step1SubstepCPrompt.md),
+// matching the files tab's own outline icon set so the quick-feedback
+// screenshot button reads as part of the same icon family. Kept identical to
+// local-representative's copy -- see App.tsx there for the file-icon
+// convention this follows.
+const CAMERA_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+    <path d="M9 4 7.5 6H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-3.5L15 4z" strokeLinecap="round" />
+    <circle cx="12" cy="13" r="3.5" />
+  </svg>
+)
+
+// captureScreenshot grabs a single frame of "the current display"
+// (Step1SubstepCPrompt.md) via the browser's screen-capture API rather than
+// rasterizing the DOM, so it genuinely captures whatever's on screen
+// (including an embedded tab's own iframe content) without pulling in a
+// DOM-to-canvas dependency. The capture stream is stopped immediately after
+// the one frame is drawn -- this is a screenshot, not a recording.
+async function captureScreenshot(): Promise<File> {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+  try {
+    const track = stream.getVideoTracks()[0]
+    const video = document.createElement('video')
+    video.srcObject = stream
+    await video.play()
+    // Give the first frame a tick to actually land before drawing it.
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    canvas.getContext('2d')!.drawImage(video, 0, 0)
+    track.stop()
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))), 'image/png'),
+    )
+    return new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })
+  } finally {
+    stream.getTracks().forEach(t => t.stop())
+  }
+}
+
+// MIC_ICON follows the same grey-palette wireframe convention as CAMERA_ICON
+// (Step1SubstepCPrompt.md) so the mic-availability indicator reads as part of
+// the same icon family. Kept identical to local-representative's copy -- see
+// App.tsx there -- and to condoccer's per-input mic button, which reuses this
+// same path. See
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// TCAvailabilityIndicator sits beside the camera/screenshot icon in the
+// header: illuminated (mic-btn-active) once at least one
+// the-conversationalist instance is available on any connected host (the
+// aggregate agent-coordinator itself computes -- see tcavailability.go).
+// Unlike ScreenshotButton this is a passive indicator, not a control -- the
+// actual mic-to-transcribe action lives on condoccer's own text inputs (see
+// Step2Prompt.md: "we will keep the TC functionality as contained in that
+// sub-app as we can").
+function TCAvailabilityIndicator({ available }: { available: boolean }) {
+  return (
+    <span
+      className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+    >
+      {MIC_ICON}
+    </span>
+  )
+}
+
+// ScreenshotButton sits immediately left of the nav arrows. `enabled`
+// reflects whether there's at least one file store to save into -- see
+// callers for what that means in each app -- independent of `busy`, which
+// just covers the capture/upload round-trip so a slow save can't be
+// double-fired.
+function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
+  const active = enabled && !busy
+  return (
+    <button
+      className={`screenshot-btn${active ? ' screenshot-btn-active' : ''}`}
+      onClick={onClick}
+      disabled={!active}
+      title={enabled ? (busy ? 'saving screenshot…' : 'save a screenshot to the most-preferred file store') : 'no file store available -- select a connected host first'}
+    >
+      {CAMERA_ICON}
+    </button>
   )
 }
 
 export default function App() {
   const {
-    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches,
-    acLoaderManaged, acUpdateAvailable,
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp,
+    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -2283,6 +2826,7 @@ export default function App() {
   // sidebar. Desktop layout is untouched -- this state has no visible effect
   // above the breakpoint.
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [screenshotBusy, setScreenshotBusy] = useState(false)
 
   const handleSelectHost = (id: string) => {
     setSelectedHostId(id)
@@ -2298,6 +2842,28 @@ export default function App() {
   }
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+
+  // "At least one file store available" (Step1SubstepCPrompt.md): AC has no
+  // file store of its own -- a screenshot can only ever land somewhere by
+  // relaying through the selected host's local-representative (same route
+  // uploadFiles already uses), which only works once a host is both picked
+  // and actually connected. uploadFiles below already prefers a cloud cache
+  // over the host-cache wherever the target LR has one; today that's
+  // nowhere, so every screenshot lands in that host's host-cache.
+  const hasFileStore = !!selectedHost && selectedHost.status === 'connected'
+
+  const handleScreenshot = async () => {
+    if (screenshotBusy || !selectedHostId) return
+    setScreenshotBusy(true)
+    try {
+      const file = await captureScreenshot()
+      await uploadFiles(selectedHostId, [file])
+    } catch (err) {
+      console.error('screenshot failed:', err)
+    } finally {
+      setScreenshotBusy(false)
+    }
+  }
 
   // Files tab picker's highlighted-file indicator (Step5SubstepR Revision E).
   // Computed across every known host -- not just whichever one is currently
@@ -2374,6 +2940,9 @@ export default function App() {
       )}
       <div className="app-header">
         <span className="app-title">agent-coordinator</span>
+        <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <TCAvailabilityIndicator available={tcAvailable} />
+        <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
         <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}
@@ -2449,7 +3018,10 @@ export default function App() {
               setActiveTab={setActiveTab}
               acLoaderManaged={acLoaderManaged}
               acUpdateAvailable={acUpdateAvailable}
+              acAutoUpdate={acAutoUpdate}
+              acStartedAt={acStartedAt}
               sendACRestartApp={sendACRestartApp}
+              sendACSetAutoUpdate={sendACSetAutoUpdate}
               hasHighlighted={!!firstHighlighted}
               onGoToHighlighted={goToFirstHighlighted}
             />

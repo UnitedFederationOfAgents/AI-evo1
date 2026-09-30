@@ -87,7 +87,15 @@ export interface SelfInfoMsg {
   host_id: string
   loader_managed: boolean
   update_available: boolean
+  // auto_update: whether AC restarts itself the instant update_available
+  // flips true, rather than waiting for an operator to press "restart and
+  // update AC" -- mirrors ProcInfo's same-named field for a
+  // local-representative's own self row. See the global topology view's
+  // "agent-coordinator" section auto-update checkbox (Step1SubstepCPrompt.md
+  // Revision D).
+  auto_update: boolean
   version: string // this process's own build version -- see BrowserRefreshStrategy.md
+  started_at: number // unix seconds this process started -- mirrors ProcInfo's same-named field for AC's own uptime readout
 }
 
 // ModeMismatchMsg discloses that a connected local-representative's dev-mode
@@ -97,6 +105,16 @@ export interface ModeMismatchMsg {
   host_id: string
   mismatched: boolean
   peer_mode?: string
+}
+
+// TCAvailabilityMsg is the aggregate answer to "is a the-conversationalist
+// instance available on any host" -- see tcavailability.go. Drives the mic
+// icon shown beside the camera/screenshot icon in the header (illuminated
+// when available) -- see
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+export interface TCAvailabilityMsg {
+  available: boolean
 }
 
 export interface LRSystemStateMsg {
@@ -149,6 +167,16 @@ export interface LRCondoccerMsg {
   condocs?: CondocInfo[]
 }
 
+export interface LRSessionsMsg {
+  host_id: string
+  available: boolean
+}
+
+export interface LRConvoMsg {
+  host_id: string
+  available: boolean
+}
+
 export interface FileInfo {
   id: string
   name: string
@@ -158,6 +186,7 @@ export interface FileInfo {
   uploaded_at: number // unix seconds
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
   highlighted: boolean // plain operator-set toggle, independent of state
+  marked_up: boolean  // an in-progress markup-dialog session (arrow/rect/text) is open on this file
 }
 
 export interface LRFilesMsg {

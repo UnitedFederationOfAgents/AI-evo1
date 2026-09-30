@@ -131,6 +131,46 @@ var managedApps = map[string]launchSpec{
 			return args
 		},
 	},
+	"sessions": {
+		binName:   "session-manager",
+		singleton: true,  // one per box, like condoccer
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.sessionsPort,
+				"--name", "sessions",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"convo": {
+		binName:   "the-conversationalist",
+		singleton: true,  // one per box, like condoccer
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.convoPort,
+				"--name", "convo",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
 	"federation-command": {
 		binName:   "federation-command",
 		singleton: false, // federation-command is N-per-host

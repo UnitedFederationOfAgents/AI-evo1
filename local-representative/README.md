@@ -80,6 +80,8 @@ it back once LR is listening again).
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
 | `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
+| `--sessions-port` | `sessions-port` | `8085` | HTTP port a managed `session-manager` serves on; its UI is reverse-proxied at `/sessions/` |
+| `--convo-port` | `convo-port` | `8086` | HTTP port a managed `the-conversationalist` serves on; its UI is reverse-proxied at `/convo/` |
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
 | `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
 
@@ -284,11 +286,11 @@ set for this increment) of whatever sits in this LR's host-cache directory
 (`--file-cache-dir`, default `/host-agent-files/exchange/host-cache`) plus its
 host-store directory (`--host-store-dir`). Drag a file from your system's file
 manager onto the tab to upload it; clicking a file opens a right-hand detail
-pane with its name, size, type and upload/expiry times, plus **enter →** and
+pane with its name, size, type and upload/expiry times, plus **view** and
 **download** buttons. A freshly-uploaded file is swept an hour after upload —
 its icon renders orange — unless held or persisted (see below).
 
-Double-clicking a file (or the detail pane's **enter →** button) opens a
+Double-clicking a file (or the detail pane's **view** button) opens a
 full-page **viewer**, reminiscent of drilling into a step through condoccer:
 images render inline, text files are fetched and shown as plain text, and
 anything else falls back to a "use download" notice — a **← back** button
@@ -331,10 +333,26 @@ too: it POSTs to `/host/<id>/api/files`, which agent-coordinator relays down
 to this LR rather than proxying transparently or keeping its own copy of the
 file. Viewing and downloading are **not** gated on either header — a GET
 reaching `/api/files/<id>` through AC's proxy is served the same as a direct
-request, so the coordinator's files tab gets the same viewer/enter/download
+request, so the coordinator's files tab gets the same viewer/view/download
 widgets, just proxied at `/host/<id>/api/files/<id>`.
 See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md) for how
 this and cross-host (LR↔AC↔LR) transfer fit together.
+
+Any image file also gets a **markup** button in its detail pane: a dialog
+with a colour palette and click-drag arrow/rectangle tools plus a
+click-to-place text tool, all drawn directly onto a full-resolution canvas
+seeded from the file itself. Every completed stroke autosaves the flattened
+composite to a hidden `.markup_<id>.jpg` sidecar (`POST
+/api/files/<id>/markup`), which is what turns the grid box's border bright
+orange and lets a later "markup" press pick the session back up (`GET
+/api/files/<id>/markup`) instead of starting fresh. The dialog's three
+buttons all close it on success: **cancel** drops the sidecar, leaving the
+file untouched; **commit** (`POST /api/files/<id>/markup/commit`) writes the
+composite over the file directly; **copy** (`POST
+/api/files/<id>/markup/copy`) spins it off into a brand-new host-cache entry
+instead, leaving the original untouched. See
+[`docs/CurrentPersistentFiles.md`](../docs/CurrentPersistentFiles.md) for the
+sidecar's on-disk details.
 
 ### Auto-launch chains
 

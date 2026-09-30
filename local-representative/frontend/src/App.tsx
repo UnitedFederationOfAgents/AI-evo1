@@ -1,8 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 
-const TABS = ['federation-command', 'condoccer', 'worker', 'system', 'files'] as const
+const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
+
+// Tabs whose content is another app's own UI, embedded via same-origin
+// iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1Prompt.md Revision A: "nested UI" tabs). These skip the service-name
+// heading and health-indicator every other tab gets and instead get a full
+// tab pane for the iframe plus a slim status bar under the tab bar, so the
+// embedded app's own UI (including its own "DEV MODE" border, when that
+// sub-app runs in dev mode) fills the space instead of floating in a
+// padded, header-topped box.
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo'])
 
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
 // Step5Prompt.md Revision M): how many recently-visited tabs we keep around
@@ -14,6 +24,8 @@ const NAV_HISTORY_MAX = 20
 const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'federation-command', multi: true },
   { name: 'condoccer', multi: false },
+  { name: 'sessions', multi: false },
+  { name: 'convo', multi: false },
 ]
 
 interface LogEntry {
@@ -35,6 +47,10 @@ function useStatusWS() {
   // Peer name -> current mismatch disclosure -- see docs/DevMode.md. A
   // mismatched peer only ever exchanges health information with this LR.
   const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
+  // Aggregate "is a the-conversationalist instance available on any host",
+  // relayed down from agent-coordinator -- see tcavailability.go and
+  // Step2Prompt.md. Drives the mic icon beside the camera/screenshot icon.
+  const [tcAvailable, setTCAvailable] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<string>('')
@@ -242,6 +258,11 @@ function useStatusWS() {
             })
             break
           }
+          case 'tc-availability': {
+            const payload = msg.payload as TCAvailabilityMsg
+            setTCAvailable(payload.available)
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -258,7 +279,7 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
+    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
     rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
@@ -994,6 +1015,28 @@ function fileDeleteUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}`
 }
 
+// markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F) --
+// GET markupUrl fetches the in-progress composite if a session is already
+// open (404 otherwise, meaning "start from the plain original"), POST
+// markupUrl saves the composite after every completed stroke, and the three
+// action routes below back its "commit"/"cancel"/"copy" buttons -- see
+// local-representative/files.go's handleMarkupGet and friends.
+function markupUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup`
+}
+
+function markupCommitUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/commit`
+}
+
+function markupCancelUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/cancel`
+}
+
+function markupCopyUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/copy`
+}
+
 function FilesPanel({
   state,
   selectedId,
@@ -1046,7 +1089,7 @@ function FilesPanel({
           {files.map(f => (
             <button
               key={f.id}
-              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}`}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}${f.marked_up ? ' files-item-markedup' : ''}`}
               onClick={() => onSelect(f.id)}
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
@@ -1065,10 +1108,12 @@ function FileDetailPane({
   file,
   onClose,
   onEnter,
+  onMarkup,
 }: {
   file: FileInfo
   onClose: () => void
   onEnter: (id: string) => void
+  onMarkup: (id: string) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [busy, setBusy] = useState(false)
@@ -1145,7 +1190,7 @@ function FileDetailPane({
       </div>
       <div className="file-detail-actions">
         <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
-          enter →
+          view
         </button>
         <a
           className="file-detail-download"
@@ -1155,6 +1200,17 @@ function FileDetailPane({
           download
         </a>
       </div>
+      {file.kind === 'image' && (
+        <div className="file-detail-actions">
+          <button
+            className={`file-detail-markup${file.marked_up ? ' file-detail-markup-active' : ''}`}
+            onClick={() => onMarkup(file.id)}
+            title={file.marked_up ? 'keep editing the in-progress markup' : 'draw arrows, rectangles, or text on this image'}
+          >
+            markup
+          </button>
+        </div>
+      )}
       <div className="file-detail-actions">
         <button
           className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
@@ -1182,7 +1238,7 @@ function FileDetailPane({
 /* ---- File viewer ---- */
 
 // FileViewer is the files tab's "drill-down" page, reached by double-clicking
-// a grid item or the detail pane's "enter →" widget (reminiscent of
+// a grid item or the detail pane's "view" widget (reminiscent of
 // condoccer's substep entry). Images render inline; text is fetched and shown
 // as plain text; anything else falls back to a "use download" notice — this
 // increment's wireframe icon set is deliberately small (text/image/other),
@@ -1240,6 +1296,308 @@ function FileViewer({
         ) : (
           <div className="file-viewer-empty">no preview available for this file type — use download above</div>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ---- Markup dialog ---- */
+
+// MarkupTool is the markup dialog's small tool set (Step1SubstepCPrompt.md
+// Revision F): a click-drag arrow, a click-drag rectangle, and a click-to-place
+// text label. Each renders permanently into the canvas the instant its
+// stroke finishes (see MarkupDialog's pointer handlers) -- there's no
+// per-shape undo, just the flattened result, same MVP spirit as the rest of
+// the files tab.
+type MarkupTool = 'arrow' | 'rect' | 'text'
+
+// MARKUP_COLORS is the markup dialog's colour palette -- unlike the rest of
+// this file's grey-wireframe icon set, these render as-is (actual colour
+// swatches), since the whole point is to draw in a colour that stands out
+// against the screenshot underneath.
+const MARKUP_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#af52de', '#ffffff', '#111111']
+
+const MARKUP_TOOL_ICON: Record<MarkupTool, JSX.Element> = {
+  arrow: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20 18 6" />
+      <path d="M9 6h9v9" />
+    </svg>
+  ),
+  rect: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+      <rect x="4" y="6" width="16" height="12" rx="1" />
+    </svg>
+  ),
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 6h14M12 6v13" />
+    </svg>
+  ),
+}
+
+// canvasPoint converts a mouse event into canvas-backing-store coordinates,
+// accounting for the canvas being displayed smaller (via CSS) than its
+// natural-resolution backing store -- see MarkupDialog's `.markup-canvas`.
+function canvasPoint(e: React.MouseEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY }
+}
+
+function drawMarkupArrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  const headLen = Math.max(14, Math.hypot(x1 - x0, y1 - y0) * 0.18)
+  const angle = Math.atan2(y1 - y0, x1 - x0)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(x0, y0)
+  ctx.lineTo(x1, y1)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawMarkupRect(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0))
+  ctx.restore()
+}
+
+// MarkupDialog is the "convenient markup system" opened from the file
+// details pane's "markup" button on any image (Step1SubstepCPrompt.md
+// Revision F). It loads whichever composite is furthest along -- the
+// in-progress sidecar if a session is already open (GET markupUrl), else the
+// plain original (rawUrl) -- draws directly onto a full-resolution canvas,
+// and autosaves the flattened result (POST markupUrl) after every completed
+// arrow/rectangle/text stroke, which is what leaves the file "marked up"
+// (see FileInfo.marked_up). "cancel"/"commit"/"copy" all close the dialog on
+// success; which of the three is used decides whether that in-progress work
+// is discarded, baked into the original file, or spun off into a duplicate.
+function MarkupDialog({
+  file,
+  rawUrl,
+  onClose,
+}: {
+  file: FileInfo
+  rawUrl: string
+  onClose: () => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const snapshotRef = useRef<ImageData | null>(null)
+  const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [tool, setTool] = useState<MarkupTool>('arrow')
+  const [color, setColor] = useState(MARKUP_COLORS[0])
+  const [hasMarkup, setHasMarkup] = useState(file.marked_up)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  // Seed the canvas: continue the in-progress composite if one exists,
+  // otherwise start fresh from the plain original.
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setReady(false)
+    setLoadError(null)
+
+    const draw = (src: string) => {
+      const img = new Image()
+      img.onload = () => {
+        if (cancelled) return
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        canvas.getContext('2d')!.drawImage(img, 0, 0)
+        setReady(true)
+      }
+      img.onerror = () => { if (!cancelled) setLoadError("couldn't load the image") }
+      img.src = src
+    }
+
+    fetch(markupUrl(file.id))
+      .then(resp => {
+        if (cancelled) return
+        if (resp.ok) {
+          setHasMarkup(true)
+          return resp.blob().then(b => {
+            if (cancelled) return
+            objectUrl = URL.createObjectURL(b)
+            draw(objectUrl)
+          })
+        }
+        draw(rawUrl)
+      })
+      .catch(() => { if (!cancelled) draw(rawUrl) })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [file.id, rawUrl])
+
+  const saveComposite = useCallback(async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    if (!blob) return
+    const form = new FormData()
+    form.append('file', blob, 'markup.jpg')
+    try {
+      const resp = await fetch(markupUrl(file.id), { method: 'POST', body: form })
+      if (resp.ok) setHasMarkup(true)
+      else setActionError('failed to save markup')
+    } catch {
+      setActionError('failed to save markup')
+    }
+  }, [file.id])
+
+  const handlePointerDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!ready || busy) return
+    const canvas = canvasRef.current!
+    const pt = canvasPoint(e, canvas)
+    if (tool === 'text') {
+      const text = window.prompt('markup text:')
+      if (text) {
+        const ctx = canvas.getContext('2d')!
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.font = `${Math.max(20, Math.round(canvas.width * 0.028))}px sans-serif`
+        ctx.textBaseline = 'top'
+        ctx.fillText(text, pt.x, pt.y)
+        ctx.restore()
+        void saveComposite()
+      }
+      return
+    }
+    snapshotRef.current = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+    dragStartRef.current = pt
+  }
+
+  const handlePointerMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+    else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+  }
+
+  const handlePointerUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    const moved = Math.hypot(pt.x - start.x, pt.y - start.y) > 2
+    if (moved) {
+      if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+      else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+    }
+    dragStartRef.current = null
+    snapshotRef.current = null
+    if (moved) void saveComposite()
+  }
+
+  const runAction = async (url: string) => {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const resp = await fetch(url, { method: 'POST' })
+      if (resp.ok) onClose()
+      else setActionError('action failed')
+    } catch {
+      setActionError('action failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="markup-overlay">
+      <div className="markup-dialog">
+        <div className="markup-header">
+          <span className="markup-title">markup</span>
+          <span className="markup-filename" title={file.name}>{file.name}</span>
+        </div>
+        <div className="markup-canvas-wrap">
+          {!ready && !loadError && <div className="markup-status">loading…</div>}
+          {loadError && <div className="markup-status markup-status-error">{loadError}</div>}
+          <canvas
+            ref={canvasRef}
+            className="markup-canvas"
+            style={{ visibility: ready ? 'visible' : 'hidden' }}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onMouseLeave={handlePointerUp}
+          />
+        </div>
+        <div className="markup-toolbar">
+          <div className="markup-tools">
+            {(Object.keys(MARKUP_TOOL_ICON) as MarkupTool[]).map(t => (
+              <button
+                key={t}
+                className={`markup-tool-btn${tool === t ? ' markup-tool-active' : ''}`}
+                onClick={() => setTool(t)}
+                title={t}
+              >
+                {MARKUP_TOOL_ICON[t]}
+              </button>
+            ))}
+          </div>
+          <div className="markup-palette">
+            {MARKUP_COLORS.map(c => (
+              <button
+                key={c}
+                className={`markup-swatch${color === c ? ' markup-swatch-active' : ''}`}
+                style={{ background: c }}
+                onClick={() => setColor(c)}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+        {actionError && <div className="markup-status markup-status-error">{actionError}</div>}
+        <div className="markup-actions">
+          <button className="markup-btn markup-btn-cancel" onClick={() => runAction(markupCancelUrl(file.id))} disabled={busy}>
+            cancel
+          </button>
+          <button
+            className="markup-btn markup-btn-copy"
+            onClick={() => runAction(markupCopyUrl(file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'create a file duplicate with the markup included' : 'draw something first'}
+          >
+            copy
+          </button>
+          <button
+            className="markup-btn markup-btn-commit"
+            onClick={() => runAction(markupCommitUrl(file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'edit the markup into the image file directly' : 'draw something first'}
+          >
+            commit
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -1329,10 +1687,108 @@ function NavArrows({ canBack, canForward, onBack, onForward }: {
   )
 }
 
+// CAMERA_ICON is a grey-palette wireframe icon (Step1SubstepCPrompt.md),
+// matching FILE_ICON_PATH's outline style so the quick-feedback screenshot
+// button reads as part of the same icon family as the files tab.
+const CAMERA_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+    <path d="M9 4 7.5 6H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-3.5L15 4z" strokeLinecap="round" />
+    <circle cx="12" cy="13" r="3.5" />
+  </svg>
+)
+
+// captureScreenshot grabs a single frame of "the current display"
+// (Step1SubstepCPrompt.md) via the browser's screen-capture API rather than
+// rasterizing the DOM, so it genuinely captures whatever's on screen
+// (including, say, an embedded tab's own iframe content) without pulling in
+// a DOM-to-canvas dependency. The capture stream is stopped immediately
+// after the one frame is drawn -- this is a screenshot, not a recording.
+async function captureScreenshot(): Promise<File> {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+  try {
+    const track = stream.getVideoTracks()[0]
+    const video = document.createElement('video')
+    video.srcObject = stream
+    await video.play()
+    // Give the first frame a tick to actually land before drawing it.
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    canvas.getContext('2d')!.drawImage(video, 0, 0)
+    track.stop()
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))), 'image/png'),
+    )
+    return new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })
+  } finally {
+    stream.getTracks().forEach(t => t.stop())
+  }
+}
+
+// MIC_ICON follows the same grey-palette wireframe convention as CAMERA_ICON
+// (Step1SubstepCPrompt.md) so the mic-availability indicator reads as part of
+// the same icon family. Kept identical to agent-coordinator's copy -- see
+// App.tsx there -- and to condoccer's per-input mic button, which reuses this
+// same path. See
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// TCAvailabilityIndicator sits beside the camera/screenshot icon in the
+// header: illuminated (mic-indicator-active) once agent-coordinator reports
+// at least one the-conversationalist instance available on any connected
+// host. Mirrors agent-coordinator's own copy -- a passive indicator, not a
+// control; the actual mic-to-transcribe action lives on condoccer's own text
+// inputs (Step2Prompt.md: "we will keep the TC functionality as contained in
+// that sub-app as we can").
+function TCAvailabilityIndicator({ available }: { available: boolean }) {
+  return (
+    <span
+      className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+    >
+      {MIC_ICON}
+    </span>
+  )
+}
+
+// ScreenshotButton sits immediately left of the nav arrows. `enabled`
+// reflects whether there's at least one file store to save into -- see
+// callers for what that means in each app -- independent of `busy`, which
+// just covers the capture/upload round-trip so a slow save can't be
+// double-fired.
+function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
+  const active = enabled && !busy
+  return (
+    <button
+      className={`screenshot-btn${active ? ' screenshot-btn-active' : ''}`}
+      onClick={onClick}
+      disabled={!active}
+      title={enabled ? (busy ? 'saving screenshot…' : 'save a screenshot to the most-preferred file store') : 'no file store available'}
+    >
+      {CAMERA_ICON}
+    </button>
+  )
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab)
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // markupFile is snapshotted at the moment the dialog opens (rather than
+  // re-derived from the live filesState listing, like selectedFile/viewerFile
+  // below) so an in-flight files-state broadcast can't yank the dialog's
+  // target out from under an open editing session.
+  const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
+  const [screenshotBusy, setScreenshotBusy] = useState(false)
   // Condoccer is embedded via a same-origin iframe with a hardcoded `src`,
   // so condoccer's own hash-based resume (Layer 1) never survives a refresh
   // of this outer page on its own -- the iframe just remounts at the bare
@@ -1353,13 +1809,14 @@ export default function App() {
   }
   const {
     connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches,
+    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
     sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
     launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
 
   const devMode = systemState?.self.dev_mode ?? false
   const mismatches = Object.values(modeMismatches)
+  const isEmbedTab = EMBED_TABS.has(activeTab)
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -1394,6 +1851,28 @@ export default function App() {
     setSelectedFileId(null)
     setViewerFileId(firstHighlightedFile.id)
   }
+
+  // "At least one file store available" (Step1SubstepCPrompt.md): LR always
+  // owns its own host-cache (defaultFileCacheDir in files.go), unlike AC
+  // which only ever reaches one by relaying through a selected host -- so
+  // here that's unconditionally true. uploadFiles below already prefers a
+  // cloud cache over the host-cache wherever one exists; today that's
+  // nowhere, so every screenshot lands in the host-cache.
+  const hasFileStore = true
+
+  const handleScreenshot = async () => {
+    if (screenshotBusy) return
+    setScreenshotBusy(true)
+    try {
+      const file = await captureScreenshot()
+      await uploadFiles([file])
+    } catch (err) {
+      console.error('screenshot failed:', err)
+    } finally {
+      setScreenshotBusy(false)
+    }
+  }
+
   const nav = useScreenHistory(activeTab, (a, b) => a === b, goToTab, NAV_HISTORY_MAX)
 
   return (
@@ -1431,97 +1910,121 @@ export default function App() {
             </button>
           ))}
         </div>
+        <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <TCAvailabilityIndicator available={tcAvailable} />
+        <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
         <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
         <span
           className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}`}
           title={connected ? 'connected' : 'disconnected'}
         />
       </div>
-      <div className="main-pane">
-        <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
-          <div className="service-view">
-            <div className="service-name">{activeTab}</div>
-            {activeTab === 'system' ? (
-              <SystemPanel
-                state={systemState}
-                fcState={fcState}
-                repoState={repoState}
-                onLaunch={launchApp}
-                onTerminate={terminateApp}
-                onRestart={restartApp}
-                onRebuild={rebuildRepo}
-                onSetAutoRebuild={setAutoRebuild}
-                onSetAutoUpdate={setAutoUpdate}
+      {isEmbedTab && (
+        <div className={`embed-status-bar health-${getStatus(activeTab)}`}>
+          <span className="health-dot" />
+          <span className="health-label">{activeTab} — {getStatus(activeTab)}</span>
+        </div>
+      )}
+      <div className={`main-pane${isEmbedTab ? ' main-pane-embed' : ''}`}>
+        {isEmbedTab ? (
+          getStatus(activeTab) === 'healthy' ? (
+            activeTab === 'condoccer' ? (
+              <iframe
+                ref={condoccerFrameRef}
+                className="embed-frame"
+                src={`/condoccer/${condoccerHash}`}
+                title="condoccer"
+                onLoad={handleCondoccerLoad}
               />
-            ) : activeTab === 'files' && viewerFileId ? (
-              <FileViewer
-                fileId={viewerFileId}
-                file={viewerFile}
-                onBack={() => setViewerFileId(null)}
-              />
-            ) : activeTab === 'files' ? (
-              <FilesPanel
-                state={filesState}
-                selectedId={selectedFileId}
-                onSelect={setSelectedFileId}
-                onEnter={setViewerFileId}
-                onUpload={uploadFiles}
-              />
+            ) : activeTab === 'sessions' ? (
+              <iframe className="embed-frame" src="/sessions/" title="sessions" />
             ) : (
-              <>
-                <div className={`health-indicator health-${getStatus(activeTab)}`}>
-                  <span className="health-dot" />
-                  <span className="health-label">{getStatus(activeTab)}</span>
-                </div>
-                {activeTab === 'federation-command' && (
-                  <>
-                    {ridealongState && (
-                      <RidealongPanel
-                        state={ridealongState}
+              <iframe className="embed-frame" src="/convo/" title="convo" />
+            )
+          ) : (
+            <div className="service-empty service-empty-embed">
+              {activeTab} is not running on this host — launch it from the system tab
+            </div>
+          )
+        ) : (
+          <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+            <div className="service-view">
+              <div className="service-name">{activeTab}</div>
+              {activeTab === 'system' ? (
+                <SystemPanel
+                  state={systemState}
+                  fcState={fcState}
+                  repoState={repoState}
+                  onLaunch={launchApp}
+                  onTerminate={terminateApp}
+                  onRestart={restartApp}
+                  onRebuild={rebuildRepo}
+                  onSetAutoRebuild={setAutoRebuild}
+                  onSetAutoUpdate={setAutoUpdate}
+                />
+              ) : activeTab === 'files' && viewerFileId ? (
+                <FileViewer
+                  fileId={viewerFileId}
+                  file={viewerFile}
+                  onBack={() => setViewerFileId(null)}
+                />
+              ) : activeTab === 'files' ? (
+                <FilesPanel
+                  state={filesState}
+                  selectedId={selectedFileId}
+                  onSelect={setSelectedFileId}
+                  onEnter={setViewerFileId}
+                  onUpload={uploadFiles}
+                />
+              ) : (
+                <>
+                  <div className={`health-indicator health-${getStatus(activeTab)}`}>
+                    <span className="health-dot" />
+                    <span className="health-label">{getStatus(activeTab)}</span>
+                  </div>
+                  {activeTab === 'federation-command' && (
+                    <>
+                      {ridealongState && (
+                        <RidealongPanel
+                          state={ridealongState}
+                          fcState={fcState}
+                          sendRidealongCommand={sendRidealongCommand}
+                        />
+                      )}
+                      {condocState && !ridealongState && (
+                        <CondocPanel
+                          state={condocState}
+                          fcState={fcState}
+                        />
+                      )}
+                      <FCCommandPanel
                         fcState={fcState}
-                        sendRidealongCommand={sendRidealongCommand}
+                        fcLog={fcLog}
+                        sendCommand={sendCommand}
                       />
-                    )}
-                    {condocState && !ridealongState && (
-                      <CondocPanel
-                        state={condocState}
-                        fcState={fcState}
-                      />
-                    )}
-                    <FCCommandPanel
-                      fcState={fcState}
-                      fcLog={fcLog}
-                      sendCommand={sendCommand}
-                    />
-                  </>
-                )}
-                {activeTab === 'condoccer' && (
-                  getStatus('condoccer') === 'healthy' ? (
-                    <iframe
-                      ref={condoccerFrameRef}
-                      className="condoccer-frame"
-                      src={`/condoccer/${condoccerHash}`}
-                      title="condoccer"
-                      onLoad={handleCondoccerLoad}
-                    />
-                  ) : (
-                    <div className="service-empty">
-                      condoccer is not running on this host — launch it from the system tab
-                    </div>
-                  )
-                )}
-              </>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+            {selectedFile && (
+              <FileDetailPane
+                file={selectedFile}
+                onClose={() => setSelectedFileId(null)}
+                onEnter={setViewerFileId}
+                onMarkup={id => setMarkupFile(filesState?.files.find(f => f.id === id) ?? null)}
+              />
             )}
           </div>
-          {selectedFile && (
-            <FileDetailPane
-              file={selectedFile}
-              onClose={() => setSelectedFileId(null)}
-              onEnter={setViewerFileId}
-            />
-          )}
-        </div>
+        )}
       </div>
+      {markupFile && (
+        <MarkupDialog
+          file={markupFile}
+          rawUrl={fileRawUrl(markupFile.id)}
+          onClose={() => setMarkupFile(null)}
+        />
+      )}
     </div>
   )
 }

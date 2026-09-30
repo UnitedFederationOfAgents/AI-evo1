@@ -37,12 +37,20 @@ I closed the remote-session-listing gap by implementing the sketch from `RemoteS
 
 I added Go tests for the new local-representative handlers and session-manager's discovery/merge logic, updated the session-manager frontend (types/UI/CSS) to show a "remote" badge for undiscovered-but-not-pulled sessions, and updated both `RemoteSessionListingGap.md` and `docs/DistributedSessionsBrainstorm.md` to document what was added. As before, the sandbox blocks `go build`/`go test`/frontend builds, so everything was verified by careful manual read rather than compiling.
 
+## Resource 1 -- Debug Sessions 1
 
-## <REPLACE-Revision|Retry> B
+Screenshots of errors with distributed sessions.
 
-<REPLACE-PROMPT>
+- [screenshot-1790639034919.png](bb7fdc16_screenshot-1790639034919.png)
 
+## Revision B
 
-## Human-Prompt
+See the resource 'Debug Sessions 1' for context - now that we have implemented the first pieces of distributed sessions we have a few errors.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We can't see the session manager presentation when connected to the agent-coordinator on provisioner01 from the client on 8082c.
+
+We can't see our remote 'Hambone23' session on provisioner01 as we expect to.
+
+We see errors in the local-representative log.
+
+Let's fix these items.

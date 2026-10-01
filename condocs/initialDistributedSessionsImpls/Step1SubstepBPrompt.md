@@ -65,11 +65,8 @@ I traced the actual request/response/concurrency path across local-representativ
 Fixed both: added status-code checks before decoding in all three LR functions; made the per-peer discovery fan-out concurrent (goroutines + WaitGroup) with its own tighter 2s-per-hop timeout separate from the 5s pull timeout; and raised the two callers' end-to-end discovery timeouts to 8s to comfortably cover LR's new worst case. This should resolve the missing remote-session and log-error symptoms; the "can't see the session-manager presentation" symptom is most plausibly the same underlying failure described informally, since no other code path this change touched could account for it separately.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+We keep getting caught in a state where we have a dirty repo with the condoc in the deleted state (pending git add/git commit) after our agent has competed work on a condoc revision.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make a quick fix to resolve this so our auto-build pipeline runs smoothly.

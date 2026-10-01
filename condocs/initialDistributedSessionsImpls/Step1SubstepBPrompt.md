@@ -139,11 +139,8 @@ I've implemented the debug view described in Revision E:
 No condoc files were touched; only the 6 implementation files listed above. The sandbox still blocks `go build`/`go test` and frontend builds, so this was verified by careful manual read (variable scoping, type assignability, brace/paren balance) rather than compiling.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+We need the network debug to capture messages exchanged on the SM<-->LR<-->AC chain.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's implement this now.

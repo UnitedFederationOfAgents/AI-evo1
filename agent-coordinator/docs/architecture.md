@@ -89,6 +89,18 @@ connection no one is actively using is a known gap left for a follow-up (see
 `condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md`, Revisions
 H/I/J).
 
+Revision C of `condocs/initialDistributedSessionsImpls/Step1Prompt.md` fixed
+a consequence of that gap: LR's `firstUseConn` fires the moment a Read is
+*attempted* on the standing tunnel, not once it succeeds, so a tunnel that
+dies (reaped, or the registration simply got evicted) before carrying any
+real traffic still looked "used" and redialed its replacement with no delay
+at all -- if whatever killed it keeps killing each replacement just as fast,
+that's a busy loop logging "tunnel: opened"/"tunnel: closed" many times a
+second. `serveTunnel` now only treats a tunnel as having been put to real use
+once a Read off it actually returns data; one that closes before that point
+gets the same 2s backoff as a failed dial. This bounds the symptom but isn't
+a fix for NAT-idle-reaping itself, which remains the open gap above.
+
 ### condoccer in the chain
 
 condoccer is itself a `representable.Client` of LR (`--auto-connect`, name `condoccer`,

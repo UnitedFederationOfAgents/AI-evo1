@@ -99,3 +99,77 @@ func TestFirstUseConnFiresOnceOnFirstRead(t *testing.T) {
 		t.Errorf("onFirstUse fired %d times, want exactly 1", got)
 	}
 }
+
+// TestFirstByteConnOnlyFiresOnRealData covers the Revision C fix (see
+// serveTunnel, Step1Prompt.md): unlike firstUseConn, which fires as soon as a
+// Read is *attempted*, firstByteConn must stay silent through a Read that
+// returns no bytes (e.g. the immediate error a dead/reaped tunnel conn
+// produces) and only fire once a Read actually returns data -- that
+// distinction is what lets serveTunnel apply its failed-dial backoff to a
+// tunnel that never carried real traffic, instead of busy-looping.
+func TestFirstByteConnOnlyFiresOnRealData(t *testing.T) {
+	client, server := net.Pipe()
+
+	var fired int
+	var mu sync.Mutex
+	c := &firstByteConn{Conn: server, onFirstByte: func() {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	}}
+
+	// Close the client side first, so the server's Read returns an error
+	// with zero bytes -- the "attempted but never actually used" case.
+	client.Close()
+
+	buf := make([]byte, 1)
+	if _, err := c.Read(buf); err == nil {
+		t.Fatal("Read off a closed pipe: want an error, got nil")
+	}
+
+	mu.Lock()
+	got := fired
+	mu.Unlock()
+	if got != 0 {
+		t.Errorf("onFirstByte fired %d times after a zero-byte Read, want 0", got)
+	}
+
+	server.Close()
+}
+
+// TestFirstByteConnFiresOnceRealDataArrives complements the above: once a
+// Read actually returns bytes, onFirstByte must fire exactly once, even
+// across multiple subsequent reads.
+func TestFirstByteConnFiresOnceRealDataArrives(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var fired int
+	var mu sync.Mutex
+	c := &firstByteConn{Conn: server, onFirstByte: func() {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	}}
+
+	go func() {
+		client.Write([]byte("a"))
+		client.Write([]byte("b"))
+	}()
+
+	buf := make([]byte, 1)
+	if _, err := c.Read(buf); err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+	if _, err := c.Read(buf); err != nil {
+		t.Fatalf("second Read: %v", err)
+	}
+
+	mu.Lock()
+	got := fired
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("onFirstByte fired %d times, want exactly 1", got)
+	}
+}

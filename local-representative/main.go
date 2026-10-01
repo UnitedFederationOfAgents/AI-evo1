@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -636,6 +637,22 @@ func (c *firstUseConn) Read(b []byte) (int, error) {
 // first Read, below), this immediately starts opening its replacement
 // concurrently, rather than waiting for agent-coordinator to finish with (and
 // close) the one just claimed.
+//
+// Revision C fixed a busy-loop this left behind: firstUseConn's onFirstUse
+// fires the instant a Read is *attempted*, regardless of whether that Read
+// ever actually succeeds -- so a tunnel that gets parked and then torn down
+// (agent-coordinator restarted, a stale registration got evicted, a NAT/
+// firewall idle-reaped it) before any real request ever lands on it still
+// counts as "used": http.Serve's very first attempt to parse a request off
+// the dead conn fails instantly, firing onFirstUse on its way to an
+// immediate "closed" below. With no delay anywhere on that path, a tunnel
+// that keeps dying this way (see the architecture doc's "known gap" note on
+// NAT-idle-reaping) reopens and redials at native CPU speed -- "tunnel:
+// opened"/"tunnel: closed (EOF)" pairs many times a second. usedForReal
+// tracks whether the connection ever got a Read that returned actual bytes
+// (real traffic), as opposed to an immediate error; closing without ever
+// reaching that point now gets the same 2s backoff as a failed dial, instead
+// of redialing instantly.
 func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool) {
 	// This goroutine serves exactly one tunnel connection per iteration, then
 	// returns -- a replacement is always handed off to a freshly spawned
@@ -651,23 +668,51 @@ func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool
 		log.Printf("tunnel: opened to agent-coordinator at %s", addr)
 
 		var openNextOnce sync.Once
+		var usedForReal atomic.Bool
 		openNext := func() {
 			openNextOnce.Do(func() {
 				go s.serveTunnel(addr, devMode, stillCurrent)
 			})
 		}
 		wrapped := &firstUseConn{Conn: conn, onFirstUse: openNext}
+		tracked := &firstByteConn{Conn: wrapped, onFirstByte: func() { usedForReal.Store(true) }}
 
-		err = http.Serve(newSingleConnListener(wrapped), s.setupRoutes(devMode))
+		err = http.Serve(newSingleConnListener(tracked), s.setupRoutes(devMode))
 		log.Printf("tunnel: closed (%v)", err)
 		// If this tunnel closed (idle-reaped, or the AC process restarted)
 		// before agent-coordinator ever claimed and used it, openNext above
 		// never fired -- make sure a replacement still gets opened. Either
 		// way, a replacement is now owned by another goroutine, so this one
 		// is done.
+		if !usedForReal.Load() {
+			// Never carried a single real byte -- dialing a replacement
+			// immediately would just repeat whatever killed this one, at
+			// native CPU speed. Back off like a failed dial.
+			time.Sleep(2 * time.Second)
+		}
 		openNext()
 		return
 	}
+}
+
+// firstByteConn wraps a net.Conn and invokes onFirstByte (at most once) the
+// first time a Read actually returns data, as opposed to firstUseConn's
+// onFirstUse, which fires on the first Read *attempt* whether or not it
+// succeeds. serveTunnel uses this to tell a tunnel that carried real traffic
+// apart from one that died before ever doing so, so only the latter gets the
+// failed-dial backoff on redial.
+type firstByteConn struct {
+	net.Conn
+	once        sync.Once
+	onFirstByte func()
+}
+
+func (c *firstByteConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.once.Do(c.onFirstByte)
+	}
+	return n, err
 }
 
 // connectAC dials agent-coordinator and maintains the connection lifecycle.

@@ -15,12 +15,14 @@ prompt: [`e657c57`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e
 
 I fixed the quote-stripping bug for `new-session` in `federation-command/main.go`: added a `stripSurroundingQuotes` helper and applied it where the REPL extracts the session name from the raw input line (both the TUI-mode and script-mode `new-session` handlers), so `new-session "My New Session"` now produces `My New Session` instead of keeping the literal quotes. I also added `TestStripSurroundingQuotes` in `main_test.go` covering quoted, unquoted, and malformed-quote cases. Note: `go build`/`go test` were blocked by the sandbox's permission policy, so I verified correctness via careful manual code review rather than a compiled/test run.
 
+## Resource 1 -- Debug Quotes
 
-## <REPLACE-Revision|Retry> A
+Quotes stripping failed
 
-<REPLACE-PROMPT>
+- [Screenshot_20261001-195912.png](5d31d14a_Screenshot_20261001-195912.png)
 
+## Revision A
 
-## Human-Prompt
+See the resource "Debug Quotes" for context - let's fix stripping quotes.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also fix up the mobile view up a bit for SM.

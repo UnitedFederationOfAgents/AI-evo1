@@ -437,9 +437,11 @@ func (s *Server) broadcastSystemState() {
 const maxDebugLogEntries = 400
 
 // DebugLogEntry is one captured stdout/stderr line from an LR-managed
-// sub-app (see lineLogWriter). Browser-side network capture (the debug
-// view's other tab) is instrumented entirely in agent-coordinator's own
-// frontend, so it has no backend counterpart here.
+// sub-app (see lineLogWriter). The debug view's other tab, "network", was
+// originally (Revision E) instrumented entirely in agent-coordinator's own
+// frontend with no backend counterpart; Revision F added one -- see
+// ChainCallEntry, below -- for the backend-to-backend half of that chain a
+// browser fetch wrapper can't see.
 type DebugLogEntry struct {
 	InstanceID string `json:"instance_id"` // e.g. "federation-command#1" -- matches ProcInfo.InstanceID
 	App        string `json:"app"`         // application name, e.g. "federation-command"
@@ -488,6 +490,65 @@ func (s *Server) broadcastDebugLog() {
 	s.broadcast("debug-log-state", st)
 	if ac := s.getACClient(); ac != nil {
 		ac.SendData("debug-log-state", st)
+	}
+}
+
+// maxChainCallEntries caps the debug view's "network" tab chain-call buffer
+// -- see Server.chainCall. Mirrors maxDebugLogEntries' reasoning.
+const maxChainCallEntries = 400
+
+// ChainCallEntry is one outbound HTTP call made somewhere on the
+// SM<->LR<->AC chain (condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md Revision F): either this LR's own "lr->ac" hop
+// (httpGetWithTimeout/fetchSessionFile, see sessions.go) or session-
+// manager's "sm->lr" hop, reported here over representable as a
+// "chain-call" data message (see reprServer.SetDataHandler) -- mirrors
+// session-manager/repr.go's same-named type.
+type ChainCallEntry struct {
+	Hop        string `json:"hop"` // "sm->lr" or "lr->ac"
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"` // 0 on a network-level failure
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"` // unix seconds, when the call was made
+}
+
+// ChainCallStateMsg is the payload of "chain-call-state" messages: the
+// current chain-call buffer, broadcast to browser clients and mirrored up
+// to agent-coordinator -- mirrors DebugLogStateMsg.
+type ChainCallStateMsg struct {
+	Entries []ChainCallEntry `json:"entries"`
+}
+
+// recordChainCall appends one captured HTTP call to the chain-call buffer --
+// called both from this LR's own instrumented "lr->ac" calls and from the
+// reprServer data handler relaying session-manager's "sm->lr" reports.
+// Mirrors recordDebugLog.
+func (s *Server) recordChainCall(entry ChainCallEntry) {
+	s.chainCallMu.Lock()
+	s.chainCall = append(s.chainCall, entry)
+	if over := len(s.chainCall) - maxChainCallEntries; over > 0 {
+		s.chainCall = s.chainCall[over:]
+	}
+	s.chainCallMu.Unlock()
+	s.broadcastChainCall()
+}
+
+// chainCallState returns a snapshot of the current chain-call buffer.
+func (s *Server) chainCallState() ChainCallStateMsg {
+	s.chainCallMu.Lock()
+	defer s.chainCallMu.Unlock()
+	entries := make([]ChainCallEntry, len(s.chainCall))
+	copy(entries, s.chainCall)
+	return ChainCallStateMsg{Entries: entries}
+}
+
+func (s *Server) broadcastChainCall() {
+	st := s.chainCallState()
+	s.broadcast("chain-call-state", st)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("chain-call-state", st)
 	}
 }
 

@@ -212,3 +212,27 @@ export interface LRDebugLogMsg {
   active: boolean
   entries?: DebugLogEntry[]
 }
+
+// ChainCallEntry mirrors local-representative's same-named type: one
+// outbound HTTP call made on the SM<->LR<->AC chain -- either that host's
+// own "lr->ac" hop or its session-manager's "sm->lr" hop -- shown on the
+// system tab's debug view's "network" tab
+// (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision
+// F). Browser-side fetch capture (see App.tsx's installNetworkCapture)
+// covers only this one frontend's own requests; this is the half of the
+// chain that happens entirely between backend processes.
+export interface ChainCallEntry {
+  hop: string // "sm->lr" | "lr->ac"
+  method: string
+  url: string
+  status: number // 0 on a network-level failure
+  error?: string
+  duration_ms: number
+  ts: number // unix seconds
+}
+
+export interface LRChainCallMsg {
+  host_id: string
+  active: boolean
+  entries?: ChainCallEntry[]
+}

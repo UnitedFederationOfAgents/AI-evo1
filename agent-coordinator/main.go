@@ -412,6 +412,36 @@ type LRDebugLogMsg struct {
 	Entries []DebugLogEntry `json:"entries,omitempty"`
 }
 
+// ChainCallEntry mirrors local-representative's same-named type (see
+// local-representative/procman.go): one outbound HTTP call made on the
+// SM<->LR<->AC chain, for the system tab's debug view's "network" tab
+// (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision
+// F).
+type ChainCallEntry struct {
+	Hop        string `json:"hop"`
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"`
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"`
+}
+
+// ChainCallStateMsg matches the chain-call-state payload sent from LR over
+// representable.
+type ChainCallStateMsg struct {
+	Entries []ChainCallEntry `json:"entries"`
+}
+
+// LRChainCallMsg is the host-scoped "lr-chain-call-state" message sent to
+// browser clients: the debug view's current chain-call buffer for one host.
+// Active is false when that LR is not connected -- mirrors LRDebugLogMsg.
+type LRChainCallMsg struct {
+	HostID  string           `json:"host_id"`
+	Active  bool             `json:"active"`
+	Entries []ChainCallEntry `json:"entries,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -439,6 +469,7 @@ type hostState struct {
 	convo      *ConvoStateMsg
 	files      *FilesStateMsg
 	debugLog   *DebugLogStateMsg
+	chainCall  *ChainCallStateMsg
 	lrHTTPPort string
 }
 
@@ -1248,6 +1279,7 @@ func main() {
 			hs.convo = nil
 			hs.files = nil
 			hs.debugLog = nil
+			hs.chainCall = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
@@ -1262,6 +1294,7 @@ func main() {
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
+			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 			s.broadcastTCAvailability()
 		}
@@ -1412,6 +1445,14 @@ func main() {
 				hs.debugLog = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: true, Entries: payload.Entries})
+			}
+		case "chain-call-state":
+			var payload ChainCallStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.chainCall = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: true, Entries: payload.Entries})
 			}
 		}
 	})

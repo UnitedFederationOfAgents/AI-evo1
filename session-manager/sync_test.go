@@ -138,7 +138,7 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestSessionPull(lrURL.Hostname(), lrURL.Port(), "sess with spaces", "*-processed.txt")
+	requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess with spaces", "*-processed.txt")
 
 	if gotPath != "/api/sessions/sess with spaces/pull" {
 		t.Errorf("path = %q, want /api/sessions/sess with spaces/pull (percent-decoded)", gotPath)

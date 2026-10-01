@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
@@ -32,6 +32,7 @@ interface HostClientState {
   convo?: LRConvoMsg
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
+  chainCall?: LRChainCallMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -327,6 +328,14 @@ function useCoordinatorWS() {
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), debugLog: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-chain-call-state': {
+            const p = msg.payload as LRChainCallMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), chainCall: p.active ? p : undefined },
             }))
             break
           }
@@ -1102,6 +1111,29 @@ function formatNetworkLogLine(e: NetworkLogEntry): string {
   return `${new Date(e.time).toLocaleTimeString()}  ${e.method}  ${status}  ${duration}  ${e.url}`
 }
 
+// TimedLine is a pre-formatted debug-pane line plus its original timestamp
+// (ms since epoch), letting DebugView merge chain-call lines (ts in unix
+// seconds, formatted by the caller -- see formatChainCallLine) into the
+// same chronological list as this frontend's own browser-fetch captures
+// (ts in unix ms, formatted by formatNetworkLogLine) without losing the
+// ordering either source needs its raw timestamp for.
+interface TimedLine {
+  ts: number // ms since epoch
+  line: string
+}
+
+// formatChainCallLine renders one captured backend-to-backend HTTP call
+// from the SM<->LR<->AC chain (Step1SubstepBPrompt.md Revision F) -- the
+// half of the "network" tab a browser fetch wrapper can't see, since it
+// never touches session-manager's or local-representative's own HTTP
+// clients. hostLabel is only passed in the global perspective, same as
+// formatDebugLogLine.
+function formatChainCallLine(e: ChainCallEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel} ` : ''
+  const status = e.status ? String(e.status) : e.error ? 'error' : '…'
+  return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.hop}] ${e.method}  ${status}  ${e.duration_ms}ms  ${e.url}`
+}
+
 // formatDebugLogLine renders one captured LR-managed-sub-app stdout/stderr
 // line. hostLabel is only passed in the global perspective, where lines from
 // every host are merged into one list and need tagging to tell them apart.
@@ -1175,18 +1207,27 @@ type DebugTab = typeof DEBUG_TABS[number]
 
 // DebugView is the system tab's "debug" button destination: network capture
 // (see useNetworkLog, app-wide and identical in both perspectives since it's
-// this one frontend's own request log) and logs (logLines, already
-// formatted by the caller -- see formatDebugLogLine -- since per-host and
-// global differ in whether a host tag is needed).
+// this one frontend's own request log -- merged chronologically with
+// chainLines, the backend-to-backend SM<->LR<->AC calls the caller already
+// formatted via formatChainCallLine, same reasoning as logLines below) and
+// logs (logLines, already formatted by the caller -- see
+// formatDebugLogLine -- since per-host and global differ in whether a host
+// tag is needed).
 function DebugView({
-  logLines, uploadHostId, uploadFiles,
+  logLines, chainLines, uploadHostId, uploadFiles,
 }: {
   logLines: string[]
+  chainLines: TimedLine[]
   uploadHostId: string | null
   uploadFiles: (hostId: string, files: File[]) => void
 }) {
   const [tab, setTab] = useState<DebugTab>('network')
   const networkEntries = useNetworkLog()
+
+  const networkLines = useMemo(() => {
+    const fetchLines: TimedLine[] = networkEntries.map(e => ({ ts: e.time, line: formatNetworkLogLine(e) }))
+    return [...fetchLines, ...chainLines].sort((a, b) => a.ts - b.ts).map(l => l.line)
+  }, [networkEntries, chainLines])
 
   return (
     <div className="debug-view">
@@ -1201,7 +1242,7 @@ function DebugView({
       </div>
       {tab === 'network' ? (
         <DebugLogPane
-          lines={networkEntries.map(formatNetworkLogLine)}
+          lines={networkLines}
           toFileName={`network-debug-${Date.now()}.log`}
           uploadHostId={uploadHostId}
           uploadFiles={uploadFiles}
@@ -2674,6 +2715,9 @@ function GlobalView({
               logLines={hosts.flatMap(h =>
                 (hostData[h.id]?.debugLog?.entries ?? []).map(e => formatDebugLogLine(e, h.label)),
               )}
+              chainLines={hosts.flatMap(h =>
+                (hostData[h.id]?.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e, h.label) })),
+              )}
               uploadHostId={resolveGlobalDebugUploadHost(hosts, selfHostId)}
               uploadFiles={uploadFiles}
             />
@@ -2881,6 +2925,7 @@ function LRView({
                 debugOpen ? (
                   <DebugView
                     logLines={(data.debugLog?.entries ?? []).map(e => formatDebugLogLine(e))}
+                    chainLines={(data.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e) }))}
                     uploadHostId={active ? host.id : null}
                     uploadFiles={uploadFiles}
                   />

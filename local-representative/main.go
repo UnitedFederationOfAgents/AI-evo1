@@ -282,6 +282,17 @@ type Server struct {
 	debugLogMu sync.Mutex
 	debugLog   []DebugLogEntry
 
+	// Debug view's "network" tab (Step1SubstepBPrompt.md Revision F): a
+	// rolling buffer of outbound HTTP calls made anywhere on the
+	// SM<->LR<->AC chain -- this LR's own "lr->ac" hop (see sessions.go's
+	// httpGetWithTimeout/fetchSessionFile) plus session-manager's "sm->lr"
+	// hop, reported over representable as a "chain-call" data message
+	// (see reprServer.SetDataHandler) -- capped at maxChainCallEntries.
+	// Mirrors debugLogMu/debugLog above; recordChainCall appends and trims
+	// under chainCallMu.
+	chainCallMu sync.Mutex
+	chainCall   []ChainCallEntry
+
 	// Session sync (see sessions.go and
 	// docs/DistributedSessionsBrainstorm.md): recordsPath is where clauditable
 	// session directories live (AGENT_RECORDS_PATH, resolved the same way
@@ -520,6 +531,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
 	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
 	ac.SendData("debug-log-state", s.debugLogState())
+	ac.SendData("chain-call-state", s.chainCallState())
 	if cc := s.getCondoccerState(); cc != nil {
 		ac.SendData("condoccer-state", *cc)
 	}
@@ -797,6 +809,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "repo-state", s.repoState())
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
 		s.sendToClient(c, "debug-log-state", s.debugLogState())
+		s.sendToClient(c, "chain-call-state", s.chainCallState())
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
 		}
@@ -1518,6 +1531,14 @@ func main() {
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("sessions-state", payload)
 					}
+				}
+			} else if dataType == "chain-call" {
+				// session-manager's own report of its "sm->lr" hop (see
+				// repr.go's reportChainCall) -- folded into the same buffer
+				// as this LR's "lr->ac" hop, see recordChainCall.
+				var payload ChainCallEntry
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.recordChainCall(payload)
 				}
 			}
 			return

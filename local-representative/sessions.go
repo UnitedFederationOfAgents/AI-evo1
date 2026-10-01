@@ -266,7 +266,7 @@ func (s *Server) handleSessionsDiscover(w http.ResponseWriter, r *http.Request) 
 // not sessionsPullHTTPTimeout -- see that constant's doc comment.
 func (s *Server) indexSessionsFrom(acBase, hostID string) []RemoteSessionEntry {
 	indexURL := fmt.Sprintf("%s/host/%s/api/sessions", acBase, url.PathEscape(hostID))
-	resp, err := httpGetWithTimeout(indexURL, sessionsDiscoverHTTPTimeout)
+	resp, err := s.httpGetWithTimeout(indexURL, sessionsDiscoverHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions discover: indexing host %s: %v", hostID, err)
 		return nil
@@ -431,7 +431,7 @@ type acHostEntry struct {
 // listPeerHosts asks agent-coordinator which other hosts it currently shows
 // as connected ("LR-active"), excluding this one.
 func (s *Server) listPeerHosts(acBase string) []string {
-	resp, err := httpGetWithTimeout(acBase+"/api/hosts", sessionsPullHTTPTimeout)
+	resp, err := s.httpGetWithTimeout(acBase+"/api/hosts", sessionsPullHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions pull: listing hosts via agent-coordinator: %v", err)
 		return nil
@@ -466,7 +466,7 @@ func (s *Server) listPeerHosts(acBase string) []string {
 func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, once bool) int {
 	listURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/list?glob=%s",
 		acBase, url.PathEscape(hostID), url.PathEscape(sessionID), url.QueryEscape(glob))
-	resp, err := httpGetWithTimeout(listURL, sessionsPullHTTPTimeout)
+	resp, err := s.httpGetWithTimeout(listURL, sessionsPullHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions pull: listing %s on host %s: %v", sessionID, hostID, err)
 		return 0
@@ -504,7 +504,7 @@ func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, on
 
 		fileURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/file/%s",
 			acBase, url.PathEscape(hostID), url.PathEscape(sessionID), url.PathEscape(file.Name))
-		if err := fetchSessionFile(fileURL, localPath); err != nil {
+		if err := s.fetchSessionFile(fileURL, localPath); err != nil {
 			log.Printf("sessions pull: fetching %s from host %s: %v", file.Name, hostID, err)
 			continue
 		}
@@ -515,8 +515,8 @@ func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, on
 
 // fetchSessionFile downloads fileURL into localPath, via a same-directory
 // temp-then-rename so a reader never sees a partially-written file.
-func fetchSessionFile(fileURL, localPath string) error {
-	resp, err := httpGetWithTimeout(fileURL, sessionsPullHTTPTimeout)
+func (s *Server) fetchSessionFile(fileURL, localPath string) error {
+	resp, err := s.httpGetWithTimeout(fileURL, sessionsPullHTTPTimeout)
 	if err != nil {
 		return err
 	}
@@ -543,10 +543,30 @@ func fetchSessionFile(fileURL, localPath string) error {
 }
 
 // httpGetWithTimeout issues a GET bounded by timeout -- see
-// sessionsPullHTTPTimeout and sessionsDiscoverHTTPTimeout.
-func httpGetWithTimeout(target string, timeout time.Duration) (*http.Response, error) {
+// sessionsPullHTTPTimeout and sessionsDiscoverHTTPTimeout -- and records the
+// outcome as this LR's "lr->ac" hop of the SM<->LR<->AC chain (every one of
+// these calls reaches agent-coordinator, whether its own "/api/hosts" or
+// its "/host/<id>/*" proxy to a peer -- see recordChainCall,
+// condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision
+// F).
+func (s *Server) httpGetWithTimeout(target string, timeout time.Duration) (*http.Response, error) {
+	start := time.Now()
 	client := &http.Client{Timeout: timeout}
-	return client.Get(target)
+	resp, err := client.Get(target)
+	entry := ChainCallEntry{
+		Hop:        "lr->ac",
+		Method:     "GET",
+		URL:        target,
+		DurationMS: time.Since(start).Milliseconds(),
+		TS:         time.Now().Unix(),
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	} else {
+		entry.Status = resp.StatusCode
+	}
+	s.recordChainCall(entry)
+	return resp, err
 }
 
 // fileSHA256 hashes a local file's contents, for handleSessionsList's

@@ -144,3 +144,30 @@ No condoc files were touched; only the 6 implementation files listed above. The 
 We need the network debug to capture messages exchanged on the SM<-->LR<-->AC chain.
 
 Let's implement this now.
+
+
+prompt: [`5a3c914`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5a3c914e103085610e9be07da80fa5afe38a83b3) → reply: [`6340b83`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6340b83742a492d3abe33057b7044f22766ace93)
+
+## Reply F
+
+This all reads correctly and consistently with the codebase's existing style. The implementation is complete and internally consistent across all three binaries, `representable`'s revert, and the frontend. Let me provide the final summary.
+
+## Summary
+
+I implemented Revision F by instrumenting the actual backend-to-backend HTTP calls on the SM<->LR<->AC chain — the error logs quoted in Revision D (`Get "http://localhost:8083/host/.../api/sessions": ... timeout`) confirmed this chain is plain HTTP calls between each binary's own Go client, not the `representable` TCP protocol, so that's what the debug view's "network" tab needed to see (it previously only captured the browser frontend's own `fetch` calls).
+
+- **session-manager**: `requestSessionPull`/`triggerSessionsDiscovery` (its two calls to local-representative, the "sm->lr" hop) now report each call's outcome to local-representative over `representable.SendData("chain-call", ...)`.
+- **local-representative**: its own outbound calls to agent-coordinator (`httpGetWithTimeout`/`fetchSessionFile`, the "lr->ac" hop) are now recorded directly; both hops land in a shared capped ring buffer (`recordChainCall`), broadcast to its own dashboard and mirrored up to agent-coordinator exactly like the existing debug-log plumbing.
+- **agent-coordinator**: relays this per-host as `lr-chain-call-state`, and its `DebugView`'s "network" tab now merges these chain-call entries chronologically with the existing browser-fetch captures (both per-host and global perspectives).
+
+I also reverted an earlier, incorrect approach (tapping the `representable` protocol's own heartbeat/state/data messages) once the Revision D logs made clear the real gap was in the HTTP layer, not that protocol. Fixed one existing test (`TestRequestSessionPullBuildsExpectedURL`) whose call site needed the new parameter. As before, the sandbox blocks `go build`/`go test`, so this was verified by careful manual read rather than compiling.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

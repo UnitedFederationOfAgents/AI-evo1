@@ -364,6 +364,51 @@ var sessionSyncGlobs = []string{"session.jsonl", "*-processed.txt"}
 // triggerSessionSync.
 const sessionSyncTimeout = 2 * time.Second
 
+// ChainCallEntry captures one outbound HTTP call this session-manager
+// backend issued to local-representative -- the "sm->lr" half of the
+// SM<->LR<->AC chain (condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md Revision F). A browser's own window.fetch capture
+// (see agent-coordinator's DebugView) can't see this: it never touches this
+// process's own HTTP client. Reported to local-representative over
+// representable (SendData("chain-call", ...)), which folds it into the same
+// buffer it keeps for its own "lr->ac" hop and relays both up to
+// agent-coordinator's debug view -- see local-representative/sessions.go's
+// mirrored copy of this type.
+type ChainCallEntry struct {
+	Hop        string `json:"hop"` // always "sm->lr" from this binary
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"` // 0 on a network-level failure
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"` // unix seconds, when the call was made
+}
+
+// reportChainCall records one sm->lr HTTP call's outcome and forwards it to
+// local-representative, best-effort (same posture as every other SendData
+// call -- see representable.Client.SendData). resp may be nil if err is set.
+// repr may also be nil (e.g. a caller exercising the request-shaping logic
+// without a live connection) -- a no-op, same posture as a nil client would
+// get from any other best-effort report.
+func reportChainCall(repr *representable.Client, method, target string, start time.Time, resp *http.Response, err error) {
+	if repr == nil {
+		return
+	}
+	entry := ChainCallEntry{
+		Hop:        "sm->lr",
+		Method:     method,
+		URL:        target,
+		DurationMS: time.Since(start).Milliseconds(),
+		TS:         time.Now().Unix(),
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	} else {
+		entry.Status = resp.StatusCode
+	}
+	repr.SendData("chain-call", entry)
+}
+
 // triggerSessionSync asks local-representative to refresh id's
 // "session.jsonl" and "*-processed.txt" files from every other LR-active
 // host before this view is rendered -- see
@@ -391,15 +436,16 @@ func (s *Server) triggerSessionSync(id string) {
 		return
 	}
 	for _, glob := range sessionSyncGlobs {
-		requestSessionPull(host, port, id, glob)
+		requestSessionPull(client, host, port, id, glob)
 	}
 }
 
 // requestSessionPull issues one best-effort POST asking local-representative
 // to sync-pull id's files matching glob from every other LR-active host --
 // the mirror image of clauditable/distsync.go's requestSessionPull (mode
-// "once" there, "sync" here).
-func requestSessionPull(lrHost, lrPort, sessionID, glob string) {
+// "once" there, "sync" here). repr is the already-connected representable
+// client to report the call's outcome to (see reportChainCall).
+func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, glob string) {
 	u := url.URL{
 		Scheme: "http",
 		Host:   net.JoinHostPort(lrHost, lrPort),
@@ -413,8 +459,10 @@ func requestSessionPull(lrHost, lrPort, sessionID, glob string) {
 	q.Set("mode", "sync")
 	u.RawQuery = q.Encode()
 
-	client := &http.Client{Timeout: sessionSyncTimeout}
-	resp, err := client.Post(u.String(), "application/octet-stream", nil)
+	httpClient := &http.Client{Timeout: sessionSyncTimeout}
+	start := time.Now()
+	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
+	reportChainCall(repr, "POST", u.String(), start, resp, err)
 	if err != nil {
 		return
 	}
@@ -504,7 +552,9 @@ func (s *Server) triggerSessionsDiscovery() []remoteSessionEntry {
 	}
 	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/api/sessions/discover"}
 	httpClient := &http.Client{Timeout: sessionsDiscoveryTimeout}
+	start := time.Now()
 	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
+	reportChainCall(client, "POST", u.String(), start, resp, err)
 	if err != nil {
 		return nil
 	}

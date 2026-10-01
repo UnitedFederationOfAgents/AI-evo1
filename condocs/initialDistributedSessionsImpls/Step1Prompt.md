@@ -106,11 +106,6 @@ I'll skip the git diff confirmation since the environment is blocking shell git 
 I traced the log storm to `local-representative/main.go`'s `serveTunnel`: its `firstUseConn` fires `onFirstUse` (which immediately opens a replacement tunnel) on the *first Read attempt*, not the first successful Read — so a standing tunnel that dies before carrying any real traffic (e.g. idle-reaped by NAT, or its registration evicted — a gap the architecture doc already flagged) still counts as "used" and redials instantly, with none of the 2s backoff the failed-dial path has, producing an unbounded "opened"/"closed (EOF)" loop. I added a `firstByteConn` wrapper that only fires once a Read returns actual bytes, and changed `serveTunnel` to apply the same 2s backoff as a failed dial whenever a tunnel closes without ever carrying real data. Added two unit tests (`tunnel_test.go`) covering both cases and updated `agent-coordinator/docs/architecture.md` to document the fix; as with prior revisions, `go build`/`go test`/`gofmt` are blocked in this sandbox, so this was verified by careful manual read of the happens-before ordering rather than compiling.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We still have the error message repeating many times per second, let's fix this.

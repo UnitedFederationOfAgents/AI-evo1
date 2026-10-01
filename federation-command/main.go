@@ -2322,7 +2322,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// new-session [name] — creates a new named session via clauditable
 	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
-		name := strings.TrimSpace(strings.TrimPrefix(line, "new-session"))
+		name := stripSurroundingQuotes(strings.TrimSpace(strings.TrimPrefix(line, "new-session")))
 		if name == "" {
 			name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
 		}
@@ -3505,7 +3505,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	// new-session [name] — creates a new named session via clauditable
 	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
-		name := strings.TrimSpace(strings.TrimPrefix(line, "new-session"))
+		name := stripSurroundingQuotes(strings.TrimSpace(strings.TrimPrefix(line, "new-session")))
 		return m.handleNewSession(name, line, cmdTime, deltaMs)
 	}
 
@@ -4445,6 +4445,21 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// stripSurroundingQuotes removes one matching pair of leading/trailing
+// double or single quotes from s, e.g. `"My New Session"` -> `My New
+// Session`. Used for new-session's name argument, which is typed directly
+// into the REPL line (not shell-parsed), so a user quoting a multi-word name
+// out of habit would otherwise end up with the quotes baked into the name.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {

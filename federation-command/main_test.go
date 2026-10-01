@@ -103,6 +103,32 @@ func TestParseRidealongCommand(t *testing.T) {
 	}
 }
 
+// TestStripSurroundingQuotes verifies new-session's name argument loses a
+// single matching pair of quotes (typed habit, e.g. `new-session "My New
+// Session"`) without mangling names that aren't quoted at all.
+func TestStripSurroundingQuotes(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`"My New Session"`, "My New Session"},
+		{`'My New Session'`, "My New Session"},
+		{"My New Session", "My New Session"},
+		{`"unterminated`, `"unterminated`},
+		{`"`, `"`},
+		{"", ""},
+		{`"mismatched'`, `"mismatched'`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := stripSurroundingQuotes(tt.in); got != tt.want {
+				t.Errorf("stripSurroundingQuotes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestIsValidAgent verifies agent validation
 func TestIsValidAgent(t *testing.T) {
 	tests := []struct {

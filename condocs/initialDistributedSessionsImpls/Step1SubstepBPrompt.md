@@ -282,11 +282,6 @@ I traced the screenshot in "Debug Sessions 2" to a real starvation bug in Revisi
 Fixed in `local-representative/main.go`: `serveTunnel` now wraps each standing tunnel in a new `firstUseConn` that fires as soon as it's actually read from (i.e. the moment agent-coordinator starts using it, not when it's done), immediately spawning a goroutine to open the replacement tunnel concurrently rather than waiting for the current one to close. Restructured the retry loop so failed-dial retries stay an actual loop (unbounded recursion during a long AC outage was a latent stack-growth risk I also cleaned up along the way). Added a unit test for the new `firstUseConn` and updated `agent-coordinator/docs/architecture.md` to describe the fix.
 
 
-## <REPLACE-Revision|Retry> K
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1790885108 (Thu Oct 1 08:05:08 PM UTC 2026).

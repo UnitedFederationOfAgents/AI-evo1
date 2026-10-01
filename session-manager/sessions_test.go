@@ -263,3 +263,77 @@ func TestSlugify(t *testing.T) {
 		}
 	}
 }
+
+// TestStripSurroundingQuotes mirrors federation-command/main_test.go's test
+// of the same name.
+func TestStripSurroundingQuotes(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`"My New Session"`, "My New Session"},
+		{`'My New Session'`, "My New Session"},
+		{"My New Session", "My New Session"},
+		{`"unterminated`, `"unterminated`},
+		{`"`, `"`},
+		{"", ""},
+		{`"mismatched'`, `"mismatched'`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := stripSurroundingQuotes(tt.in); got != tt.want {
+				t.Errorf("stripSurroundingQuotes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCreateSessionStripsQuotes verifies createSession strips a user's
+// habitual quoting of a multi-word name (see resource "Debug Quotes": the
+// Session Manager web UI's "new session name…" field is a plain text input,
+// not shell-parsed, so typed quotes previously ended up baked into the name).
+func TestCreateSessionStripsQuotes(t *testing.T) {
+	dir := t.TempDir()
+
+	id, err := createSession(dir, `"Name Without Quotes"`)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	sessions, err := listSessions(dir, id)
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Name != "Name Without Quotes" {
+		t.Errorf("Name = %q, want %q", sessions[0].Name, "Name Without Quotes")
+	}
+}
+
+// TestRenameSessionStripsQuotes is TestCreateSessionStripsQuotes's
+// rename-session equivalent.
+func TestRenameSessionStripsQuotes(t *testing.T) {
+	dir := t.TempDir()
+
+	id, err := createSession(dir, "Original Name")
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	if err := renameSession(dir, id, `"Renamed Without Quotes"`); err != nil {
+		t.Fatalf("renameSession: %v", err)
+	}
+
+	sessions, err := listSessions(dir, id)
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Name != "Renamed Without Quotes" {
+		t.Errorf("Name = %q, want %q", sessions[0].Name, "Renamed Without Quotes")
+	}
+}

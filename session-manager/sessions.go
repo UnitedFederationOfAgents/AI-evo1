@@ -378,6 +378,7 @@ func readSessionYAMLFields(sessionDir string) [][2]string {
 // recordsPath and returns its generated ID, mirroring clauditable's
 // new-session (ensureSession + generateSessionID).
 func createSession(recordsPath, name string) (string, error) {
+	name = stripSurroundingQuotes(name)
 	if name == "" {
 		name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
 	}
@@ -426,6 +427,22 @@ func slugify(name string) string {
 	return result
 }
 
+// stripSurroundingQuotes mirrors federation-command/main.go's function of
+// the same name: removes one matching pair of leading/trailing double or
+// single quotes from s, e.g. `"My New Session"` -> `My New Session`. The
+// frontend's "new session name…" field (and the rename equivalent) is a
+// plain text input, not shell-parsed, so a user quoting a multi-word name
+// out of habit would otherwise end up with the quotes baked into the name.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
 // writeSessionYAMLIfAbsent mirrors clauditable/main.go's function of the
 // same name.
 func writeSessionYAMLIfAbsent(sessionDir, id, name string) error {
@@ -440,6 +457,7 @@ func writeSessionYAMLIfAbsent(sessionDir, id, name string) error {
 // renameSession mirrors federation-command/main.go's updateSessionName plus
 // handleRenameSession's default-session guard.
 func renameSession(recordsPath, id, newName string) error {
+	newName = stripSurroundingQuotes(newName)
 	if strings.HasSuffix(id, "-default") {
 		return fmt.Errorf("cannot rename a default session")
 	}

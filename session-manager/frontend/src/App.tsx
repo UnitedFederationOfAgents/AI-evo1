@@ -510,15 +510,26 @@ function SessionTranscript({ view }: { view: SessionView | null }) {
     return <div className="session-detail-body session-detail-loading">loading…</div>
   }
   const entries = view.entries ?? []
+  // sync_incomplete means local-representative couldn't reach one of the
+  // other LR-active hosts while refreshing this session just now -- the
+  // transcript below (even if non-empty) may be missing turns a reachable
+  // peer would have had (see types.ts's SessionView doc comment).
+  const warning = view.sync_incomplete && (
+    <div className="session-transcript-warning">
+      could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
+    </div>
+  )
   if (entries.length === 0) {
     return (
       <div className="session-detail-body">
+        {warning}
         <span className="session-transcript-empty">no recorded turns in this session yet</span>
       </div>
     )
   }
   return (
     <div className="session-transcript">
+      {warning}
       {entries.map((e, i) => (
         <div className="transcript-entry" key={i}>
           <div className="transcript-entry-header">

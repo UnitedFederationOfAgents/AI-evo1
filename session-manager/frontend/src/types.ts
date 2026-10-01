@@ -71,11 +71,16 @@ export interface SessionEntry {
 }
 
 // SessionView is the "session-view" payload: a session's transcript parsed
-// out of session.jsonl into readable entries.
+// out of session.jsonl into readable entries. sync_incomplete is set when
+// local-representative's pre-view sync couldn't actually reach one of the
+// other LR-active hosts (Step1SubstepBPrompt.md Revision G) -- the transcript
+// may be missing turns a reachable peer would have had, so it's not
+// necessarily "genuinely empty/short".
 export interface SessionView {
   id: string
   name: string
   entries: SessionEntry[]
+  sync_incomplete?: boolean
 }
 
 // ArchiveResultMsg is the "archive-result" payload ("ufa session archive"

@@ -40,6 +40,8 @@ func TestTriggerSessionSyncPostsBothGlobsToPeerHTTPPort(t *testing.T) {
 		gotGlobs = append(gotGlobs, r.URL.Query().Get("glob"))
 		gotModes = append(gotModes, r.URL.Query().Get("mode"))
 		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sessionPullResultMsg{})
 	}))
 	defer lr.Close()
 	lrURL, err := url.Parse(lr.URL)
@@ -131,6 +133,8 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %q, want POST", r.Method)
 		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sessionPullResultMsg{})
 	}))
 	defer lr.Close()
 	lrURL, err := url.Parse(lr.URL)
@@ -138,7 +142,9 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess with spaces", "*-processed.txt")
+	if ok := requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess with spaces", "*-processed.txt"); !ok {
+		t.Errorf("requestSessionPull = false, want true (no errors reported)")
+	}
 
 	if gotPath != "/api/sessions/sess with spaces/pull" {
 		t.Errorf("path = %q, want /api/sessions/sess with spaces/pull (percent-decoded)", gotPath)
@@ -149,6 +155,28 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 	}
 	if q.Get("glob") != "*-processed.txt" || q.Get("mode") != "sync" {
 		t.Errorf("query = %q, want glob=*-processed.txt&mode=sync", gotQuery)
+	}
+}
+
+// TestRequestSessionPullReportsIncompleteOnUpstreamErrors exercises the
+// Step1SubstepBPrompt.md Revision G fix: local-representative reporting
+// SessionPullResultMsg.Errors > 0 (a peer it couldn't reach, same as
+// condocs/initialDistributedSessionsImpls/31e41125_network-debug-1790867771753.log's
+// "502 then 200" sequence) must make requestSessionPull return false, not
+// true -- even though the HTTP call to local-representative itself succeeded.
+func TestRequestSessionPullReportsIncompleteOnUpstreamErrors(t *testing.T) {
+	lr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sessionPullResultMsg{Errors: 1})
+	}))
+	defer lr.Close()
+	lrURL, err := url.Parse(lr.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if ok := requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess-1", "session.jsonl"); ok {
+		t.Errorf("requestSessionPull = true, want false (local-representative reported an unreachable peer)")
 	}
 }
 

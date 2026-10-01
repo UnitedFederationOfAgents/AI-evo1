@@ -421,31 +421,53 @@ func reportChainCall(repr *representable.Client, method, target string, start ti
 // Best-effort and bounded: with no live local-representative connection, or
 // one that hasn't disclosed its HTTP port yet (see
 // representable.Client.PeerHTTPPort, set from local-representative's "hello"
-// message on connect), this is a no-op and the view renders exactly as it
-// would have before this increment -- a purely local read.
-func (s *Server) triggerSessionSync(id string) {
+// message on connect), this is a no-op (incomplete is false: there's nothing
+// to report as having failed) and the view renders exactly as it would have
+// before this increment -- a purely local read.
+//
+// incomplete is true when any glob's pull reported a peer it couldn't
+// actually reach (local-representative's SessionPullResultMsg.Errors > 0,
+// not just "nothing new") -- see requestSessionPull and
+// condocs/initialDistributedSessionsImpls/31e41125_network-debug-1790867771753.log's
+// "502 then 200" sequence (Step1SubstepBPrompt.md Revision G). sendSessionView
+// (sessions.go) surfaces this on the rendered view so a session that looks
+// empty because its remote peer was unreachable isn't indistinguishable from
+// one that's genuinely empty.
+func (s *Server) triggerSessionSync(id string) (incomplete bool) {
 	s.reprMu.Lock()
 	client := s.reprClient
 	host := s.reprHost
 	s.reprMu.Unlock()
 	if client == nil {
-		return
+		return false
 	}
 	port := client.PeerHTTPPort()
 	if port == "" {
-		return
+		return false
 	}
 	for _, glob := range sessionSyncGlobs {
-		requestSessionPull(client, host, port, id, glob)
+		if !requestSessionPull(client, host, port, id, glob) {
+			incomplete = true
+		}
 	}
+	return incomplete
+}
+
+// sessionPullResultMsg mirrors local-representative's SessionPullResultMsg --
+// only Errors is read here; Hosts/Fetched are purely informational.
+type sessionPullResultMsg struct {
+	Errors int `json:"errors"`
 }
 
 // requestSessionPull issues one best-effort POST asking local-representative
 // to sync-pull id's files matching glob from every other LR-active host --
 // the mirror image of clauditable/distsync.go's requestSessionPull (mode
 // "once" there, "sync" here). repr is the already-connected representable
-// client to report the call's outcome to (see reportChainCall).
-func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, glob string) {
+// client to report the call's outcome to (see reportChainCall). Returns false
+// when the pull itself failed outright (network error, non-200) or when
+// local-representative reports at least one peer it couldn't reach --
+// true otherwise, including the ordinary "had nothing new to pull" case.
+func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, glob string) bool {
 	u := url.URL{
 		Scheme: "http",
 		Host:   net.JoinHostPort(lrHost, lrPort),
@@ -464,9 +486,18 @@ func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, g
 	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
 	reportChainCall(repr, "POST", u.String(), start, resp, err)
 	if err != nil {
-		return
+		return false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var result sessionPullResultMsg
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("session pull: decoding result for %s %s: %v", sessionID, glob, err)
+		return false
+	}
+	return result.Errors == 0
 }
 
 // remoteSessionEntry mirrors local-representative's RemoteSessionEntry (see

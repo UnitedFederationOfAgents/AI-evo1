@@ -108,12 +108,17 @@ type SessionDiscoveryMsg struct {
 	Sessions []RemoteSessionEntry `json:"sessions"` // every session reported by any of them
 }
 
-// SessionPullResultMsg is handleSessionsPull's response body -- mostly useful
-// for tests/debugging; callers (clauditable, session-manager) treat the pull
-// as fire-and-forget and don't inspect it.
+// SessionPullResultMsg is handleSessionsPull's response body. clauditable
+// still treats the pull as fire-and-forget and doesn't inspect it, but
+// session-manager's requestSessionPull reads Errors (see
+// condocs/initialDistributedSessionsImpls/31e41125_network-debug-1790867771753.log's
+// "502 from agent-coordinator, 200 from this handler" sequence, Step1SubstepBPrompt.md
+// Revision G): a glob with nothing to pull and a glob nobody could reach both
+// used to come back as Fetched: 0 with no way to tell them apart.
 type SessionPullResultMsg struct {
 	Hosts   int `json:"hosts"`   // how many other LR-active hosts were queried
 	Fetched int `json:"fetched"` // how many files were actually pulled
+	Errors  int `json:"errors"`  // how many of those hosts failed to list/fetch from (not just "had nothing new")
 }
 
 // validSessionPathSegment guards path traversal in a session id or filename,
@@ -396,12 +401,16 @@ func (s *Server) handleSessionsPull(w http.ResponseWriter, r *http.Request, sess
 	acBase := "http://" + acAddr
 
 	hosts := s.listPeerHosts(acBase)
-	fetched := 0
+	fetched, errs := 0, 0
 	for _, hostID := range hosts {
-		fetched += s.pullSessionFilesFrom(acBase, hostID, sessionID, glob, once)
+		n, ok := s.pullSessionFilesFrom(acBase, hostID, sessionID, glob, once)
+		fetched += n
+		if !ok {
+			errs++
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(SessionPullResultMsg{Hosts: len(hosts), Fetched: fetched})
+	_ = json.NewEncoder(w).Encode(SessionPullResultMsg{Hosts: len(hosts), Fetched: fetched, Errors: errs})
 }
 
 // acHTTPAddr returns agent-coordinator's "host:port" HTTP address, and
@@ -462,36 +471,41 @@ func (s *Server) listPeerHosts(acBase string) []string {
 // whichever ones "once" (never re-fetch an already-present name) or "sync"
 // (re-fetch on a checksum mismatch or absence) says are worth pulling,
 // writing each straight into this LR's own AGENT_RECORDS_PATH. Returns how
-// many files were actually fetched.
-func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, once bool) int {
+// many files were actually fetched, and whether hostID was actually reachable
+// and fully pulled -- ok is false on a listing failure (network error,
+// non-200 -- e.g. agent-coordinator's 502 "host not reachable", decode error)
+// or when any individual file fetch failed, so handleSessionsPull's caller
+// can tell "0 fetched because there was nothing new" apart from "0 fetched
+// because hostID couldn't be reached at all" (see SessionPullResultMsg).
+func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, once bool) (fetched int, ok bool) {
 	listURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/list?glob=%s",
 		acBase, url.PathEscape(hostID), url.PathEscape(sessionID), url.QueryEscape(glob))
 	resp, err := s.httpGetWithTimeout(listURL, sessionsPullHTTPTimeout)
 	if err != nil {
 		log.Printf("sessions pull: listing %s on host %s: %v", sessionID, hostID, err)
-		return 0
+		return 0, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("sessions pull: listing %s on host %s: unexpected status %d", sessionID, hostID, resp.StatusCode)
-		return 0
+		return 0, false
 	}
 	var msg SessionFilesMsg
 	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
 		log.Printf("sessions pull: decoding listing from host %s: %v", hostID, err)
-		return 0
+		return 0, false
 	}
 	if len(msg.Files) == 0 {
-		return 0
+		return 0, true
 	}
 
 	dir := filepath.Join(s.recordsPath, sessionID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		log.Printf("sessions pull: creating session directory: %v", err)
-		return 0
+		return 0, false
 	}
 
-	fetched := 0
+	ok = true
 	for _, file := range msg.Files {
 		localPath := filepath.Join(dir, file.Name)
 		if once {
@@ -506,11 +520,12 @@ func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, on
 			acBase, url.PathEscape(hostID), url.PathEscape(sessionID), url.PathEscape(file.Name))
 		if err := s.fetchSessionFile(fileURL, localPath); err != nil {
 			log.Printf("sessions pull: fetching %s from host %s: %v", file.Name, hostID, err)
+			ok = false
 			continue
 		}
 		fetched++
 	}
-	return fetched
+	return fetched, ok
 }
 
 // fetchSessionFile downloads fileURL into localPath, via a same-directory

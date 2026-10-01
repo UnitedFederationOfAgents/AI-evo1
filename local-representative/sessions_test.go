@@ -178,9 +178,12 @@ func TestPullSessionFilesFromOnceNeverRefetchesAnExistingName(t *testing.T) {
 
 	ac := fakeACAndPeer(t, peer)
 
-	fetched := s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "*-s-processed.txt", true /* once */)
+	fetched, ok := s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "*-s-processed.txt", true /* once */)
 	if fetched != 1 {
 		t.Fatalf("fetched = %d, want 1 (only the new 200-*)", fetched)
+	}
+	if !ok {
+		t.Errorf("ok = false, want true (peer was reachable)")
 	}
 
 	// The already-present name must be untouched, even though its remote
@@ -229,9 +232,12 @@ func TestPullSessionFilesFromSyncRefetchesOnChecksumMismatch(t *testing.T) {
 
 	ac := fakeACAndPeer(t, peer)
 
-	fetched := s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "session.jsonl", false /* sync */)
+	fetched, ok := s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "session.jsonl", false /* sync */)
 	if fetched != 1 {
 		t.Fatalf("fetched = %d, want 1 (checksum mismatch)", fetched)
+	}
+	if !ok {
+		t.Errorf("ok = false, want true (peer was reachable)")
 	}
 	got, err := os.ReadFile(filepath.Join(localDir, "session.jsonl"))
 	if err != nil {
@@ -242,9 +248,36 @@ func TestPullSessionFilesFromSyncRefetchesOnChecksumMismatch(t *testing.T) {
 	}
 
 	// A second sync with matching content should not report a fetch.
-	fetched = s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "session.jsonl", false)
+	fetched, ok = s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "session.jsonl", false)
 	if fetched != 0 {
 		t.Errorf("fetched = %d on an unchanged file, want 0", fetched)
+	}
+	if !ok {
+		t.Errorf("ok = false, want true (peer was reachable, just had nothing new)")
+	}
+}
+
+// TestPullSessionFilesFromReportsNotOKOnUnreachableHost exercises the
+// condocs/initialDistributedSessionsImpls/31e41125_network-debug-1790867771753.log
+// scenario (Step1SubstepBPrompt.md Revision G): agent-coordinator's proxy
+// returning 502 "host not reachable" for a peer that's dropped off the
+// network must come back as ok=false, not get folded into fetched=0 the same
+// way a peer with nothing new to send does.
+func TestPullSessionFilesFromReportsNotOKOnUnreachableHost(t *testing.T) {
+	s := newTestSessionsServer(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/host/host-b/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "host host-b not reachable: dial tcp: i/o timeout", http.StatusBadGateway)
+	})
+	ac := httptest.NewServer(mux)
+	t.Cleanup(ac.Close)
+
+	fetched, ok := s.pullSessionFilesFrom(ac.URL, "host-b", "sess-1", "session.jsonl", false /* sync */)
+	if fetched != 0 {
+		t.Errorf("fetched = %d, want 0 (host unreachable)", fetched)
+	}
+	if ok {
+		t.Errorf("ok = true, want false (host unreachable, not just empty)")
 	}
 }
 

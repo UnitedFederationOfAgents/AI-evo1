@@ -254,6 +254,18 @@ body {
 .session-notice-error { background: #2a1414; color: #f0b8b8; border-bottom: 1px solid #4a3a1e; }
 .session-notice-success { background: #16261a; color: #a8e0a8; border-bottom: 1px solid #2e4a2e; }
 
+/* SessionView.sync_incomplete: a pre-view sync couldn't reach a remote host
+   (see App.tsx's SessionTranscript) -- same posture as .session-notice but
+   scoped to the transcript itself rather than the whole main pane. */
+.session-transcript-warning {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  font-size: 12px;
+  background: #2a2414;
+  color: #e0cfa8;
+  border-bottom: 1px solid #4a4420;
+}
+
 .session-detail-header {
   flex-shrink: 0;
   display: flex;

@@ -155,17 +155,25 @@ func (s *Server) sendSessionInfo(c *wsClient, id string) {
 // LR-active host (see repr.go's triggerSessionSync) -- this is "bringing it
 // up in session-manager for viewing" from
 // docs/DistributedSessionsBrainstorm.md's sync trigger.
+//
+// When that sync reports it couldn't actually reach a peer (Revision G's
+// fix, see triggerSessionSync), the rendered view is tagged SyncIncomplete so
+// the frontend can tell "this session is genuinely empty/short" apart from
+// "this session may be missing turns because a remote host was unreachable
+// when we tried to refresh it" -- previously indistinguishable, which is what
+// made a remote session like "Hambone23" look like it simply wasn't there.
 func (s *Server) sendSessionView(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "view-session: id is required")
 		return
 	}
-	s.triggerSessionSync(id)
+	incomplete := s.triggerSessionSync(id)
 	view, err := viewSession(s.recordsPath, id)
 	if err != nil {
 		s.sendToClient(c, "error", "view-session: "+err.Error())
 		return
 	}
+	view.SyncIncomplete = incomplete
 	s.sendToClient(c, "session-view", view)
 }
 
@@ -537,6 +545,9 @@ type SessionView struct {
 	ID      string         `json:"id"`
 	Name    string         `json:"name"`
 	Entries []SessionEntry `json:"entries"`
+	// SyncIncomplete is set by sendSessionView, not viewSession (a purely
+	// local read has no notion of it) -- see sendSessionView's doc comment.
+	SyncIncomplete bool `json:"sync_incomplete,omitempty"`
 }
 
 // viewSession reads id's session.jsonl and parses it into a readable

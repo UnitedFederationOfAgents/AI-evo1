@@ -69,11 +69,29 @@ Fixed both items from Revision B:
 2. **Can't select remote sessions**: the session-manager backend's `describe-session`/`set-session` handlers required the session directory to already exist locally (`os.Stat`) before doing anything, with no sync trigger — unlike `view-session`, which already pulled remote files first. Added a `triggerSessionSync` call before each existence check (and added `session.yaml` to the synced glob set in `repr.go` so a never-seen session's name/metadata gets pulled too, not just its transcript), and removed the frontend's `disabled`/no-op-click guard on remote session rows so they're actually selectable. Added a Go test (`TestHandleSetSessionPullsRemoteOnlySession`) and updated the glob-count test for the new `session.yaml` entry.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Now we have a new error appearing - when we connect from 8082c we see the LR logs rapidly outputting:
 
+tor at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: opened to agent-coordinator at 192.168.0.101:8084
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:49 tunnel: closed (EOF)
+2026/10/01 21:36:50 tunnel: opened to agent-coordinator at 192.168.0.101:8084
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This happens many times per second. Let's fix this.

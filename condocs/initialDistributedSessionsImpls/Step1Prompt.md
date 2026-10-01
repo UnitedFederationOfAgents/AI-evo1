@@ -109,3 +109,22 @@ I traced the log storm to `local-representative/main.go`'s `serveTunnel`: its `f
 ## Revision D
 
 We still have the error message repeating many times per second, let's fix this.
+
+
+prompt: [`98de8e8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/98de8e8f78f41fc6fcf5ba83aca442d575b9ee3a) → reply: [`d28082d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d28082d41d63306c04ecc165eaf483e36a4bc392)
+
+## Reply D
+
+Found the actual root cause: Revision C's `firstByteConn` backoff fix never actually engaged, because `serveTunnel` still wired the "open the next tunnel" trigger to the old `firstUseConn` (fires on the mere *attempt* of a Read, success or not). So a dead tunnel's instantly-failing Read still spawned its replacement with zero delay, and the backoff-gated `openNext()` reached after `http.Serve` returned was always a no-op (already consumed by `sync.Once`) — the storm was never actually throttled.
+
+Fix: removed `firstUseConn` entirely and now drive both decisions ("open next tunnel concurrently" and "skip backoff") off `firstByteConn.onFirstByte` alone, so only a tunnel that genuinely carries real traffic can bypass the 2s backoff. Updated `main.go`'s comments, `tunnel_test.go` (dropped the now-obsolete `firstUseConn` test, reworded the remaining ones), and `agent-coordinator/docs/architecture.md` to document why Revision C's fix was ineffective and what Revision D actually changed. As with prior revisions, `go build`/`go test` are blocked in this sandbox, so this was verified by careful manual read.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

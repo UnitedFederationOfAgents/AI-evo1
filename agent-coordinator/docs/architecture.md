@@ -89,17 +89,23 @@ connection no one is actively using is a known gap left for a follow-up (see
 `condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md`, Revisions
 H/I/J).
 
-Revision C of `condocs/initialDistributedSessionsImpls/Step1Prompt.md` fixed
-a consequence of that gap: LR's `firstUseConn` fires the moment a Read is
-*attempted* on the standing tunnel, not once it succeeds, so a tunnel that
-dies (reaped, or the registration simply got evicted) before carrying any
-real traffic still looked "used" and redialed its replacement with no delay
-at all -- if whatever killed it keeps killing each replacement just as fast,
-that's a busy loop logging "tunnel: opened"/"tunnel: closed" many times a
-second. `serveTunnel` now only treats a tunnel as having been put to real use
-once a Read off it actually returns data; one that closes before that point
-gets the same 2s backoff as a failed dial. This bounds the symptom but isn't
-a fix for NAT-idle-reaping itself, which remains the open gap above.
+Revision C of `condocs/initialDistributedSessionsImpls/Step1Prompt.md`
+attempted to fix a consequence of that gap: a tunnel that dies (reaped, or
+the registration simply got evicted) before carrying any real traffic still
+looked "used" and redialed its replacement with no delay at all -- if
+whatever killed it keeps killing each replacement just as fast, that's a
+busy loop logging "tunnel: opened"/"tunnel: closed" many times a second.
+Revision C added `firstByteConn`, which only fires once a Read off the
+tunnel actually returns data, but still triggered the *next tunnel's* dial
+from the older "first Read attempt" signal (`firstUseConn`) -- which fires
+instantly whether or not that Read ever succeeds. So the dead tunnel's
+doomed first Read still spawned its replacement immediately, with zero
+delay, same as before; the busy loop was unaffected in practice. Revision D
+removed `firstUseConn` and wired both "open the next tunnel concurrently"
+and "this tunnel was used for real, skip the backoff" off `firstByteConn`
+alone, so a tunnel that never carries real traffic can no longer bypass the
+2s backoff. This bounds the symptom but isn't a fix for NAT-idle-reaping
+itself, which remains the open gap above.
 
 ### condoccer in the chain
 

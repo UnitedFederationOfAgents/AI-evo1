@@ -59,54 +59,17 @@ func TestSingleConnListenerAcceptsOnceThenUnblocksOnClose(t *testing.T) {
 	}
 }
 
-// TestFirstUseConnFiresOnceOnFirstRead covers the Revision J fix (see
-// serveTunnel, Step1SubstepBPrompt.md): a freshly dialed standing tunnel must
-// trigger opening its replacement as soon as it's actually read from -- i.e.
-// as soon as agent-coordinator starts forwarding a claimed tunnel's first
-// request -- not only once it closes, so a long-lived claim (the dashboard's
-// own WebSocket) can't starve every other proxied request for its whole
-// lifetime.
-func TestFirstUseConnFiresOnceOnFirstRead(t *testing.T) {
-	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
-
-	var fired int
-	var mu sync.Mutex
-	c := &firstUseConn{Conn: server, onFirstUse: func() {
-		mu.Lock()
-		fired++
-		mu.Unlock()
-	}}
-
-	go func() {
-		client.Write([]byte("a"))
-		client.Write([]byte("b"))
-	}()
-
-	buf := make([]byte, 1)
-	if _, err := c.Read(buf); err != nil {
-		t.Fatalf("first Read: %v", err)
-	}
-	if _, err := c.Read(buf); err != nil {
-		t.Fatalf("second Read: %v", err)
-	}
-
-	mu.Lock()
-	got := fired
-	mu.Unlock()
-	if got != 1 {
-		t.Errorf("onFirstUse fired %d times, want exactly 1", got)
-	}
-}
-
-// TestFirstByteConnOnlyFiresOnRealData covers the Revision C fix (see
-// serveTunnel, Step1Prompt.md): unlike firstUseConn, which fires as soon as a
-// Read is *attempted*, firstByteConn must stay silent through a Read that
-// returns no bytes (e.g. the immediate error a dead/reaped tunnel conn
-// produces) and only fire once a Read actually returns data -- that
+// TestFirstByteConnOnlyFiresOnRealData covers the Revision D fix (see
+// serveTunnel, Step1Prompt.md): firstByteConn must stay silent through a
+// Read that returns no bytes (e.g. the immediate error a dead/reaped tunnel
+// conn produces) and only fire once a Read actually returns data -- that
 // distinction is what lets serveTunnel apply its failed-dial backoff to a
-// tunnel that never carried real traffic, instead of busy-looping.
+// tunnel that never carried real traffic, instead of busy-looping. (An
+// earlier Revision C attempt added this same firstByteConn but still wired
+// the *next-tunnel* trigger to a cruder "first Read attempt" signal, which
+// fired instantly even on a doomed Read and defeated the backoff anyway --
+// Revision D removed that separate signal and drives everything off this
+// one.)
 func TestFirstByteConnOnlyFiresOnRealData(t *testing.T) {
 	client, server := net.Pipe()
 

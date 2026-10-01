@@ -598,24 +598,6 @@ func (l *singleConnListener) Close() error {
 
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
-// firstUseConn invokes onFirstUse (at most once) just before its first Read
-// returns -- i.e. the moment agent-coordinator actually starts forwarding a
-// claimed tunnel's first request onto the wire, as opposed to the (possibly
-// much later, possibly never) moment that request/connection finishes and
-// the underlying net.Conn closes. serveTunnel uses this to open the *next*
-// standing tunnel as soon as the current one is claimed, instead of waiting
-// for it to close.
-type firstUseConn struct {
-	net.Conn
-	once       sync.Once
-	onFirstUse func()
-}
-
-func (c *firstUseConn) Read(b []byte) (int, error) {
-	c.once.Do(c.onFirstUse)
-	return c.Conn.Read(b)
-}
-
 // serveTunnel opens the standing tunnel connection a NAT'd local-representative
 // needs (see representable.DialTunnel) and serves this LR's own HTTP mux over
 // it, so agent-coordinator's proxy can reach this host without dialing back
@@ -633,26 +615,41 @@ func (c *firstUseConn) Read(b []byte) (int, error) {
 // showing "no sessions yet" and a false "not connected" footer, even though
 // the remote-session fan-out -- a separate, one-shot HTTP call that doesn't
 // compete for this tunnel -- had just successfully listed that same host's
-// sessions): as soon as the standing tunnel is actually claimed and used (its
-// first Read, below), this immediately starts opening its replacement
-// concurrently, rather than waiting for agent-coordinator to finish with (and
-// close) the one just claimed.
+// sessions): as soon as the standing tunnel is actually claimed and used,
+// this immediately starts opening its replacement concurrently, rather than
+// waiting for agent-coordinator to finish with (and close) the one just
+// claimed.
 //
-// Revision C fixed a busy-loop this left behind: firstUseConn's onFirstUse
-// fires the instant a Read is *attempted*, regardless of whether that Read
-// ever actually succeeds -- so a tunnel that gets parked and then torn down
+// Revision J judged "claimed and used" by the first Read *attempt*, via a
+// now-removed firstUseConn wrapper, regardless of whether that Read ever
+// actually succeeded -- so a tunnel that gets parked and then torn down
 // (agent-coordinator restarted, a stale registration got evicted, a NAT/
 // firewall idle-reaped it) before any real request ever lands on it still
-// counts as "used": http.Serve's very first attempt to parse a request off
-// the dead conn fails instantly, firing onFirstUse on its way to an
+// counted as "used": http.Serve's very first attempt to parse a request off
+// the dead conn fails instantly, firing that trigger on its way to an
 // immediate "closed" below. With no delay anywhere on that path, a tunnel
 // that keeps dying this way (see the architecture doc's "known gap" note on
-// NAT-idle-reaping) reopens and redials at native CPU speed -- "tunnel:
-// opened"/"tunnel: closed (EOF)" pairs many times a second. usedForReal
-// tracks whether the connection ever got a Read that returned actual bytes
-// (real traffic), as opposed to an immediate error; closing without ever
-// reaching that point now gets the same 2s backoff as a failed dial, instead
-// of redialing instantly.
+// NAT-idle-reaping) reopened and redialed at native CPU speed -- "tunnel:
+// opened"/"tunnel: closed (EOF)" pairs many times a second.
+//
+// Revision C tried to fix this by adding firstByteConn below, which only
+// fires once a Read actually returns bytes, and gating a 2s backoff on
+// whether it ever did -- but it left the *trigger that opens the next
+// tunnel* wired to the old first-Read-attempt signal instead of switching it
+// to firstByteConn too. That trigger called openNext() directly and
+// unconditionally, and openNextOnce means whichever caller reaches it first
+// wins -- so a dead conn's immediate, failed first Read still spawned the
+// replacement instantly, and the backoff-gated openNext() call below arrived
+// after the fact as a no-op. The busy loop was unchanged in practice.
+//
+// Revision D removes the separate first-attempt trigger entirely and drives
+// both decisions -- "this tunnel is genuinely in use, open a concurrent
+// replacement" and "this tunnel was used for real, so no backoff is needed"
+// -- off the single firstByteConn.onFirstByte signal below: a tunnel that
+// returns real data opens its replacement immediately (preserving the
+// no-starvation behavior Revision J added), while a tunnel that dies
+// without ever doing so only gets a replacement after the same 2s backoff
+// as a failed dial.
 func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool) {
 	// This goroutine serves exactly one tunnel connection per iteration, then
 	// returns -- a replacement is always handed off to a freshly spawned
@@ -674,8 +671,10 @@ func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool
 				go s.serveTunnel(addr, devMode, stillCurrent)
 			})
 		}
-		wrapped := &firstUseConn{Conn: conn, onFirstUse: openNext}
-		tracked := &firstByteConn{Conn: wrapped, onFirstByte: func() { usedForReal.Store(true) }}
+		tracked := &firstByteConn{Conn: conn, onFirstByte: func() {
+			usedForReal.Store(true)
+			openNext()
+		}}
 
 		err = http.Serve(newSingleConnListener(tracked), s.setupRoutes(devMode))
 		log.Printf("tunnel: closed (%v)", err)
@@ -696,11 +695,13 @@ func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool
 }
 
 // firstByteConn wraps a net.Conn and invokes onFirstByte (at most once) the
-// first time a Read actually returns data, as opposed to firstUseConn's
-// onFirstUse, which fires on the first Read *attempt* whether or not it
-// succeeds. serveTunnel uses this to tell a tunnel that carried real traffic
-// apart from one that died before ever doing so, so only the latter gets the
-// failed-dial backoff on redial.
+// first time a Read actually returns data, as opposed to a Read merely being
+// *attempted* -- a dead/reaped tunnel conn's first (and only) Read fails
+// instantly with zero bytes, so it never fires. serveTunnel (see Revision D
+// above) drives both "open the next tunnel concurrently" and "this tunnel
+// was used for real, skip the backoff" off this single signal, so a tunnel
+// that never carries real traffic can no longer trigger an instant,
+// backoff-free redial of its replacement.
 type firstByteConn struct {
 	net.Conn
 	once        sync.Once

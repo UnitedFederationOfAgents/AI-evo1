@@ -256,12 +256,14 @@ I implemented the N==1 tunnel design from Revision I: `representable` gained `Di
 
 I added tests in all three packages (tunnel round-trip/replacement in `representable`, the dial-prefers-tunnel/fallback behavior in `agent-coordinator`, and the `singleConnListener` accept/close synchronization in `local-representative`), and documented the mechanism in `agent-coordinator/docs/architecture.md`. As with prior revisions, the sandbox blocks `go build`/`go test`/`gofmt`, so this was verified by careful manual read rather than compiling.
 
+## Resource 3 -- Debug Sessions 2
 
-## <REPLACE-Revision|Retry> J
+Some improvement, still problems.
 
-<REPLACE-PROMPT>
+- [17908835501023656856397944330255.jpg](b3eef36d_17908835501023656856397944330255.jpg)
 
+## Revision J
 
-## Human-Prompt
+Let's look at 'Debug Sessions 2' and correct the new errors we see.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We see that the new network approach has lead to some progress -- it's the first time we've seen our remote sessions -- but things are not yet fully functional.

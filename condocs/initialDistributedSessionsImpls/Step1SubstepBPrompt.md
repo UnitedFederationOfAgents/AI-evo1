@@ -182,11 +182,10 @@ The Network Debug 1 log made the fix obvious: the `[lr->ac]` 502s at a consisten
 I fixed the error-propagation gap: `local-representative/sessions.go` now has `pullSessionFilesFrom` return whether the peer was actually reachable, aggregated into a new `SessionPullResultMsg.Errors` count returned from `handleSessionsPull`; `session-manager/repr.go`'s `requestSessionPull`/`triggerSessionSync` now read that field instead of ignoring the body, and `sendSessionView` tags the rendered view `SyncIncomplete` when any peer couldn't be reached. The frontend (`types.ts`/`App.tsx`/`index.css`) shows a warning banner on the session transcript in that case, so a session that's merely unsynced because a remote host is down no longer looks indistinguishable from a genuinely empty one. Added/updated Go tests in both binaries covering the new return values; the underlying network reachability to `8082c7f2a286-o3x0` itself is an infra issue outside this codebase's fix (confirming the host is actually up and routable on `192.168.0.166:8081` is the next step if the session still doesn't appear after this).
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+Note that hosts connecting to AC may not be routable in the other direction. That appears to be the invalid assumption here.
 
+We need the connections to be held from the connecting LR instances because they may be on private network segments which can reach out to touch AC and form a connection, but not vice-versa.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's correct things with respect to this understanding if it is simple, or let's explain the decision path if it is complex.

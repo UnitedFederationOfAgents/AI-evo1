@@ -267,3 +267,26 @@ Some improvement, still problems.
 Let's look at 'Debug Sessions 2' and correct the new errors we see.
 
 We see that the new network approach has lead to some progress -- it's the first time we've seen our remote sessions -- but things are not yet fully functional.
+
+
+prompt: [`8981bc4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8981bc4a7c0c3c6956f28b0c73c277b189069d98) → reply: [`7de30c4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7de30c4f7a07d991b26dd9e57573eb28662e6eef)
+
+## Reply J
+
+Confirmed — no condoc files touched, only the three implementation/docs files above.
+
+## Summary
+
+I traced the screenshot in "Debug Sessions 2" to a real starvation bug in Revision I's N==1 tunnel: once agent-coordinator's shared `http.Transport` claimed the single standing tunnel for *any* request, it held onto that connection for the rest of its lifetime (keep-alive reuse, or indefinitely for a long-lived connection like the dashboard's own `/host/<id>/ws`), and `local-representative` only redialed a replacement after the claimed connection *closed* — so every other proxied request to that host (the session list fetch, the "connected to local-representative" status check, etc.) fell back to a direct dial that's guaranteed to fail for a NAT'd host, exactly matching the "no sessions yet" / false "not connected" symptoms, while the separate one-shot session-discovery fan-out (which doesn't compete for this tunnel) had just started working.
+
+Fixed in `local-representative/main.go`: `serveTunnel` now wraps each standing tunnel in a new `firstUseConn` that fires as soon as it's actually read from (i.e. the moment agent-coordinator starts using it, not when it's done), immediately spawning a goroutine to open the replacement tunnel concurrently rather than waiting for the current one to close. Restructured the retry loop so failed-dial retries stay an actual loop (unbounded recursion during a long AC outage was a latent stack-growth risk I also cleaned up along the way). Added a unit test for the new `firstUseConn` and updated `agent-coordinator/docs/architecture.md` to describe the fix.
+
+
+## <REPLACE-Revision|Retry> K
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

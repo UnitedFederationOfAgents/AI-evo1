@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -55,5 +56,46 @@ func TestSingleConnListenerAcceptsOnceThenUnblocksOnClose(t *testing.T) {
 	// again must not panic or block.
 	if err := l.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestFirstUseConnFiresOnceOnFirstRead covers the Revision J fix (see
+// serveTunnel, Step1SubstepBPrompt.md): a freshly dialed standing tunnel must
+// trigger opening its replacement as soon as it's actually read from -- i.e.
+// as soon as agent-coordinator starts forwarding a claimed tunnel's first
+// request -- not only once it closes, so a long-lived claim (the dashboard's
+// own WebSocket) can't starve every other proxied request for its whole
+// lifetime.
+func TestFirstUseConnFiresOnceOnFirstRead(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	var fired int
+	var mu sync.Mutex
+	c := &firstUseConn{Conn: server, onFirstUse: func() {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	}}
+
+	go func() {
+		client.Write([]byte("a"))
+		client.Write([]byte("b"))
+	}()
+
+	buf := make([]byte, 1)
+	if _, err := c.Read(buf); err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+	if _, err := c.Read(buf); err != nil {
+		t.Fatalf("second Read: %v", err)
+	}
+
+	mu.Lock()
+	got := fired
+	mu.Unlock()
+	if got != 1 {
+		t.Errorf("onFirstUse fired %d times, want exactly 1", got)
 	}
 }

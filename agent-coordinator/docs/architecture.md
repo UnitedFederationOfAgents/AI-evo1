@@ -78,11 +78,16 @@ claim that host's pooled tunnel conn and only falling back to a real `net.Dial`
 if none is parked (e.g. a host with no tunnel yet, or in tests) — `net/http`'s
 own client/server machinery doesn't care whether the conn it's handed came
 from a real dial or a pre-existing stream. This iteration keeps it to exactly
-one standing tunnel per LR (`N == 1`): if it drops, LR redials a replacement;
-concurrent requests beyond that single connection's keep-alive reuse, and
-NAT-idle-reaping a connection no one is actively using, are known gaps left
-for a follow-up (see `condocs/initialDistributedSessionsImpls/
-Step1SubstepBPrompt.md`, Revisions H/I).
+one standing tunnel per LR (`N == 1`), but LR redials its replacement as soon
+as the standing tunnel is actually claimed and used — not only once it drops —
+so a long-lived claim (notably the dashboard's own `/host/<id>/ws`
+connection) can't starve every other proxied request for the rest of its
+lifetime; a request that still beats the replacement into existence falls
+back to a direct dial like before, which only resolves if that LR also
+happens to be reachable that way (see Revision J). NAT-idle-reaping a
+connection no one is actively using is a known gap left for a follow-up (see
+`condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md`, Revisions
+H/I/J).
 
 ### condoccer in the chain
 

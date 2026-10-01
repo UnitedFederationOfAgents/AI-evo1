@@ -597,18 +597,50 @@ func (l *singleConnListener) Close() error {
 
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
+// firstUseConn invokes onFirstUse (at most once) just before its first Read
+// returns -- i.e. the moment agent-coordinator actually starts forwarding a
+// claimed tunnel's first request onto the wire, as opposed to the (possibly
+// much later, possibly never) moment that request/connection finishes and
+// the underlying net.Conn closes. serveTunnel uses this to open the *next*
+// standing tunnel as soon as the current one is claimed, instead of waiting
+// for it to close.
+type firstUseConn struct {
+	net.Conn
+	once       sync.Once
+	onFirstUse func()
+}
+
+func (c *firstUseConn) Read(b []byte) (int, error) {
+	c.once.Do(c.onFirstUse)
+	return c.Conn.Read(b)
+}
+
 // serveTunnel opens the standing tunnel connection a NAT'd local-representative
 // needs (see representable.DialTunnel) and serves this LR's own HTTP mux over
 // it, so agent-coordinator's proxy can reach this host without dialing back
 // in -- the only direction guaranteed to work from behind NAT is the one LR
 // already opened (see condocs/initialDistributedSessionsImpls/
 // Step1SubstepBPrompt.md, Revision I). For this iteration there is exactly
-// one such connection (N==1), replacing agent-coordinator's old dial-out for
-// this host entirely: when it drops -- idle-reaped by a NAT middlebox, or
-// simply used up and closed -- this redials a replacement for as long as
-// stillCurrent (tied to the owning connectAC call) still says this
-// agent-coordinator connection is the live one.
+// one such connection (N==1) parked at any moment, replacing
+// agent-coordinator's old dial-out for this host entirely.
+//
+// A naive "redial only after the current one closes" loop starves every
+// other proxied request for as long as the current tunnel stays claimed --
+// which, for a long-lived use like the dashboard's own WebSocket (see
+// handleWS), can be the entire lifetime of that browser tab. Revision J
+// fixed this (see Resource 3, "Debug Sessions 2": the per-host dashboard
+// showing "no sessions yet" and a false "not connected" footer, even though
+// the remote-session fan-out -- a separate, one-shot HTTP call that doesn't
+// compete for this tunnel -- had just successfully listed that same host's
+// sessions): as soon as the standing tunnel is actually claimed and used (its
+// first Read, below), this immediately starts opening its replacement
+// concurrently, rather than waiting for agent-coordinator to finish with (and
+// close) the one just claimed.
 func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool) {
+	// This goroutine serves exactly one tunnel connection per iteration, then
+	// returns -- a replacement is always handed off to a freshly spawned
+	// goroutine (see openNext below) rather than looped back onto here, so a
+	// long AC outage retrying every 2s can't grow this call stack unbounded.
 	for stillCurrent() {
 		conn, err := representable.DialTunnel(addr, s.lrName, 5*time.Second)
 		if err != nil {
@@ -617,8 +649,24 @@ func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool
 			continue
 		}
 		log.Printf("tunnel: opened to agent-coordinator at %s", addr)
-		err = http.Serve(newSingleConnListener(conn), s.setupRoutes(devMode))
-		log.Printf("tunnel: closed (%v) -- reopening", err)
+
+		var openNextOnce sync.Once
+		openNext := func() {
+			openNextOnce.Do(func() {
+				go s.serveTunnel(addr, devMode, stillCurrent)
+			})
+		}
+		wrapped := &firstUseConn{Conn: conn, onFirstUse: openNext}
+
+		err = http.Serve(newSingleConnListener(wrapped), s.setupRoutes(devMode))
+		log.Printf("tunnel: closed (%v)", err)
+		// If this tunnel closed (idle-reaped, or the AC process restarted)
+		// before agent-coordinator ever claimed and used it, openNext above
+		// never fired -- make sure a replacement still gets opened. Either
+		// way, a replacement is now owned by another goroutine, so this one
+		// is done.
+		openNext()
+		return
 	}
 }
 

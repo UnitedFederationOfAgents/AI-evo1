@@ -210,11 +210,44 @@ This is not a quick fix like B/C/D — it's a protocol-level change, for several
 Given all of that touches a shared library (`representable`), both ends of the wire protocol, new concurrency control, and large-payload framing — and the sandbox still blocks `go build`/`go test`, so a change this size would ship unverified by anything but manual read — I'm not attempting it as a drive-by fix. The right-sized path is a dedicated follow-up: (1) extend `representable`'s protocol with correlated request/response message types plus a `connState` write mutex (small, testable in isolation); (2) reroute AC's proxy/relay handlers to send requests down that channel instead of dialing out, with a pending-request map and a timeout mirroring the existing 2s/5s/8s budgets; (3) add chunked/streamed body framing, since full-dashboard HTML/JS and file transfers won't fit a single JSON line — landing the small-payload cases (session index/listing JSON) first would already fix the original "Hambone23"/8082c symptom, with UI passthrough and file transfer following once framing is in place.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+Let's go ahead with a different implementation ---
+
+I pulled up the real state this refers to — `representable/representable.go`, `agent-coordinator/main.go`'s `proxyToHost`/`resolveHostTarget`/`hostProxyTransport`, and `local-representative/main.go`'s `representable.Connect` + its own `setupRoutes` mux — to ground this in what Reply H actually found, rather than the abstract idea.
+
+## What Reply H already established
+
+Today there's exactly **one** TCP socket per LR, and it only ever goes LR→AC (`representable.Connect` dials out from LR at `main.go:561`). Every proxied request — dashboard HTML/JS/CSS, session discovery, file pulls, uploads — goes through `proxyToHost`/`handleFileUploadRelay`, which make AC **dial out fresh** to LR (`resolveHostTarget` + `hostProxyTransport`, `agent-coordinator/main.go:1022-1095`). That's backwards for a NATed LR: the only socket guaranteed to work is the one LR already opened, and it's being ignored.
+
+Reply H's rejected fix was to tunnel requests *through that existing socket*, reusing `representable`'s `Msg`/`ServerMsg` JSON-line protocol. It correctly shot that down: no correlation ID, no write mutex, no chunking, 64KB line cap — turning a heartbeat/state protocol into an RPC multiplexer is real surgery on a shared library.
+
+## Your proposal: a second, pooled socket instead
+
+This is a different shape, and it sidesteps most of what killed the first idea:
+
+- At LR→AC connect time, LR dials AC **again**, N times, opening a small pool of plain sockets held idle — separate from the control connection, not wrapped in `Msg`/`ServerMsg` framing at all.
+- AC's `acceptLoop`/`handleConn` tags these (a one-line handshake distinguishing "control" vs "tunnel" + host id) and parks them in a per-host pool instead of treating them as a `connState`.
+- `hostProxyTransport`'s `DialContext` gets swapped for a dialer that pulls a conn out of that host's pool instead of calling `net.Dial`. **`proxyToHost`'s reverse-proxy logic doesn't change at all** — `http.Transport` doesn't care whether its `net.Conn` came from a real dial or a pre-existing pooled stream.
+- On LR's side, a claimed tunnel conn gets served with `http.Serve(singleConnListener{conn}, s.setupRoutes(cfg.dev))` — the *exact same mux* LR's real HTTP port uses, so no reduced-trust side door.
+
+Why this is better than the rejected alternative: it reuses `net/http`'s own client/server machinery for the actual payload — full HTTP/1.1 semantics, chunked bodies, arbitrary file sizes — instead of inventing a new wire format. And correlation is free: a request's identity *is* the socket it got handed, for the duration it holds it. No correlation IDs, no shared-socket write mutex (Reply H's concern #4 — gone, since each in-flight request owns a dedicated conn). The only new control-channel primitive needed is tiny: a `need-tunnel` command AC can send down the *existing* connection when a host's pool is empty and demand bursts past standing capacity — one line in LR's existing command dispatcher, not a protocol redesign.
+
+## Where it's genuinely harder, not easier
+
+- **NAT/firewall idle-reaping.** The whole reason this is needed is that LR sits behind NAT — and idle sockets are exactly what those middleboxes kill first, silently, often well under the main connection's heartbeat interval. A pooled-but-idle tunnel conn can die without either side knowing until AC tries to use it. That needs its own keepalive/health-check discipline per pooled conn, separate from (if parallel to) `heartbeatLoop`.
+- **FD/resource footprint scales with fleet size.** Today: one socket per LR. With pooling: N idle sockets per LR, held on AC the whole time regardless of whether that host is being actively used. Fine at a handful of hosts; a real capacity question if this grows to many LRs on one AC.
+- **Still a cross-binary, multi-file change** — `representable` (new tunnel handshake + pool), `agent-coordinator` (pool-aware dialer, `need-tunnel` send), `local-representative` (pool maintenance loop, single-conn serve) — and the sandbox still can't `go build`/`go test` to verify it. Smaller and lower-risk than Reply H's RPC-correlation design, but still a dedicated revision, not a drive-by.
+
+## Recommendation
+
+Worth pursuing as Revision I instead of the request/response-correlation path Reply H sketched — it gets you real HTTP semantics for free and eliminates the hardest parts of that design (correlation, framing, write arbitration) by construction. The cost moves from "protocol design" to "connection-pool lifecycle management" (sizing, NAT-idle health checks, burst replenishment), which is a more bounded and more testable-in-isolation problem. If you want, I can sketch the concrete diff shape (new `representable.DialTunnel`/pool type, the `DialContext` swap, LR's single-conn serve loop) before anyone writes code against it.
+
+--- for this iteration we will have N == 1, we will open exactly one additional connection. This connection will take over the behaviour we used to accomodate with 'dial out'.
 
 
 ## Human-Prompt
 
 When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+
+!HANDOFF!

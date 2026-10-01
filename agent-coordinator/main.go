@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -47,6 +48,30 @@ const relayedUploadHeader = "X-UFA-Relayed-Upload-By"
 // acRelayStamp is the value both proxiedHeader and relayedUploadHeader carry
 // on a request handleFileUploadRelay makes.
 const acRelayStamp = "agent-coordinator"
+
+// hostDialTimeout bounds how long proxyToHost's reverse proxy and
+// handleFileUploadRelay's outbound request will wait to establish the TCP
+// connection to a peer host's local-representative. Without it, both ride
+// http.DefaultTransport's 30s dial timeout -- far longer than every caller
+// that sits on top of this proxy budgets for the whole round trip
+// (local-representative's sessionsDiscoverHTTPTimeout is 2s,
+// sessionsPullHTTPTimeout 5s; federation-command's and session-manager's own
+// end-to-end discovery timeout 8s). Against an unreachable host (firewalled,
+// an unpublished container port, offline) every one of those callers was
+// already giving up on its own side -- "sessions discover: indexing host
+// ...: context deadline exceeded" -- while AC's dial kept running uselessly
+// in the background, and a human navigating straight to that host's
+// dashboard through AC sat on a spinner for up to 30s before seeing "not
+// reachable". A short dial timeout here makes AC's own "not reachable"
+// verdict arrive well inside every existing caller's budget instead of
+// racing (and losing to) it.
+const hostDialTimeout = 1500 * time.Millisecond
+
+// hostProxyTransport is shared by proxyToHost and handleFileUploadRelay --
+// see hostDialTimeout.
+var hostProxyTransport = &http.Transport{
+	DialContext: (&net.Dialer{Timeout: hostDialTimeout}).DialContext,
+}
 
 // Host represents a local-representative instance known to agent-coordinator.
 type Host struct {
@@ -989,6 +1014,7 @@ func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
 	target := &url.URL{Scheme: "http", Host: addr}
 	prefix := "/host/" + hostID
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = hostProxyTransport
 	base := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		base(req)
@@ -1034,7 +1060,8 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 	outReq.Header.Set(proxiedHeader, acRelayStamp)
 	outReq.Header.Set(relayedUploadHeader, acRelayStamp)
 
-	resp, err := http.DefaultClient.Do(outReq)
+	relayClient := &http.Client{Transport: hostProxyTransport}
+	resp, err := relayClient.Do(outReq)
 	if err != nil {
 		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)
 		return

@@ -98,3 +98,22 @@ We now see this new error log as well:
 "
 
 Let's fix this interaction.
+
+
+prompt: [`d3e1146`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d3e1146b4537c9ad929c7ac56111442e06c78a2f) → reply: [`c0c461b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c0c461b71c0f47b7e2736081e899f9d130068522)
+
+## Reply D
+
+I traced the two new errors to the same root cause: `agent-coordinator`'s `proxyToHost` (and `handleFileUploadRelay`) used Go's default HTTP transport, whose dial timeout is 30s — far longer than every caller stacked on top of it budgets for the whole round trip (local-representative's 2s discovery hop, 5s pull hop; federation-command's/session-manager's 8s end-to-end discovery timeout). Against the now-unreachable `8082c7f2a286-o3x0` host, that meant AC's own dial kept running long after callers had already given up with "context deadline exceeded," and a human browsing straight to that host's dashboard sat on a spinner for up to 30s before finally seeing "not reachable."
+
+Fixed in `agent-coordinator/main.go` by giving both `proxyToHost` and `handleFileUploadRelay` a shared transport with a 1.5s dial timeout (`hostProxyTransport`/`hostDialTimeout`), so AC's own "not reachable" verdict now lands comfortably inside every existing caller's timeout budget instead of racing (and losing to) it. As before, the sandbox blocks `go build`/`go test`, so this was verified by careful manual read and cross-checking existing tests (which all use fast loopback `httptest` servers, well under 1.5s) rather than compiling.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -2,6 +2,8 @@ package representable
 
 import (
 	"encoding/json"
+	"io"
+	"net"
 	"testing"
 	"time"
 )
@@ -200,6 +202,119 @@ func TestServerNoHTTPPortDisclosesEmpty(t *testing.T) {
 	waitFor(t, func() bool { return c.ModeMismatch() || c.PeerMode() == ModeOps }, "client never received hello")
 	if got := c.PeerHTTPPort(); got != "" {
 		t.Errorf("PeerHTTPPort = %q, want empty", got)
+	}
+}
+
+// TestDialTunnelClaimTunnelRoundTrip is an end-to-end (real TCP loopback)
+// check of the N==1 tunnel mechanism added in Step1SubstepBPrompt.md
+// Revision I: a DialTunnel connection is parked under its handshake name
+// (not run through the Msg/ServerMsg JSON framing a control connection
+// uses), ClaimTunnel hands back that exact raw stream, takes full ownership
+// (a second claim finds nothing), and an unknown name reports ok=false.
+func TestDialTunnelClaimTunnelRoundTrip(t *testing.T) {
+	s, addr := newTestServer(t, ModeOps)
+
+	if _, ok := s.ClaimTunnel("host-a"); ok {
+		t.Fatal("ClaimTunnel should report false before any tunnel is parked")
+	}
+
+	conn, err := DialTunnel(addr, "host-a", time.Second)
+	if err != nil {
+		t.Fatalf("DialTunnel: %v", err)
+	}
+	defer conn.Close()
+
+	var tunnel net.Conn
+	waitFor(t, func() bool {
+		c, ok := s.ClaimTunnel("host-a")
+		if ok {
+			tunnel = c
+		}
+		return ok
+	}, "server never parked the dialed tunnel under its handshake name")
+	defer tunnel.Close()
+
+	if _, ok := s.ClaimTunnel("host-a"); ok {
+		t.Fatal("ClaimTunnel should report false once the tunnel has already been claimed")
+	}
+
+	const payload = "hello over the tunnel"
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := conn.Write([]byte(payload))
+		errCh <- err
+	}()
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(tunnel, buf); err != nil {
+		t.Fatalf("reading payload through the claimed tunnel: %v", err)
+	}
+	if string(buf) != payload {
+		t.Errorf("got %q, want %q", buf, payload)
+	}
+	if err := <-errCh; err != nil {
+		t.Errorf("Write on the dialing side: %v", err)
+	}
+}
+
+// TestRegisterTunnelReplacesPrevious verifies a second DialTunnel under the
+// same name supersedes whatever was parked there, so there is always at most
+// one standing tunnel per client -- matching serveTunnel's redial-on-drop
+// behavior on the local-representative side.
+func TestRegisterTunnelReplacesPrevious(t *testing.T) {
+	s, addr := newTestServer(t, ModeOps)
+
+	first, err := DialTunnel(addr, "host-a", time.Second)
+	if err != nil {
+		t.Fatalf("DialTunnel (first): %v", err)
+	}
+	defer first.Close()
+
+	var firstParked net.Conn
+	waitFor(t, func() bool {
+		s.tunnelsMu.Lock()
+		c, ok := s.tunnels["host-a"]
+		s.tunnelsMu.Unlock()
+		if ok {
+			firstParked = c
+		}
+		return ok
+	}, "first tunnel never parked")
+
+	second, err := DialTunnel(addr, "host-a", time.Second)
+	if err != nil {
+		t.Fatalf("DialTunnel (second): %v", err)
+	}
+	defer second.Close()
+
+	// Wait for the map entry to actually change, not just be present -- it's
+	// already present (the first conn) the instant this check starts.
+	var claimed net.Conn
+	waitFor(t, func() bool {
+		s.tunnelsMu.Lock()
+		conn, ok := s.tunnels["host-a"]
+		s.tunnelsMu.Unlock()
+		if ok && conn != firstParked {
+			claimed = conn
+			return true
+		}
+		return false
+	}, "second tunnel never replaced the first")
+
+	// Exactly one tunnel is tracked under the name at a time.
+	s.tunnelsMu.Lock()
+	n := len(s.tunnels)
+	s.tunnelsMu.Unlock()
+	if n != 1 {
+		t.Fatalf("tunnels map has %d entries, want 1", n)
+	}
+
+	// The parked conn is readable -- i.e. it's live, not the first
+	// connection's now-closed server-side peer.
+	go second.Write([]byte("x"))
+	buf := make([]byte, 1)
+	claimed.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(claimed, buf); err != nil {
+		t.Fatalf("reading from the parked (should be the second) tunnel: %v", err)
 	}
 }
 

@@ -242,3 +242,26 @@ Why this is better than the rejected alternative: it reuses `net/http`'s own cli
 Worth pursuing as Revision I instead of the request/response-correlation path Reply H sketched — it gets you real HTTP semantics for free and eliminates the hardest parts of that design (correlation, framing, write arbitration) by construction. The cost moves from "protocol design" to "connection-pool lifecycle management" (sizing, NAT-idle health checks, burst replenishment), which is a more bounded and more testable-in-isolation problem. If you want, I can sketch the concrete diff shape (new `representable.DialTunnel`/pool type, the `DialContext` swap, LR's single-conn serve loop) before anyone writes code against it.
 
 --- for this iteration we will have N == 1, we will open exactly one additional connection. This connection will take over the behaviour we used to accomodate with 'dial out'.
+
+
+prompt: [`7ee5ff5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7ee5ff5c9f741c11b6bfd8ef67c2a4caaa8f2c66) → reply: [`6b05de2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6b05de23e3e0d06d978f800f4f474414be8a5019)
+
+## Reply I
+
+Everything is wired consistently and no stale references remain. The implementation is complete.
+
+## Summary
+
+I implemented the N==1 tunnel design from Revision I: `representable` gained `DialTunnel` (a second, plain TCP connection tagged with a one-line `TUNNEL <name>` handshake, distinct from the JSON-framed control connection) and `Server.ClaimTunnel`/`registerTunnel` to park/claim it, detected in `handleConn` via a non-consuming peek. `local-representative` now opens this standing tunnel right after connecting to `agent-coordinator` (`serveTunnel`), serving its own HTTP mux over it via a `singleConnListener` that redials a replacement whenever the tunnel drops. `agent-coordinator`'s shared proxy transport (`newHostProxyTransport`, now a `Server` field so it can see `reprServer`) prefers claiming a host's pooled tunnel over dialing out fresh, falling back to a direct dial when none is parked — keeping `proxyToHost`'s reverse-proxy logic and existing tests untouched.
+
+I added tests in all three packages (tunnel round-trip/replacement in `representable`, the dial-prefers-tunnel/fallback behavior in `agent-coordinator`, and the `singleConnListener` accept/close synchronization in `local-representative`), and documented the mechanism in `agent-coordinator/docs/architecture.md`. As with prior revisions, the sandbox blocks `go build`/`go test`/`gofmt`, so this was verified by careful manual read rather than compiling.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

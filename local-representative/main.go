@@ -4,8 +4,10 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -168,6 +170,7 @@ type Server struct {
 	reprServer *representable.Server
 	lrName     string
 	devMode    bool // --dev-mode: cascaded to every managed instance this LR launches — see docs/DevMode.md
+	dev        bool // --dev: skip serving the embedded frontend (see setupRoutes) — also what the tunnel conn (see serveTunnel) serves
 
 	// repoWatch is the dev-repo watcher (--dev-repo — see docs/DevMode.md and
 	// repowatch.go); nil unless this LR was launched with --dev-repo.
@@ -543,6 +546,82 @@ func (s *Server) pushStateToAC() {
 	}
 }
 
+// notifyCloseConn wraps a net.Conn so closing it -- as net/http does once the
+// peer (agent-coordinator's proxy) disconnects -- also signals a
+// singleConnListener, so its second Accept call returns instead of blocking
+// forever. That lets http.Serve return from serveTunnel so it can redial a
+// replacement tunnel.
+type notifyCloseConn struct {
+	net.Conn
+	onClose func()
+}
+
+func (c *notifyCloseConn) Close() error {
+	err := c.Conn.Close()
+	c.onClose()
+	return err
+}
+
+// singleConnListener is a net.Listener whose Accept hands back one
+// pre-established connection exactly once, then blocks until Close -- just
+// enough of net.Listener for http.Serve to run a full http.Server off a
+// single tunnel connection (see serveTunnel) instead of a real listening
+// socket.
+type singleConnListener struct {
+	conn   net.Conn
+	used   bool
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	l := &singleConnListener{closed: make(chan struct{})}
+	signalClosed := func() { l.once.Do(func() { close(l.closed) }) }
+	l.conn = &notifyCloseConn{Conn: conn, onClose: signalClosed}
+	return l
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if !l.used {
+		l.used = true
+		return l.conn, nil
+	}
+	<-l.closed
+	return nil, io.EOF
+}
+
+func (l *singleConnListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// serveTunnel opens the standing tunnel connection a NAT'd local-representative
+// needs (see representable.DialTunnel) and serves this LR's own HTTP mux over
+// it, so agent-coordinator's proxy can reach this host without dialing back
+// in -- the only direction guaranteed to work from behind NAT is the one LR
+// already opened (see condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md, Revision I). For this iteration there is exactly
+// one such connection (N==1), replacing agent-coordinator's old dial-out for
+// this host entirely: when it drops -- idle-reaped by a NAT middlebox, or
+// simply used up and closed -- this redials a replacement for as long as
+// stillCurrent (tied to the owning connectAC call) still says this
+// agent-coordinator connection is the live one.
+func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool) {
+	for stillCurrent() {
+		conn, err := representable.DialTunnel(addr, s.lrName, 5*time.Second)
+		if err != nil {
+			log.Printf("tunnel: failed to open to agent-coordinator at %s: %v", addr, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		log.Printf("tunnel: opened to agent-coordinator at %s", addr)
+		err = http.Serve(newSingleConnListener(conn), s.setupRoutes(devMode))
+		log.Printf("tunnel: closed (%v) -- reopening", err)
+	}
+}
+
 // connectAC dials agent-coordinator and maintains the connection lifecycle.
 // Must be called in its own goroutine.
 func (s *Server) connectAC(host, port string) {
@@ -597,6 +676,15 @@ func (s *Server) connectAC(host, port string) {
 	})
 	client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
 		s.setModeMismatch("agent-coordinator", mismatched, peerMode)
+	})
+
+	// Open this connection's standing tunnel (see serveTunnel) -- the second,
+	// plain socket agent-coordinator's proxy now reaches this host through,
+	// instead of dialing back in.
+	go s.serveTunnel(addr, s.dev, func() bool {
+		s.acMu.RLock()
+		defer s.acMu.RUnlock()
+		return s.acClient == client
 	})
 
 	s.pushStateToAC()
@@ -1348,6 +1436,7 @@ func main() {
 		}
 	}
 	s.devMode = cfg.devMode
+	s.dev = cfg.dev
 	if s.devMode {
 		// Per-sub-application out-of-date detection (see pollManagedVersions)
 		// is, like the rest of this dev/ops-mode-gated feature set, only

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -67,10 +68,34 @@ const acRelayStamp = "agent-coordinator"
 // racing (and losing to) it.
 const hostDialTimeout = 1500 * time.Millisecond
 
-// hostProxyTransport is shared by proxyToHost and handleFileUploadRelay --
-// see hostDialTimeout.
-var hostProxyTransport = &http.Transport{
-	DialContext: (&net.Dialer{Timeout: hostDialTimeout}).DialContext,
+// hostIDContextKey carries a proxied request's target host id through to
+// newHostProxyTransport's DialContext, which otherwise only sees the literal
+// "host:port" dial target proxyToHost/handleFileUploadRelay resolved -- it
+// needs the host id too, to look up that host's pooled tunnel connection.
+type hostIDContextKey struct{}
+
+// newHostProxyTransport builds the http.Transport shared by proxyToHost and
+// handleFileUploadRelay. Its DialContext prefers a pooled tunnel connection --
+// one local-representative already opened to this agent-coordinator via
+// representable.DialTunnel, the one direction guaranteed to work when LR
+// sits behind NAT -- over dialing the host fresh (see hostDialTimeout and
+// condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md, Revision
+// I). It falls back to a direct dial whenever that host has no tunnel
+// parked (no representable server at all, or the host just hasn't opened one
+// yet), so this keeps working unchanged for a same-machine/non-NAT host and
+// in tests, which never register a tunnel.
+func newHostProxyTransport(s *Server) *http.Transport {
+	dialer := &net.Dialer{Timeout: hostDialTimeout}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if hostID, _ := ctx.Value(hostIDContextKey{}).(string); hostID != "" && s.reprServer != nil {
+				if conn, ok := s.reprServer.ClaimTunnel(hostID); ok {
+					return conn, nil
+				}
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
 }
 
 // Host represents a local-representative instance known to agent-coordinator.
@@ -509,10 +534,14 @@ type Server struct {
 	// Step2Prompt.md.
 	tcMu        sync.RWMutex
 	tcAvailable bool
+
+	// hostProxyTransport is shared by proxyToHost and handleFileUploadRelay --
+	// see newHostProxyTransport.
+	hostProxyTransport *http.Transport
 }
 
 func newServer() *Server {
-	return &Server{
+	s := &Server{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -521,6 +550,8 @@ func newServer() *Server {
 		modeMismatches: make(map[string]ModeMismatchMsg),
 		startedAt:      time.Now(),
 	}
+	s.hostProxyTransport = newHostProxyTransport(s)
+	return s
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
@@ -1070,10 +1101,11 @@ func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errMsg, status)
 		return
 	}
+	r = r.WithContext(context.WithValue(r.Context(), hostIDContextKey{}, hostID))
 	target := &url.URL{Scheme: "http", Host: addr}
 	prefix := "/host/" + hostID
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = hostProxyTransport
+	proxy.Transport = s.hostProxyTransport
 	base := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		base(req)
@@ -1109,7 +1141,8 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
-	outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://"+addr+"/api/files", r.Body)
+	ctx := context.WithValue(r.Context(), hostIDContextKey{}, hostID)
+	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/api/files", r.Body)
 	if err != nil {
 		http.Error(w, "building relay request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1119,7 +1152,7 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 	outReq.Header.Set(proxiedHeader, acRelayStamp)
 	outReq.Header.Set(relayedUploadHeader, acRelayStamp)
 
-	relayClient := &http.Client{Transport: hostProxyTransport}
+	relayClient := &http.Client{Transport: s.hostProxyTransport}
 	resp, err := relayClient.Do(outReq)
 	if err != nil {
 		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)

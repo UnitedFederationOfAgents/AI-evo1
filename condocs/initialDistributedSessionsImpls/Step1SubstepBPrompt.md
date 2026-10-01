@@ -189,3 +189,32 @@ Note that hosts connecting to AC may not be routable in the other direction. Tha
 We need the connections to be held from the connecting LR instances because they may be on private network segments which can reach out to touch AC and form a connection, but not vice-versa.
 
 Let's correct things with respect to this understanding if it is simple, or let's explain the decision path if it is complex.
+
+
+prompt: [`a5a912a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a5a912a2a74b28ec5f4bd7c839bdb77384606067) → reply: [`ae623ef`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ae623ef173639ba9a94ffb57b084015655e5d9a6)
+
+## Reply H
+
+## Reply H
+
+Confirmed the invalid assumption, and it's a real one with teeth: `agent-coordinator`'s `/host/<id>/*` passthrough (`proxyToHost`, `agent-coordinator/main.go:1056-1095`) and `handleFileUploadRelay` both work by AC **dialing out fresh** to the LR host's own HTTP address (`resolveHostTarget`, `main.go:1022-1044`, combining the IP learned from the representable TCP connection's `RemoteAddr()` with the port LR discloses via a `"lr-http"` data message) — every single browser-dashboard view, session-discovery hop, session-file pull, and file upload for a remote host goes through a brand-new AC→LR socket. Meanwhile the *only* connection guaranteed to work in a NAT'd/private-segment setup is the one LR already opened to AC (`local-representative/main.go:561`, a persistent `representable` TCP connection, client-dials-server). So AC's proxy layer is dialing in exactly the direction that may be blocked, while ignoring a live, already-open socket going the other way.
+
+This is not a quick fix like B/C/D — it's a protocol-level change, for several concrete reasons I verified directly in `representable/representable.go`:
+
+- **No request/response concept exists on the wire.** `Msg` (LR→AC) only carries `heartbeat`/`state`/`log`/`data`; `ServerMsg` (AC→LR) only carries a bare `command` string or the one-time `hello`. Neither has a correlation ID, so even sending "do this HTTP request" and "here's the reply" as two new message types wouldn't tell AC which in-flight proxy call a given reply belongs to.
+- **The two directions aren't symmetric.** `Msg.Data`/`DataType` is already a generic JSON envelope, so an LR→AC "here's my response" message is cheap to add. But `ServerMsg` has no generic payload field — AC→LR "here's the request to serve" would need a genuinely new typed variant, not reuse of `command`.
+- **Framing can't carry what this proxy actually carries.** The protocol is newline-delimited JSON over `bufio.Scanner` (64KB default max line), and `proxyToHost` isn't just small API JSON — it transparently forwards LR's whole dashboard UI (HTML/JS/CSS) and `handleFileUploadRelay`/session-file pulls move arbitrary file content. None of that fits in one JSON line today; tunneling it means adding chunking/streaming to a protocol that has none.
+- **No write synchronization on the server side for this use.** AC's per-host `connState` (server-side) has no write mutex comparable to the client's `Client.writeMu`; concurrent proxied requests to the same host (session discovery already fans out concurrently per Revision B) would race writes onto the same socket.
+- **LR has no "serve this against my own mux and ship the response back" path.** Its command handler (`main.go:585-597`) dispatches bare strings by prefix; it doesn't currently loop a request back into its own `http.ServeMux` and stream a result out over the TCP connection.
+
+Given all of that touches a shared library (`representable`), both ends of the wire protocol, new concurrency control, and large-payload framing — and the sandbox still blocks `go build`/`go test`, so a change this size would ship unverified by anything but manual read — I'm not attempting it as a drive-by fix. The right-sized path is a dedicated follow-up: (1) extend `representable`'s protocol with correlated request/response message types plus a `connState` write mutex (small, testable in isolation); (2) reroute AC's proxy/relay handlers to send requests down that channel instead of dialing out, with a pending-request map and a timeout mirroring the existing 2s/5s/8s budgets; (3) add chunked/streamed body framing, since full-dashboard HTML/JS and file transfers won't fit a single JSON line — landing the small-payload cases (session index/listing JSON) first would already fix the original "Hambone23"/8082c symptom, with UI passthrough and file transfer following once framing is in place.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

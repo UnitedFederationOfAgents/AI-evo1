@@ -195,8 +195,6 @@ prompt: [`a5a912a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a
 
 ## Reply H
 
-## Reply H
-
 Confirmed the invalid assumption, and it's a real one with teeth: `agent-coordinator`'s `/host/<id>/*` passthrough (`proxyToHost`, `agent-coordinator/main.go:1056-1095`) and `handleFileUploadRelay` both work by AC **dialing out fresh** to the LR host's own HTTP address (`resolveHostTarget`, `main.go:1022-1044`, combining the IP learned from the representable TCP connection's `RemoteAddr()` with the port LR discloses via a `"lr-http"` data message) — every single browser-dashboard view, session-discovery hop, session-file pull, and file upload for a remote host goes through a brand-new AC→LR socket. Meanwhile the *only* connection guaranteed to work in a NAT'd/private-segment setup is the one LR already opened to AC (`local-representative/main.go:561`, a persistent `representable` TCP connection, client-dials-server). So AC's proxy layer is dialing in exactly the direction that may be blocked, while ignoring a live, already-open socket going the other way.
 
 This is not a quick fix like B/C/D — it's a protocol-level change, for several concrete reasons I verified directly in `representable/representable.go`:
@@ -244,10 +242,3 @@ Why this is better than the rejected alternative: it reuses `net/http`'s own cli
 Worth pursuing as Revision I instead of the request/response-correlation path Reply H sketched — it gets you real HTTP semantics for free and eliminates the hardest parts of that design (correlation, framing, write arbitration) by construction. The cost moves from "protocol design" to "connection-pool lifecycle management" (sizing, NAT-idle health checks, burst replenishment), which is a more bounded and more testable-in-isolation problem. If you want, I can sketch the concrete diff shape (new `representable.DialTunnel`/pool type, the `DialContext` swap, LR's single-conn serve loop) before anyone writes code against it.
 
 --- for this iteration we will have N == 1, we will open exactly one additional connection. This connection will take over the behaviour we used to accomodate with 'dial out'.
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
-
-!HANDOFF!

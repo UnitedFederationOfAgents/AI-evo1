@@ -109,11 +109,18 @@ I traced the two new errors to the same root cause: `agent-coordinator`'s `proxy
 Fixed in `agent-coordinator/main.go` by giving both `proxyToHost` and `handleFileUploadRelay` a shared transport with a 1.5s dial timeout (`hostProxyTransport`/`hostDialTimeout`), so AC's own "not reachable" verdict now lands comfortably inside every existing caller's timeout budget instead of racing (and losing to) it. As before, the sandbox blocks `go build`/`go test`, so this was verified by careful manual read and cross-checking existing tests (which all use fast loopback `httptest` servers, well under 1.5s) rather than compiling.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+These fixes are not working.
 
+Let's add a new debugging capability.
 
-## Human-Prompt
+We will add a 'debug' button in the system tab in the top right corner. When we use this button we will enter a new view for the main pane, so far it will have two tabs - 'network' and 'logs'.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In each tab we'll start with a very simple viewer which captures logs. We will cover all of the sub-apps.
+
+For logs we'll only worry about the LR-managed sub-apps for now.
+
+This debug view will be present in both the per-host and global perspectives.
+
+In each logs and network debug we will be able to use a 'to file' button to bring them into the preferred files tab cache.

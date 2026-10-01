@@ -24,13 +24,19 @@ Let's also create an explanation 'md' document, with a simple embedded diagram, 
 ```
 
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Make some improvements to session behaviour
+
+[Step 2 Prompt](initialDistributedSessionsImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+In this step we will improve some session behaviour.
+
+In this first increment we will fix the issue where 'new-session "My New Session"' does not strip the quotes.
+
+We should end up with a name 'My New Sessions' -- not '"My New Session"'
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

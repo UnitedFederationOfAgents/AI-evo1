@@ -120,11 +120,6 @@ Found the actual root cause: Revision C's `firstByteConn` backoff fix never actu
 Fix: removed `firstUseConn` entirely and now drive both decisions ("open next tunnel concurrently" and "skip backoff") off `firstByteConn.onFirstByte` alone, so only a tunnel that genuinely carries real traffic can bypass the 2s backoff. Updated `main.go`'s comments, `tunnel_test.go` (dropped the now-obsolete `firstUseConn` test, reworded the remaining ones), and `agent-coordinator/docs/architecture.md` to document why Revision C's fix was ineffective and what Revision D actually changed. As with prior revisions, `go build`/`go test` are blocked in this sandbox, so this was verified by careful manual read.
 
 
-## <REPLACE-Revision|Retry> E
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1790894869 (Thu Oct 1 10:47:49 PM UTC 2026).

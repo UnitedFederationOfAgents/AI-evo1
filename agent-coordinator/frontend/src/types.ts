@@ -194,3 +194,21 @@ export interface LRFilesMsg {
   active: boolean
   files?: FileInfo[]
 }
+
+// DebugLogEntry mirrors local-representative's same-named type: one captured
+// stdout/stderr line from an LR-managed sub-app, shown on the system tab's
+// debug view (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md
+// Revision E).
+export interface DebugLogEntry {
+  instance_id: string
+  app: string
+  stream: string // "stdout" | "stderr"
+  line: string
+  ts: number // unix seconds
+}
+
+export interface LRDebugLogMsg {
+  host_id: string
+  active: boolean
+  entries?: DebugLogEntry[]
+}

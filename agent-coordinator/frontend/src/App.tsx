@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
@@ -31,6 +31,7 @@ interface HostClientState {
   sessions?: LRSessionsMsg
   convo?: LRConvoMsg
   files?: LRFilesMsg
+  debugLog?: LRDebugLogMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -318,6 +319,14 @@ function useCoordinatorWS() {
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), files: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-debug-log-state': {
+            const p = msg.payload as LRDebugLogMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), debugLog: p.active ? p : undefined },
             }))
             break
           }
@@ -1008,6 +1017,219 @@ function RepoWatchPanel({
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
       )}
+    </div>
+  )
+}
+
+/* ---- Debug view (system tab, Step1SubstepBPrompt.md Revision E) ----
+ *
+ * A first, deliberately simple pass: a "debug" button in the system tab
+ * (both per-host and global) swaps that tab's main pane for a two-tab
+ * viewer -- "network" and "logs" -- each just a plain scrolling list of
+ * captured lines, plus a "to file" button that drops the current contents
+ * into the preferred file store the same way ScreenshotButton already does.
+ */
+
+// NetworkLogEntry is one captured request this agent-coordinator frontend
+// itself made -- method/URL/status/duration. Since every interaction with
+// every sub-app (uploads, hold/persist/delete, markup, screenshots, launch/
+// terminate commands that ride the WebSocket, etc.) is issued as a fetch
+// from this one page, wrapping window.fetch once (see installNetworkCapture)
+// covers all of them without needing each sub-app's own embedded iframe to
+// cooperate. It doesn't yet see network activity that happens entirely
+// inside an embedded iframe's own document (condoccer/sessions/convo's own
+// UI) -- a later increment could thread that through postMessage if needed.
+interface NetworkLogEntry {
+  id: number
+  time: number // unix ms
+  method: string
+  url: string
+  status: number | null // null while in flight or on a network-level failure
+  duration_ms: number | null
+  error?: string
+}
+
+const MAX_NETWORK_LOG_ENTRIES = 300
+let networkLog: NetworkLogEntry[] = []
+let networkLogSeq = 0
+const networkLogListeners = new Set<() => void>()
+
+function pushNetworkLogEntry(entry: NetworkLogEntry) {
+  networkLog = [...networkLog.slice(-(MAX_NETWORK_LOG_ENTRIES - 1)), entry]
+  networkLogListeners.forEach(fn => fn())
+}
+
+// installNetworkCapture wraps window.fetch exactly once per page load.
+let networkCaptureInstalled = false
+function installNetworkCapture() {
+  if (networkCaptureInstalled) return
+  networkCaptureInstalled = true
+  const realFetch = window.fetch.bind(window)
+  window.fetch = (...args: Parameters<typeof fetch>) => {
+    const method = (args[1]?.method ?? 'GET').toUpperCase()
+    const first = args[0]
+    const url = typeof first === 'string' ? first : first instanceof Request ? first.url : String(first)
+    const id = ++networkLogSeq
+    const start = Date.now()
+    return realFetch(...args).then(
+      resp => {
+        pushNetworkLogEntry({ id, time: start, method, url, status: resp.status, duration_ms: Date.now() - start })
+        return resp
+      },
+      err => {
+        pushNetworkLogEntry({ id, time: start, method, url, status: null, duration_ms: Date.now() - start, error: String(err) })
+        throw err
+      },
+    )
+  }
+}
+
+// useNetworkLog subscribes this component to the shared capture buffer above.
+function useNetworkLog(): NetworkLogEntry[] {
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    installNetworkCapture()
+    const listener = () => forceRender(n => n + 1)
+    networkLogListeners.add(listener)
+    return () => { networkLogListeners.delete(listener) }
+  }, [])
+  return networkLog
+}
+
+function formatNetworkLogLine(e: NetworkLogEntry): string {
+  const status = e.status != null ? String(e.status) : e.error ? 'error' : '…'
+  const duration = e.duration_ms != null ? `${e.duration_ms}ms` : ''
+  return `${new Date(e.time).toLocaleTimeString()}  ${e.method}  ${status}  ${duration}  ${e.url}`
+}
+
+// formatDebugLogLine renders one captured LR-managed-sub-app stdout/stderr
+// line. hostLabel is only passed in the global perspective, where lines from
+// every host are merged into one list and need tagging to tell them apart.
+function formatDebugLogLine(e: DebugLogEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel} ` : ''
+  const marker = e.stream === 'stderr' ? '!' : ' '
+  return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.app}]${marker} ${e.line}`
+}
+
+// resolveGlobalDebugUploadHost picks the "preferred file store" to save a
+// global-perspective debug capture to, where there's no single selected host
+// to fall back on the way ScreenshotButton's per-host case does: this
+// agent-coordinator's own co-located host if it's connected, else the first
+// connected host, else null (disables the "to file" button).
+function resolveGlobalDebugUploadHost(hosts: Host[], selfHostId: string | null): string | null {
+  if (selfHostId && hosts.some(h => h.id === selfHostId && h.status === 'connected')) return selfHostId
+  return hosts.find(h => h.status === 'connected')?.id ?? null
+}
+
+// DebugLogPane is the "very simple viewer" shared by both the network and
+// logs tabs: a plain scrolling list of pre-formatted lines, plus a "to file"
+// button that uploads them as one text file through the normal upload path
+// (so it lands in the files tab cache like any other upload).
+function DebugLogPane({
+  lines, toFileName, uploadHostId, uploadFiles, emptyMessage,
+}: {
+  lines: string[]
+  toFileName: string
+  uploadHostId: string | null
+  uploadFiles: (hostId: string, files: File[]) => void
+  emptyMessage: string
+}) {
+  const [busy, setBusy] = useState(false)
+
+  const handleToFile = async () => {
+    if (!uploadHostId || lines.length === 0 || busy) return
+    setBusy(true)
+    try {
+      await uploadFiles(uploadHostId, [new File([lines.join('\n') + '\n'], toFileName, { type: 'text/plain' })])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="debug-pane">
+      <div className="debug-pane-toolbar">
+        <span className="debug-pane-count">{lines.length} line(s) captured this session</span>
+        <button
+          className="sys-btn sys-btn-neutral"
+          disabled={!uploadHostId || lines.length === 0 || busy}
+          onClick={handleToFile}
+          title={uploadHostId ? 'save these lines to the preferred file store' : 'no file store available -- select a connected host first'}
+        >
+          {busy ? 'saving…' : 'to file'}
+        </button>
+      </div>
+      <div className="debug-pane-lines">
+        {lines.length === 0 ? (
+          <div className="debug-pane-empty">{emptyMessage}</div>
+        ) : (
+          lines.map((line, i) => <div className="debug-pane-line" key={i}>{line}</div>)
+        )}
+      </div>
+    </div>
+  )
+}
+
+const DEBUG_TABS = ['network', 'logs'] as const
+type DebugTab = typeof DEBUG_TABS[number]
+
+// DebugView is the system tab's "debug" button destination: network capture
+// (see useNetworkLog, app-wide and identical in both perspectives since it's
+// this one frontend's own request log) and logs (logLines, already
+// formatted by the caller -- see formatDebugLogLine -- since per-host and
+// global differ in whether a host tag is needed).
+function DebugView({
+  logLines, uploadHostId, uploadFiles,
+}: {
+  logLines: string[]
+  uploadHostId: string | null
+  uploadFiles: (hostId: string, files: File[]) => void
+}) {
+  const [tab, setTab] = useState<DebugTab>('network')
+  const networkEntries = useNetworkLog()
+
+  return (
+    <div className="debug-view">
+      <div className="tab-bar tab-bar-nested">
+        <div className="tabs">
+          {DEBUG_TABS.map(t => (
+            <button key={t} className={`tab${tab === t ? ' tab-active' : ''}`} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {tab === 'network' ? (
+        <DebugLogPane
+          lines={networkEntries.map(formatNetworkLogLine)}
+          toFileName={`network-debug-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no network activity captured yet"
+        />
+      ) : (
+        <DebugLogPane
+          lines={logLines}
+          toFileName={`logs-debug-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no LR-managed sub-app log lines captured yet"
+        />
+      )}
+    </div>
+  )
+}
+
+// DebugToggleButton sits at the right edge of the system tab's own tab bar
+// (both per-host and global -- Step1SubstepBPrompt.md Revision E: "a 'debug'
+// button in the system tab in the top right corner"), only rendered while
+// that tab is active.
+function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => void }) {
+  return (
+    <div className="tab-bar-right">
+      <button className={`sys-btn sys-btn-neutral${open ? ' debug-toggle-btn-active' : ''}`} onClick={onClick}>
+        debug
+      </button>
     </div>
   )
 }
@@ -2392,7 +2614,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2412,7 +2634,10 @@ function GlobalView({
   sendACSetAutoUpdate: (enabled: boolean) => void
   hasHighlighted: boolean
   onGoToHighlighted: () => void
+  uploadFiles: (hostId: string, files: FileList | File[]) => void
 }) {
+  const [debugOpen, setDebugOpen] = useState(false)
+
   return (
     <div className="lr-view">
       <div className="lr-header">
@@ -2438,25 +2663,38 @@ function GlobalView({
             </button>
           ))}
         </div>
+        {activeTab === 'system' && (
+          <DebugToggleButton open={debugOpen} onClick={() => setDebugOpen(o => !o)} />
+        )}
       </div>
       <div className="main-pane">
         {activeTab === 'system' ? (
-          <GlobalSystemPanel
-            hosts={hosts}
-            hostData={hostData}
-            selfHostId={selfHostId}
-            devMode={devMode}
-            sendLRRestartApp={sendLRRestartApp}
-            sendLRRebuildApp={sendLRRebuildApp}
-            sendLRSetAutoRebuild={sendLRSetAutoRebuild}
-            sendLRSetAutoUpdate={sendLRSetAutoUpdate}
-            acLoaderManaged={acLoaderManaged}
-            acUpdateAvailable={acUpdateAvailable}
-            acAutoUpdate={acAutoUpdate}
-            acStartedAt={acStartedAt}
-            sendACRestartApp={sendACRestartApp}
-            sendACSetAutoUpdate={sendACSetAutoUpdate}
-          />
+          debugOpen ? (
+            <DebugView
+              logLines={hosts.flatMap(h =>
+                (hostData[h.id]?.debugLog?.entries ?? []).map(e => formatDebugLogLine(e, h.label)),
+              )}
+              uploadHostId={resolveGlobalDebugUploadHost(hosts, selfHostId)}
+              uploadFiles={uploadFiles}
+            />
+          ) : (
+            <GlobalSystemPanel
+              hosts={hosts}
+              hostData={hostData}
+              selfHostId={selfHostId}
+              devMode={devMode}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              acLoaderManaged={acLoaderManaged}
+              acUpdateAvailable={acUpdateAvailable}
+              acAutoUpdate={acAutoUpdate}
+              acStartedAt={acStartedAt}
+              sendACRestartApp={sendACRestartApp}
+              sendACSetAutoUpdate={sendACSetAutoUpdate}
+            />
+          )
         ) : (
           <div className="service-empty">not yet implemented</div>
         )}
@@ -2481,7 +2719,7 @@ function LRView({
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
-  uploadFiles: (hostId: string, files: FileList) => void
+  uploadFiles: (hostId: string, files: FileList | File[]) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -2491,6 +2729,12 @@ function LRView({
 }) {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // debugOpen is reset whenever the viewed host changes -- this component
+  // isn't remounted on host switch (see condoccerHash below), so without
+  // this a debug view left open on one host would otherwise still be open
+  // after picking a different one.
+  const [debugOpen, setDebugOpen] = useState(false)
+  useEffect(() => setDebugOpen(false), [host.id])
   // markupFile is snapshotted at the moment the dialog opens (rather than
   // re-derived from `files` below) so an in-flight files-state broadcast
   // can't yank the dialog's target out from under an open editing session --
@@ -2578,6 +2822,9 @@ function LRView({
             </button>
           ))}
         </div>
+        {activeTab === 'system' && (
+          <DebugToggleButton open={debugOpen} onClick={() => setDebugOpen(o => !o)} />
+        )}
       </div>
       {isEmbedTab && (
         <div className={`embed-status-bar health-${getServiceStatus(activeTab)}`}>
@@ -2631,20 +2878,28 @@ function LRView({
                 </div>
               )}
               {activeTab === 'system' && (
-                <SystemPanel
-                  hostId={host.id}
-                  state={data.system}
-                  active={active}
-                  fcState={data.fcState}
-                  repoState={data.repo}
-                  onLaunch={sendLRLaunchApp}
-                  onTerminate={sendLRTerminateApp}
-                  onRestart={sendLRRestartApp}
-                  onRestartManaged={sendLRRestartManagedApp}
-                  onRebuild={sendLRRebuildApp}
-                  onSetAutoRebuild={sendLRSetAutoRebuild}
-                  onSetAutoUpdate={sendLRSetAutoUpdate}
-                />
+                debugOpen ? (
+                  <DebugView
+                    logLines={(data.debugLog?.entries ?? []).map(e => formatDebugLogLine(e))}
+                    uploadHostId={active ? host.id : null}
+                    uploadFiles={uploadFiles}
+                  />
+                ) : (
+                  <SystemPanel
+                    hostId={host.id}
+                    state={data.system}
+                    active={active}
+                    fcState={data.fcState}
+                    repoState={data.repo}
+                    onLaunch={sendLRLaunchApp}
+                    onTerminate={sendLRTerminateApp}
+                    onRestart={sendLRRestartApp}
+                    onRestartManaged={sendLRRestartManagedApp}
+                    onRebuild={sendLRRebuildApp}
+                    onSetAutoRebuild={sendLRSetAutoRebuild}
+                    onSetAutoUpdate={sendLRSetAutoUpdate}
+                  />
+                )
               )}
               {activeTab === 'files' && viewerFileId ? (
                 <FileViewer
@@ -3024,6 +3279,7 @@ export default function App() {
               sendACSetAutoUpdate={sendACSetAutoUpdate}
               hasHighlighted={!!firstHighlighted}
               onGoToHighlighted={goToFirstHighlighted}
+              uploadFiles={uploadFiles}
             />
           )}
         </div>

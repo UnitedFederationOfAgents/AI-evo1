@@ -431,6 +431,66 @@ func (s *Server) broadcastSystemState() {
 	}
 }
 
+// maxDebugLogEntries caps the in-memory buffer recordDebugLog appends to --
+// enough scrollback for the debug view's "very simple viewer" (Step1SubstepBPrompt.md
+// Revision E) without letting a chatty managed process grow it unbounded.
+const maxDebugLogEntries = 400
+
+// DebugLogEntry is one captured stdout/stderr line from an LR-managed
+// sub-app (see lineLogWriter). Browser-side network capture (the debug
+// view's other tab) is instrumented entirely in agent-coordinator's own
+// frontend, so it has no backend counterpart here.
+type DebugLogEntry struct {
+	InstanceID string `json:"instance_id"` // e.g. "federation-command#1" -- matches ProcInfo.InstanceID
+	App        string `json:"app"`         // application name, e.g. "federation-command"
+	Stream     string `json:"stream"`      // "stdout" or "stderr"
+	Line       string `json:"line"`
+	TS         int64  `json:"ts"` // unix seconds
+}
+
+// DebugLogStateMsg is the payload of "debug-log-state" messages: the current
+// debug-log buffer, broadcast to browser clients and mirrored up to
+// agent-coordinator.
+type DebugLogStateMsg struct {
+	Entries []DebugLogEntry `json:"entries"`
+}
+
+// recordDebugLog appends one captured line to the debug-log buffer, called
+// from lineLogWriter.Write (so: once per newline-terminated chunk, from
+// whichever goroutine owns that managed process's stdout/stderr pipe).
+func (s *Server) recordDebugLog(instanceID, app, stream, line string) {
+	s.debugLogMu.Lock()
+	s.debugLog = append(s.debugLog, DebugLogEntry{
+		InstanceID: instanceID,
+		App:        app,
+		Stream:     stream,
+		Line:       line,
+		TS:         time.Now().Unix(),
+	})
+	if over := len(s.debugLog) - maxDebugLogEntries; over > 0 {
+		s.debugLog = s.debugLog[over:]
+	}
+	s.debugLogMu.Unlock()
+	s.broadcastDebugLog()
+}
+
+// debugLogState returns a snapshot of the current debug-log buffer.
+func (s *Server) debugLogState() DebugLogStateMsg {
+	s.debugLogMu.Lock()
+	defer s.debugLogMu.Unlock()
+	entries := make([]DebugLogEntry, len(s.debugLog))
+	copy(entries, s.debugLog)
+	return DebugLogStateMsg{Entries: entries}
+}
+
+func (s *Server) broadcastDebugLog() {
+	st := s.debugLogState()
+	s.broadcast("debug-log-state", st)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("debug-log-state", st)
+	}
+}
+
 // handleSystemCommand executes a system-tab action requested remotely by
 // agent-coordinator. AC delivers these over the representable command channel
 // with a "__system:" prefix (mirroring "__ridealong:"); connectAC routes them
@@ -736,8 +796,8 @@ func (s *Server) launchManaged(app string) (string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Fan the wrapper's own output into LR's log stream. The interactive child
 	// itself draws in its terminal window; this only catches launcher errors.
-	cmd.Stdout = &lineLogWriter{prefix: id}
-	cmd.Stderr = &lineLogWriter{prefix: id}
+	cmd.Stdout = &lineLogWriter{prefix: id, onLine: func(line string) { s.recordDebugLog(id, app, "stdout", line) }}
+	cmd.Stderr = &lineLogWriter{prefix: id, onLine: func(line string) { s.recordDebugLog(id, app, "stderr", line) }}
 
 	if err := cmd.Start(); err != nil {
 		s.recordLaunchFailure(app, instance, id, err)
@@ -1038,9 +1098,13 @@ func (s *Server) recordLaunchFailure(app string, instance int, id string, cause 
 
 // lineLogWriter buffers writes from a child process and emits one LR log line
 // per newline-terminated chunk. Each instance is written by a single goroutine.
+// onLine, when set, also feeds that line into the debug view's buffer (see
+// recordDebugLog) -- nil for call sites that have no app/instance to tag it
+// with (none today, but kept optional rather than required).
 type lineLogWriter struct {
 	prefix string
 	buf    []byte
+	onLine func(line string)
 }
 
 func (w *lineLogWriter) Write(p []byte) (int, error) {
@@ -1052,6 +1116,9 @@ func (w *lineLogWriter) Write(p []byte) (int, error) {
 		}
 		if line := strings.TrimRight(string(w.buf[:i]), "\r"); line != "" {
 			log.Printf("[%s] %s", w.prefix, line)
+			if w.onLine != nil {
+				w.onLine(line)
+			}
 		}
 		w.buf = w.buf[i+1:]
 	}

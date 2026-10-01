@@ -385,6 +385,33 @@ type LRFilesMsg struct {
 	Files  []FileInfo `json:"files,omitempty"`
 }
 
+// DebugLogEntry mirrors local-representative's same-named type (see
+// local-representative/procman.go): one captured stdout/stderr line from an
+// LR-managed sub-app, for the system tab's debug view
+// (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision E).
+type DebugLogEntry struct {
+	InstanceID string `json:"instance_id"`
+	App        string `json:"app"`
+	Stream     string `json:"stream"`
+	Line       string `json:"line"`
+	TS         int64  `json:"ts"`
+}
+
+// DebugLogStateMsg matches the debug-log-state payload sent from LR over
+// representable.
+type DebugLogStateMsg struct {
+	Entries []DebugLogEntry `json:"entries"`
+}
+
+// LRDebugLogMsg is the host-scoped "lr-debug-log-state" message sent to
+// browser clients: the debug view's current log buffer for one host. Active
+// is false when that LR is not connected -- mirrors LRFilesMsg.
+type LRDebugLogMsg struct {
+	HostID  string          `json:"host_id"`
+	Active  bool            `json:"active"`
+	Entries []DebugLogEntry `json:"entries,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -411,6 +438,7 @@ type hostState struct {
 	sessions   *SessionsStateMsg
 	convo      *ConvoStateMsg
 	files      *FilesStateMsg
+	debugLog   *DebugLogStateMsg
 	lrHTTPPort string
 }
 
@@ -1219,6 +1247,7 @@ func main() {
 			hs.sessions = nil
 			hs.convo = nil
 			hs.files = nil
+			hs.debugLog = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
@@ -1232,6 +1261,7 @@ func main() {
 			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
+			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 			s.broadcastTCAvailability()
 		}
@@ -1374,6 +1404,14 @@ func main() {
 				hs.files = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: true, Files: payload.Files})
+			}
+		case "debug-log-state":
+			var payload DebugLogStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.debugLog = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: true, Entries: payload.Entries})
 			}
 		}
 	})

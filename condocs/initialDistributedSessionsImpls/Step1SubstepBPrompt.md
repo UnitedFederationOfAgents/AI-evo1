@@ -124,3 +124,26 @@ For logs we'll only worry about the LR-managed sub-apps for now.
 This debug view will be present in both the per-host and global perspectives.
 
 In each logs and network debug we will be able to use a 'to file' button to bring them into the preferred files tab cache.
+
+
+prompt: [`7f2b33e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7f2b33edc3b078f04808a4b95a9b722a89d4ae44) → reply: [`015f30e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/015f30eb294d477379c9e9379053ba8534ffbec0)
+
+## Reply E
+
+I've implemented the debug view described in Revision E:
+
+- **Backend** (`local-representative`): `procman.go`'s `lineLogWriter` now also feeds each captured stdout/stderr line from LR-managed sub-apps into a capped (400-entry) ring buffer, broadcast as a new `debug-log-state` message (mirroring the existing files/system-state plumbing) both to LR's own dashboard and up to `agent-coordinator`.
+- **Relay** (`agent-coordinator/main.go`): mirrors that message per host (`lr-debug-log-state`), resetting on disconnect, same pattern as `LRFilesMsg`.
+- **Frontend** (`agent-coordinator` React app): added a "debug" toggle button at the top-right of the system tab's tab bar (both per-host `LRView` and the global `GlobalView`), which swaps that tab's content for a new `DebugView` with "network" (a simple capture of every fetch this frontend makes, via a wrapped `window.fetch`) and "logs" (the LR-managed sub-app lines relayed above, tagged per-host in the global perspective) tabs — each a plain scrolling list with a "to file" button that uploads the captured lines as a text file through the existing upload-relay path into that host's files-tab cache.
+
+No condoc files were touched; only the 6 implementation files listed above. The sandbox still blocks `go build`/`go test` and frontend builds, so this was verified by careful manual read (variable scoping, type assignability, brace/paren balance) rather than compiling.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

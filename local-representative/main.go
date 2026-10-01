@@ -274,6 +274,14 @@ type Server struct {
 	fileCacheDir string
 	hostStoreDir string
 
+	// Debug view (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md
+	// Revision E): a rolling buffer of stdout/stderr lines from the LR-managed
+	// sub-apps (see procman.go's lineLogWriter), capped at maxDebugLogEntries
+	// so a chatty child can't grow this unbounded. Oldest-first; recordDebugLog
+	// appends and trims under debugLogMu.
+	debugLogMu sync.Mutex
+	debugLog   []DebugLogEntry
+
 	// Session sync (see sessions.go and
 	// docs/DistributedSessionsBrainstorm.md): recordsPath is where clauditable
 	// session directories live (AGENT_RECORDS_PATH, resolved the same way
@@ -511,6 +519,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
 	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
+	ac.SendData("debug-log-state", s.debugLogState())
 	if cc := s.getCondoccerState(); cc != nil {
 		ac.SendData("condoccer-state", *cc)
 	}
@@ -787,6 +796,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "system-state", s.systemState())
 		s.sendToClient(c, "repo-state", s.repoState())
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
+		s.sendToClient(c, "debug-log-state", s.debugLogState())
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
 		}

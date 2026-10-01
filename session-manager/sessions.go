@@ -106,15 +106,24 @@ func (s *Server) handleNewSession(c *wsClient, name string) {
 	s.broadcastSessions()
 }
 
-// handleSetSession is "ufa session set <id>" parity.
+// handleSetSession is "ufa session set <id>" parity. id may name a session
+// this host has only ever seen as a Remote entry from listSessionsWithRemote
+// (discovered on another host, nothing pulled locally yet) -- triggerSessionSync
+// materializes it (session.yaml/session.jsonl/-processed, see sessionSyncGlobs)
+// before the existence check, the same way sendSessionView already does for
+// viewing, so selecting a remote session doesn't require it to already exist
+// in this host's own AGENT_RECORDS_PATH.
 func (s *Server) handleSetSession(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "set-session: id is required")
 		return
 	}
 	if _, err := os.Stat(filepath.Join(s.recordsPath, id)); err != nil {
-		s.sendToClient(c, "error", fmt.Sprintf("set-session: session %q not found", id))
-		return
+		s.triggerSessionSync(id)
+		if _, err := os.Stat(filepath.Join(s.recordsPath, id)); err != nil {
+			s.sendToClient(c, "error", fmt.Sprintf("set-session: session %q not found", id))
+			return
+		}
 	}
 	s.setCurrentSession(id)
 	s.broadcastSessions()
@@ -135,12 +144,18 @@ func (s *Server) handleRenameSession(c *wsClient, id, name string) {
 	s.sendSessionInfo(c, id)
 }
 
-// sendSessionInfo is "ufa session describe" parity, replying to c only.
+// sendSessionInfo is "ufa session describe" parity, replying to c only. Like
+// sendSessionView, this syncs id in first -- the frontend's selectSession
+// fires describe-session and view-session together for a row that may be a
+// Remote-tagged entry (listSessionsWithRemote) never pulled locally before,
+// so without this describeSession's plain os.Stat would reliably lose the
+// race against view-session's own sync and report "not found".
 func (s *Server) sendSessionInfo(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "describe-session: id is required")
 		return
 	}
+	s.triggerSessionSync(id)
 	info, err := describeSession(s.recordsPath, id)
 	if err != nil {
 		s.sendToClient(c, "error", "describe-session: "+err.Error())

@@ -346,9 +346,8 @@ function SessionList({ sessions, currentId, selectedId, onSelect, onNew, onArchi
             <button
               key={s.id}
               className={`session-row${s.id === selectedId ? ' selected' : ''}${s.remote ? ' session-row-remote' : ''}`}
-              onClick={() => !s.remote && onSelect(s.id)}
-              disabled={s.remote}
-              title={s.remote ? `${s.id} — discovered on ${s.host}, not yet pulled locally` : s.id}
+              onClick={() => onSelect(s.id)}
+              title={s.remote ? `${s.id} — discovered on ${s.host}, not yet pulled locally; selecting it will pull it` : s.id}
             >
               <span className={`session-row-current-dot${s.id === currentId ? ' is-current' : ''}`} title={s.id === currentId ? 'current session' : ''} />
               <span className="session-row-name">{s.name || s.id}</span>

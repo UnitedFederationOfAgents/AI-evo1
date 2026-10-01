@@ -463,10 +463,14 @@ func getSession() string {
 	return defaultSessionID()
 }
 
-// defaultSessionID returns a unique default session identifier for this moment.
-// Includes a timestamp so concurrent distributed instances don't collide.
+// defaultSessionID returns today's default session identifier (YYYY-MM-DD-default).
+// This is day-granular, not per-invocation, so that every instance started on
+// the same day — local or distributed — resolves to the one session already
+// created for that day instead of piling up a fresh one each time. Concurrent
+// first-creators of the day all compute this same ID and converge on it via
+// ensureSession/writeSessionYAMLIfAbsent's create-if-absent semantics.
 func defaultSessionID() string {
-	return time.Now().Format("2006-01-02_15-04-05") + "-default"
+	return time.Now().Format("2006-01-02") + "-default"
 }
 
 // parseMetadata parses the UFA_METADATA environment variable
@@ -740,11 +744,11 @@ func isUnixTimestamp(s string) bool {
 	return true
 }
 
-// runGetDefaultSession ensures a default session for this moment exists and prints its ID.
+// runGetDefaultSession ensures today's default session exists and prints its ID.
 func runGetDefaultSession() int {
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	sessionID := defaultSessionID()
-	name := time.Now().Format("2006-01-02 15:04:05") + " Default"
+	name := time.Now().Format("2006-01-02") + " Default"
 	if err := ensureSession(recordsPath, sessionID, name); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable get-default-session: %v\n", err)
 		return 1

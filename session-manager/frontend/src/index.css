@@ -222,14 +222,13 @@ body {
 }
 
 /* A discovered-but-not-yet-pulled session (see sessions.go's
-   listSessionsWithRemote) -- shown but not selectable, since nothing pulls
-   its files just from appearing in this list. */
+   listSessionsWithRemote) -- selecting it (selectSession in App.tsx) triggers
+   a sync-pull (sendSessionInfo/sendSessionView's triggerSessionSync) that
+   materializes it locally, same as any local session; just dimmed here so
+   the badge below remains legible as a "not pulled yet" hint until then. */
 .session-row-remote {
-  cursor: default;
   opacity: 0.6;
 }
-
-.session-row-remote:hover { background: transparent; }
 
 .session-row-remote-badge {
   color: #6b9fd4;

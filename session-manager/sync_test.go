@@ -23,13 +23,14 @@ func TestTriggerSessionSyncNoClientIsANoOp(t *testing.T) {
 	s.triggerSessionSync("some-session") // must not panic or block
 }
 
-// TestTriggerSessionSyncPostsBothGlobsToPeerHTTPPort verifies the end-to-end
+// TestTriggerSessionSyncPostsAllGlobsToPeerHTTPPort verifies the end-to-end
 // wiring described in docs/DistributedSessionsBrainstorm.md: once connected
 // to local-representative (which discloses its own HTTP port over
 // representable's "hello" message -- see representable.Client.PeerHTTPPort),
-// triggerSessionSync POSTs a sync pull for both "session.jsonl" and
-// "*-processed.txt" to that host's "/api/sessions/<id>/pull".
-func TestTriggerSessionSyncPostsBothGlobsToPeerHTTPPort(t *testing.T) {
+// triggerSessionSync POSTs a sync pull for each of sessionSyncGlobs
+// ("session.jsonl", "session.yaml", "*-processed.txt") to that host's
+// "/api/sessions/<id>/pull".
+func TestTriggerSessionSyncPostsAllGlobsToPeerHTTPPort(t *testing.T) {
 	var mu sync.Mutex
 	var gotPaths []string
 	var gotGlobs []string
@@ -70,8 +71,8 @@ func TestTriggerSessionSyncPostsBothGlobsToPeerHTTPPort(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(gotPaths) != 2 {
-		t.Fatalf("got %d pull requests, want 2 (one per glob): paths=%v", len(gotPaths), gotPaths)
+	if len(gotPaths) != len(sessionSyncGlobs) {
+		t.Fatalf("got %d pull requests, want %d (one per glob): paths=%v", len(gotPaths), len(sessionSyncGlobs), gotPaths)
 	}
 	for i, p := range gotPaths {
 		if p != "/api/sessions/my-session/pull" {
@@ -81,7 +82,7 @@ func TestTriggerSessionSyncPostsBothGlobsToPeerHTTPPort(t *testing.T) {
 			t.Errorf("request %d mode = %q, want sync", i, gotModes[i])
 		}
 	}
-	wantGlobs := map[string]bool{"session.jsonl": false, "*-processed.txt": false}
+	wantGlobs := map[string]bool{"session.jsonl": false, "session.yaml": false, "*-processed.txt": false}
 	for _, g := range gotGlobs {
 		if _, ok := wantGlobs[g]; !ok {
 			t.Errorf("unexpected glob %q", g)
@@ -309,6 +310,60 @@ func TestListSessionsWithRemoteSkipsAlreadyKnownIDs(t *testing.T) {
 	}
 	if sawLocalAsRemote {
 		t.Errorf("got %+v, sess-local should never be tagged remote (it's a local ID, coincidentally also reported by a peer)", summaries)
+	}
+
+	s.disconnectRepr()
+}
+
+// TestHandleSetSessionPullsRemoteOnlySession verifies Step1Prompt.md Revision
+// B's "select remote sessions" fix: handleSetSession must not reject an id
+// just because nothing under s.recordsPath has that name yet -- it has to
+// give triggerSessionSync a chance to materialize it (the real
+// local-representative would pull session.yaml/session.jsonl/-processed into
+// s.recordsPath here) before concluding the session truly doesn't exist
+// anywhere.
+func TestHandleSetSessionPullsRemoteOnlySession(t *testing.T) {
+	recordsPath := t.TempDir()
+	lr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Stand in for local-representative's real pull handler: materialize
+		// the session directory on disk, exactly as pullSessionFilesFrom
+		// would for a session discovered on another host.
+		if err := os.MkdirAll(filepath.Join(recordsPath, "remote-only-session"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(sessionPullResultMsg{})
+	}))
+	defer lr.Close()
+	lrURL, err := url.Parse(lr.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reprAddr := freeTCPAddr(t)
+	reprSrv, err := representable.NewServer(reprAddr, representable.Mode(false))
+	if err != nil {
+		t.Fatalf("representable.NewServer: %v", err)
+	}
+	reprSrv.SetHTTPPort(lrURL.Port())
+	host, port, err := net.SplitHostPort(reprAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := newServer()
+	s.name = "sessions"
+	s.recordsPath = recordsPath
+	s.startConnectLoop(host, port)
+	waitForReprStatus(t, s, "connected")
+
+	s.handleSetSession(nil, "remote-only-session")
+
+	if got := s.getCurrentSession(); got != "remote-only-session" {
+		t.Errorf("getCurrentSession() = %q, want remote-only-session", got)
+	}
+	if _, err := os.Stat(filepath.Join(recordsPath, "remote-only-session")); err != nil {
+		t.Errorf("session directory was not materialized locally: %v", err)
 	}
 
 	s.disconnectRepr()

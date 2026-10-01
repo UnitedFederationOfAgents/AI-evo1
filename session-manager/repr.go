@@ -357,8 +357,11 @@ func (s *Server) handleReprCommand(raw string) {
 }
 
 // sessionSyncGlobs are the file patterns a session-view read keeps fresh --
-// see triggerSessionSync.
-var sessionSyncGlobs = []string{"session.jsonl", "*-processed.txt"}
+// see triggerSessionSync. session.yaml is included so a session that exists
+// only on a remote host (never before pulled here -- see
+// listSessionsWithRemote's Remote-tagged entries) gets its name/metadata
+// materialized locally too, not just its transcript.
+var sessionSyncGlobs = []string{"session.jsonl", "session.yaml", "*-processed.txt"}
 
 // sessionSyncTimeout bounds each glob's pull request -- see
 // triggerSessionSync.

@@ -54,3 +54,26 @@ Now that the networking is in better order, let's make a few fixes with our newf
 
 - The default sessions are piling up because we are failing to detect the existing one. Once we create the day's default session another new instance should use this session rather than creating a new one.
 - In session manager we should be able to select remote sessions
+
+
+prompt: [`9b24d46`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9b24d46290bab50e54453c5161f665b859edd94c) → reply: [`f7618a7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f7618a7bc114273d7a9c6095bb007bc5e646ef99)
+
+## Reply B
+
+## Summary
+
+Fixed both items from Revision B:
+
+1. **Default-session pileup**: `clauditable/main.go`'s `defaultSessionID()` was generating a per-second timestamped ID (`2026-10-01_15-04-05-default`) instead of the documented day-level `YYYY-MM-DD-default` format, so every new instance computed a distinct "default" session and none ever matched an existing one — exactly the pileup described (this also fixed a pre-existing failing assertion in `TestGetSession`, and now matches federation-command's own day-level fallback format it already used). Changed it to `time.Now().Format("2006-01-02") + "-default"` so same-day instances converge on one session.
+
+2. **Can't select remote sessions**: the session-manager backend's `describe-session`/`set-session` handlers required the session directory to already exist locally (`os.Stat`) before doing anything, with no sync trigger — unlike `view-session`, which already pulled remote files first. Added a `triggerSessionSync` call before each existence check (and added `session.yaml` to the synced glob set in `repr.go` so a never-seen session's name/metadata gets pulled too, not just its transcript), and removed the frontend's `disabled`/no-op-click guard on remote session rows so they're actually selectable. Added a Go test (`TestHandleSetSessionPullsRemoteOnlySession`) and updated the glob-count test for the new `session.yaml` entry.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

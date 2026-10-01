@@ -70,3 +70,26 @@ Fixed both: added status-code checks before decoding in all three LR functions; 
 We keep getting caught in a state where we have a dirty repo with the condoc in the deleted state (pending git add/git commit) after our agent has competed work on a condoc revision.
 
 Let's make a quick fix to resolve this so our auto-build pipeline runs smoothly.
+
+
+prompt: [`f2d0d1e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f2d0d1ecd6e4dd3cd357db29a6191d40ff6a3e58) → reply: [`4b149c6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4b149c68ccc65dc97401362ea068e81c24106b7b)
+
+## Reply C
+
+Only `condoccer/main.go` is modified — the substep file and other condoc files are untouched, as required.
+
+## Summary
+
+I traced the recurring dirty-repo issue to `condoccer`'s `.condoc` lock file: `writeCondocLock`/`removeCondocLock` write/remove that file directly on disk from condoccer's own watch loop, outside whatever process commits the rest of a condoc's prompt/reply content, so its removal (which happens right as an agent finishes a revision, per `updateCondocLock`'s "safe to rebuild" transition) was never committed by anyone — leaving a dangling deleted-but-unstaged `.condoc` that previously had to be cleaned up by hand (the "fix condoc rails" commits).
+
+I fixed it in `condoccer/main.go` by adding a `commitCondocLock` helper that stages and commits just `.condoc` (not `-A`) immediately after every write or removal, so the lock file's git state always matches disk and the working tree never sits dirty waiting on it. `.condoc` stays tracked in git as before (other hosts following the branch still need to see it), it's just now committed the instant condoccer changes it.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

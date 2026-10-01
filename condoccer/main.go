@@ -1095,13 +1095,46 @@ func (s *Server) writeCondocLock(action string) {
 	content := fmt.Sprintf("Condoccer %s at %s (%d)\n", action, now.Format(time.RFC1123), now.Unix())
 	if err := os.WriteFile(s.condocLockPath(), []byte(content), 0644); err != nil {
 		log.Printf("condoc lock: write failed: %v", err)
+		return
 	}
+	s.commitCondocLock("condoc: lock - " + action)
 }
 
 // removeCondocLock deletes the lock file, if present.
 func (s *Server) removeCondocLock() {
-	if err := os.Remove(s.condocLockPath()); err != nil && !os.IsNotExist(err) {
-		log.Printf("condoc lock: remove failed: %v", err)
+	if err := os.Remove(s.condocLockPath()); err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("condoc lock: remove failed: %v", err)
+		}
+		return
+	}
+	s.commitCondocLock("condoc: lock released")
+}
+
+// commitCondocLock stages and commits only the '.condoc' lock file itself,
+// right after writeCondocLock/removeCondocLock change it on disk. '.condoc'
+// is tracked in git (unlike '.building' -- see the root .gitignore) because
+// other nodes following this branch rely on its presence/absence to gate
+// their own rebuilds, so it can't just be gitignored away.
+//
+// condoccer writes/removes that file directly from its own watch loop,
+// outside of whatever commits the rest of a condoc's prompt/reply content,
+// so without this the lock file's change (especially its removal once an
+// agent finishes a revision) sits as an uncommitted, untracked-by-anyone
+// working-tree change until someone notices the dirty repo and cleans it up
+// by hand (see the "fix condoc rails" commits). Committing it immediately,
+// scoped to just this one file, keeps the tree clean without touching
+// whatever else may be mid-edit at the same time.
+func (s *Server) commitCondocLock(message string) {
+	if err := exec.Command("git", "-C", s.root, "add", "--", ".condoc").Run(); err != nil {
+		log.Printf("condoc lock: git add failed: %v", err)
+		return
+	}
+	if exec.Command("git", "-C", s.root, "diff", "--cached", "--quiet", "--", ".condoc").Run() == nil {
+		return // nothing staged -- not a git repo, or no-op write of identical content
+	}
+	if err := exec.Command("git", "-C", s.root, "commit", "-m", message, "--", ".condoc").Run(); err != nil {
+		log.Printf("condoc lock: git commit failed: %v", err)
 	}
 }
 

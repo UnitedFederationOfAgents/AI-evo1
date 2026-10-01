@@ -162,12 +162,12 @@ I implemented Revision F by instrumenting the actual backend-to-backend HTTP cal
 
 I also reverted an earlier, incorrect approach (tapping the `representable` protocol's own heartbeat/state/data messages) once the Revision D logs made clear the real gap was in the HTTP layer, not that protocol. Fixed one existing test (`TestRequestSessionPullBuildsExpectedURL`) whose call site needed the new parameter. As before, the sandbox blocks `go build`/`go test`, so this was verified by careful manual read rather than compiling.
 
+## Resource 2 -- Network Debug 1
 
-## <REPLACE-Revision|Retry> G
+Network data collected
 
-<REPLACE-PROMPT>
+- [network-debug-1790867771753.log](31e41125_network-debug-1790867771753.log)
 
+## Revision G
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's use the information we have in the 'Network Debug 1' resource to fix our session manager issue if it is obvious, or explain what additional steps we could take to understand the problem if it is not.

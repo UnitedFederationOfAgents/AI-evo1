@@ -48,11 +48,9 @@ I've implemented the distributed-sessions flow from the diagram across four bina
 [Step 1 Substep B](Step1SubstepBPrompt.md)
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Now that the networking is in better order, let's make a few fixes with our newfound feedback:
 
-
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+- The default sessions are piling up because we are failing to detect the existing one. Once we create the day's default session another new instance should use this session rather than creating a new one.
+- In session manager we should be able to select remote sessions

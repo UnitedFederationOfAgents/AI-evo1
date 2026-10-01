@@ -37,11 +37,10 @@ Good — that confirms the working directory context resolved and shows exactly 
 I fixed the quote-stripping bug from the screenshot: it reproduced in the Session Manager web UI (not the REPL already fixed in the initial reply), because `session-manager/sessions.go`'s `createSession`/`renameSession` had their own separate copy of the session-creation logic with no quote handling. I added a `stripSurroundingQuotes` helper there (mirroring `federation-command/main.go`'s) and applied it in both functions, plus matching tests in `sessions_test.go`. For the mobile-view request, I added a `@media (max-width: 640px)` block to `session-manager/frontend/src/index.css` that stacks the sidebar above the detail pane (instead of the cramped side-by-side split seen in the screenshot) and lets the detail header's buttons/rename input wrap instead of clipping. As before, the sandbox blocked `go test`/`vite build`, so this is verified by careful manual review rather than a compiled/test run.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's do a quick detour to FC - let's make it so that federation-command can accept a launch-arg to set the session it begins with.
 
+Let's make it so it also communicates its session to LR, so we can see it on LR or AC.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When LR restarts FC it should bring it back to the same session.

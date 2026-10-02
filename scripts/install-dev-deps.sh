@@ -25,6 +25,19 @@ NODE_INSTALL_MAJOR=20
 REQUIRED_DIRS=(
     "/AI-evo1-dev/bin"
     "/host-agent-files/agent-records"
+    "/host-agent-files/exchange"
+)
+
+# Shared mount points whose top-level directory must stay world-writable. A
+# plain `mkdir -p` on a REQUIRED_DIRS leaf creates every missing ancestor as
+# root:root 0755, including the mount root itself if it didn't already exist
+# — so a leaf added here later (or created directly by a binary's own
+# os.MkdirAll at runtime, e.g. local-representative's file-cache dirs under
+# exchange/) can still hit a permission-denied parent even though its own dir
+# gets chmod 777'd below. Reopen the mount root explicitly so that doesn't
+# happen again.
+SHARED_MOUNT_ROOTS=(
+    "/host-agent-files"
 )
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -225,6 +238,15 @@ create_missing_dirs() {
             created=$((created + 1))
         else
             info "Already exists: $dir"
+        fi
+    done
+    # mkdir -p above may have just created one of the shared mount roots as a
+    # side effect (root:root 0755) on its way to a leaf. Reopen it too, so a
+    # dir under it that isn't in REQUIRED_DIRS doesn't inherit a parent that
+    # blocks writes.
+    for root in "${SHARED_MOUNT_ROOTS[@]}"; do
+        if [ -d "$root" ]; then
+            chmod 777 "$root"
         fi
     done
     if [ "$created" -eq 0 ]; then

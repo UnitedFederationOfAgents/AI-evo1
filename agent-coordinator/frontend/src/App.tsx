@@ -1169,10 +1169,12 @@ function formatDebugLogLine(e: DebugLogEntry, hostLabel?: string): string {
 // hostLabel is only passed in the global perspective, same as
 // formatDebugLogLine/formatChainCallLine -- a stateboard entry has no
 // timestamp of its own (it's a live snapshot, not a log), so unlike those
-// two this is plain text with no time prefix.
+// two this is plain text with no time prefix. Entries nest two levels deep
+// under their owning sub-app (Revision F), so this renders "app: key =
+// value" rather than a single flattened key.
 function formatStateboardLine(e: StateboardEntry, hostLabel?: string): string {
   const host = hostLabel ? `${hostLabel}  ` : ''
-  return `${host}${e.key} = ${e.value || '(empty)'}`
+  return `${host}${e.app}: ${e.key} = ${e.value || '(empty)'}`
 }
 
 // resolveGlobalDebugUploadHost picks the "preferred file store" to save a

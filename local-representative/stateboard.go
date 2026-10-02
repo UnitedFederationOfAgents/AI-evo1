@@ -11,13 +11,19 @@ import (
 // This file implements the debug view's "stateboard" tab
 // (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E): a
 // generic key/value board any representable-connected sub-app can post
-// custom entries to, plus a default "<app>-present"/"<app>-hosts" pair LR
-// derives itself for every app it knows how to manage, from representable's
-// own connection health -- mirrors debugLog/chainCall (procman.go) in shape
-// and in how it's relayed up to agent-coordinator.
+// custom entries to, plus a default "present"/"hosts" pair LR derives
+// itself for every app it knows how to manage, from representable's own
+// connection health -- mirrors debugLog/chainCall (procman.go) in shape and
+// in how it's relayed up to agent-coordinator. Entries nest two levels deep
+// under their owning sub-app (Revision F).
 
-// StateboardEntry is one key/value row.
+// StateboardEntry is one key/value row, nested two levels deep under the
+// sub-app that owns it (Revision F: "session-manager: current-session: <id>"
+// rather than a single flattened "session-manager-current-session" key) --
+// we assume for now that keys will only ever be this two levels deep
+// (sub-app: key: <value>).
 type StateboardEntry struct {
+	App   string `json:"app"`
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
@@ -29,12 +35,12 @@ type StateboardMsg struct {
 	Entries []StateboardEntry `json:"entries"`
 }
 
-// stateboardApp names one sub-app that gets a default "<label>-present"/
-// "<label>-hosts" pair computed automatically from representable's
-// connection health. clientName is the name it connects to representable
-// as (see managedApps' --name args); label is the human-facing app name
-// used in the stateboard's key names, which isn't always the same string
-// (e.g. session-manager connects as "sessions").
+// stateboardApp names one sub-app that gets a default "present"/"hosts"
+// pair computed automatically from representable's connection health.
+// clientName is the name it connects to representable as (see managedApps'
+// --name args); label is the human-facing app name used as the stateboard
+// entry's App, which isn't always the same string (e.g. session-manager
+// connects as "sessions").
 var stateboardApps = []struct{ clientName, label string }{
 	{"federation-command", "federation-command"},
 	{"condoccer", "condoccer"},
@@ -44,15 +50,18 @@ var stateboardApps = []struct{ clientName, label string }{
 
 // setStateboardKV records one custom key/value pair submitted by a connected
 // sub-app over representable's generic "stateboard" data message (see
-// reprServer.SetDataHandler) -- any sub-app can post any key, which is what
-// makes this capability generic rather than hard-coded per app name.
-// Broadcasts a fresh stateboard snapshot.
-func (s *Server) setStateboardKV(key, value string) {
-	if key == "" {
+// reprServer.SetDataHandler) -- any sub-app can post any key under its own
+// app name, which is what makes this capability generic rather than
+// hard-coded per app name. Broadcasts a fresh stateboard snapshot.
+func (s *Server) setStateboardKV(app, key, value string) {
+	if app == "" || key == "" {
 		return
 	}
 	s.stateboardMu.Lock()
-	s.stateboardCustom[key] = value
+	if s.stateboardCustom[app] == nil {
+		s.stateboardCustom[app] = make(map[string]string)
+	}
+	s.stateboardCustom[app][key] = value
 	s.stateboardMu.Unlock()
 	s.broadcastStateboard()
 }
@@ -92,18 +101,20 @@ func (s *Server) clearFCHead(instanceID string) {
 
 // stateboard assembles the current stateboard snapshot: every custom
 // key/value pair a connected sub-app has submitted, plus the default
-// "<app>-present"/"<app>-hosts" pair for every app in stateboardApps,
-// derived live from representable's own connection health, plus
-// federation-command's "-instances" row built from the heads self-reported
-// by LR-launched instances (see setFCHead). Sorted by key for a stable
-// display order.
+// "present"/"hosts" pair nested under every app in stateboardApps, derived
+// live from representable's own connection health, plus
+// federation-command's "instances" row built from the heads self-reported
+// by LR-launched instances (see setFCHead). Sorted by app then key for a
+// stable display order.
 func (s *Server) stateboard() StateboardMsg {
 	host := ufahostid.GetHostID()
 
 	s.stateboardMu.Lock()
 	entries := make([]StateboardEntry, 0, len(s.stateboardCustom)+len(stateboardApps)*2+1)
-	for k, v := range s.stateboardCustom {
-		entries = append(entries, StateboardEntry{Key: k, Value: v})
+	for app, kv := range s.stateboardCustom {
+		for k, v := range kv {
+			entries = append(entries, StateboardEntry{App: app, Key: k, Value: v})
+		}
 	}
 	heads := make([]string, 0, len(s.fcHeads))
 	for _, h := range s.fcHeads {
@@ -113,12 +124,12 @@ func (s *Server) stateboard() StateboardMsg {
 
 	for _, app := range stateboardApps {
 		present := s.reprServer != nil && s.reprServer.IsHealthy(app.clientName)
-		entries = append(entries, StateboardEntry{Key: app.label + "-present", Value: strconv.FormatBool(present)})
+		entries = append(entries, StateboardEntry{App: app.label, Key: "present", Value: strconv.FormatBool(present)})
 		hosts := ""
 		if present {
 			hosts = host
 		}
-		entries = append(entries, StateboardEntry{Key: app.label + "-hosts", Value: hosts})
+		entries = append(entries, StateboardEntry{App: app.label, Key: "hosts", Value: hosts})
 	}
 
 	if len(heads) > 0 {
@@ -127,10 +138,15 @@ func (s *Server) stateboard() StateboardMsg {
 		for i, h := range heads {
 			pairs[i] = host + ":" + h
 		}
-		entries = append(entries, StateboardEntry{Key: "federation-command-instances", Value: strings.Join(pairs, ", ")})
+		entries = append(entries, StateboardEntry{App: "federation-command", Key: "instances", Value: strings.Join(pairs, ", ")})
 	}
 
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].App != entries[j].App {
+			return entries[i].App < entries[j].App
+		}
+		return entries[i].Key < entries[j].Key
+	})
 	return StateboardMsg{Entries: entries}
 }
 

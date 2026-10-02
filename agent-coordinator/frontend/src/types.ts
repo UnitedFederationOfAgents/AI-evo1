@@ -239,12 +239,15 @@ export interface LRChainCallMsg {
 }
 
 // StateboardEntry mirrors local-representative's same-named type: one
-// key/value row on the system tab's debug view's "stateboard" tab
+// key/value row, nested two levels deep under the sub-app that owns it
+// (app: key: value), on the system tab's debug view's "stateboard" tab
 // (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E) --
 // a generic board any representable-connected sub-app can post custom
-// entries to, plus the default "<app>-present"/"<app>-hosts" rows
-// local-representative derives itself from its own connection health.
+// entries to, plus the default "present"/"hosts" rows local-representative
+// derives itself from its own connection health. We assume for now that
+// keys are only ever this two levels deep (Revision F).
 export interface StateboardEntry {
+  app: string
   key: string
   value: string
 }

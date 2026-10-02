@@ -339,15 +339,17 @@ func (s *Server) sendVersion() {
 // stateboardKV is the payload of representable's generic "stateboard" data
 // message -- one key/value row posted to local-representative's stateboard
 // (see local-representative/stateboard.go's setStateboardKV and
-// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
-// Mirrors local-representative's own StateboardEntry.
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E), nested
+// two levels deep under App (Revision F). Mirrors local-representative's own
+// StateboardEntry.
 type stateboardKV struct {
+	App   string `json:"app"`
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
 
 // pushCurrentSessionStateboard reports this instance's current session on
-// the stateboard as "session-manager-current-session" -- called whenever it
+// the stateboard as "session-manager: current-session" -- called whenever it
 // changes (see sessions.go's setCurrentSession) and right after a
 // representable connection lands, mirroring sendVersion/pushSessionsState.
 // No-op when not connected or when nothing is current yet.
@@ -359,7 +361,8 @@ func (s *Server) pushCurrentSessionStateboard() {
 		return
 	}
 	client.SendData("stateboard", stateboardKV{
-		Key:   "session-manager-current-session",
+		App:   "session-manager",
+		Key:   "current-session",
 		Value: s.getCurrentSession(),
 	})
 }

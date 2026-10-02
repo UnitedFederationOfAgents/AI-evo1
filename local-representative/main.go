@@ -335,14 +335,16 @@ type Server struct {
 	// Debug view's "stateboard" tab (condocs/initialDistributedSessionsImpls/
 	// Step2Prompt.md Revision E): a generic key/value board any connected
 	// sub-app can post custom entries to (see setStateboardKV, stateboard.go),
-	// plus the default "<app>-present"/"<app>-hosts" rows derived live from
+	// plus the default "present"/"hosts" rows derived live from
 	// representable's own connection health for every app named in
-	// stateboardApps. fcHeads holds federation-command's self-reported head
-	// IDs, one per LR-launched instance (see setFCHead) -- the only way to
-	// list them individually despite representable tracking one connection
-	// identity per app name (see versionMu's comment above).
+	// stateboardApps. stateboardCustom is keyed by sub-app then key, matching
+	// StateboardEntry's two-level nesting (Revision F). fcHeads holds
+	// federation-command's self-reported head IDs, one per LR-launched
+	// instance (see setFCHead) -- the only way to list them individually
+	// despite representable tracking one connection identity per app name
+	// (see versionMu's comment above).
 	stateboardMu     sync.Mutex
-	stateboardCustom map[string]string
+	stateboardCustom map[string]map[string]string
 	fcHeads          map[string]string // instance id -> federation-command's self-reported head ID
 
 	// Session sync (see sessions.go and
@@ -381,7 +383,7 @@ func newServer(lrName string) *Server {
 		managedVersions:        make(map[string]string),
 		managedUpdateAvailable: make(map[string]bool),
 		managedPendingVersion:  make(map[string]string),
-		stateboardCustom:       make(map[string]string),
+		stateboardCustom:       make(map[string]map[string]string),
 		fcHeads:                make(map[string]string),
 	}
 }
@@ -1666,7 +1668,7 @@ func main() {
 				s.setModeMismatch("sessions", false, "")
 				// Clear its stateboard row rather than leave a stale session
 				// id up once session-manager itself is gone.
-				s.setStateboardKV("session-manager-current-session", "")
+				s.setStateboardKV("session-manager", "current-session", "")
 			}
 			return
 		}
@@ -1705,7 +1707,7 @@ func main() {
 				// comment above), so a disconnect means none are reachable
 				// any more -- drop every self-reported head rather than let
 				// a stale one linger on the stateboard (also refreshes
-				// "federation-command-present"/"-hosts", which read
+				// "federation-command: present"/"hosts", which read
 				// reprServer.IsHealthy live but only on the next broadcast).
 				s.stateboardMu.Lock()
 				s.fcHeads = make(map[string]string)
@@ -1744,7 +1746,7 @@ func main() {
 			// Revision E).
 			var payload StateboardEntry
 			if err := json.Unmarshal(data, &payload); err == nil {
-				s.setStateboardKV(payload.Key, payload.Value)
+				s.setStateboardKV(payload.App, payload.Key, payload.Value)
 			}
 			return
 		}

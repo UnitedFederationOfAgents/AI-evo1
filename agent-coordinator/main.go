@@ -478,10 +478,12 @@ type LRChainCallMsg struct {
 }
 
 // StateboardEntry mirrors local-representative's same-named type (see
-// local-representative/stateboard.go): one key/value row on the system
-// tab's debug view's "stateboard" tab
-// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
+// local-representative/stateboard.go): one key/value row, nested two levels
+// deep under the sub-app that owns it, on the system tab's debug view's
+// "stateboard" tab (condocs/initialDistributedSessionsImpls/Step2Prompt.md
+// Revision E, nesting added in Revision F).
 type StateboardEntry struct {
+	App   string `json:"app"`
 	Key   string `json:"key"`
 	Value string `json:"value"`
 }
@@ -771,6 +773,9 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	sessions := hs.sessions
 	convo := hs.convo
 	files := hs.files
+	debugLog := hs.debugLog
+	chainCall := hs.chainCall
+	stateboard := hs.stateboard
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -800,6 +805,28 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: false})
+	}
+	// debugLog/chainCall/stateboard were missing here entirely (Revision F:
+	// "nothing is currently displaying in the stateboard view") -- a browser
+	// client connecting (or reconnecting) after LR's one-time initial
+	// pushStateToAC never got this host's current debug-view data until the
+	// next broadcastStateboard()-triggering event, which for the
+	// comparatively static stateboard tab (unlike the constantly-streaming
+	// logs/network tabs) could be a very long wait or never.
+	if debugLog != nil {
+		s.sendToClient(c, "lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: connected, Entries: debugLog.Entries})
+	} else {
+		s.sendToClient(c, "lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
+	}
+	if chainCall != nil {
+		s.sendToClient(c, "lr-chain-call-state", LRChainCallMsg{HostID: name, Active: connected, Entries: chainCall.Entries})
+	} else {
+		s.sendToClient(c, "lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
+	}
+	if stateboard != nil {
+		s.sendToClient(c, "lr-stateboard-state", LRStateboardMsg{HostID: name, Active: connected, Entries: stateboard.Entries})
+	} else {
+		s.sendToClient(c, "lr-stateboard-state", LRStateboardMsg{HostID: name, Active: false})
 	}
 }
 

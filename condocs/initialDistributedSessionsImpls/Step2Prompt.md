@@ -137,3 +137,26 @@ Nothing is currently displaying in the stateboard view. Let's do another pass to
 Note that we also DO want nested keys - 'session-manager-current-session: <id>' should be 'session-manager: current-session: <id>'
 
 We can assume for now that keys will only be two levels deep. (sub-app: key: <value>)
+
+
+prompt: [`5b57803`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5b57803cbf101adb3e6e18594bf3b059f916f7d6) → reply: [`da8c5cd`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/da8c5cd2cfa4241feee7eaef06b18a92e77f2b71)
+
+## Reply F
+
+I found and fixed the actual display bug plus the nesting request from Revision F:
+
+1. **Root cause of the empty stateboard view**: `agent-coordinator/main.go`'s `sendHostSnapshot` (which pushes a connecting browser client its current per-host state) never read or sent `debugLog`/`chainCall`/`stateboard` at all — only `services`, `ridealong`, `condoc`, etc. Since the stateboard is relatively static (unlike the constantly-streaming logs tab), a browser that loaded the debug view after LR's one-time initial push to AC would simply never receive any entries. Added the missing sends, mirroring the existing nil-check pattern used for `files`/`condoc`.
+
+2. **Nested keys**: Changed `StateboardEntry` (in `local-representative/stateboard.go`, mirrored in `agent-coordinator/main.go` and the frontend `types.ts`) from a single flattened `Key` to `App`/`Key`/`Value`, updated `setStateboardKV`'s storage to a nested `app -> key -> value` map, updated every producer (`session-manager/repr.go`'s `pushCurrentSessionStateboard`, LR's default `present`/`hosts`/`instances` rows) to populate the new fields, and updated `formatStateboardLine` to render `"app: key = value"` instead of `"app-key = value"` — e.g. `session-manager: current-session: <id>`.
+
+`go build`/`gofmt`/`tsc` remain blocked by the sandbox's permission policy (as in every prior reply on this condoc), so this was verified via careful manual tracing of every call site rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

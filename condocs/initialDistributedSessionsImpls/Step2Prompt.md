@@ -220,3 +220,20 @@ I implemented Revision H: session-manager now accepts a `--session <id>`/`SM_SES
 When we have a default session in SM and we launch a NEW FC instance from the system tab we expect to have it take the current session.
 
 Let's ensure this works.
+
+
+prompt: [`65c491f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/65c491f115cad3b5b16c680ab6edfd8b2ab629ab) → reply: [`5d41f1c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5d41f1c5a6c24e2b74c7b2914638ac6f8ebd5b0f)
+
+## Reply I
+
+I implemented Revision I in `local-representative/procman.go`: added a `fcLaunchSessionID()` helper that prefers a previously-reported FC session (restart continuity, unchanged) but now falls back to session-manager's current session (`smSession()`) when no FC session has ever been reported — i.e. when launching a brand-new FC instance rather than restarting one. Wired this into both the `federation-command` launch spec's `buildArgs` (`--session`) and `buildEnv` (`FC_SESSION`), so a new FC instance launched from the system tab while SM has an active session now lands in that same session instead of minting its own. Added two tests in `procman_test.go` covering the new fallback and confirming it yields to an already-known FC session when one exists; as with every prior reply on this condoc, `go build`/`go test` were blocked by the sandbox, so this was verified via manual review/tracing rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

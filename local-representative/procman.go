@@ -207,13 +207,16 @@ var managedApps = map[string]launchSpec{
 				// docs/DevMode.md.
 				args = append(args, "--dev-mode")
 			}
-			if id, _ := s.fcSession(); id != "" {
+			if id := s.fcLaunchSessionID(); id != "" {
 				// A previous (or still-running) FC instance reported this session —
 				// hand it straight back so a restart lands in the same place (see
 				// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
-				// Harmless on a first launch with nothing reported yet: fcSession
-				// returns "" and this is skipped, leaving FC to resolve its own
-				// default session as before.
+				// With no FC session known yet (a brand-new instance, not a
+				// restart), this falls back to session-manager's current session
+				// instead (Revision I), so a new FC launched while SM has a
+				// session active lands there rather than minting its own. ""
+				// only when neither has reported anything, leaving FC to resolve
+				// its own default session as before.
 				args = append(args, "--session", id)
 			}
 			return args
@@ -242,7 +245,9 @@ var managedApps = map[string]launchSpec{
 			if s.devMode {
 				env = append(env, "FC_DEV_MODE=1")
 			}
-			if id, _ := s.fcSession(); id != "" {
+			if id := s.fcLaunchSessionID(); id != "" {
+				// Mirrors buildArgs above (including the Revision I session-manager
+				// fallback) -- see its comment.
 				env = append(env, "FC_SESSION="+id)
 			}
 			return env
@@ -401,6 +406,21 @@ func (s *Server) smSession() string {
 	s.smSessionMu.RLock()
 	defer s.smSessionMu.RUnlock()
 	return s.smSessionID
+}
+
+// fcLaunchSessionID picks the session id to hand a federation-command
+// instance on launch. A previously-reported FC session wins first (restart
+// continuity -- see fcSession/setFCSessionState and Revision B above); with
+// none yet reported -- i.e. this is a brand-new instance, not a restart --
+// fall back to session-manager's current session, so a fresh FC lands in
+// whatever session is already active in SM instead of minting its own (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision I). ""
+// if neither has reported anything, leaving FC to resolve its own default.
+func (s *Server) fcLaunchSessionID() string {
+	if id, _ := s.fcSession(); id != "" {
+		return id
+	}
+	return s.smSession()
 }
 
 // managedVersion returns the build version most recently reported by the

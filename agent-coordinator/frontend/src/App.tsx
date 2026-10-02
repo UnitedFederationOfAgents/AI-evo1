@@ -2797,6 +2797,12 @@ function LRView({
   const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
+  // Mirrors local-representative/frontend/src/App.tsx's own fcSession: the
+  // session this host's federation-command is on, relayed down through
+  // lr-system-state (see condocs/initialDistributedSessionsImpls/
+  // Step2Prompt.md Revision C). Surfaced on the federation-command tab
+  // itself rather than only the system tab's per-row tag.
+  const fcSession = data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
 
   // Consume the global "go to first highlighted file" handoff (Step5SubstepR
   // Revision E) once this is the host it was aimed at -- App() has already
@@ -2930,6 +2936,9 @@ function LRView({
                 <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
                   <span className="health-dot" />
                   <span className="health-label">{getServiceStatus(activeTab)}</span>
+                  {fcSession && (
+                    <span className="fc-session-tag" title="active session">{fcSession}</span>
+                  )}
                 </div>
               )}
               {activeTab === 'system' && (

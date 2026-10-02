@@ -4080,14 +4080,16 @@ func readSessionYAMLFields(sessionDir string) [][2]string {
 	return fields
 }
 
-// updateSessionName writes the new name into session.yaml, creating the file if needed.
+// updateSessionName writes the new name into session.yaml, creating the file
+// if needed. A freshly-created file's owner is this host (fcHostID) --
+// see condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
 func updateSessionName(sessionDir, newName string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
 		sessionID := filepath.Base(sessionDir)
-		content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
-			sessionID, newName, time.Now().Format(time.RFC3339))
+		content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+			sessionID, newName, fcHostID, time.Now().Format(time.RFC3339))
 		return os.WriteFile(yamlPath, []byte(content), 0644)
 	}
 	lines := strings.Split(string(data), "\n")

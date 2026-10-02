@@ -748,7 +748,7 @@ func isUnixTimestamp(s string) bool {
 func runGetDefaultSession() int {
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	sessionID := defaultSessionID()
-	name := time.Now().Format("2006-01-02") + " Default"
+	name := time.Now().Format("2006-01-02") + " Default " + ufahostid.GetHostID()
 	if err := ensureSession(recordsPath, sessionID, name); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable get-default-session: %v\n", err)
 		return 1
@@ -819,14 +819,18 @@ func ensureSession(recordsPath, sessionID, name string) error {
 	return writeSessionYAMLIfAbsent(sessionDir, sessionID, name)
 }
 
-// writeSessionYAMLIfAbsent writes session.yaml only when it doesn't already exist.
+// writeSessionYAMLIfAbsent writes session.yaml only when it doesn't already
+// exist. owner records the host that created the session (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C) --
+// never rewritten afterward, so it stays pinned to whichever host actually
+// made the directory even if another host later renames or takes over it.
 func writeSessionYAMLIfAbsent(sessionDir, sessionID, name string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	if _, err := os.Stat(yamlPath); err == nil {
 		return nil
 	}
-	content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
-		sessionID, name, time.Now().Format(time.RFC3339))
+	content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+		sessionID, name, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
 	return os.WriteFile(yamlPath, []byte(content), 0644)
 }
 
@@ -853,8 +857,8 @@ func updateSessionYAMLName(sessionDir, sessionID, newName string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
-		content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
-			sessionID, newName, time.Now().Format(time.RFC3339))
+		content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+			sessionID, newName, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
 		return os.WriteFile(yamlPath, []byte(content), 0644)
 	}
 	lines := strings.Split(string(data), "\n")

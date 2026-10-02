@@ -66,3 +66,28 @@ Let's take another look here - we expect to see FC's session in the federation-c
 Let's finish this implementation.
 
 Let's also add the 'owner' field to the session.yaml (starts with creating host ID), and when we create defaults the names will now be '<date> Default <host>'.
+
+
+prompt: [`614e403`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/614e403baeaaff12285dd783f50cca12e4fa252b) → reply: [`a1448dc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a1448dc665fb4db8336f224fe43c45a8d8a6b081)
+
+## Reply C
+
+This all looks complete and consistent across the three independent session.yaml implementations. Everything is in order — summarizing now.
+
+## Summary
+
+For Revision C I made two changes:
+
+1. **FC session visible on the federation-command tab**: `local-representative`'s and `agent-coordinator`'s frontends already relayed a connected federation-command instance's session into `ProcInfo.Session` for the *system* tab, but never surfaced it on the *federation-command* tab itself. I added a derived `fcSession` lookup against the existing system-state data and rendered it as a small tag next to the health indicator in both `App.tsx`s (plus matching `.fc-session-tag` CSS), so the session is now visible right where FC's own controls/log live, not just buried in the system tab.
+
+2. **`owner` field + host-qualified default names**: Added an `owner: <host ID>` line (via `ufahostid.GetHostID()`/`fcHostID`) to every place a `session.yaml` gets freshly written — `clauditable`'s `writeSessionYAMLIfAbsent`/`updateSessionYAMLName`, `session-manager`'s mirrored `writeSessionYAMLIfAbsent` (plus its `go.mod`/import to pull in `ufa-hostid`), and `federation-command`'s `updateSessionName` create-fallback — so the owner always reflects the creating host and is left untouched on rename. Default-session names (`clauditable get-default-session`, the only place that mints them) now read `"<date> Default <host>"`. Since all three apps' describe/list code already renders `session.yaml` fields generically, `owner` shows up automatically without further changes. Added/extended unit tests in all three packages to cover the new field; as in prior replies, `go build`/`go test` were blocked by the sandbox, so this was verified by careful manual review rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

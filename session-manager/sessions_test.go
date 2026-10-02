@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ufahostid "ufa-hostid"
 )
 
 // TestCreateAndListSessions verifies createSession writes a session.yaml
@@ -37,6 +39,35 @@ func TestCreateAndListSessions(t *testing.T) {
 	}
 	if !sessions[0].Current {
 		t.Error("expected newly-created session to be marked Current")
+	}
+}
+
+// TestCreateSessionRecordsOwner verifies createSession stamps session.yaml
+// with an owner field naming the creating host, surfaced generically by
+// describeSession like every other field (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C).
+func TestCreateSessionRecordsOwner(t *testing.T) {
+	dir := t.TempDir()
+
+	id, err := createSession(dir, "Owner Check")
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	info, err := describeSession(dir, id)
+	if err != nil {
+		t.Fatalf("describeSession: %v", err)
+	}
+	var owner string
+	for _, f := range info.Fields {
+		if f[0] == "owner" {
+			owner = f[1]
+		}
+	}
+	if owner == "" {
+		t.Fatalf("expected an owner field, got fields: %v", info.Fields)
+	}
+	if owner != ufahostid.GetHostID() {
+		t.Errorf("owner = %q, want %q", owner, ufahostid.GetHostID())
 	}
 }
 

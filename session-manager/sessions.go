@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	ufahostid "ufa-hostid"
 )
 
 // This file gives session-manager parity with federation-command's "ufa
@@ -444,13 +446,14 @@ func stripSurroundingQuotes(s string) string {
 }
 
 // writeSessionYAMLIfAbsent mirrors clauditable/main.go's function of the
-// same name.
+// same name, including the owner field recording the creating host (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C).
 func writeSessionYAMLIfAbsent(sessionDir, id, name string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	if _, err := os.Stat(yamlPath); err == nil {
 		return nil
 	}
-	content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n", id, name, time.Now().Format(time.RFC3339))
+	content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n", id, name, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
 	return os.WriteFile(yamlPath, []byte(content), 0644)
 }
 

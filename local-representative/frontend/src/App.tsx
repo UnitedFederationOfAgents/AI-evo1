@@ -1821,6 +1821,16 @@ export default function App() {
   const mismatches = Object.values(modeMismatches)
   const isEmbedTab = EMBED_TABS.has(activeTab)
 
+  // The federation-command tab's own session readout -- setFCSessionState
+  // (procman.go) already folds every connected FC instance's reported
+  // session into its system-state ProcInfo.Session (all of them get the
+  // same value; see that function's doc comment), but until now that only
+  // ever reached the system tab's per-row tag. Surface the same value
+  // right on the federation-command tab itself, next to its health
+  // indicator, so "what session is FC on" doesn't require a trip to system.
+  // See condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
+  const fcSession = systemState?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
   }
@@ -1984,6 +1994,9 @@ export default function App() {
                   <div className={`health-indicator health-${getStatus(activeTab)}`}>
                     <span className="health-dot" />
                     <span className="health-label">{getStatus(activeTab)}</span>
+                    {activeTab === 'federation-command' && fcSession && (
+                      <span className="fc-session-tag" title="active session">{fcSession}</span>
+                    )}
                   </div>
                   {activeTab === 'federation-command' && (
                     <>

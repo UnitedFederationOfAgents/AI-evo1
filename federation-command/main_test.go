@@ -129,6 +129,28 @@ func TestStripSurroundingQuotes(t *testing.T) {
 	}
 }
 
+// TestUpdateSessionNameStampsOwnerOnCreate verifies updateSessionName's
+// create-fallback (taken when renaming a session that has no session.yaml
+// yet) stamps an owner field naming this host -- see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
+func TestUpdateSessionNameStampsOwnerOnCreate(t *testing.T) {
+	prevHostID := fcHostID
+	fcHostID = "test-host-123"
+	defer func() { fcHostID = prevHostID }()
+
+	dir := t.TempDir()
+	if err := updateSessionName(dir, "My Session"); err != nil {
+		t.Fatalf("updateSessionName: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "session.yaml"))
+	if err != nil {
+		t.Fatalf("reading session.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "owner: test-host-123") {
+		t.Errorf("session.yaml should contain owner, got: %s", data)
+	}
+}
+
 // TestIsValidAgent verifies agent validation
 func TestIsValidAgent(t *testing.T) {
 	tests := []struct {

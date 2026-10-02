@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"clauditable/pkg/records"
+	ufahostid "ufa-hostid"
 )
 
 func TestGetSession(t *testing.T) {
@@ -472,6 +473,11 @@ func TestEnsureSession(t *testing.T) {
 	}
 	if !strings.Contains(content, "name: "+name) {
 		t.Errorf("session.yaml should contain name, got: %s", content)
+	}
+	// owner records the creating host (condocs/initialDistributedSessionsImpls/
+	// Step2Prompt.md Revision C).
+	if !strings.Contains(content, "owner: "+ufahostid.GetHostID()) {
+		t.Errorf("session.yaml should contain owner, got: %s", content)
 	}
 
 	// Calling again should not overwrite

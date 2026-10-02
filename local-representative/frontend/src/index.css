@@ -430,6 +430,16 @@ body {
 .health-unhealthy .health-dot  { background: #cc4444; }
 .health-unhealthy .health-label { color: #cc4444; }
 
+.fc-session-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: #888;
+  background: #262626;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 1px 8px;
+}
+
 /* ---- FC control panel ---- */
 
 .fc-status {

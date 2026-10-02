@@ -70,6 +70,7 @@ export interface ProcInfo {
   update_available?: boolean // the on-disk binary now answers --version differently than this running process (self: docs/DevMode.md "Loader"; managed: Step4Prompt.md Revision D)
   pending_version?: string // the on-disk version update_available refers to; empty whenever update_available is false -- see Step5Prompt.md Revision J
   auto_update?: boolean // self only: restart that host's LR automatically the moment update_available goes true, instead of waiting for the "restart and update" control -- see docs/DevMode.md "Loader"
+  session?: string // federation-command only: the session it's currently on (display name if session.yaml has one, otherwise the bare id) -- empty until an instance has connected and reported
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
@@ -193,4 +194,66 @@ export interface LRFilesMsg {
   host_id: string
   active: boolean
   files?: FileInfo[]
+}
+
+// DebugLogEntry mirrors local-representative's same-named type: one captured
+// stdout/stderr line from an LR-managed sub-app, shown on the system tab's
+// debug view (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md
+// Revision E).
+export interface DebugLogEntry {
+  instance_id: string
+  app: string
+  stream: string // "stdout" | "stderr"
+  line: string
+  ts: number // unix seconds
+}
+
+export interface LRDebugLogMsg {
+  host_id: string
+  active: boolean
+  entries?: DebugLogEntry[]
+}
+
+// ChainCallEntry mirrors local-representative's same-named type: one
+// outbound HTTP call made on the SM<->LR<->AC chain -- either that host's
+// own "lr->ac" hop or its session-manager's "sm->lr" hop -- shown on the
+// system tab's debug view's "network" tab
+// (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision
+// F). Browser-side fetch capture (see App.tsx's installNetworkCapture)
+// covers only this one frontend's own requests; this is the half of the
+// chain that happens entirely between backend processes.
+export interface ChainCallEntry {
+  hop: string // "sm->lr" | "lr->ac"
+  method: string
+  url: string
+  status: number // 0 on a network-level failure
+  error?: string
+  duration_ms: number
+  ts: number // unix seconds
+}
+
+export interface LRChainCallMsg {
+  host_id: string
+  active: boolean
+  entries?: ChainCallEntry[]
+}
+
+// StateboardEntry mirrors local-representative's same-named type: one
+// key/value row, nested two levels deep under the sub-app that owns it
+// (app: key: value), on the system tab's debug view's "stateboard" tab
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E) --
+// a generic board any representable-connected sub-app can post custom
+// entries to, plus the default "present"/"hosts" rows local-representative
+// derives itself from its own connection health. We assume for now that
+// keys are only ever this two levels deep (Revision F).
+export interface StateboardEntry {
+  app: string
+  key: string
+  value: string
+}
+
+export interface LRStateboardMsg {
+  host_id: string
+  active: boolean
+  entries?: StateboardEntry[]
 }

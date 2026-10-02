@@ -56,6 +56,57 @@ Local-representative connects to AC using `representable.Client`. Messages:
 | LR → AC | `log` (cmd/output) | FC command echo / output forwarded upstream |
 | AC → LR | `command` | plain cmd or `__ridealong:action` → forwarded to FC; `__system:launch <app>` / `__system:terminate <id>` / `__system:restart-managed <id>` → LR's process manager; `__system:restart` / `__system:rebuild` / `__system:auto-rebuild <on\|off>` → LR's own restart control and dev-repo watcher (see [DevMode.md](../../docs/DevMode.md)) |
 
+### Reaching a NAT'd LR: the tunnel connection
+
+Every `GET /host/<id>/*` an AC browser (or AC itself, serving a session pull,
+discovery fan-out, or upload relay) issues used to make AC **dial out fresh**
+to that LR's own HTTP port, resolved from the host's representable `RemoteAddr`
+plus the `lr-http` port it discloses. That assumes the LR→AC direction is
+reachable both ways, which doesn't hold for an LR sitting behind NAT or on a
+private network segment that can only reach *out* to AC, never be dialed back
+into.
+
+Fixed by giving each LR a second, plain TCP connection in addition to its
+control connection: right after connecting, LR also dials AC again via
+`representable.DialTunnel`, tagging the raw socket with a one-line
+`TUNNEL <name>` handshake (not the `Msg`/`ServerMsg` JSON framing the control
+connection uses) and then serving its own HTTP mux straight over it
+(`http.Serve` against a single-connection listener). AC's `representable.Server`
+parks that socket in a per-host pool (`ClaimTunnel`); `proxyToHost` and
+`handleFileUploadRelay`'s shared `http.Transport` now dials by first trying to
+claim that host's pooled tunnel conn and only falling back to a real `net.Dial`
+if none is parked (e.g. a host with no tunnel yet, or in tests) — `net/http`'s
+own client/server machinery doesn't care whether the conn it's handed came
+from a real dial or a pre-existing stream. This iteration keeps it to exactly
+one standing tunnel per LR (`N == 1`), but LR redials its replacement as soon
+as the standing tunnel is actually claimed and used — not only once it drops —
+so a long-lived claim (notably the dashboard's own `/host/<id>/ws`
+connection) can't starve every other proxied request for the rest of its
+lifetime; a request that still beats the replacement into existence falls
+back to a direct dial like before, which only resolves if that LR also
+happens to be reachable that way (see Revision J). NAT-idle-reaping a
+connection no one is actively using is a known gap left for a follow-up (see
+`condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md`, Revisions
+H/I/J).
+
+Revision C of `condocs/initialDistributedSessionsImpls/Step1Prompt.md`
+attempted to fix a consequence of that gap: a tunnel that dies (reaped, or
+the registration simply got evicted) before carrying any real traffic still
+looked "used" and redialed its replacement with no delay at all -- if
+whatever killed it keeps killing each replacement just as fast, that's a
+busy loop logging "tunnel: opened"/"tunnel: closed" many times a second.
+Revision C added `firstByteConn`, which only fires once a Read off the
+tunnel actually returns data, but still triggered the *next tunnel's* dial
+from the older "first Read attempt" signal (`firstUseConn`) -- which fires
+instantly whether or not that Read ever succeeds. So the dead tunnel's
+doomed first Read still spawned its replacement immediately, with zero
+delay, same as before; the busy loop was unaffected in practice. Revision D
+removed `firstUseConn` and wired both "open the next tunnel concurrently"
+and "this tunnel was used for real, skip the backoff" off `firstByteConn`
+alone, so a tunnel that never carries real traffic can no longer bypass the
+2s backoff. This bounds the symptom but isn't a fix for NAT-idle-reaping
+itself, which remains the open gap above.
+
 ### condoccer in the chain
 
 condoccer is itself a `representable.Client` of LR (`--auto-connect`, name `condoccer`,

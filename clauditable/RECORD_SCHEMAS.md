@@ -1,6 +1,8 @@
 # Record Schemas
 
 This document describes the record and event schemas used by `clauditable` and related tools.
+For how these files move through the writing → raw/s-raw → processed → `session.jsonl`
+pipeline, see [`FILE_PROCESSING_SEQUENCE.md`](FILE_PROCESSING_SEQUENCE.md).
 
 ## Terminology
 

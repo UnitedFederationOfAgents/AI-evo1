@@ -1,0 +1,16 @@
+3:12:23 PM  [sm->lr] POST  200  1ms  http://localhost:8081/api/sessions/discover
+3:15:22 PM  [lr->ac] GET  200  3ms  http://localhost:8083/api/hosts
+3:15:23 PM  [lr->ac] GET  502  1501ms  http://localhost:8083/host/8082c7f2a286-o3x0/api/sessions
+3:15:23 PM  [sm->lr] POST  200  1507ms  http://localhost:8081/api/sessions/discover
+3:15:30 PM  [lr->ac] GET  200  0ms  http://localhost:8083/api/hosts
+3:15:31 PM  [lr->ac] GET  502  1501ms  http://localhost:8083/host/8082c7f2a286-o3x0/api/sessions
+3:15:31 PM  [sm->lr] POST  200  1503ms  http://localhost:8081/api/sessions/discover
+3:15:37 PM  [lr->ac] GET  200  1ms  http://localhost:8083/api/hosts
+3:15:38 PM  [lr->ac] GET  502  1501ms  http://localhost:8083/host/8082c7f2a286-o3x0/api/sessions
+3:15:38 PM  [sm->lr] POST  200  1503ms  http://localhost:8081/api/sessions/discover
+3:15:38 PM  [lr->ac] GET  200  0ms  http://localhost:8083/api/hosts
+3:15:40 PM  [lr->ac] GET  502  1501ms  http://localhost:8083/host/8082c7f2a286-o3x0/api/sessions/2026-10-01_15-15-37_blather/list?glob=session.jsonl
+3:15:40 PM  [sm->lr] POST  200  1503ms  http://localhost:8081/api/sessions/2026-10-01_15-15-37_blather/pull?glob=session.jsonl&mode=sync
+3:15:40 PM  [lr->ac] GET  200  0ms  http://localhost:8083/api/hosts
+3:15:41 PM  [lr->ac] GET  502  1500ms  http://localhost:8083/host/8082c7f2a286-o3x0/api/sessions/2026-10-01_15-15-37_blather/list?glob=%2A-processed.txt
+3:15:41 PM  [sm->lr] POST  200  1503ms  http://localhost:8081/api/sessions/2026-10-01_15-15-37_blather/pull?glob=%2A-processed.txt&mode=sync

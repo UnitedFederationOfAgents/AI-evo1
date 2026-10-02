@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ufahostid "ufa-hostid"
 )
 
 // TestCreateAndListSessions verifies createSession writes a session.yaml
@@ -37,6 +39,35 @@ func TestCreateAndListSessions(t *testing.T) {
 	}
 	if !sessions[0].Current {
 		t.Error("expected newly-created session to be marked Current")
+	}
+}
+
+// TestCreateSessionRecordsOwner verifies createSession stamps session.yaml
+// with an owner field naming the creating host, surfaced generically by
+// describeSession like every other field (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C).
+func TestCreateSessionRecordsOwner(t *testing.T) {
+	dir := t.TempDir()
+
+	id, err := createSession(dir, "Owner Check")
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	info, err := describeSession(dir, id)
+	if err != nil {
+		t.Fatalf("describeSession: %v", err)
+	}
+	var owner string
+	for _, f := range info.Fields {
+		if f[0] == "owner" {
+			owner = f[1]
+		}
+	}
+	if owner == "" {
+		t.Fatalf("expected an owner field, got fields: %v", info.Fields)
+	}
+	if owner != ufahostid.GetHostID() {
+		t.Errorf("owner = %q, want %q", owner, ufahostid.GetHostID())
 	}
 }
 
@@ -261,5 +292,79 @@ func TestSlugify(t *testing.T) {
 		if got := slugify(in); got != want {
 			t.Errorf("slugify(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestStripSurroundingQuotes mirrors federation-command/main_test.go's test
+// of the same name.
+func TestStripSurroundingQuotes(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`"My New Session"`, "My New Session"},
+		{`'My New Session'`, "My New Session"},
+		{"My New Session", "My New Session"},
+		{`"unterminated`, `"unterminated`},
+		{`"`, `"`},
+		{"", ""},
+		{`"mismatched'`, `"mismatched'`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := stripSurroundingQuotes(tt.in); got != tt.want {
+				t.Errorf("stripSurroundingQuotes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCreateSessionStripsQuotes verifies createSession strips a user's
+// habitual quoting of a multi-word name (see resource "Debug Quotes": the
+// Session Manager web UI's "new session name…" field is a plain text input,
+// not shell-parsed, so typed quotes previously ended up baked into the name).
+func TestCreateSessionStripsQuotes(t *testing.T) {
+	dir := t.TempDir()
+
+	id, err := createSession(dir, `"Name Without Quotes"`)
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+
+	sessions, err := listSessions(dir, id)
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Name != "Name Without Quotes" {
+		t.Errorf("Name = %q, want %q", sessions[0].Name, "Name Without Quotes")
+	}
+}
+
+// TestRenameSessionStripsQuotes is TestCreateSessionStripsQuotes's
+// rename-session equivalent.
+func TestRenameSessionStripsQuotes(t *testing.T) {
+	dir := t.TempDir()
+
+	id, err := createSession(dir, "Original Name")
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	if err := renameSession(dir, id, `"Renamed Without Quotes"`); err != nil {
+		t.Fatalf("renameSession: %v", err)
+	}
+
+	sessions, err := listSessions(dir, id)
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(sessions))
+	}
+	if sessions[0].Name != "Renamed Without Quotes" {
+		t.Errorf("Name = %q, want %q", sessions[0].Name, "Renamed Without Quotes")
 	}
 }

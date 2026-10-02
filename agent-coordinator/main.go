@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -47,6 +49,54 @@ const relayedUploadHeader = "X-UFA-Relayed-Upload-By"
 // acRelayStamp is the value both proxiedHeader and relayedUploadHeader carry
 // on a request handleFileUploadRelay makes.
 const acRelayStamp = "agent-coordinator"
+
+// hostDialTimeout bounds how long proxyToHost's reverse proxy and
+// handleFileUploadRelay's outbound request will wait to establish the TCP
+// connection to a peer host's local-representative. Without it, both ride
+// http.DefaultTransport's 30s dial timeout -- far longer than every caller
+// that sits on top of this proxy budgets for the whole round trip
+// (local-representative's sessionsDiscoverHTTPTimeout is 2s,
+// sessionsPullHTTPTimeout 5s; federation-command's and session-manager's own
+// end-to-end discovery timeout 8s). Against an unreachable host (firewalled,
+// an unpublished container port, offline) every one of those callers was
+// already giving up on its own side -- "sessions discover: indexing host
+// ...: context deadline exceeded" -- while AC's dial kept running uselessly
+// in the background, and a human navigating straight to that host's
+// dashboard through AC sat on a spinner for up to 30s before seeing "not
+// reachable". A short dial timeout here makes AC's own "not reachable"
+// verdict arrive well inside every existing caller's budget instead of
+// racing (and losing to) it.
+const hostDialTimeout = 1500 * time.Millisecond
+
+// hostIDContextKey carries a proxied request's target host id through to
+// newHostProxyTransport's DialContext, which otherwise only sees the literal
+// "host:port" dial target proxyToHost/handleFileUploadRelay resolved -- it
+// needs the host id too, to look up that host's pooled tunnel connection.
+type hostIDContextKey struct{}
+
+// newHostProxyTransport builds the http.Transport shared by proxyToHost and
+// handleFileUploadRelay. Its DialContext prefers a pooled tunnel connection --
+// one local-representative already opened to this agent-coordinator via
+// representable.DialTunnel, the one direction guaranteed to work when LR
+// sits behind NAT -- over dialing the host fresh (see hostDialTimeout and
+// condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md, Revision
+// I). It falls back to a direct dial whenever that host has no tunnel
+// parked (no representable server at all, or the host just hasn't opened one
+// yet), so this keeps working unchanged for a same-machine/non-NAT host and
+// in tests, which never register a tunnel.
+func newHostProxyTransport(s *Server) *http.Transport {
+	dialer := &net.Dialer{Timeout: hostDialTimeout}
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if hostID, _ := ctx.Value(hostIDContextKey{}).(string); hostID != "" && s.reprServer != nil {
+				if conn, ok := s.reprServer.ClaimTunnel(hostID); ok {
+					return conn, nil
+				}
+			}
+			return dialer.DialContext(ctx, network, addr)
+		},
+	}
+}
 
 // Host represents a local-representative instance known to agent-coordinator.
 type Host struct {
@@ -257,6 +307,16 @@ type ProcInfo struct {
 	// silently dropped the flag, so the frontend's "auto-update" checkbox
 	// could never render as checked (Revision K).
 	AutoUpdate bool `json:"auto_update,omitempty"`
+
+	// Session is federation-command-specific: the session it most recently
+	// reported over representable's "fc-session" data message, relayed here
+	// unchanged by LR -- see local-representative/procman.go's own ProcInfo.
+	// Without this field, decoding LR's system-state payload into this struct
+	// silently dropped it the same way AutoUpdate did above (Revision K), so
+	// the federation-command tab's session tag could never render here even
+	// though LR's own frontend showed it fine (see
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision D).
+	Session string `json:"session,omitempty"`
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.
@@ -360,6 +420,90 @@ type LRFilesMsg struct {
 	Files  []FileInfo `json:"files,omitempty"`
 }
 
+// DebugLogEntry mirrors local-representative's same-named type (see
+// local-representative/procman.go): one captured stdout/stderr line from an
+// LR-managed sub-app, for the system tab's debug view
+// (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision E).
+type DebugLogEntry struct {
+	InstanceID string `json:"instance_id"`
+	App        string `json:"app"`
+	Stream     string `json:"stream"`
+	Line       string `json:"line"`
+	TS         int64  `json:"ts"`
+}
+
+// DebugLogStateMsg matches the debug-log-state payload sent from LR over
+// representable.
+type DebugLogStateMsg struct {
+	Entries []DebugLogEntry `json:"entries"`
+}
+
+// LRDebugLogMsg is the host-scoped "lr-debug-log-state" message sent to
+// browser clients: the debug view's current log buffer for one host. Active
+// is false when that LR is not connected -- mirrors LRFilesMsg.
+type LRDebugLogMsg struct {
+	HostID  string          `json:"host_id"`
+	Active  bool            `json:"active"`
+	Entries []DebugLogEntry `json:"entries,omitempty"`
+}
+
+// ChainCallEntry mirrors local-representative's same-named type (see
+// local-representative/procman.go): one outbound HTTP call made on the
+// SM<->LR<->AC chain, for the system tab's debug view's "network" tab
+// (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md Revision
+// F).
+type ChainCallEntry struct {
+	Hop        string `json:"hop"`
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"`
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"`
+}
+
+// ChainCallStateMsg matches the chain-call-state payload sent from LR over
+// representable.
+type ChainCallStateMsg struct {
+	Entries []ChainCallEntry `json:"entries"`
+}
+
+// LRChainCallMsg is the host-scoped "lr-chain-call-state" message sent to
+// browser clients: the debug view's current chain-call buffer for one host.
+// Active is false when that LR is not connected -- mirrors LRDebugLogMsg.
+type LRChainCallMsg struct {
+	HostID  string           `json:"host_id"`
+	Active  bool             `json:"active"`
+	Entries []ChainCallEntry `json:"entries,omitempty"`
+}
+
+// StateboardEntry mirrors local-representative's same-named type (see
+// local-representative/stateboard.go): one key/value row, nested two levels
+// deep under the sub-app that owns it, on the system tab's debug view's
+// "stateboard" tab (condocs/initialDistributedSessionsImpls/Step2Prompt.md
+// Revision E, nesting added in Revision F).
+type StateboardEntry struct {
+	App   string `json:"app"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// StateboardMsg matches the stateboard-state payload sent from LR over
+// representable.
+type StateboardMsg struct {
+	Entries []StateboardEntry `json:"entries"`
+}
+
+// LRStateboardMsg is the host-scoped "lr-stateboard-state" message sent to
+// browser clients: the debug view's current stateboard for one host. Active
+// is false when that LR is not connected -- mirrors LRDebugLogMsg/
+// LRChainCallMsg.
+type LRStateboardMsg struct {
+	HostID  string            `json:"host_id"`
+	Active  bool              `json:"active"`
+	Entries []StateboardEntry `json:"entries,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -386,6 +530,9 @@ type hostState struct {
 	sessions   *SessionsStateMsg
 	convo      *ConvoStateMsg
 	files      *FilesStateMsg
+	debugLog   *DebugLogStateMsg
+	chainCall  *ChainCallStateMsg
+	stateboard *StateboardMsg
 	lrHTTPPort string
 }
 
@@ -425,10 +572,14 @@ type Server struct {
 	// Step2Prompt.md.
 	tcMu        sync.RWMutex
 	tcAvailable bool
+
+	// hostProxyTransport is shared by proxyToHost and handleFileUploadRelay --
+	// see newHostProxyTransport.
+	hostProxyTransport *http.Transport
 }
 
 func newServer() *Server {
-	return &Server{
+	s := &Server{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -437,6 +588,8 @@ func newServer() *Server {
 		modeMismatches: make(map[string]ModeMismatchMsg),
 		startedAt:      time.Now(),
 	}
+	s.hostProxyTransport = newHostProxyTransport(s)
+	return s
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode
@@ -586,6 +739,21 @@ func (s *Server) getHosts() []Host {
 	return hosts
 }
 
+// handleHostsAPI answers GET /api/hosts: the same host list/status the "hosts"
+// WebSocket message carries, as plain JSON -- for a local-representative's
+// own outbound calls (discovering which other hosts are LR-active before a
+// session-file pull -- see local-representative/sessions.go and
+// docs/DistributedSessionsBrainstorm.md) rather than only for browsers over
+// the WebSocket.
+func (s *Server) handleHostsAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(HostsMsg{Hosts: s.getHosts()})
+}
+
 func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	s.hostsMu.RLock()
 	hs, ok := s.hostStates[name]
@@ -605,6 +773,9 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	sessions := hs.sessions
 	convo := hs.convo
 	files := hs.files
+	debugLog := hs.debugLog
+	chainCall := hs.chainCall
+	stateboard := hs.stateboard
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -634,6 +805,28 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: false})
+	}
+	// debugLog/chainCall/stateboard were missing here entirely (Revision F:
+	// "nothing is currently displaying in the stateboard view") -- a browser
+	// client connecting (or reconnecting) after LR's one-time initial
+	// pushStateToAC never got this host's current debug-view data until the
+	// next broadcastStateboard()-triggering event, which for the
+	// comparatively static stateboard tab (unlike the constantly-streaming
+	// logs/network tabs) could be a very long wait or never.
+	if debugLog != nil {
+		s.sendToClient(c, "lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: connected, Entries: debugLog.Entries})
+	} else {
+		s.sendToClient(c, "lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
+	}
+	if chainCall != nil {
+		s.sendToClient(c, "lr-chain-call-state", LRChainCallMsg{HostID: name, Active: connected, Entries: chainCall.Entries})
+	} else {
+		s.sendToClient(c, "lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
+	}
+	if stateboard != nil {
+		s.sendToClient(c, "lr-stateboard-state", LRStateboardMsg{HostID: name, Active: connected, Entries: stateboard.Entries})
+	} else {
+		s.sendToClient(c, "lr-stateboard-state", LRStateboardMsg{HostID: name, Active: false})
 	}
 }
 
@@ -971,9 +1164,11 @@ func (s *Server) proxyToHost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errMsg, status)
 		return
 	}
+	r = r.WithContext(context.WithValue(r.Context(), hostIDContextKey{}, hostID))
 	target := &url.URL{Scheme: "http", Host: addr}
 	prefix := "/host/" + hostID
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = s.hostProxyTransport
 	base := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		base(req)
@@ -1009,7 +1204,8 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
-	outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://"+addr+"/api/files", r.Body)
+	ctx := context.WithValue(r.Context(), hostIDContextKey{}, hostID)
+	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/api/files", r.Body)
 	if err != nil {
 		http.Error(w, "building relay request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1019,7 +1215,8 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 	outReq.Header.Set(proxiedHeader, acRelayStamp)
 	outReq.Header.Set(relayedUploadHeader, acRelayStamp)
 
-	resp, err := http.DefaultClient.Do(outReq)
+	relayClient := &http.Client{Transport: s.hostProxyTransport}
+	resp, err := relayClient.Do(outReq)
 	if err != nil {
 		http.Error(w, "host "+hostID+" not reachable: "+err.Error(), http.StatusBadGateway)
 		return
@@ -1036,6 +1233,7 @@ func (s *Server) handleFileUploadRelay(w http.ResponseWriter, r *http.Request, h
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/hosts", s.handleHostsAPI)
 	mux.HandleFunc("/host/", s.proxyToHost)
 
 	if devMode {
@@ -1176,6 +1374,9 @@ func main() {
 			hs.sessions = nil
 			hs.convo = nil
 			hs.files = nil
+			hs.debugLog = nil
+			hs.chainCall = nil
+			hs.stateboard = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
@@ -1189,6 +1390,9 @@ func main() {
 			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
+			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
+			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
+			s.broadcast("lr-stateboard-state", LRStateboardMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 			s.broadcastTCAvailability()
 		}
@@ -1331,6 +1535,30 @@ func main() {
 				hs.files = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: true, Files: payload.Files})
+			}
+		case "debug-log-state":
+			var payload DebugLogStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.debugLog = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: true, Entries: payload.Entries})
+			}
+		case "chain-call-state":
+			var payload ChainCallStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.chainCall = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: true, Entries: payload.Entries})
+			}
+		case "stateboard-state":
+			var payload StateboardMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.stateboard = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-stateboard-state", LRStateboardMsg{HostID: name, Active: true, Entries: payload.Entries})
 			}
 		}
 	})

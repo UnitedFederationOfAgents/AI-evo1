@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -229,6 +232,8 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		})
 		s.pushSessionsState()
 		s.sendVersion()
+		s.pushCurrentSessionStateboard()
+		go s.refreshSessionsAfterConnect(client)
 
 		<-client.DisconnectCh()
 
@@ -331,6 +336,37 @@ func (s *Server) sendVersion() {
 	client.SendData("version", versionPayload{Version: ufaversion.Version})
 }
 
+// stateboardKV is the payload of representable's generic "stateboard" data
+// message -- one key/value row posted to local-representative's stateboard
+// (see local-representative/stateboard.go's setStateboardKV and
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E), nested
+// two levels deep under App (Revision F). Mirrors local-representative's own
+// StateboardEntry.
+type stateboardKV struct {
+	App   string `json:"app"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// pushCurrentSessionStateboard reports this instance's current session on
+// the stateboard as "session-manager: current-session" -- called whenever it
+// changes (see sessions.go's setCurrentSession) and right after a
+// representable connection lands, mirroring sendVersion/pushSessionsState.
+// No-op when not connected or when nothing is current yet.
+func (s *Server) pushCurrentSessionStateboard() {
+	s.reprMu.Lock()
+	client := s.reprClient
+	s.reprMu.Unlock()
+	if client == nil {
+		return
+	}
+	client.SendData("stateboard", stateboardKV{
+		App:   "session-manager",
+		Key:   "current-session",
+		Value: s.getCurrentSession(),
+	})
+}
+
 // handleReprCommand handles commands local-representative relays down the
 // representable channel (originating from agent-coordinator). session-manager
 // only acts on the "__sessions:" namespace, mirroring condoccer's
@@ -350,4 +386,248 @@ func (s *Server) handleReprCommand(raw string) {
 	default:
 		log.Printf("repr: ignoring unrecognised command %q", raw)
 	}
+}
+
+// sessionSyncGlobs are the file patterns a session-view read keeps fresh --
+// see triggerSessionSync. session.yaml is included so a session that exists
+// only on a remote host (never before pulled here -- see
+// listSessionsWithRemote's Remote-tagged entries) gets its name/metadata
+// materialized locally too, not just its transcript.
+var sessionSyncGlobs = []string{"session.jsonl", "session.yaml", "*-processed.txt"}
+
+// sessionSyncTimeout bounds each glob's pull request -- see
+// triggerSessionSync.
+const sessionSyncTimeout = 2 * time.Second
+
+// ChainCallEntry captures one outbound HTTP call this session-manager
+// backend issued to local-representative -- the "sm->lr" half of the
+// SM<->LR<->AC chain (condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md Revision F). A browser's own window.fetch capture
+// (see agent-coordinator's DebugView) can't see this: it never touches this
+// process's own HTTP client. Reported to local-representative over
+// representable (SendData("chain-call", ...)), which folds it into the same
+// buffer it keeps for its own "lr->ac" hop and relays both up to
+// agent-coordinator's debug view -- see local-representative/sessions.go's
+// mirrored copy of this type.
+type ChainCallEntry struct {
+	Hop        string `json:"hop"` // always "sm->lr" from this binary
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"` // 0 on a network-level failure
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"` // unix seconds, when the call was made
+}
+
+// reportChainCall records one sm->lr HTTP call's outcome and forwards it to
+// local-representative, best-effort (same posture as every other SendData
+// call -- see representable.Client.SendData). resp may be nil if err is set.
+// repr may also be nil (e.g. a caller exercising the request-shaping logic
+// without a live connection) -- a no-op, same posture as a nil client would
+// get from any other best-effort report.
+func reportChainCall(repr *representable.Client, method, target string, start time.Time, resp *http.Response, err error) {
+	if repr == nil {
+		return
+	}
+	entry := ChainCallEntry{
+		Hop:        "sm->lr",
+		Method:     method,
+		URL:        target,
+		DurationMS: time.Since(start).Milliseconds(),
+		TS:         time.Now().Unix(),
+	}
+	if err != nil {
+		entry.Error = err.Error()
+	} else {
+		entry.Status = resp.StatusCode
+	}
+	repr.SendData("chain-call", entry)
+}
+
+// triggerSessionSync asks local-representative to refresh id's
+// "session.jsonl" and "*-processed.txt" files from every other LR-active
+// host before this view is rendered -- see
+// docs/DistributedSessionsBrainstorm.md: "Whenever any host is about to read
+// a session (ie: ... bringing it up in session-manager for viewing) then it
+// will request the jsonl and the -processed glob for sync (refreshed any
+// number of times)." Called from sendSessionView (sessions.go) right before
+// it reads the local session directory.
+//
+// Best-effort and bounded: with no live local-representative connection, or
+// one that hasn't disclosed its HTTP port yet (see
+// representable.Client.PeerHTTPPort, set from local-representative's "hello"
+// message on connect), this is a no-op (incomplete is false: there's nothing
+// to report as having failed) and the view renders exactly as it would have
+// before this increment -- a purely local read.
+//
+// incomplete is true when any glob's pull reported a peer it couldn't
+// actually reach (local-representative's SessionPullResultMsg.Errors > 0,
+// not just "nothing new") -- see requestSessionPull and
+// condocs/initialDistributedSessionsImpls/31e41125_network-debug-1790867771753.log's
+// "502 then 200" sequence (Step1SubstepBPrompt.md Revision G). sendSessionView
+// (sessions.go) surfaces this on the rendered view so a session that looks
+// empty because its remote peer was unreachable isn't indistinguishable from
+// one that's genuinely empty.
+func (s *Server) triggerSessionSync(id string) (incomplete bool) {
+	s.reprMu.Lock()
+	client := s.reprClient
+	host := s.reprHost
+	s.reprMu.Unlock()
+	if client == nil {
+		return false
+	}
+	port := client.PeerHTTPPort()
+	if port == "" {
+		return false
+	}
+	for _, glob := range sessionSyncGlobs {
+		if !requestSessionPull(client, host, port, id, glob) {
+			incomplete = true
+		}
+	}
+	return incomplete
+}
+
+// sessionPullResultMsg mirrors local-representative's SessionPullResultMsg --
+// only Errors is read here; Hosts/Fetched are purely informational.
+type sessionPullResultMsg struct {
+	Errors int `json:"errors"`
+}
+
+// requestSessionPull issues one best-effort POST asking local-representative
+// to sync-pull id's files matching glob from every other LR-active host --
+// the mirror image of clauditable/distsync.go's requestSessionPull (mode
+// "once" there, "sync" here). repr is the already-connected representable
+// client to report the call's outcome to (see reportChainCall). Returns false
+// when the pull itself failed outright (network error, non-200) or when
+// local-representative reports at least one peer it couldn't reach --
+// true otherwise, including the ordinary "had nothing new to pull" case.
+func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, glob string) bool {
+	u := url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(lrHost, lrPort),
+		// Path holds the unescaped form -- url.URL.String() escapes it (and
+		// any special characters sessionID carries) itself; pre-escaping
+		// here too would double-encode it.
+		Path: "/api/sessions/" + sessionID + "/pull",
+	}
+	q := u.Query()
+	q.Set("glob", glob)
+	q.Set("mode", "sync")
+	u.RawQuery = q.Encode()
+
+	httpClient := &http.Client{Timeout: sessionSyncTimeout}
+	start := time.Now()
+	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
+	reportChainCall(repr, "POST", u.String(), start, resp, err)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var result sessionPullResultMsg
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		log.Printf("session pull: decoding result for %s %s: %v", sessionID, glob, err)
+		return false
+	}
+	return result.Errors == 0
+}
+
+// remoteSessionEntry mirrors local-representative's RemoteSessionEntry (see
+// sessions.go's handleSessionsDiscover) -- this binary's own copy of the
+// wire shape, same posture as this file's/sessions.go's other mirrored
+// helpers.
+type remoteSessionEntry struct {
+	HostID string `json:"host_id"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+// sessionDiscoveryMsg mirrors local-representative's SessionDiscoveryMsg --
+// only Sessions is read here; Hosts is purely informational.
+type sessionDiscoveryMsg struct {
+	Sessions []remoteSessionEntry `json:"sessions"`
+}
+
+// sessionsDiscoveryDelay gives local-representative's "hello" time to
+// disclose its HTTP port (see representable.Client.PeerHTTPPort) before the
+// on-connect discovery poll fires -- without it, a poll fired the instant
+// connectLoop adopts a client would almost always race the hello and
+// silently no-op (triggerSessionsDiscovery's own bounded-timeout posture
+// handles every other failure mode already).
+const sessionsDiscoveryDelay = 500 * time.Millisecond
+
+// sessionsDiscoveryTimeout bounds triggerSessionsDiscovery's HTTP request,
+// deliberately distinct from (and longer than) sessionSyncTimeout: this has
+// to cover local-representative's own worst-case round trip through
+// handleSessionsDiscover -- a bounded call to list peers via
+// agent-coordinator (up to local-representative's sessionsPullHTTPTimeout,
+// 5s) followed by a concurrent per-peer indexing fan-out (up to its
+// sessionsDiscoverHTTPTimeout, 2s, regardless of peer count) -- not just the
+// network hop to it. sessionSyncTimeout's 2s is fine for a sync-pull (a
+// single hop LR makes on our behalf with its own short-lived fetch), but was
+// too short reused here: it let this call give up before
+// handleSessionsDiscover could ever have succeeded, silently discarding
+// real results on a live multi-host setup. This runs in its own goroutine
+// (triggerSessionsDiscovery is always called off listSessionsWithRemote,
+// itself only ever invoked from sendSessions/broadcastSessions's "go"
+// callers -- see main.go/sessions.go), so a longer bound here doesn't risk
+// blocking anything.
+const sessionsDiscoveryTimeout = 8 * time.Second
+
+// refreshSessionsAfterConnect fires the discovery poll once more shortly
+// after connecting -- Step1SubstepBPrompt.md Revision A: "It will also
+// happen on connect of FC or SM" (renderSessions' callers already cover
+// "any list-sessions behaviour", since sendSessions/broadcastSessions run on
+// every browser connect/mutation too). Run in its own goroutine from
+// connectLoop so it never delays adopting the connection; client guards
+// against firing for a connection already superseded by the time the delay
+// elapses.
+func (s *Server) refreshSessionsAfterConnect(client *representable.Client) {
+	time.Sleep(sessionsDiscoveryDelay)
+	s.reprMu.Lock()
+	stillCurrent := s.reprClient == client
+	s.reprMu.Unlock()
+	if stillCurrent {
+		s.broadcastSessions()
+	}
+}
+
+// triggerSessionsDiscovery asks local-representative which sessions every
+// other LR-active host has, for listSessionsWithRemote (sessions.go) to
+// merge into a rendered session list as remote entries -- the fan-out half
+// of closing condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md's
+// gap. Best-effort and bounded, same posture as triggerSessionSync: returns
+// nil with no live local-representative connection, one that hasn't
+// disclosed its HTTP port yet, or on any request/decode failure --
+// listSessionsWithRemote then returns exactly listSessions's purely-local
+// result.
+func (s *Server) triggerSessionsDiscovery() []remoteSessionEntry {
+	s.reprMu.Lock()
+	client := s.reprClient
+	host := s.reprHost
+	s.reprMu.Unlock()
+	if client == nil {
+		return nil
+	}
+	port := client.PeerHTTPPort()
+	if port == "" {
+		return nil
+	}
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/api/sessions/discover"}
+	httpClient := &http.Client{Timeout: sessionsDiscoveryTimeout}
+	start := time.Now()
+	resp, err := httpClient.Post(u.String(), "application/octet-stream", nil)
+	reportChainCall(client, "POST", u.String(), start, resp, err)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var msg sessionDiscoveryMsg
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		return nil
+	}
+	return msg.Sessions
 }

@@ -190,6 +190,54 @@ func TestFederationCommandDevModeCascades(t *testing.T) {
 	}
 }
 
+// TestFederationCommandNewInstanceAdoptsSMSession verifies Revision I: a
+// brand-new federation-command instance (no FC has ever reported a session
+// on this LR, so fcSessionID is still "") picks up session-manager's current
+// session instead of leaving --session/FC_SESSION unset, so launching FC
+// from the system tab while SM already has a session active lands FC there
+// too (see fcLaunchSessionID).
+func TestFederationCommandNewInstanceAdoptsSMSession(t *testing.T) {
+	spec := managedApps["federation-command"]
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.smSessionID = "2026-10-02_13-10-42_sm-created-1"
+
+	args := strings.Join(spec.buildArgs(s, "federation-command#1"), " ")
+	if !strings.Contains(args, "--session "+s.smSessionID) {
+		t.Errorf("buildArgs should fall back to SM's current session when FC has none of its own, got %q", args)
+	}
+	env := map[string]string{}
+	for _, kv := range spec.buildEnv(s, "federation-command#1") {
+		if k, v, found := strings.Cut(kv, "="); found {
+			env[k] = v
+		}
+	}
+	if env["FC_SESSION"] != s.smSessionID {
+		t.Errorf("FC_SESSION = %q, want SM's current session %q", env["FC_SESSION"], s.smSessionID)
+	}
+}
+
+// TestFederationCommandExistingSessionWinsOverSM verifies the fallback in
+// TestFederationCommandNewInstanceAdoptsSMSession only applies when FC has no
+// session of its own yet: once a connected/previous FC instance has reported
+// one, that wins over SM's current session (restart continuity, Revision B,
+// takes priority over the Revision I fallback).
+func TestFederationCommandExistingSessionWinsOverSM(t *testing.T) {
+	spec := managedApps["federation-command"]
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.smSessionID = "sm-session"
+	s.fcSessionID = "fc-session"
+
+	args := strings.Join(spec.buildArgs(s, "federation-command#1"), " ")
+	if !strings.Contains(args, "--session fc-session") {
+		t.Errorf("buildArgs should prefer FC's own last-reported session, got %q", args)
+	}
+	if strings.Contains(args, "sm-session") {
+		t.Errorf("buildArgs should not fall back to SM's session when FC already has one, got %q", args)
+	}
+}
+
 // TestCondoccerDevModeCascades mirrors TestFederationCommandDevModeCascades
 // for the condoccer launch spec.
 func TestCondoccerDevModeCascades(t *testing.T) {

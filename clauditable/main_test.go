@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"clauditable/pkg/records"
+	ufahostid "ufa-hostid"
 )
 
 func TestGetSession(t *testing.T) {
@@ -364,6 +365,20 @@ func TestWriteWrittenFile(t *testing.T) {
 		t.Error("written file JSON should reference the written file path")
 	}
 
+	// The producer of the raw file must also handle its own raw-->processed step
+	// immediately, rather than leaving it for a later primary consolidation.
+	processedPath := filepath.Join(sessionDir, "1705312200-processed.txt")
+	processedData, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("writeWrittenFile (primary) should produce a processed file: %v", err)
+	}
+	if !strings.Contains(string(processedData), "IN>> echo hello") {
+		t.Error("processed file should contain IN>> prefixed command")
+	}
+	if !strings.Contains(string(processedData), `"processing_type":"no_op"`) {
+		t.Error("processed file should contain a no_op header when nothing needed processing")
+	}
+
 	// Test secondary: creates {ts}-s-raw.txt
 	record2 := &records.Record{
 		Event: records.Event{
@@ -380,6 +395,16 @@ func TestWriteWrittenFile(t *testing.T) {
 	expectedPath2 := filepath.Join(sessionDir, "1705312260-s-raw.txt")
 	if path2 != expectedPath2 {
 		t.Errorf("secondary written file path: got %s, want %s", path2, expectedPath2)
+	}
+
+	// Secondaries also produce their own processed file immediately, keeping
+	// the "-s-" infix (distinct from a primary's {ts}-processed.txt) until a
+	// later consolidation folds and promotes it -- see writeProcessedFile.
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312260-s-processed.txt")); os.IsNotExist(err) {
+		t.Error("writeWrittenFile (secondary) should also produce a -s-processed.txt file")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312260-processed.txt")); !os.IsNotExist(err) {
+		t.Error("writeWrittenFile (secondary) should not produce a final -processed.txt before consolidation folds it")
 	}
 }
 
@@ -448,6 +473,11 @@ func TestEnsureSession(t *testing.T) {
 	}
 	if !strings.Contains(content, "name: "+name) {
 		t.Errorf("session.yaml should contain name, got: %s", content)
+	}
+	// owner records the creating host (condocs/initialDistributedSessionsImpls/
+	// Step2Prompt.md Revision C).
+	if !strings.Contains(content, "owner: "+ufahostid.GetHostID()) {
+		t.Errorf("session.yaml should contain owner, got: %s", content)
 	}
 
 	// Calling again should not overwrite
@@ -542,5 +572,202 @@ func TestConsolidatePrimaryToJSONL(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(sessionDir, "1705312860-processed.txt")); os.IsNotExist(err) {
 		t.Error("processed file should be created for primary record")
+	}
+}
+
+// TestConsolidatePrimaryToJSONLUsesProducersProcessedFile verifies that consolidation
+// trusts a processed file already produced by a raw/s-raw file's own producer (as
+// writeWrittenFile now does) instead of reprocessing it from scratch.
+func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	session := "test-session"
+	sessionDir := filepath.Join(tmpDir, session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	primary := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:01:00Z",
+			EventType: "command_execution",
+			Agent:     "claude",
+		},
+		Command: "echo primary",
+		Stdout:  "primary\n",
+	}
+
+	// Simulate the producer already having written its own raw + processed
+	// files via writeWrittenFile, with a sentinel processed marker that would
+	// NOT be present if consolidation reprocessed the raw content itself.
+	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+		t.Fatalf("writeWrittenFile failed: %v", err)
+	}
+	processedPath := filepath.Join(sessionDir, "1705312860-processed.txt")
+	sentinel, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("expected producer to have written processed file: %v", err)
+	}
+	marked := string(sentinel) + "\nSENTINEL-FROM-PRODUCER\n"
+	if err := os.WriteFile(processedPath, []byte(marked), 0644); err != nil {
+		t.Fatalf("failed to mark processed file: %v", err)
+	}
+
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
+	}
+
+	// The processed file on disk should be untouched (still carries the sentinel) —
+	// consolidation must not have regenerated it from the raw content.
+	after, err := os.ReadFile(processedPath)
+	if err != nil {
+		t.Fatalf("failed to read processed file after consolidation: %v", err)
+	}
+	if !strings.Contains(string(after), "SENTINEL-FROM-PRODUCER") {
+		t.Error("consolidation should not overwrite a processed file already produced by its own producer")
+	}
+}
+
+// TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary verifies the
+// distributed-sessions case: a "{ts}-s-processed.txt" with no local
+// "{ts}-s-raw.txt" sibling -- exactly what local-representative's
+// once-transfer leaves behind after pulling a remote LR-active host's record
+// in (see distsync.go) -- is folded into session.jsonl and promoted to
+// "{ts}-processed.txt" on its own, with no raw file ever appearing locally
+// for it (the pre-redaction raw content never crosses hosts -- see
+// FILE_PROCESSING_SEQUENCE.md).
+func TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary(t *testing.T) {
+	tmpDir := t.TempDir()
+	session := "test-session"
+	sessionDir := filepath.Join(tmpDir, session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	remote := &records.Record{
+		Event: records.Event{
+			Timestamp: "2026-01-15T10:00:00Z",
+			EventType: "command_execution",
+			Host:      "other-host",
+		},
+		Command: "echo remote",
+		Stdout:  "remote\n",
+	}
+	content, headers := records.ApplyAutoMaintenance(remote.FormatWrittenFile(), true)
+	remoteProcessed := records.FormatProcessedFile(content, headers)
+	remoteProcessedPath := filepath.Join(sessionDir, "1705312800-s-processed.txt")
+	if err := os.WriteFile(remoteProcessedPath, []byte(remoteProcessed), 0644); err != nil {
+		t.Fatalf("failed to write simulated once-transferred file: %v", err)
+	}
+
+	primary := &records.Record{
+		Event: records.Event{Timestamp: "2026-01-15T10:01:00Z", EventType: "command_execution"},
+		Command: "echo primary",
+		Stdout:  "primary\n",
+	}
+	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+		t.Fatalf("writeWrittenFile failed: %v", err)
+	}
+
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
+	}
+
+	logData, err := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
+	if err != nil {
+		t.Fatalf("failed to read session.jsonl: %v", err)
+	}
+	logStr := string(logData)
+	if !strings.Contains(logStr, "echo remote") {
+		t.Error("session.jsonl should contain the once-transferred remote command")
+	}
+	if !strings.Contains(logStr, "echo primary") {
+		t.Error("session.jsonl should contain the primary command")
+	}
+	if strings.Index(logStr, "echo remote") > strings.Index(logStr, "echo primary") {
+		t.Error("remote-origin entry should appear before primary entry in session.jsonl (earlier timestamp)")
+	}
+
+	if _, err := os.Stat(remoteProcessedPath); !os.IsNotExist(err) {
+		t.Error("1705312800-s-processed.txt should be renamed (promoted) after consolidation")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-processed.txt")); os.IsNotExist(err) {
+		t.Error("remote-origin record should be promoted to 1705312800-processed.txt")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-raw.txt")); !os.IsNotExist(err) {
+		t.Error("a remote-origin record should never gain a local -raw.txt -- its raw content never crossed hosts")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-s-raw.txt")); !os.IsNotExist(err) {
+		t.Error("a remote-origin record should never have a local -s-raw.txt either")
+	}
+}
+
+// TestConsolidatePrimaryToJSONLPromotesLocalSecondary verifies the
+// local-secondary case still works under the new -s-processed.txt-keyed
+// consolidation: both its {ts}-s-raw.txt and {ts}-s-processed.txt (produced
+// together by writeWrittenFile, same as any other invocation) get promoted
+// to {ts}-raw.txt/{ts}-processed.txt, and the already-processed content is
+// trusted as-is rather than being regenerated from the raw content.
+func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
+	tmpDir := t.TempDir()
+	session := "test-session"
+	sessionDir := filepath.Join(tmpDir, session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatalf("failed to create session dir: %v", err)
+	}
+
+	secondary := &records.Record{
+		Event: records.Event{Timestamp: "2026-01-15T10:00:00Z", EventType: "command_execution"},
+		Command: "echo secondary",
+		Stdout:  "secondary\n",
+	}
+	if _, err := writeWrittenFile(sessionDir, 1705312800, false, secondary); err != nil {
+		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
+	}
+	secondaryProcessedPath := filepath.Join(sessionDir, "1705312800-s-processed.txt")
+	sentinel, err := os.ReadFile(secondaryProcessedPath)
+	if err != nil {
+		t.Fatalf("expected secondary producer to have written its own processed file: %v", err)
+	}
+	if err := os.WriteFile(secondaryProcessedPath, append(sentinel, []byte("\nSENTINEL-FROM-SECONDARY\n")...), 0644); err != nil {
+		t.Fatalf("failed to mark secondary processed file: %v", err)
+	}
+
+	primary := &records.Record{
+		Event: records.Event{Timestamp: "2026-01-15T10:01:00Z", EventType: "command_execution"},
+		Command: "echo primary",
+		Stdout:  "primary\n",
+	}
+	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
+	}
+
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
+	}
+
+	logData, err := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
+	if err != nil {
+		t.Fatalf("failed to read session.jsonl: %v", err)
+	}
+	if !strings.Contains(string(logData), "SENTINEL-FROM-SECONDARY") {
+		t.Error("consolidation should use the local secondary's own already-processed content as-is")
+	}
+
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-s-raw.txt")); !os.IsNotExist(err) {
+		t.Error("local secondary's -s-raw.txt should be renamed (promoted) after consolidation")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-raw.txt")); os.IsNotExist(err) {
+		t.Error("local secondary should be promoted to 1705312800-raw.txt")
+	}
+	if _, err := os.Stat(secondaryProcessedPath); !os.IsNotExist(err) {
+		t.Error("local secondary's -s-processed.txt should be renamed (promoted) after consolidation")
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "1705312800-processed.txt")); os.IsNotExist(err) {
+		t.Error("local secondary should be promoted to 1705312800-processed.txt")
 	}
 }

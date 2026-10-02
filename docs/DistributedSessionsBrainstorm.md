@@ -153,3 +153,104 @@ Brainstorm some aspects of session behaviour to support distributed sessions. Th
 - **`clauditable get-default-session`**: Idempotently creates today's default session (`YYYY-MM-DD-default`, name `YYYY-MM-DD Default`) and prints the ID.
 - **FC `new-session [name]` / `ufa session new [name]`**: With name argument calls clauditable synchronously and switches. Without argument launches an interactive bash prompt (via `tea.ExecProcess`) then switches on completion via `sessionNewDoneMsg`.
 - **Startup log append**: FC now opens `session.jsonl` with `O_APPEND` instead of truncating, so default sessions accumulate records across FC restarts on the same day.
+
+### InitialDistributedSessions Step 1 Revision A — once-transfer / sync wiring
+
+Implements the flow sketched in that step's "Distributed CLBL Cooking Flow"
+resource: hooking clauditable's on-host file sequence (see
+[`clauditable/FILE_PROCESSING_SEQUENCE.md`](../clauditable/FILE_PROCESSING_SEQUENCE.md#distributed-sessions))
+up to actual cross-host transfer, entirely as pulls a host makes on its own
+behalf through `local-representative`/`agent-coordinator`'s existing
+infrastructure — no push primitive, no representable protocol change.
+
+- **`clauditable` now keeps a secondary's processed file distinct from a
+  primary's**: `writeProcessedFile` writes `{ts}-s-processed.txt` for a
+  secondary (previously it wrote straight to `{ts}-processed.txt`, same as a
+  primary) and `consolidatePrimaryToJSONL` now folds from
+  `*-s-processed.txt` rather than `*-s-raw.txt`, promoting the folded file to
+  `{ts}-processed.txt` (and, only if a local `{ts}-s-raw.txt` sibling exists,
+  that to `{ts}-raw.txt`). This is what lets a remotely once-transferred
+  record — which only ever brings the already-processed file across, never
+  the pre-redaction raw one — fold in exactly the same way a local secondary
+  does, with no `{ts}-raw.txt` ever appearing locally for it.
+- **`local-representative` gained a `/api/sessions/<id>/...` surface**
+  (`sessions.go`): `GET .../list?glob=` and `GET .../file/<name>` are
+  read-only lookups into `AGENT_RECORDS_PATH` (ungated on the
+  `X-UFA-Proxied-By` guard, same "reads aren't the write-to-an-arbitrary-host
+  concern" posture as the files tab's existing endpoints — see
+  [`docs/DistributedExchange.md`](DistributedExchange.md)), reused unmodified
+  through `agent-coordinator`'s transparent `/host/<id>/*` proxy. `POST
+  .../pull?glob=&mode=once|sync` is the opposite direction — this LR, acting
+  as a client, discovering every other host `agent-coordinator` shows as
+  connected (a new `GET /api/hosts` route there) and fetching from their
+  `list`/`file` endpoints — so it's refused when it arrives through that same
+  proxy (never something another host should trigger on this one remotely).
+  `mode=once` never re-fetches an already-present filename; `mode=sync`
+  compares each listed file's reported sha256 and only re-fetches on a
+  mismatch or absence.
+- **`clauditable` triggers a `mode=once` pull for `*-s-processed.txt`** right
+  after a dispatching invocation is declared primary, before it runs the
+  wrapped command (`distsync.go`) — "when a host is about to write a CLBL
+  record and it is primary." **`session-manager` triggers a `mode=sync` pull
+  for `session.jsonl` and `*-processed.txt`** right before rendering a
+  session view (`repr.go`'s `triggerSessionSync`, called from
+  `sendSessionView`) — "whenever any host is about to read a session ...
+  bringing it up in session-manager for viewing." Both are one best-effort,
+  bounded-timeout local HTTP call to the caller's own `local-representative`;
+  neither errors, blocks meaningfully, or changes behavior when
+  local-representative isn't running, isn't connected to agent-coordinator,
+  or has no peers — the purely local sequence is unaffected either way.
+  `clauditable` (too short-lived to keep its own representable connection)
+  addresses its local LR via `LR_HTTP_HOST`/`LR_HTTP_PORT` (default
+  `localhost:8081`); `session-manager`, already representable-connected,
+  instead reads LR's disclosed HTTP port off
+  `representable.Client.PeerHTTPPort()` the same way condoccer already does
+  (see `docs/DistributedExchange.md`).
+- **Not wired in this increment**: "supplying \[a session] to an agent for
+  context" — the other reader case named alongside session-manager's viewer
+  in the step prompt — since nothing in this repo yet reads a session
+  directory for that purpose to begin with; `triggerSessionSync`'s HTTP call
+  is a plain, reusable one-liner for whatever adds that later. Multi-primary
+  merge of `session.jsonl` (the same session written from different hosts at
+  different times, never having synced with each other in between) is also
+  out of scope — sync is a one-way "catch this host up" pull, not a CRDT-style
+  merge.
+
+### InitialDistributedSessions Step 1 Substep B Revision A — discovering a session neither host has heard of
+
+Closes the gap traced in
+[`condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md`](../condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md):
+until now `list-sessions` never left the local filesystem on either
+`federation-command` or `session-manager`, because every existing pull
+(once-transfer, sync) takes a session ID the caller already has — nothing
+answered "what sessions do you have at all."
+
+- **`local-representative` gained a `GET /api/sessions` unscoped index**
+  (`sessions.go`'s `handleSessionsIndex`) — every session ID this host has
+  plus its `session.yaml` name, no file contents — and a `POST
+  /api/sessions/discover` (`handleSessionsDiscover`) that fans that same
+  question out to every LR-active peer (via the existing `GET /api/hosts` /
+  `listPeerHosts`) and returns everything found, each entry tagged with
+  which host reported it. Both are read-only on every host involved:
+  discovery never fetches a file or creates a local session directory —
+  only a pull (unchanged) still does that, and only once something actually
+  asks to view the session.
+- **`federation-command`'s `renderSessions` and `session-manager`'s
+  `listSessions`/`sendSessions`/`broadcastSessions`** now merge in
+  `discoverRemoteSessions()`'s/`triggerSessionsDiscovery()`'s result (each
+  binary's own copy of the discovery HTTP call, same posture as their
+  existing sync/once pull callers), skipping any ID already present
+  locally. This fires every time either binary is about to render a session
+  list — the WS "list-sessions" verb, a new browser connection, and any
+  mutation all flow through session-manager's two functions; `list-sessions`,
+  `ufa session list`, and the ridealong builtin all flow through
+  federation-command's `renderSessions`.
+- **Both also fire the same poll once more right after connecting** to
+  their own `local-representative` — `session-manager`'s `connectLoop`
+  re-broadcasts the merged list to open browser tabs;
+  `federation-command`'s two connect-success paths print a one-line notice
+  if anything new turns up. Each waits 500ms first so local-representative's
+  "hello" has had time to disclose its HTTP port (see
+  `representable.Client.PeerHTTPPort`) before polling — otherwise the very
+  first poll right after `Connect` returns would almost always race the
+  hello and silently no-op.

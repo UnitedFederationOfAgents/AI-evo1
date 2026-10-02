@@ -79,6 +79,16 @@ var fcHeadID string
 // fcHostID is the stable per-host identifier, resolved once in main() via ufahostid.
 var fcHostID string
 
+// fcInstanceID is the LR-assigned instance id this FC instance was launched
+// with (FC_INSTANCE_ID -- set by local-representative's managedApps
+// ["federation-command"].buildEnv, see local-representative/procman.go),
+// read once in main(). Empty for an independently-launched FC that
+// --auto-connects without having been launched by an LR -- sendSessionState
+// then reports no head for the stateboard's "federation-command-instances"
+// row (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E),
+// the same way such an instance is absent from the system tab's managed list.
+var fcInstanceID string
+
 // Available agents (must match ambiguous-agent configurations)
 var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
 
@@ -631,6 +641,40 @@ func (m appModel) sendVersion() {
 		return
 	}
 	m.reprClient.SendData("version", versionPayload{Version: ufaversion.Version})
+}
+
+// sessionStatePayload is sent over the representable data channel to report
+// this instance's currently active session, so local-representative (and,
+// relayed through it, agent-coordinator) can show which session a given FC
+// instance is on, and so LR can relaunch this instance back into the same
+// session on a restart (see local-representative/procman.go's
+// managedApps["federation-command"] and condocs/initialDistributedSessionsImpls/
+// Step2Prompt.md Revision B). Name is session.yaml's name field when one has
+// been set (via new-session/rename-session), empty otherwise.
+type sessionStatePayload struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+
+	// InstanceID and Head piggyback the stateboard's "federation-command-
+	// instances" row (local-representative/stateboard.go's setFCHead) onto
+	// this already-frequent message rather than a dedicated one.
+	InstanceID string `json:"instance_id,omitempty"`
+	Head       string `json:"head,omitempty"`
+}
+
+// sendSessionState reports the current session to local-representative.
+// Called whenever the active session changes and right after a representable
+// connection lands, mirroring sendVersion.
+func (m appModel) sendSessionState() {
+	if m.reprClient == nil {
+		return
+	}
+	m.reprClient.SendData("fc-session", sessionStatePayload{
+		ID:         m.sessionID,
+		Name:       readSessionName(m.sessionDir),
+		InstanceID: fcInstanceID,
+		Head:       fcHeadID,
+	})
 }
 
 // sendRidealongState pushes the current ridealong state to local-representative.
@@ -1191,6 +1235,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.prevInputLen = 0
 				return m, tea.Batch(tea.Println(errorStyle.Render("rename-session: "+err.Error())), m.blinker.ResetTick())
 			}
+			m.sendSessionState()
 			m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 0)
 			if !m.blinker.IsRemoteControlActive() {
 				m.blinker.SetState(BlinkerIdle)
@@ -1314,6 +1359,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.wireModeMismatchHandler()
 		m.sendVersion()
+		m.sendSessionState()
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
 			m.reprOutPath = tf.Name()
@@ -1337,6 +1383,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
 			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
 			listenForDisconnectCmd(m.reprClient),
+			sessionsDiscoveryDelayCmd(m.reprClient),
 		}
 		if !wantsRemote {
 			cmds = append(cmds, textinput.Blink)
@@ -1366,6 +1413,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.wireModeMismatchHandler()
 		m.sendVersion()
+		m.sendSessionState()
 		// Create temp file for output capture.
 		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
 			tf.Close()
@@ -1380,6 +1428,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
 			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
 			listenForDisconnectCmd(m.reprClient),
+			sessionsDiscoveryDelayCmd(m.reprClient),
 		)
 
 	case reprConnectFailedMsg:
@@ -1387,6 +1436,18 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Failed to connect — return to select mode so user can try again.
 			m.blinker.SetState(BlinkerSelect)
 			return m, m.blinker.ResetTick()
+		}
+		return m, nil
+
+	case sessionsDiscoveryTickMsg:
+		if m.reprClient != msg.client {
+			// Superseded (disconnected, or replaced by a fresh connect) by
+			// the time sessionsDiscoveryDelay elapsed -- drop it rather than
+			// poll a connection nothing still points at.
+			return m, nil
+		}
+		if remote := m.discoverRemoteSessions(); len(remote) > 0 {
+			return m, tea.Println(sessionsDiscoveryNotice(remote))
 		}
 		return m, nil
 
@@ -2231,7 +2292,8 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// list-sessions
 	if line == "list-sessions" {
-		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
+		remote := m.discoverRemoteSessions()
+		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir), remote), 0)
 	}
 
 	// version / ufa version
@@ -2278,6 +2340,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		m.sessionID = newSessionID
 		m.sessionDir = newSessionDir
 		os.Setenv(EnvAgentSession, newSessionID)
+		m.sendSessionState()
 		return true, m, seqPrint(successStyle.Render("session set to: "+newSessionDir), 0)
 	}
 	if line == "set-session" {
@@ -2302,12 +2365,13 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		m.sessionID = newSessionID
 		m.sessionDir = newSessionDir
 		os.Setenv(EnvAgentSession, newSessionID)
+		m.sendSessionState()
 		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
 	}
 
 	// new-session [name] — creates a new named session via clauditable
 	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
-		name := strings.TrimSpace(strings.TrimPrefix(line, "new-session"))
+		name := stripSurroundingQuotes(strings.TrimSpace(strings.TrimPrefix(line, "new-session")))
 		if name == "" {
 			name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
 		}
@@ -3378,7 +3442,8 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "list-sessions" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
+		remote := m.discoverRemoteSessions()
+		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir), remote))
 	}
 
 	// version (also available as "ufa version", handled by the "ufa "
@@ -3455,6 +3520,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		m.sessionID = newSessionID
 		m.sessionDir = newSessionDir
 		os.Setenv(EnvAgentSession, newSessionID)
+		m.sendSessionState()
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
 	}
@@ -3483,13 +3549,14 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		m.sessionID = newSessionID
 		m.sessionDir = newSessionDir
 		os.Setenv(EnvAgentSession, newSessionID)
+		m.sendSessionState()
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render("session reset to: " + newSessionDir))
 	}
 
 	// new-session [name] — creates a new named session via clauditable
 	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
-		name := strings.TrimSpace(strings.TrimPrefix(line, "new-session"))
+		name := stripSurroundingQuotes(strings.TrimSpace(strings.TrimPrefix(line, "new-session")))
 		return m.handleNewSession(name, line, cmdTime, deltaMs)
 	}
 
@@ -3618,6 +3685,7 @@ func (m appModel) switchToSession(newID string) (appModel, error) {
 	m.sessionID = newID
 	m.sessionDir = newSessionDir
 	os.Setenv(EnvAgentSession, newID)
+	m.sendSessionState()
 	return m, nil
 }
 
@@ -3734,7 +3802,8 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 
 	case "session list":
 		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID))
+		remote := m.discoverRemoteSessions()
+		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID, remote))
 
 	case "session get":
 		m.logRecord(line, cmdTime, deltaMs, 0)
@@ -3831,6 +3900,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			m.sessionID = id
 			m.sessionDir = newSessionDir
 			os.Setenv(EnvAgentSession, id)
+			m.sendSessionState()
 			m.logRecord(line, cmdTime, deltaMs, 0)
 			return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
 		}
@@ -4028,14 +4098,16 @@ func readSessionYAMLFields(sessionDir string) [][2]string {
 	return fields
 }
 
-// updateSessionName writes the new name into session.yaml, creating the file if needed.
+// updateSessionName writes the new name into session.yaml, creating the file
+// if needed. A freshly-created file's owner is this host (fcHostID) --
+// see condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
 func updateSessionName(sessionDir, newName string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	data, err := os.ReadFile(yamlPath)
 	if err != nil {
 		sessionID := filepath.Base(sessionDir)
-		content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n",
-			sessionID, newName, time.Now().Format(time.RFC3339))
+		content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+			sessionID, newName, fcHostID, time.Now().Format(time.RFC3339))
 		return os.WriteFile(yamlPath, []byte(content), 0644)
 	}
 	lines := strings.Split(string(data), "\n")
@@ -4200,6 +4272,7 @@ func (m appModel) handleRenameSession(args, line string, cmdTime time.Time, delt
 		m.logRecord(line, cmdTime, deltaMs, 1)
 		return m, tea.Println(errorStyle.Render("rename-session: " + err.Error()))
 	}
+	m.sendSessionState()
 	m.logRecord(line, cmdTime, deltaMs, 0)
 	return m, tea.Println(successStyle.Render("session renamed to: " + args))
 }
@@ -4428,6 +4501,21 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// stripSurroundingQuotes removes one matching pair of leading/trailing
+// double or single quotes from s, e.g. `"My New Session"` -> `My New
+// Session`. Used for new-session's name argument, which is typed directly
+// into the REPL line (not shell-parsed), so a user quoting a multi-word name
+// out of habit would otherwise end up with the quotes baked into the name.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {
@@ -5049,8 +5137,12 @@ func modeDescription(mode string) string {
 	}
 }
 
-// renderSessions returns a styled string listing available sessions
-func renderSessions(recordsPath string, currentSession string) string {
+// renderSessions returns a styled string listing available sessions, plus
+// any remote entries returned so far -- see discoverRemoteSessions. remote
+// entries whose ID is already among the local sessions are skipped: that ID
+// isn't "remote" to this host once it has its own copy (e.g. already
+// pulled).
+func renderSessions(recordsPath string, currentSession string, remote []remoteSessionEntry) string {
 	var b strings.Builder
 	entries, err := os.ReadDir(recordsPath)
 	if err != nil {
@@ -5061,9 +5153,11 @@ func renderSessions(recordsPath string, currentSession string) string {
 	b.WriteString("\n\n")
 
 	var sessions []string
+	known := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			sessions = append(sessions, entry.Name())
+			known[entry.Name()] = true
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(sessions)))
@@ -5087,6 +5181,19 @@ func renderSessions(recordsPath string, currentSession string) string {
 		b.WriteString("\n")
 	}
 
+	for _, r := range remote {
+		if known[r.ID] {
+			continue
+		}
+		known[r.ID] = true
+		nameStr := ""
+		if r.Name != "" {
+			nameStr = " — " + r.Name
+		}
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("    %s (remote on %s)%s", r.ID, r.HostID, nameStr)))
+		b.WriteString("\n")
+	}
+
 	b.WriteString("\n")
 	b.WriteString(sessionStyle.Render("use 'agent -provide-records <id> [-p|-r|-w|-x] <prompt>' to include session context"))
 	return b.String()
@@ -5102,6 +5209,13 @@ type cliConfig struct {
 	remote      bool   // derived: true whenever autoConnect is set — a machine-driven auto-launch/auto-connect chain always adopts remote control (no separate --remote flag)
 	lrAddr      string // local-representative representable address (--lr-host / --lr-port / FC_LR_HOST / FC_LR_PORT override host / port)
 	devMode     bool   // --dev-mode / dev-mode / FC_DEV_MODE: launched from an in-progress dev branch — see docs/DevMode.md. Unrelated to the ambiguous-agent-style "--dev" flag other sub-apps use for frontend development.
+	// session is the session ID to begin with (--session / session / FC_SESSION),
+	// taking priority over AGENT_SESSION and the clauditable default-session
+	// lookup in main — see docs/DevMode.md-style launch-arg cascading. Set by
+	// local-representative when relaunching a managed federation-command
+	// instance, so a restart lands back in the same session (see
+	// local-representative/procman.go's managedApps["federation-command"]).
+	session string
 }
 
 // Config-file keys recognised for federation-command (see README.md).
@@ -5110,6 +5224,7 @@ const (
 	cfgKeyLRHost      = "lr-host"
 	cfgKeyLRPort      = "lr-port"
 	cfgKeyDevMode     = "dev-mode"
+	cfgKeySession     = "session"
 )
 
 // Environment variables recognised for the local-representative connection.
@@ -5125,6 +5240,10 @@ const (
 	// FC, so a managed instance always cascades its launcher's mode (see
 	// docs/DevMode.md) even if the terminal wrapper mangles trailing argv.
 	envDevMode = "FC_DEV_MODE"
+	// envSession is set by local-representative when relaunching a managed FC
+	// instance it already knows the session of, so a dropped argv still lands
+	// FC back in the same session (mirrors envAutoConnect/envDevMode).
+	envSession = "FC_SESSION"
 )
 
 // envTruthy interprets a boolean-ish environment variable. Unset, "", "0",
@@ -5176,6 +5295,7 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 		return cfg, false, fmt.Errorf("invalid %s value %d in config (want 1-65535)", cfgKeyLRPort, port)
 	}
 	host := conf.String(cfgKeyLRHost, DefaultLRHost)
+	cfg.session = conf.String(cfgKeySession, "")
 
 	// Environment overrides sit between the config file and the CLI flags: a
 	// launcher (local-representative) sets FC_* so the connection is configured
@@ -5193,6 +5313,9 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 		if port, err = parseLRPort(v); err != nil {
 			return cfg, false, fmt.Errorf("%s: %w", envLRPort, err)
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv(envSession)); v != "" {
+		cfg.session = v
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -5231,6 +5354,16 @@ func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfi
 			if port, err = parseLRPort(strings.TrimPrefix(arg, "-lr-port=")); err != nil {
 				return cfg, false, err
 			}
+		case arg == "--session" || arg == "-session":
+			if i+1 >= len(args) {
+				return cfg, false, fmt.Errorf("--session requires a value")
+			}
+			i++
+			cfg.session = args[i]
+		case strings.HasPrefix(arg, "--session="):
+			cfg.session = strings.TrimPrefix(arg, "--session=")
+		case strings.HasPrefix(arg, "-session="):
+			cfg.session = strings.TrimPrefix(arg, "-session=")
 		}
 		// Unknown arguments are ignored for backward compatibility.
 	}
@@ -5256,6 +5389,7 @@ func parseLRPort(s string) (int, error) {
 func main() {
 	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
 	fcHostID = ufahostid.GetHostID()
+	fcInstanceID = strings.TrimSpace(os.Getenv("FC_INSTANCE_ID"))
 
 	cfg, handled, err := parseCLIArgs(os.Args[1:])
 	if handled {
@@ -5271,9 +5405,17 @@ func main() {
 		recordsPath = DefaultRecordsPath
 	}
 
-	// Resolve session: use today's default when AGENT_SESSION is unset or "default"
+	// Resolve session: use today's default when AGENT_SESSION is unset or "default".
+	// --session / FC_SESSION (cfg.session) wins over AGENT_SESSION -- it's how
+	// local-representative hands a managed instance back its prior session on
+	// restart (see condocs/initialDistributedSessionsImpls/Step2Prompt.md
+	// Revision B and local-representative/procman.go's
+	// managedApps["federation-command"]).
 	now := time.Now()
-	sessionID := os.Getenv(EnvAgentSession)
+	sessionID := strings.TrimSpace(cfg.session)
+	if sessionID == "" {
+		sessionID = os.Getenv(EnvAgentSession)
+	}
 	if sessionID == "" || sessionID == "default" {
 		if clauditablePath, findErr := findBinary("clauditable"); findErr == nil {
 			getCmd := exec.Command(clauditablePath, "get-default-session")

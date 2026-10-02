@@ -469,6 +469,16 @@ body {
 .health-unknown   .health-dot  { background: #666; }
 .health-unknown   .health-label { color: #666; }
 
+.fc-session-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: #888;
+  background: #262626;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 1px 8px;
+}
+
 .service-empty {
   color: #555;
   font-style: italic;
@@ -617,6 +627,56 @@ body {
   font-size: 12px;
   padding: 0 12px;
 }
+
+/* tab-bar-right pins a control (the system tab's "debug" button -- see
+   DebugToggleButton) to the right edge of a .tab-bar, alongside the tab
+   buttons' own flex row rather than below or above it. */
+.tab-bar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+}
+
+.debug-toggle-btn-active { background: #1a2a3a; border-color: #2e5a7a; color: #6ea6c9; }
+
+/* ---- Debug view (system tab's "debug" button -- Step1SubstepBPrompt.md
+   Revision E): a very simple two-tab scrolling-log viewer, shared by the
+   network and logs tabs (see DebugLogPane). ---- */
+
+.debug-view { display: flex; flex-direction: column; gap: 0; flex: 1; min-height: 0; }
+
+.debug-pane { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+
+.debug-pane-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.debug-pane-count { font-size: 12px; color: #888; }
+
+.debug-pane-lines {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+  flex: 1;
+  min-height: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.debug-pane-line {
+  padding: 1px 0;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.debug-pane-empty { color: #555; font-style: italic; }
 
 /* ---- Global topology panel (global system tab, see
    condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg) ----
@@ -770,6 +830,7 @@ body {
 .sys-col-name { color: #d4d4d4; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow: visible; white-space: normal; }
 .sys-col-name-main { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sys-version-tag { font-size: 10px; font-weight: 400; color: #666; white-space: normal; overflow-wrap: anywhere; }
+.sys-session-tag { font-size: 10px; font-weight: 400; color: #888; white-space: normal; overflow-wrap: anywhere; }
 .sys-col-pid { color: #9c9c9c; }
 .sys-col-detail { color: #9c9c9c; }
 .sys-self-tag { margin-left: 8px; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; }
@@ -780,6 +841,10 @@ body {
 .sys-col-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; overflow: visible; white-space: normal; }
 .sys-btn { font-family: inherit; font-size: 11px; padding: 2px 10px; border-radius: 3px; cursor: pointer; }
 .sys-btn:disabled { opacity: 0.5; cursor: default; }
+/* Plain grey, no color-coded meaning attached -- the debug view's "debug"
+   toggle and "to file" buttons (Step1SubstepBPrompt.md Revision E). */
+.sys-btn-neutral { background: #3c3c3c; border: 1px solid #555; color: #ccc; }
+.sys-btn-neutral:hover:not(:disabled) { background: #4a4a4a; }
 .sys-btn-terminate { background: #3a1a1a; border: 1px solid #7a2e2e; color: #c96e6e; }
 .sys-btn-terminate:hover { background: #5a2e2e; }
 .sys-btn-restart { background: #1a2a3a; border: 1px solid #2e5a7a; color: #6ea6c9; }
@@ -863,6 +928,14 @@ body {
 .files-dropzone-text { font-size: 13px; color: #aaa; }
 .files-dropzone-hint { font-size: 11px; color: #666; }
 .files-dropzone-input { display: none; }
+/* "new text file" button (Step2Prompt.md Revision J) -- sits right below the
+   dropzone, same width, so it reads as a second way to add a file rather
+   than a buried action. */
+.files-new-btn {
+  background: #262626; border: 1px dashed #3c3c3c; border-radius: 6px; color: #aaa;
+  font-family: inherit; font-size: 13px; padding: 10px; cursor: pointer; text-align: center;
+}
+.files-new-btn:hover { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
 .files-empty { color: #888; font-style: italic; font-size: 13px; }
 .files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 12px; }
 .files-item {
@@ -1016,6 +1089,82 @@ body {
 .markup-btn-copy:hover:not(:disabled) { background: #1a3a1a; border-color: #2e7a2e; }
 .markup-btn-commit { color: #ff9d5c; }
 .markup-btn-commit:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+/* ---- New text file dialog (Step2Prompt.md Revision J) ----
+   Same overlay/dialog shell convention as .markup-overlay/.markup-dialog
+   above, kept as its own class pair (rather than reused) since the two
+   dialogs are otherwise unrelated. */
+
+.new-file-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px;
+}
+.new-file-dialog {
+  display: flex; flex-direction: column; gap: 12px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; padding: 16px;
+  width: min(94vw, 480px);
+}
+.new-file-name-input {
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #d4d4d4;
+  font-family: inherit; font-size: 13px; padding: 7px 9px;
+}
+.new-file-body-input {
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #d4d4d4;
+  font-family: inherit; font-size: 13px; padding: 7px 9px; resize: vertical; min-height: 160px;
+}
+.new-file-name-input:focus, .new-file-body-input:focus { outline: none; border-color: #555; }
+.new-file-error { color: #e06a6a; font-size: 12px; }
+.new-file-actions { display: flex; gap: 8px; }
+.new-file-btn {
+  flex: 1; background: #262626; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 7px 0; cursor: pointer; text-align: center;
+}
+.new-file-btn:hover { background: #2e2e2e; border-color: #555; }
+.new-file-btn:disabled { opacity: 0.5; cursor: default; }
+.new-file-btn-cancel { color: #e06a6a; }
+.new-file-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+.new-file-btn-create { color: #ff9d5c; }
+.new-file-btn-create:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+/* ---- The Conversationalist mic-capture (Step2Prompt.md Revision J) ----
+   Mirrors condoccer's and local-representative's own copies of these same
+   rules -- see App.tsx's field-with-mic/.mic-btn/TCCaptureOverlay for the
+   markup they back. field-with-mic wraps the new-text-file dialog's body
+   textarea so MicButton sits beside it rather than overlapping the
+   textarea's own resize handle; the field itself keeps its existing
+   class-driven styling, since this only adds a flex sibling. MicButton
+   renders nothing until its host's TC is available, so field-with-mic is
+   present even when there's nothing to see beside the field. */
+
+.field-with-mic { display: flex; align-items: flex-start; gap: 6px; width: 100%; }
+.field-with-mic > input, .field-with-mic > textarea { flex: 1; min-width: 0; }
+.mic-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 24px; height: 24px; margin-top: 1px; padding: 3px;
+  background: #2d2d2d; color: #999; border: 1px solid #3c3c3c; border-radius: 3px; cursor: pointer;
+}
+.mic-btn svg { width: 100%; height: 100%; display: block; }
+.mic-btn:hover { background: #333; color: #d4d4d4; border-color: #555; }
+
+/* TCCaptureOverlay -- the floating panel hosting the-conversationalist's own
+   capture-mode iframe while a dictation is in progress (App.tsx). */
+
+.tc-capture-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.tc-capture-panel {
+  width: 420px; max-width: 90vw; height: 320px; max-height: 80vh;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 6px;
+  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.tc-capture-panel-header {
+  display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;
+  background: #252526; border-bottom: 1px solid #3c3c3c; font-size: 12px; color: #ccc;
+}
+.tc-capture-close { background: none; border: none; color: #999; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.tc-capture-close:hover { color: #fff; }
+.tc-capture-frame { flex: 1; width: 100%; border: none; background: #141414; }
 
 /* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
  *

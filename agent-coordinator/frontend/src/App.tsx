@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
@@ -31,6 +31,9 @@ interface HostClientState {
   sessions?: LRSessionsMsg
   convo?: LRConvoMsg
   files?: LRFilesMsg
+  debugLog?: LRDebugLogMsg
+  chainCall?: LRChainCallMsg
+  stateboard?: LRStateboardMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -318,6 +321,30 @@ function useCoordinatorWS() {
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), files: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-debug-log-state': {
+            const p = msg.payload as LRDebugLogMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), debugLog: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-chain-call-state': {
+            const p = msg.payload as LRChainCallMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), chainCall: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-stateboard-state': {
+            const p = msg.payload as LRStateboardMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), stateboard: p.active ? p : undefined },
             }))
             break
           }
@@ -741,6 +768,9 @@ function SystemProcRow({
         {proc.version && (
           <span className="sys-version-tag" title="build version">{proc.version}</span>
         )}
+        {proc.session && (
+          <span className="sys-session-tag" title="active session">{proc.session}</span>
+        )}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
@@ -835,6 +865,14 @@ function SystemProcDetails({ proc, nowSec }: { proc: ProcInfo; nowSec: number })
             : proc.pending_version || <span className="sys-readout-placeholder">update available (version unknown)</span>}
         </span>
       </div>
+      {proc.name === 'federation-command' && (
+        <div className="sys-readout-row">
+          <span className="sys-readout-label">session</span>
+          <span className="sys-readout-value">
+            {proc.session || <span className="sys-readout-placeholder">not yet reported</span>}
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -1008,6 +1046,321 @@ function RepoWatchPanel({
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
       )}
+    </div>
+  )
+}
+
+/* ---- Debug view (system tab, Step1SubstepBPrompt.md Revision E) ----
+ *
+ * A first, deliberately simple pass: a "debug" button in the system tab
+ * (both per-host and global) swaps that tab's main pane for a two-tab
+ * viewer -- "network" and "logs" -- each just a plain scrolling list of
+ * captured lines, plus a "to file" button that drops the current contents
+ * into the preferred file store the same way ScreenshotButton already does.
+ */
+
+// NetworkLogEntry is one captured request this agent-coordinator frontend
+// itself made -- method/URL/status/duration. Since every interaction with
+// every sub-app (uploads, hold/persist/delete, markup, screenshots, launch/
+// terminate commands that ride the WebSocket, etc.) is issued as a fetch
+// from this one page, wrapping window.fetch once (see installNetworkCapture)
+// covers all of them without needing each sub-app's own embedded iframe to
+// cooperate. It doesn't yet see network activity that happens entirely
+// inside an embedded iframe's own document (condoccer/sessions/convo's own
+// UI) -- a later increment could thread that through postMessage if needed.
+interface NetworkLogEntry {
+  id: number
+  time: number // unix ms
+  method: string
+  url: string
+  status: number | null // null while in flight or on a network-level failure
+  duration_ms: number | null
+  error?: string
+}
+
+const MAX_NETWORK_LOG_ENTRIES = 300
+let networkLog: NetworkLogEntry[] = []
+let networkLogSeq = 0
+const networkLogListeners = new Set<() => void>()
+
+function pushNetworkLogEntry(entry: NetworkLogEntry) {
+  networkLog = [...networkLog.slice(-(MAX_NETWORK_LOG_ENTRIES - 1)), entry]
+  networkLogListeners.forEach(fn => fn())
+}
+
+// installNetworkCapture wraps window.fetch exactly once per page load.
+let networkCaptureInstalled = false
+function installNetworkCapture() {
+  if (networkCaptureInstalled) return
+  networkCaptureInstalled = true
+  const realFetch = window.fetch.bind(window)
+  window.fetch = (...args: Parameters<typeof fetch>) => {
+    const method = (args[1]?.method ?? 'GET').toUpperCase()
+    const first = args[0]
+    const url = typeof first === 'string' ? first : first instanceof Request ? first.url : String(first)
+    const id = ++networkLogSeq
+    const start = Date.now()
+    return realFetch(...args).then(
+      resp => {
+        pushNetworkLogEntry({ id, time: start, method, url, status: resp.status, duration_ms: Date.now() - start })
+        return resp
+      },
+      err => {
+        pushNetworkLogEntry({ id, time: start, method, url, status: null, duration_ms: Date.now() - start, error: String(err) })
+        throw err
+      },
+    )
+  }
+}
+
+// useNetworkLog subscribes this component to the shared capture buffer above.
+function useNetworkLog(): NetworkLogEntry[] {
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    installNetworkCapture()
+    const listener = () => forceRender(n => n + 1)
+    networkLogListeners.add(listener)
+    return () => { networkLogListeners.delete(listener) }
+  }, [])
+  return networkLog
+}
+
+function formatNetworkLogLine(e: NetworkLogEntry): string {
+  const status = e.status != null ? String(e.status) : e.error ? 'error' : '…'
+  const duration = e.duration_ms != null ? `${e.duration_ms}ms` : ''
+  return `${new Date(e.time).toLocaleTimeString()}  ${e.method}  ${status}  ${duration}  ${e.url}`
+}
+
+// TimedLine is a pre-formatted debug-pane line plus its original timestamp
+// (ms since epoch), letting DebugView merge chain-call lines (ts in unix
+// seconds, formatted by the caller -- see formatChainCallLine) into the
+// same chronological list as this frontend's own browser-fetch captures
+// (ts in unix ms, formatted by formatNetworkLogLine) without losing the
+// ordering either source needs its raw timestamp for.
+interface TimedLine {
+  ts: number // ms since epoch
+  line: string
+}
+
+// formatChainCallLine renders one captured backend-to-backend HTTP call
+// from the SM<->LR<->AC chain (Step1SubstepBPrompt.md Revision F) -- the
+// half of the "network" tab a browser fetch wrapper can't see, since it
+// never touches session-manager's or local-representative's own HTTP
+// clients. hostLabel is only passed in the global perspective, same as
+// formatDebugLogLine.
+function formatChainCallLine(e: ChainCallEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel} ` : ''
+  const status = e.status ? String(e.status) : e.error ? 'error' : '…'
+  return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.hop}] ${e.method}  ${status}  ${e.duration_ms}ms  ${e.url}`
+}
+
+// formatDebugLogLine renders one captured LR-managed-sub-app stdout/stderr
+// line. hostLabel is only passed in the global perspective, where lines from
+// every host are merged into one list and need tagging to tell them apart.
+function formatDebugLogLine(e: DebugLogEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel} ` : ''
+  const marker = e.stream === 'stderr' ? '!' : ' '
+  return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.app}]${marker} ${e.line}`
+}
+
+// formatStateboardLine renders one stateboard key/value row (see
+// StateboardEntry) for the debug view's "stateboard" tab
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
+// hostLabel is only passed in the global perspective, same as
+// formatDebugLogLine/formatChainCallLine -- a stateboard entry has no
+// timestamp of its own (it's a live snapshot, not a log), so unlike those
+// two this is plain text with no time prefix. Entries nest two levels deep
+// under their owning sub-app (Revision F), so this renders "app: key =
+// value" rather than a single flattened key.
+function formatStateboardLine(e: StateboardEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel}  ` : ''
+  return `${host}${e.app}: ${e.key} = ${e.value || '(empty)'}`
+}
+
+// mergeGlobalStateboard combines every host's locally-reported stateboard
+// into one process-wide view (Revision G): each LR only *presents* its own
+// local view (what's connected to it), but the global perspective needs to
+// show what's reachable across every host -- the same way an LR recognizes
+// a capability like transcription is usable from another node once *any*
+// host reports it present, rather than only its own. Flat-mapping per-host
+// entries with a host label (the old behaviour, still used for logs/chain
+// calls where per-host attribution is the point) just produced a repeated
+// per-host breakdown here instead of a merged summary. "present" rows OR
+// together across hosts; every other row (the "hosts"/"instances" list rows
+// and any custom key a sub-app posts, e.g. "current-session") unions the
+// distinct non-empty values reported by each host, sorted, so e.g. a
+// "hosts" row ends up listing every host where that app is present instead
+// of just whichever single host happened to report it.
+function mergeGlobalStateboard(hosts: Host[], hostData: Record<string, HostClientState>): StateboardEntry[] {
+  const present = new Map<string, boolean>()
+  const values = new Map<string, Set<string>>()
+  const idOf = (app: string, key: string) => `${app}\x00${key}`
+  for (const h of hosts) {
+    for (const e of hostData[h.id]?.stateboard?.entries ?? []) {
+      const id = idOf(e.app, e.key)
+      if (e.key === 'present') {
+        present.set(id, (present.get(id) ?? false) || e.value === 'true')
+      } else {
+        const set = values.get(id) ?? new Set<string>()
+        for (const part of e.value.split(',').map(v => v.trim())) {
+          if (part) set.add(part)
+        }
+        values.set(id, set)
+      }
+    }
+  }
+  const entries: StateboardEntry[] = []
+  for (const [id, isPresent] of present) {
+    const [app, key] = id.split('\x00')
+    entries.push({ app, key, value: String(isPresent) })
+  }
+  for (const [id, set] of values) {
+    const [app, key] = id.split('\x00')
+    entries.push({ app, key, value: [...set].sort().join(', ') })
+  }
+  entries.sort((a, b) => (a.app !== b.app ? a.app.localeCompare(b.app) : a.key.localeCompare(b.key)))
+  return entries
+}
+
+// resolveGlobalDebugUploadHost picks the "preferred file store" to save a
+// global-perspective debug capture to, where there's no single selected host
+// to fall back on the way ScreenshotButton's per-host case does: this
+// agent-coordinator's own co-located host if it's connected, else the first
+// connected host, else null (disables the "to file" button).
+function resolveGlobalDebugUploadHost(hosts: Host[], selfHostId: string | null): string | null {
+  if (selfHostId && hosts.some(h => h.id === selfHostId && h.status === 'connected')) return selfHostId
+  return hosts.find(h => h.status === 'connected')?.id ?? null
+}
+
+// DebugLogPane is the "very simple viewer" shared by both the network and
+// logs tabs: a plain scrolling list of pre-formatted lines, plus a "to file"
+// button that uploads them as one text file through the normal upload path
+// (so it lands in the files tab cache like any other upload).
+function DebugLogPane({
+  lines, toFileName, uploadHostId, uploadFiles, emptyMessage,
+}: {
+  lines: string[]
+  toFileName: string
+  uploadHostId: string | null
+  uploadFiles: (hostId: string, files: File[]) => void
+  emptyMessage: string
+}) {
+  const [busy, setBusy] = useState(false)
+
+  const handleToFile = async () => {
+    if (!uploadHostId || lines.length === 0 || busy) return
+    setBusy(true)
+    try {
+      await uploadFiles(uploadHostId, [new File([lines.join('\n') + '\n'], toFileName, { type: 'text/plain' })])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="debug-pane">
+      <div className="debug-pane-toolbar">
+        <span className="debug-pane-count">{lines.length} line(s) captured this session</span>
+        <button
+          className="sys-btn sys-btn-neutral"
+          disabled={!uploadHostId || lines.length === 0 || busy}
+          onClick={handleToFile}
+          title={uploadHostId ? 'save these lines to the preferred file store' : 'no file store available -- select a connected host first'}
+        >
+          {busy ? 'saving…' : 'to file'}
+        </button>
+      </div>
+      <div className="debug-pane-lines">
+        {lines.length === 0 ? (
+          <div className="debug-pane-empty">{emptyMessage}</div>
+        ) : (
+          lines.map((line, i) => <div className="debug-pane-line" key={i}>{line}</div>)
+        )}
+      </div>
+    </div>
+  )
+}
+
+const DEBUG_TABS = ['network', 'logs', 'stateboard'] as const
+type DebugTab = typeof DEBUG_TABS[number]
+
+// DebugView is the system tab's "debug" button destination: network capture
+// (see useNetworkLog, app-wide and identical in both perspectives since it's
+// this one frontend's own request log -- merged chronologically with
+// chainLines, the backend-to-backend SM<->LR<->AC calls the caller already
+// formatted via formatChainCallLine, same reasoning as logLines below),
+// logs (logLines, already formatted by the caller -- see
+// formatDebugLogLine -- since per-host and global differ in whether a host
+// tag is needed), and stateboard (stateLines, formatted the same way via
+// formatStateboardLine -- condocs/initialDistributedSessionsImpls/
+// Step2Prompt.md Revision E).
+function DebugView({
+  logLines, chainLines, stateLines, uploadHostId, uploadFiles,
+}: {
+  logLines: string[]
+  chainLines: TimedLine[]
+  stateLines: string[]
+  uploadHostId: string | null
+  uploadFiles: (hostId: string, files: File[]) => void
+}) {
+  const [tab, setTab] = useState<DebugTab>('network')
+  const networkEntries = useNetworkLog()
+
+  const networkLines = useMemo(() => {
+    const fetchLines: TimedLine[] = networkEntries.map(e => ({ ts: e.time, line: formatNetworkLogLine(e) }))
+    return [...fetchLines, ...chainLines].sort((a, b) => a.ts - b.ts).map(l => l.line)
+  }, [networkEntries, chainLines])
+
+  return (
+    <div className="debug-view">
+      <div className="tab-bar tab-bar-nested">
+        <div className="tabs">
+          {DEBUG_TABS.map(t => (
+            <button key={t} className={`tab${tab === t ? ' tab-active' : ''}`} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {tab === 'network' ? (
+        <DebugLogPane
+          lines={networkLines}
+          toFileName={`network-debug-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no network activity captured yet"
+        />
+      ) : tab === 'logs' ? (
+        <DebugLogPane
+          lines={logLines}
+          toFileName={`logs-debug-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no LR-managed sub-app log lines captured yet"
+        />
+      ) : (
+        <DebugLogPane
+          lines={stateLines}
+          toFileName={`stateboard-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no stateboard entries reported yet"
+        />
+      )}
+    </div>
+  )
+}
+
+// DebugToggleButton sits at the right edge of the system tab's own tab bar
+// (both per-host and global -- Step1SubstepBPrompt.md Revision E: "a 'debug'
+// button in the system tab in the top right corner"), only rendered while
+// that tab is active.
+function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => void }) {
+  return (
+    <div className="tab-bar-right">
+      <button className={`sys-btn sys-btn-neutral${open ? ' debug-toggle-btn-active' : ''}`} onClick={onClick}>
+        debug
+      </button>
     </div>
   )
 }
@@ -1258,6 +1611,91 @@ function markupCopyUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/copy`
 }
 
+// NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
+// Revision J: "add a 'new text file' button to the files tab ... accepts the
+// name and text (with optional voice input with mic icon when available)").
+// There's no dedicated "create file" API on the server -- this reuses the
+// very same multipart upload endpoint every drag-and-drop/browse upload
+// already goes through (relayed via handleFileUploadRelay to the target
+// host's own handleFileUpload, in files.go) by synthesizing a File from the
+// typed name and body client-side, the same trick the debug-log panel's
+// "save to file" button already uses. Mirrors local-representative's own
+// copy of this dialog.
+function NewTextFileDialog({
+  onCreate,
+  onClose,
+}: {
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState('')
+  const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    // Mirrors files.go's saveUploadedFile reserved-prefix checks -- a
+    // friendlier client-side echo of a rejection the server would otherwise
+    // give silently (a rejected file is just dropped from the response).
+    if (trimmed.startsWith('.manifest_') || trimmed.startsWith('.markup_')) {
+      setError("that name is reserved for the host-cache's own bookkeeping files")
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([body], finalName, { type: 'text/plain' })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">new text file</span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          className="new-file-name-input"
+          placeholder="file name (e.g. notes.txt)"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          autoFocus
+        />
+        <div className="field-with-mic">
+          <textarea
+            className="new-file-body-input"
+            placeholder="file contents…"
+            value={body}
+            onChange={e => setBody(e.target.value)}
+            rows={10}
+          />
+          <MicButton onTranscript={text => setBody(prev => appendTranscript(prev, text))} />
+        </div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function FilesPanel({
   files, active, selectedId, onSelect, onEnter, onUpload,
 }: {
@@ -1266,9 +1704,10 @@ function FilesPanel({
   selectedId: string | null
   onSelect: (id: string) => void
   onEnter: (id: string) => void
-  onUpload: (files: FileList) => void
+  onUpload: (files: FileList | File[]) => void
 }) {
   const [dragging, setDragging] = useState(false)
+  const [newFileOpen, setNewFileOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   if (!active) {
@@ -1300,6 +1739,12 @@ function FilesPanel({
           }}
         />
       </div>
+      <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+        + new text file
+      </button>
+      {newFileOpen && (
+        <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
       {files.length === 0 ? (
         <div className="files-empty">no files in the host-cache</div>
       ) : (
@@ -2392,7 +2837,7 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles,
 }: {
   hosts: Host[]
   hostData: Record<string, HostClientState>
@@ -2412,7 +2857,10 @@ function GlobalView({
   sendACSetAutoUpdate: (enabled: boolean) => void
   hasHighlighted: boolean
   onGoToHighlighted: () => void
+  uploadFiles: (hostId: string, files: FileList | File[]) => void
 }) {
+  const [debugOpen, setDebugOpen] = useState(false)
+
   return (
     <div className="lr-view">
       <div className="lr-header">
@@ -2438,25 +2886,42 @@ function GlobalView({
             </button>
           ))}
         </div>
+        {activeTab === 'system' && (
+          <DebugToggleButton open={debugOpen} onClick={() => setDebugOpen(o => !o)} />
+        )}
       </div>
       <div className="main-pane">
         {activeTab === 'system' ? (
-          <GlobalSystemPanel
-            hosts={hosts}
-            hostData={hostData}
-            selfHostId={selfHostId}
-            devMode={devMode}
-            sendLRRestartApp={sendLRRestartApp}
-            sendLRRebuildApp={sendLRRebuildApp}
-            sendLRSetAutoRebuild={sendLRSetAutoRebuild}
-            sendLRSetAutoUpdate={sendLRSetAutoUpdate}
-            acLoaderManaged={acLoaderManaged}
-            acUpdateAvailable={acUpdateAvailable}
-            acAutoUpdate={acAutoUpdate}
-            acStartedAt={acStartedAt}
-            sendACRestartApp={sendACRestartApp}
-            sendACSetAutoUpdate={sendACSetAutoUpdate}
-          />
+          debugOpen ? (
+            <DebugView
+              logLines={hosts.flatMap(h =>
+                (hostData[h.id]?.debugLog?.entries ?? []).map(e => formatDebugLogLine(e, h.label)),
+              )}
+              chainLines={hosts.flatMap(h =>
+                (hostData[h.id]?.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e, h.label) })),
+              )}
+              stateLines={mergeGlobalStateboard(hosts, hostData).map(e => formatStateboardLine(e))}
+              uploadHostId={resolveGlobalDebugUploadHost(hosts, selfHostId)}
+              uploadFiles={uploadFiles}
+            />
+          ) : (
+            <GlobalSystemPanel
+              hosts={hosts}
+              hostData={hostData}
+              selfHostId={selfHostId}
+              devMode={devMode}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              acLoaderManaged={acLoaderManaged}
+              acUpdateAvailable={acUpdateAvailable}
+              acAutoUpdate={acAutoUpdate}
+              acStartedAt={acStartedAt}
+              sendACRestartApp={sendACRestartApp}
+              sendACSetAutoUpdate={sendACSetAutoUpdate}
+            />
+          )
         ) : (
           <div className="service-empty">not yet implemented</div>
         )}
@@ -2481,7 +2946,7 @@ function LRView({
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
-  uploadFiles: (hostId: string, files: FileList) => void
+  uploadFiles: (hostId: string, files: FileList | File[]) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -2491,6 +2956,12 @@ function LRView({
 }) {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // debugOpen is reset whenever the viewed host changes -- this component
+  // isn't remounted on host switch (see condoccerHash below), so without
+  // this a debug view left open on one host would otherwise still be open
+  // after picking a different one.
+  const [debugOpen, setDebugOpen] = useState(false)
+  useEffect(() => setDebugOpen(false), [host.id])
   // markupFile is snapshotted at the moment the dialog opens (rather than
   // re-derived from `files` below) so an in-flight files-state broadcast
   // can't yank the dialog's target out from under an open editing session --
@@ -2498,6 +2969,12 @@ function LRView({
   const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
   const lrState = data.lrState
   const active = lrState?.active ?? false
+  // Mirrors local-representative/frontend/src/App.tsx's own fcSession: the
+  // session this host's federation-command is on, relayed down through
+  // lr-system-state (see condocs/initialDistributedSessionsImpls/
+  // Step2Prompt.md Revision C). Surfaced on the federation-command tab
+  // itself rather than only the system tab's per-row tag.
+  const fcSession = data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
 
   // Consume the global "go to first highlighted file" handoff (Step5SubstepR
   // Revision E) once this is the host it was aimed at -- App() has already
@@ -2550,7 +3027,15 @@ function LRView({
     : null
   const isEmbedTab = EMBED_TABS.has(activeTab)
 
+  // Drives every MicButton under this host's view (Step2Prompt.md Revision
+  // J) via TCCaptureContext, below -- gated on this host's own data.convo
+  // (whether a the-conversationalist instance is actually running there),
+  // not the header's global tcAvailable, since dictation has to reach this
+  // specific host's convo instance -- see useTCCapture's doc comment.
+  const tcCapture = useTCCapture(Boolean(data.convo), host.id)
+
   return (
+    <TCCaptureContext.Provider value={{ available: tcCapture.available, capture: tcCapture.capture }}>
     <div className="lr-view">
       <div className="lr-header">
         <span className="lr-host-label">{host.label}</span>
@@ -2578,6 +3063,9 @@ function LRView({
             </button>
           ))}
         </div>
+        {activeTab === 'system' && (
+          <DebugToggleButton open={debugOpen} onClick={() => setDebugOpen(o => !o)} />
+        )}
       </div>
       {isEmbedTab && (
         <div className={`embed-status-bar health-${getServiceStatus(activeTab)}`}>
@@ -2628,23 +3116,36 @@ function LRView({
                 <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
                   <span className="health-dot" />
                   <span className="health-label">{getServiceStatus(activeTab)}</span>
+                  {fcSession && (
+                    <span className="fc-session-tag" title="active session">{fcSession}</span>
+                  )}
                 </div>
               )}
               {activeTab === 'system' && (
-                <SystemPanel
-                  hostId={host.id}
-                  state={data.system}
-                  active={active}
-                  fcState={data.fcState}
-                  repoState={data.repo}
-                  onLaunch={sendLRLaunchApp}
-                  onTerminate={sendLRTerminateApp}
-                  onRestart={sendLRRestartApp}
-                  onRestartManaged={sendLRRestartManagedApp}
-                  onRebuild={sendLRRebuildApp}
-                  onSetAutoRebuild={sendLRSetAutoRebuild}
-                  onSetAutoUpdate={sendLRSetAutoUpdate}
-                />
+                debugOpen ? (
+                  <DebugView
+                    logLines={(data.debugLog?.entries ?? []).map(e => formatDebugLogLine(e))}
+                    chainLines={(data.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e) }))}
+                    stateLines={(data.stateboard?.entries ?? []).map(e => formatStateboardLine(e))}
+                    uploadHostId={active ? host.id : null}
+                    uploadFiles={uploadFiles}
+                  />
+                ) : (
+                  <SystemPanel
+                    hostId={host.id}
+                    state={data.system}
+                    active={active}
+                    fcState={data.fcState}
+                    repoState={data.repo}
+                    onLaunch={sendLRLaunchApp}
+                    onTerminate={sendLRTerminateApp}
+                    onRestart={sendLRRestartApp}
+                    onRestartManaged={sendLRRestartManagedApp}
+                    onRebuild={sendLRRebuildApp}
+                    onSetAutoRebuild={sendLRSetAutoRebuild}
+                    onSetAutoUpdate={sendLRSetAutoUpdate}
+                  />
+                )
               )}
               {activeTab === 'files' && viewerFileId ? (
                 <FileViewer
@@ -2705,7 +3206,11 @@ function LRView({
           onClose={() => setMarkupFile(null)}
         />
       )}
+      {tcCapture.captureURL && (
+        <TCCaptureOverlay url={tcCapture.captureURL} onCancel={tcCapture.cancel} />
+      )}
     </div>
+    </TCCaptureContext.Provider>
   )
 }
 
@@ -2765,6 +3270,121 @@ const MIC_ICON = (
     <path d="M8 21h8" />
   </svg>
 )
+
+// ---- The Conversationalist mic-capture, for per-field dictation ----
+//
+// Step2Prompt.md Revision J adds the files tab's "new text file" dialog, whose
+// body field gets the same mic-dictation affordance condoccer's inputs
+// already have. Mirrors condoccer's and local-representative's own copies of
+// this block almost exactly, with one difference: agent-coordinator only
+// ever reaches a the-conversationalist instance *through* a specific host's
+// local-representative (/host/<id>/convo/, reverse-proxied by proxyToHost in
+// main.go), so both the capture URL and the "is TC available" gate are
+// host-scoped rather than global -- see LRView's own per-host
+// TCCaptureContext.Provider, below, which already knows which host (and
+// whether that host's own data.convo says TC is running there) it's for.
+function tcCaptureURL(hostId: string): string {
+  return `${window.location.origin}/host/${encodeURIComponent(hostId)}/convo/?embed=capture`
+}
+
+interface TCCaptureContextValue {
+  available: boolean
+  capture: (onTranscript: (text: string) => void) => void
+}
+
+// Default value only matters if a MicButton somehow renders outside a
+// TCCaptureContext.Provider -- available: false keeps it inert.
+const TCCaptureContext = createContext<TCCaptureContextValue>({ available: false, capture: () => {} })
+
+// useTCCapture owns the one hidden-until-active iframe a given host's
+// TCCaptureContext.Provider ever opens into that host's the-conversationalist,
+// and the postMessage listener that receives its transcript back. `available`
+// gates every MicButton under that provider; `capture` starts a capture,
+// invoking its callback once (and only once) with the final text.
+function useTCCapture(tcAvailable: boolean, hostId: string) {
+  const [captureURL, setCaptureURL] = useState<string | null>(null)
+  const onTranscriptRef = useRef<((text: string) => void) | null>(null)
+
+  const capture = useCallback((onTranscript: (text: string) => void) => {
+    onTranscriptRef.current = onTranscript
+    setCaptureURL(tcCaptureURL(hostId))
+  }, [hostId])
+
+  const cancel = useCallback(() => {
+    onTranscriptRef.current = null
+    setCaptureURL(null)
+  }, [])
+
+  useEffect(() => {
+    if (!captureURL) return
+    let expectedOrigin: string
+    try {
+      expectedOrigin = new URL(captureURL).origin
+    } catch {
+      return
+    }
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== expectedOrigin) return
+      const data = ev.data as { type?: string; text?: string } | undefined
+      if (data?.type === 'tc-transcript') {
+        onTranscriptRef.current?.(data.text ?? '')
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      } else if (data?.type === 'tc-transcript-cancel') {
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [captureURL])
+
+  return { available: tcAvailable, capture, captureURL, cancel }
+}
+
+// MicButton is the per-field affordance -- renders nothing while the
+// enclosing TCCaptureContext.Provider says TC isn't available for that host.
+// See the new-text-file dialog's body field, below, for its one call site in
+// this app so far.
+function MicButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const { available, capture } = useContext(TCCaptureContext)
+  if (!available) return null
+  return (
+    <button
+      type="button"
+      className="mic-btn"
+      title="dictate with The Conversationalist"
+      onClick={() => capture(onTranscript)}
+    >
+      {MIC_ICON}
+    </button>
+  )
+}
+
+// appendTranscript is the shared "insert dictated text" behaviour every
+// MicButton call site uses: appended after any existing content, space-
+// separated, rather than overwriting it. Mirrors condoccer's own copy.
+function appendTranscript(prev: string, text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return prev
+  return prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed
+}
+
+// TCCaptureOverlay hosts the actual iframe while a capture is in progress --
+// mirrors condoccer's own copy.
+function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void }) {
+  return (
+    <div className="tc-capture-backdrop" onClick={onCancel}>
+      <div className="tc-capture-panel" onClick={e => e.stopPropagation()}>
+        <div className="tc-capture-panel-header">
+          <span>The Conversationalist</span>
+          <button type="button" className="tc-capture-close" onClick={onCancel} aria-label="Cancel dictation">×</button>
+        </div>
+        <iframe className="tc-capture-frame" src={url} title="the-conversationalist capture" allow="microphone" />
+      </div>
+    </div>
+  )
+}
 
 // TCAvailabilityIndicator sits beside the camera/screenshot icon in the
 // header: illuminated (mic-btn-active) once at least one
@@ -3024,6 +3644,7 @@ export default function App() {
               sendACSetAutoUpdate={sendACSetAutoUpdate}
               hasHighlighted={!!firstHighlighted}
               onGoToHighlighted={goToFirstHighlighted}
+              uploadFiles={uploadFiles}
             />
           )}
         </div>

@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,6 +20,13 @@ const (
 	HeartbeatInterval = 2 * time.Second
 	StaleThreshold    = 6 * time.Second
 )
+
+// tunnelHandshakePrefix opens the single line a tunnel connection (see
+// DialTunnel) writes immediately after dialing, before any other traffic --
+// every Msg line a control connection (Connect) ever sends is a JSON object,
+// which never starts with this, so Server.handleConn can tell the two kinds
+// of connection apart by peeking just this much.
+const tunnelHandshakePrefix = "TUNNEL "
 
 // Dev-mode identifiers exchanged in Msg.Mode / ServerMsg.Mode. Every UFA
 // sub-application launches as one or the other (see docs/DevMode.md); a peer
@@ -100,6 +108,29 @@ func Connect(addr, name, mode string, connectTimeout time.Duration) (*Client, er
 	go c.heartbeatLoop()
 	go c.readLoop()
 	return c, nil
+}
+
+// DialTunnel opens a second, plain TCP connection to addr -- in addition to,
+// not instead of, a Connect control connection -- and tags it with a one-line
+// handshake naming this client, then hands back the raw net.Conn.
+//
+// Unlike Client, the returned connection is NOT wrapped in the Msg/ServerMsg
+// JSON-line protocol: once the handshake line is written, the connection
+// carries whatever the caller puts on it. This is how local-representative
+// gives agent-coordinator's proxy a connection it opened itself to serve its
+// own HTTP mux over (see Server.ClaimTunnel on the accepting side) -- the
+// only direction guaranteed to work from behind NAT, per
+// condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md, Revision I.
+func DialTunnel(addr, name string, connectTimeout time.Duration) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", addr, connectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write([]byte(tunnelHandshakePrefix + name + "\n")); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
 }
 
 // Close stops heartbeats and closes the TCP connection.
@@ -344,6 +375,9 @@ type Server struct {
 	onLog          func(name, line, kind string)                     // called when client sends a log entry
 	onData         func(name, dataType string, data json.RawMessage) // called when client sends a data message
 	onModeMismatch func(name string, mismatched bool, peerMode string) // called when a client's mode mismatch verdict changes
+
+	tunnelsMu sync.Mutex
+	tunnels   map[string]net.Conn // client name -> one parked tunnel conn (see DialTunnel/ClaimTunnel; N==1 for now)
 }
 
 // NewServer starts a TCP listener on addr and begins accepting connections.
@@ -356,12 +390,43 @@ func NewServer(addr, mode string) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		ln:     ln,
-		mode:   mode,
-		states: make(map[string]*connState),
+		ln:      ln,
+		mode:    mode,
+		states:  make(map[string]*connState),
+		tunnels: make(map[string]net.Conn),
 	}
 	go s.acceptLoop()
 	return s, nil
+}
+
+// registerTunnel parks a freshly-handshaken tunnel connection under name,
+// closing whatever was previously parked there -- per Revision I, there is
+// only ever one standing tunnel per client.
+func (s *Server) registerTunnel(name string, conn net.Conn) {
+	s.tunnelsMu.Lock()
+	old := s.tunnels[name]
+	s.tunnels[name] = conn
+	s.tunnelsMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+// ClaimTunnel removes and returns the tunnel connection parked for name, if
+// any. The caller takes full ownership on success -- the server stops
+// tracking it entirely, so a second ClaimTunnel call for the same name finds
+// nothing until that client's DialTunnel loop parks a replacement (see
+// agent-coordinator's hostProxyTransport, which hands a claimed conn
+// straight to an http.Transport for keep-alive reuse across requests rather
+// than giving it back here after one use).
+func (s *Server) ClaimTunnel(name string) (net.Conn, bool) {
+	s.tunnelsMu.Lock()
+	defer s.tunnelsMu.Unlock()
+	conn, ok := s.tunnels[name]
+	if ok {
+		delete(s.tunnels, name)
+	}
+	return conn, ok
 }
 
 // SetHTTPPort records this server's own HTTP dashboard port, disclosed to
@@ -503,11 +568,38 @@ func (s *Server) acceptLoop() {
 	}
 }
 
+// peekedConn is a net.Conn whose Reads continue through a bufio.Reader that
+// already peeked past a leading handshake line, so bytes the peer pipelined
+// right behind it (if any) aren't lost once the raw conn is handed off.
+type peekedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (p *peekedConn) Read(b []byte) (int, error) { return p.r.Read(b) }
+
 func (s *Server) handleConn(conn net.Conn) {
+	br := bufio.NewReader(conn)
+	if prefix, err := br.Peek(len(tunnelHandshakePrefix)); err == nil && string(prefix) == tunnelHandshakePrefix {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, tunnelHandshakePrefix))
+		if name == "" {
+			conn.Close()
+			return
+		}
+		// Ownership passes to the tunnel pool from here -- no defer conn.Close().
+		s.registerTunnel(name, &peekedConn{Conn: conn, r: br})
+		return
+	}
+
 	defer conn.Close()
 	var cs *connState
 	var clientName string
-	scanner := bufio.NewScanner(conn)
+	scanner := bufio.NewScanner(br)
 	for scanner.Scan() {
 		var m Msg
 		if err := json.Unmarshal(scanner.Bytes(), &m); err != nil || m.From == "" {

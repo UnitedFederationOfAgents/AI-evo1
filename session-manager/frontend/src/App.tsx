@@ -345,13 +345,17 @@ function SessionList({ sessions, currentId, selectedId, onSelect, onNew, onArchi
           sessions.map((s) => (
             <button
               key={s.id}
-              className={`session-row${s.id === selectedId ? ' selected' : ''}`}
+              className={`session-row${s.id === selectedId ? ' selected' : ''}${s.remote ? ' session-row-remote' : ''}`}
               onClick={() => onSelect(s.id)}
-              title={s.id}
+              title={s.remote ? `${s.id} — discovered on ${s.host}, not yet pulled locally; selecting it will pull it` : s.id}
             >
               <span className={`session-row-current-dot${s.id === currentId ? ' is-current' : ''}`} title={s.id === currentId ? 'current session' : ''} />
               <span className="session-row-name">{s.name || s.id}</span>
-              <span className="session-row-meta">{s.file_count}</span>
+              {s.remote ? (
+                <span className="session-row-meta session-row-remote-badge">remote · {s.host}</span>
+              ) : (
+                <span className="session-row-meta">{s.file_count}</span>
+              )}
             </button>
           ))
         )}
@@ -505,15 +509,26 @@ function SessionTranscript({ view }: { view: SessionView | null }) {
     return <div className="session-detail-body session-detail-loading">loading…</div>
   }
   const entries = view.entries ?? []
+  // sync_incomplete means local-representative couldn't reach one of the
+  // other LR-active hosts while refreshing this session just now -- the
+  // transcript below (even if non-empty) may be missing turns a reachable
+  // peer would have had (see types.ts's SessionView doc comment).
+  const warning = view.sync_incomplete && (
+    <div className="session-transcript-warning">
+      could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
+    </div>
+  )
   if (entries.length === 0) {
     return (
       <div className="session-detail-body">
+        {warning}
         <span className="session-transcript-empty">no recorded turns in this session yet</span>
       </div>
     )
   }
   return (
     <div className="session-transcript">
+      {warning}
       {entries.map((e, i) => (
         <div className="transcript-entry" key={i}>
           <div className="transcript-entry-header">

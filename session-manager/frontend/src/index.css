@@ -221,6 +221,19 @@ body {
   font-size: 10px;
 }
 
+/* A discovered-but-not-yet-pulled session (see sessions.go's
+   listSessionsWithRemote) -- selecting it (selectSession in App.tsx) triggers
+   a sync-pull (sendSessionInfo/sendSessionView's triggerSessionSync) that
+   materializes it locally, same as any local session; just dimmed here so
+   the badge below remains legible as a "not pulled yet" hint until then. */
+.session-row-remote {
+  opacity: 0.6;
+}
+
+.session-row-remote-badge {
+  color: #6b9fd4;
+}
+
 /* ---- Session detail pane ---- */
 
 .session-detail {
@@ -239,6 +252,18 @@ body {
 
 .session-notice-error { background: #2a1414; color: #f0b8b8; border-bottom: 1px solid #4a3a1e; }
 .session-notice-success { background: #16261a; color: #a8e0a8; border-bottom: 1px solid #2e4a2e; }
+
+/* SessionView.sync_incomplete: a pre-view sync couldn't reach a remote host
+   (see App.tsx's SessionTranscript) -- same posture as .session-notice but
+   scoped to the transcript itself rather than the whole main pane. */
+.session-transcript-warning {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  font-size: 12px;
+  background: #2a2414;
+  color: #e0cfa8;
+  border-bottom: 1px solid #4a4420;
+}
 
 .session-detail-header {
   flex-shrink: 0;
@@ -510,4 +535,45 @@ button:disabled {
   color: #aaa;
   cursor: pointer;
   white-space: nowrap;
+}
+
+/* ---- Mobile ----
+   Below this width (phones, and the narrow split-screen panel this app is
+   often embedded in -- see resource "Debug Quotes") the sidebar + detail
+   pane side-by-side layout leaves too little room for either: the detail
+   header's buttons get clipped and the fields table wraps mid-word. Stack
+   them instead (.sidebar-wrap's display: contents lets .app's flex-direction
+   switch alone re-stack .sidebar/.main-content as its direct children, no
+   extra wrapper needed), and let anything that used to assume a wide row
+   wrap onto its own line. */
+@media (max-width: 640px) {
+  .app {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .sidebar {
+    width: 100%;
+    min-width: 0;
+    max-height: 45vh;
+    border-right: none;
+    border-bottom: 1px solid #3c3c3c;
+  }
+
+  .main-content {
+    min-height: 0;
+  }
+
+  .session-detail-header {
+    flex-wrap: wrap;
+  }
+
+  .session-detail-actions {
+    flex-wrap: wrap;
+  }
+
+  .session-rename-input {
+    min-width: 0;
+    width: 100%;
+  }
 }

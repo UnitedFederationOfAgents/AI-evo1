@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	ufahostid "ufa-hostid"
 )
 
 // This file gives session-manager parity with federation-command's "ufa
@@ -60,11 +62,12 @@ func (s *Server) setCurrentSession(id string) {
 	s.sessMu.Lock()
 	s.currentSession = id
 	s.sessMu.Unlock()
+	s.pushCurrentSessionStateboard()
 }
 
 // sendSessions replies to c only.
 func (s *Server) sendSessions(c *wsClient) {
-	sessions, err := listSessions(s.recordsPath, s.getCurrentSession())
+	sessions, err := s.listSessionsWithRemote()
 	if err != nil {
 		s.sendToClient(c, "error", err.Error())
 		return
@@ -75,7 +78,7 @@ func (s *Server) sendSessions(c *wsClient) {
 // broadcastSessions notifies every connected client -- used after a
 // mutation (new/set/rename/archive) so other open tabs stay in sync.
 func (s *Server) broadcastSessions() {
-	sessions, err := listSessions(s.recordsPath, s.getCurrentSession())
+	sessions, err := s.listSessionsWithRemote()
 	msg := SessionsMsg{Current: s.getCurrentSession()}
 	if err != nil {
 		s.mu.RLock()
@@ -106,15 +109,24 @@ func (s *Server) handleNewSession(c *wsClient, name string) {
 	s.broadcastSessions()
 }
 
-// handleSetSession is "ufa session set <id>" parity.
+// handleSetSession is "ufa session set <id>" parity. id may name a session
+// this host has only ever seen as a Remote entry from listSessionsWithRemote
+// (discovered on another host, nothing pulled locally yet) -- triggerSessionSync
+// materializes it (session.yaml/session.jsonl/-processed, see sessionSyncGlobs)
+// before the existence check, the same way sendSessionView already does for
+// viewing, so selecting a remote session doesn't require it to already exist
+// in this host's own AGENT_RECORDS_PATH.
 func (s *Server) handleSetSession(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "set-session: id is required")
 		return
 	}
 	if _, err := os.Stat(filepath.Join(s.recordsPath, id)); err != nil {
-		s.sendToClient(c, "error", fmt.Sprintf("set-session: session %q not found", id))
-		return
+		s.triggerSessionSync(id)
+		if _, err := os.Stat(filepath.Join(s.recordsPath, id)); err != nil {
+			s.sendToClient(c, "error", fmt.Sprintf("set-session: session %q not found", id))
+			return
+		}
 	}
 	s.setCurrentSession(id)
 	s.broadcastSessions()
@@ -135,12 +147,18 @@ func (s *Server) handleRenameSession(c *wsClient, id, name string) {
 	s.sendSessionInfo(c, id)
 }
 
-// sendSessionInfo is "ufa session describe" parity, replying to c only.
+// sendSessionInfo is "ufa session describe" parity, replying to c only. Like
+// sendSessionView, this syncs id in first -- the frontend's selectSession
+// fires describe-session and view-session together for a row that may be a
+// Remote-tagged entry (listSessionsWithRemote) never pulled locally before,
+// so without this describeSession's plain os.Stat would reliably lose the
+// race against view-session's own sync and report "not found".
 func (s *Server) sendSessionInfo(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "describe-session: id is required")
 		return
 	}
+	s.triggerSessionSync(id)
 	info, err := describeSession(s.recordsPath, id)
 	if err != nil {
 		s.sendToClient(c, "error", "describe-session: "+err.Error())
@@ -150,17 +168,30 @@ func (s *Server) sendSessionInfo(c *wsClient, id string) {
 }
 
 // sendSessionView renders id's session.jsonl as a readable transcript,
-// replying to c only.
+// replying to c only. Before reading, it asks local-representative to
+// sync-refresh id's "session.jsonl"/"-processed" files from every other
+// LR-active host (see repr.go's triggerSessionSync) -- this is "bringing it
+// up in session-manager for viewing" from
+// docs/DistributedSessionsBrainstorm.md's sync trigger.
+//
+// When that sync reports it couldn't actually reach a peer (Revision G's
+// fix, see triggerSessionSync), the rendered view is tagged SyncIncomplete so
+// the frontend can tell "this session is genuinely empty/short" apart from
+// "this session may be missing turns because a remote host was unreachable
+// when we tried to refresh it" -- previously indistinguishable, which is what
+// made a remote session like "Hambone23" look like it simply wasn't there.
 func (s *Server) sendSessionView(c *wsClient, id string) {
 	if id == "" {
 		s.sendToClient(c, "error", "view-session: id is required")
 		return
 	}
+	incomplete := s.triggerSessionSync(id)
 	view, err := viewSession(s.recordsPath, id)
 	if err != nil {
 		s.sendToClient(c, "error", "view-session: "+err.Error())
 		return
 	}
+	view.SyncIncomplete = incomplete
 	s.sendToClient(c, "session-view", view)
 }
 
@@ -210,12 +241,16 @@ func resolveRecordsPath() string {
 
 // ---- listing / describing ----
 
-// SessionSummary is one row of "ufa session list" parity data.
+// SessionSummary is one row of "ufa session list" parity data. Remote/Host
+// are set only for a session discovered on another host but not (yet)
+// present in this host's own AGENT_RECORDS_PATH -- see listSessionsWithRemote.
 type SessionSummary struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	FileCount int    `json:"file_count"`
 	Current   bool   `json:"current"`
+	Remote    bool   `json:"remote,omitempty"`
+	Host      string `json:"host,omitempty"`
 }
 
 // listSessions returns every session directory under recordsPath, newest
@@ -248,6 +283,37 @@ func listSessions(recordsPath, currentID string) ([]SessionSummary, error) {
 			FileCount: len(files),
 			Current:   id == currentID,
 		})
+	}
+	return summaries, nil
+}
+
+// listSessionsWithRemote returns listSessions's purely-local summaries plus
+// every session triggerSessionsDiscovery (repr.go) reports from another
+// LR-active host whose ID isn't already in that local list, tagged Remote
+// and with which host it came from -- closing the gap
+// condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md
+// describes: "list-sessions never leaves the local filesystem." Called by
+// sendSessions/broadcastSessions, so "any list-sessions behaviour" (both the
+// WS "list-sessions" verb and every other trigger that reaches those two --
+// a new browser connection, a mutation, or the connect-time refresh --
+// initiates the same discovery poll (Step1SubstepBPrompt.md Revision A). A
+// session already present locally (e.g. because it was previously pulled)
+// is left as its local entry, never duplicated as remote.
+func (s *Server) listSessionsWithRemote() ([]SessionSummary, error) {
+	summaries, err := listSessions(s.recordsPath, s.getCurrentSession())
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool, len(summaries))
+	for _, sum := range summaries {
+		known[sum.ID] = true
+	}
+	for _, r := range s.triggerSessionsDiscovery() {
+		if known[r.ID] {
+			continue
+		}
+		known[r.ID] = true
+		summaries = append(summaries, SessionSummary{ID: r.ID, Name: r.Name, Remote: true, Host: r.HostID})
 	}
 	return summaries, nil
 }
@@ -315,6 +381,7 @@ func readSessionYAMLFields(sessionDir string) [][2]string {
 // recordsPath and returns its generated ID, mirroring clauditable's
 // new-session (ensureSession + generateSessionID).
 func createSession(recordsPath, name string) (string, error) {
+	name = stripSurroundingQuotes(name)
 	if name == "" {
 		name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
 	}
@@ -363,20 +430,38 @@ func slugify(name string) string {
 	return result
 }
 
+// stripSurroundingQuotes mirrors federation-command/main.go's function of
+// the same name: removes one matching pair of leading/trailing double or
+// single quotes from s, e.g. `"My New Session"` -> `My New Session`. The
+// frontend's "new session name…" field (and the rename equivalent) is a
+// plain text input, not shell-parsed, so a user quoting a multi-word name
+// out of habit would otherwise end up with the quotes baked into the name.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
 // writeSessionYAMLIfAbsent mirrors clauditable/main.go's function of the
-// same name.
+// same name, including the owner field recording the creating host (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C).
 func writeSessionYAMLIfAbsent(sessionDir, id, name string) error {
 	yamlPath := filepath.Join(sessionDir, "session.yaml")
 	if _, err := os.Stat(yamlPath); err == nil {
 		return nil
 	}
-	content := fmt.Sprintf("id: %s\nname: %s\ncreated: %s\n", id, name, time.Now().Format(time.RFC3339))
+	content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n", id, name, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
 	return os.WriteFile(yamlPath, []byte(content), 0644)
 }
 
 // renameSession mirrors federation-command/main.go's updateSessionName plus
 // handleRenameSession's default-session guard.
 func renameSession(recordsPath, id, newName string) error {
+	newName = stripSurroundingQuotes(newName)
 	if strings.HasSuffix(id, "-default") {
 		return fmt.Errorf("cannot rename a default session")
 	}
@@ -497,6 +582,9 @@ type SessionView struct {
 	ID      string         `json:"id"`
 	Name    string         `json:"name"`
 	Entries []SessionEntry `json:"entries"`
+	// SyncIncomplete is set by sendSessionView, not viewSession (a purely
+	// local read has no notion of it) -- see sendSessionView's doc comment.
+	SyncIncomplete bool `json:"sync_incomplete,omitempty"`
 }
 
 // viewSession reads id's session.jsonl and parses it into a readable

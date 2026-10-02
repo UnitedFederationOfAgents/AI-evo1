@@ -74,6 +74,15 @@ type ProcInfo struct {
 	// "auto-update" checkbox (see selfversion.go and
 	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E).
 	AutoUpdate bool `json:"auto_update,omitempty"`
+
+	// Session is federation-command-specific: the session it most recently
+	// reported over representable's "fc-session" data message (see
+	// setFCSessionState) -- its session.yaml display name when it has one,
+	// otherwise the bare session ID. Empty for every other managed app, and
+	// for FC itself until an instance has connected and reported at least
+	// once. See condocs/initialDistributedSessionsImpls/Step2Prompt.md
+	// Revision B.
+	Session string `json:"session,omitempty"`
 }
 
 // VersionMsg is the payload of a representable "version" data message: sent
@@ -92,11 +101,11 @@ type SystemStateMsg struct {
 
 // launchSpec describes how to start one managed application.
 type launchSpec struct {
-	binName   string                   // executable name to resolve
-	singleton bool                     // true: at most one running instance per host; false: N-per-host
-	terminal  bool                     // true: an interactive TUI that must be hosted in a terminal
-	buildArgs func(s *Server) []string // argv after the program name
-	buildEnv  func(s *Server) []string // extra KEY=VALUE entries appended to the child environment
+	binName   string                                    // executable name to resolve
+	singleton bool                                      // true: at most one running instance per host; false: N-per-host
+	terminal  bool                                       // true: an interactive TUI that must be hosted in a terminal
+	buildArgs func(s *Server, instanceID string) []string // argv after the program name; instanceID is the id about to be launched (see nextInstanceLocked)
+	buildEnv  func(s *Server, instanceID string) []string // extra KEY=VALUE entries appended to the child environment
 }
 
 // managedApps is the fixed set of applications local-representative knows how to
@@ -107,7 +116,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "condoccer",
 		singleton: true,  // condoccer is one-per-box: it serves a single repo view
 		terminal:  false, // plain HTTP server — no TTY needed
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			// Bring condoccer up already wired to this LR: --auto-connect makes it
 			// retry the representable heartbeat to our server in the background and
 			// push its condoc summary once landed, and --port fixes the HTTP port
@@ -135,7 +144,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "session-manager",
 		singleton: true,  // one per box, like condoccer
 		terminal:  false, // plain HTTP server — no TTY needed
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			args := []string{
 				"--auto-connect",
 				"--lr-host", "localhost",
@@ -148,6 +157,16 @@ var managedApps = map[string]launchSpec{
 				// docs/DevMode.md.
 				args = append(args, "--dev-mode")
 			}
+			if id := s.smSession(); id != "" {
+				// A previous (or still-running) session-manager instance
+				// reported this session -- hand it straight back so a restart
+				// lands in the same place, mirroring federation-command's
+				// --session above (see
+				// condocs/initialDistributedSessionsImpls/Step2Prompt.md
+				// Revision H). Harmless on a first launch with nothing
+				// reported yet: smSession returns "" and this is skipped.
+				args = append(args, "--session", id)
+			}
 			return args
 		},
 	},
@@ -155,7 +174,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "the-conversationalist",
 		singleton: true,  // one per box, like condoccer
 		terminal:  false, // plain HTTP server — no TTY needed
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			args := []string{
 				"--auto-connect",
 				"--lr-host", "localhost",
@@ -175,7 +194,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "federation-command",
 		singleton: false, // federation-command is N-per-host
 		terminal:  true,  // it is an interactive shell — needs a real terminal
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			// Bring FC up already wired to this LR. --auto-connect makes it retry
 			// the heartbeat connection in the background and adopt remote control
 			// the moment it lands (auto-connect implies remote — there is no
@@ -188,9 +207,21 @@ var managedApps = map[string]launchSpec{
 				// docs/DevMode.md.
 				args = append(args, "--dev-mode")
 			}
+			if id := s.fcLaunchSessionID(); id != "" {
+				// A previous (or still-running) FC instance reported this session —
+				// hand it straight back so a restart lands in the same place (see
+				// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+				// With no FC session known yet (a brand-new instance, not a
+				// restart), this falls back to session-manager's current session
+				// instead (Revision I), so a new FC launched while SM has a
+				// session active lands there rather than minting its own. ""
+				// only when neither has reported anything, leaving FC to resolve
+				// its own default session as before.
+				args = append(args, "--session", id)
+			}
 			return args
 		},
-		buildEnv: func(s *Server) []string {
+		buildEnv: func(s *Server, instanceID string) []string {
 			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
 			// wrapper can swallow or re-quote trailing argv, which would drop
 			// --auto-connect and leave FC in *local* control — unusable in a
@@ -204,9 +235,20 @@ var managedApps = map[string]launchSpec{
 				"FC_AUTO_CONNECT=1",
 				"FC_LR_HOST=localhost",
 				"FC_LR_PORT=" + s.heartbeatPort,
+				// Lets this instance self-report its head ID back under a
+				// stable key on the stateboard's "federation-command-instances"
+				// row (see stateboard.go's setFCHead) despite representable
+				// tracking one connection identity per app name regardless of
+				// how many instances share it.
+				"FC_INSTANCE_ID=" + instanceID,
 			}
 			if s.devMode {
 				env = append(env, "FC_DEV_MODE=1")
+			}
+			if id := s.fcLaunchSessionID(); id != "" {
+				// Mirrors buildArgs above (including the Revision I session-manager
+				// fallback) -- see its comment.
+				env = append(env, "FC_SESSION="+id)
 			}
 			return env
 		},
@@ -273,6 +315,15 @@ func (s *Server) systemState() SystemStateMsg {
 		info.Version = s.managedVersion(p.app)
 		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
 		info.PendingVersion = s.managedPendingVersionFor(p.app)
+		if p.app == "federation-command" {
+			if id, name := s.fcSession(); id != "" {
+				if name != "" {
+					info.Session = name
+				} else {
+					info.Session = id
+				}
+			}
+		}
 		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
@@ -315,6 +366,61 @@ func (s *Server) setManagedVersion(name, version string) {
 	if changed {
 		s.broadcastSystemState()
 	}
+}
+
+// setFCSessionState records the session a federation-command instance most
+// recently reported over representable's "fc-session" data message (see
+// main.go's SetDataHandler), broadcasting a fresh system-state if it's new or
+// has changed since the last report -- mirrors setManagedVersion. Unlike
+// managedVersions, this is never cleared on disconnect: it has to survive the
+// gap between restartManaged's terminate and relaunch so buildArgs/buildEnv
+// below can hand it straight back (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+func (s *Server) setFCSessionState(id, name string) {
+	s.fcSessionMu.Lock()
+	changed := s.fcSessionID != id || s.fcSessionName != name
+	if changed {
+		s.fcSessionID = id
+		s.fcSessionName = name
+	}
+	s.fcSessionMu.Unlock()
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// fcSession returns the session most recently reported by a connected
+// federation-command instance: id for relaunching it (--session/FC_SESSION),
+// name for display when session.yaml has one (falling back to id otherwise
+// -- see systemState). Both empty if none has connected/reported yet.
+func (s *Server) fcSession() (id, name string) {
+	s.fcSessionMu.RLock()
+	defer s.fcSessionMu.RUnlock()
+	return s.fcSessionID, s.fcSessionName
+}
+
+// smSession returns the session most recently reported by a connected
+// session-manager instance, for relaunching it (--session) -- mirrors
+// fcSession. "" if none has connected/reported yet.
+func (s *Server) smSession() string {
+	s.smSessionMu.RLock()
+	defer s.smSessionMu.RUnlock()
+	return s.smSessionID
+}
+
+// fcLaunchSessionID picks the session id to hand a federation-command
+// instance on launch. A previously-reported FC session wins first (restart
+// continuity -- see fcSession/setFCSessionState and Revision B above); with
+// none yet reported -- i.e. this is a brand-new instance, not a restart --
+// fall back to session-manager's current session, so a fresh FC lands in
+// whatever session is already active in SM instead of minting its own (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision I). ""
+// if neither has reported anything, leaving FC to resolve its own default.
+func (s *Server) fcLaunchSessionID() string {
+	if id, _ := s.fcSession(); id != "" {
+		return id
+	}
+	return s.smSession()
 }
 
 // managedVersion returns the build version most recently reported by the
@@ -428,6 +534,127 @@ func (s *Server) broadcastSystemState() {
 	// this LR's process management from the coordinator dashboard.
 	if ac := s.getACClient(); ac != nil {
 		ac.SendData("system-state", st)
+	}
+}
+
+// maxDebugLogEntries caps the in-memory buffer recordDebugLog appends to --
+// enough scrollback for the debug view's "very simple viewer" (Step1SubstepBPrompt.md
+// Revision E) without letting a chatty managed process grow it unbounded.
+const maxDebugLogEntries = 400
+
+// DebugLogEntry is one captured stdout/stderr line from an LR-managed
+// sub-app (see lineLogWriter). The debug view's other tab, "network", was
+// originally (Revision E) instrumented entirely in agent-coordinator's own
+// frontend with no backend counterpart; Revision F added one -- see
+// ChainCallEntry, below -- for the backend-to-backend half of that chain a
+// browser fetch wrapper can't see.
+type DebugLogEntry struct {
+	InstanceID string `json:"instance_id"` // e.g. "federation-command#1" -- matches ProcInfo.InstanceID
+	App        string `json:"app"`         // application name, e.g. "federation-command"
+	Stream     string `json:"stream"`      // "stdout" or "stderr"
+	Line       string `json:"line"`
+	TS         int64  `json:"ts"` // unix seconds
+}
+
+// DebugLogStateMsg is the payload of "debug-log-state" messages: the current
+// debug-log buffer, broadcast to browser clients and mirrored up to
+// agent-coordinator.
+type DebugLogStateMsg struct {
+	Entries []DebugLogEntry `json:"entries"`
+}
+
+// recordDebugLog appends one captured line to the debug-log buffer, called
+// from lineLogWriter.Write (so: once per newline-terminated chunk, from
+// whichever goroutine owns that managed process's stdout/stderr pipe).
+func (s *Server) recordDebugLog(instanceID, app, stream, line string) {
+	s.debugLogMu.Lock()
+	s.debugLog = append(s.debugLog, DebugLogEntry{
+		InstanceID: instanceID,
+		App:        app,
+		Stream:     stream,
+		Line:       line,
+		TS:         time.Now().Unix(),
+	})
+	if over := len(s.debugLog) - maxDebugLogEntries; over > 0 {
+		s.debugLog = s.debugLog[over:]
+	}
+	s.debugLogMu.Unlock()
+	s.broadcastDebugLog()
+}
+
+// debugLogState returns a snapshot of the current debug-log buffer.
+func (s *Server) debugLogState() DebugLogStateMsg {
+	s.debugLogMu.Lock()
+	defer s.debugLogMu.Unlock()
+	entries := make([]DebugLogEntry, len(s.debugLog))
+	copy(entries, s.debugLog)
+	return DebugLogStateMsg{Entries: entries}
+}
+
+func (s *Server) broadcastDebugLog() {
+	st := s.debugLogState()
+	s.broadcast("debug-log-state", st)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("debug-log-state", st)
+	}
+}
+
+// maxChainCallEntries caps the debug view's "network" tab chain-call buffer
+// -- see Server.chainCall. Mirrors maxDebugLogEntries' reasoning.
+const maxChainCallEntries = 400
+
+// ChainCallEntry is one outbound HTTP call made somewhere on the
+// SM<->LR<->AC chain (condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md Revision F): either this LR's own "lr->ac" hop
+// (httpGetWithTimeout/fetchSessionFile, see sessions.go) or session-
+// manager's "sm->lr" hop, reported here over representable as a
+// "chain-call" data message (see reprServer.SetDataHandler) -- mirrors
+// session-manager/repr.go's same-named type.
+type ChainCallEntry struct {
+	Hop        string `json:"hop"` // "sm->lr" or "lr->ac"
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"` // 0 on a network-level failure
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"` // unix seconds, when the call was made
+}
+
+// ChainCallStateMsg is the payload of "chain-call-state" messages: the
+// current chain-call buffer, broadcast to browser clients and mirrored up
+// to agent-coordinator -- mirrors DebugLogStateMsg.
+type ChainCallStateMsg struct {
+	Entries []ChainCallEntry `json:"entries"`
+}
+
+// recordChainCall appends one captured HTTP call to the chain-call buffer --
+// called both from this LR's own instrumented "lr->ac" calls and from the
+// reprServer data handler relaying session-manager's "sm->lr" reports.
+// Mirrors recordDebugLog.
+func (s *Server) recordChainCall(entry ChainCallEntry) {
+	s.chainCallMu.Lock()
+	s.chainCall = append(s.chainCall, entry)
+	if over := len(s.chainCall) - maxChainCallEntries; over > 0 {
+		s.chainCall = s.chainCall[over:]
+	}
+	s.chainCallMu.Unlock()
+	s.broadcastChainCall()
+}
+
+// chainCallState returns a snapshot of the current chain-call buffer.
+func (s *Server) chainCallState() ChainCallStateMsg {
+	s.chainCallMu.Lock()
+	defer s.chainCallMu.Unlock()
+	entries := make([]ChainCallEntry, len(s.chainCall))
+	copy(entries, s.chainCall)
+	return ChainCallStateMsg{Entries: entries}
+}
+
+func (s *Server) broadcastChainCall() {
+	st := s.chainCallState()
+	s.broadcast("chain-call-state", st)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("chain-call-state", st)
 	}
 }
 
@@ -705,7 +932,7 @@ func (s *Server) launchManaged(app string) (string, error) {
 		return id, err
 	}
 
-	appArgs := spec.buildArgs(s)
+	appArgs := spec.buildArgs(s, id)
 	prog, args := bin, appArgs
 	var hosting terminalHosting
 	if spec.terminal {
@@ -729,15 +956,15 @@ func (s *Server) launchManaged(app string) (string, error) {
 		cmd.Env = os.Environ()
 	}
 	if spec.buildEnv != nil {
-		cmd.Env = append(cmd.Env, spec.buildEnv(s)...)
+		cmd.Env = append(cmd.Env, spec.buildEnv(s, id)...)
 	}
 	// Own process group so terminate can signal the whole child tree (terminal
 	// wrapper included).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Fan the wrapper's own output into LR's log stream. The interactive child
 	// itself draws in its terminal window; this only catches launcher errors.
-	cmd.Stdout = &lineLogWriter{prefix: id}
-	cmd.Stderr = &lineLogWriter{prefix: id}
+	cmd.Stdout = &lineLogWriter{prefix: id, onLine: func(line string) { s.recordDebugLog(id, app, "stdout", line) }}
+	cmd.Stderr = &lineLogWriter{prefix: id, onLine: func(line string) { s.recordDebugLog(id, app, "stderr", line) }}
 
 	if err := cmd.Start(); err != nil {
 		s.recordLaunchFailure(app, instance, id, err)
@@ -817,6 +1044,12 @@ func (s *Server) reapManaged(p *managedProc) {
 	p.mu.Unlock()
 
 	log.Printf("system: %s (pid %d) %s (exit %d)", p.instanceID, p.pid, status, code)
+	if p.app == "federation-command" {
+		// This instance is no longer reachable -- drop its self-reported
+		// head from the stateboard's "federation-command-instances" row
+		// (see stateboard.go's setFCHead).
+		s.clearFCHead(p.instanceID)
+	}
 	s.broadcastSystemState()
 }
 
@@ -839,6 +1072,9 @@ func (s *Server) terminateManaged(target string) error {
 		s.procMu.Lock()
 		delete(s.managed, id)
 		s.procMu.Unlock()
+		if p.app == "federation-command" {
+			s.clearFCHead(id)
+		}
 		if len(p.killCmd) > 0 {
 			log.Printf("system: stopping detached session for %s: %v", id, p.killCmd)
 			if out, err := exec.Command(p.killCmd[0], p.killCmd[1:]...).CombinedOutput(); err != nil {
@@ -855,6 +1091,9 @@ func (s *Server) terminateManaged(target string) error {
 		s.procMu.Lock()
 		delete(s.managed, id)
 		s.procMu.Unlock()
+		if p.app == "federation-command" {
+			s.clearFCHead(id)
+		}
 		s.broadcastSystemState()
 		return nil
 	}
@@ -1038,9 +1277,13 @@ func (s *Server) recordLaunchFailure(app string, instance int, id string, cause 
 
 // lineLogWriter buffers writes from a child process and emits one LR log line
 // per newline-terminated chunk. Each instance is written by a single goroutine.
+// onLine, when set, also feeds that line into the debug view's buffer (see
+// recordDebugLog) -- nil for call sites that have no app/instance to tag it
+// with (none today, but kept optional rather than required).
 type lineLogWriter struct {
 	prefix string
 	buf    []byte
+	onLine func(line string)
 }
 
 func (w *lineLogWriter) Write(p []byte) (int, error) {
@@ -1052,6 +1295,9 @@ func (w *lineLogWriter) Write(p []byte) (int, error) {
 		}
 		if line := strings.TrimRight(string(w.buf[:i]), "\r"); line != "" {
 			log.Printf("[%s] %s", w.prefix, line)
+			if w.onLine != nil {
+				w.onLine(line)
+			}
 		}
 		w.buf = w.buf[i+1:]
 	}

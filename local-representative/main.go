@@ -4,8 +4,10 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,6 +39,10 @@ const (
 
 	defaultACHost = "localhost"
 	defaultACPort = "8084"
+	// defaultACHTTPPort matches agent-coordinator's own "-port" flag default
+	// (see agent-coordinator/main.go) -- distinct from defaultACPort above,
+	// which is its representable port.
+	defaultACHTTPPort = "8083"
 )
 
 // ServiceStatus is the health status of a monitored service.
@@ -58,6 +65,27 @@ type FCStateMsg struct {
 type FCLogMsg struct {
 	Line string `json:"line"`
 	Kind string `json:"kind,omitempty"` // "cmd" or "output"
+}
+
+// FCSessionMsg is the payload of federation-command's "fc-session" data
+// message: the session it is currently on (see federation-command/main.go's
+// sendSessionState). Not broadcast as its own WebSocket message type --
+// setFCSessionState folds it into ProcInfo.Session on the next system-state
+// (see procman.go), mirroring how a reported build version folds into
+// ProcInfo.Version.
+type FCSessionMsg struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+
+	// InstanceID and Head are the stateboard's half of this message (see
+	// stateboard.go's setFCHead): InstanceID is the LR-assigned instance id
+	// this FC instance was launched with (FC_INSTANCE_ID -- see
+	// managedApps["federation-command"].buildEnv), empty for an
+	// independently-launched FC; Head is that instance's own self-generated
+	// head ID (federation-command/main.go's fcHeadID). Both piggyback on
+	// this already-frequent message rather than a dedicated one.
+	InstanceID string `json:"instance_id,omitempty"`
+	Head       string `json:"head,omitempty"`
 }
 
 // RidealongStateMsg is the payload of "ridealong-state" WebSocket messages.
@@ -164,6 +192,7 @@ type Server struct {
 	reprServer *representable.Server
 	lrName     string
 	devMode    bool // --dev-mode: cascaded to every managed instance this LR launches — see docs/DevMode.md
+	dev        bool // --dev: skip serving the embedded frontend (see setupRoutes) — also what the tunnel conn (see serveTunnel) serves
 
 	// repoWatch is the dev-repo watcher (--dev-repo — see docs/DevMode.md and
 	// repowatch.go); nil unless this LR was launched with --dev-repo.
@@ -253,6 +282,33 @@ type Server struct {
 	// once for that app.
 	managedPendingVersion map[string]string
 
+	// fcSessionMu guards fcSessionID/fcSessionName: the session a
+	// federation-command instance most recently reported over representable's
+	// "fc-session" data message (see setFCSessionState in procman.go), folded
+	// into ProcInfo.Session on the system tab. Keyed implicitly to the app
+	// name "federation-command" like managedVersions above, for the same
+	// reason. Deliberately *not* cleared when FC disconnects (unlike
+	// ridealongState/condocState below) -- it has to survive the gap between
+	// restartManaged's terminate and relaunch so the relaunch can pass it back
+	// (see managedApps["federation-command"].buildArgs/buildEnv and
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+	fcSessionMu   sync.RWMutex
+	fcSessionID   string
+	fcSessionName string
+
+	// smSessionMu guards smSessionID: the session a managed session-manager
+	// most recently reported over representable's generic "stateboard" data
+	// message (App "session-manager", Key "current-session" -- see
+	// session-manager/repr.go's pushCurrentSessionStateboard), mirroring
+	// fcSessionID above. Deliberately *not* cleared when session-manager
+	// disconnects (unlike the stateboard row itself, which setStateChangeHandler
+	// does blank for display -- see stateboard's "session-manager" case) so it
+	// survives the gap between restartManaged's terminate and relaunch, letting
+	// managedApps["sessions"].buildArgs hand it straight back (see
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision H).
+	smSessionMu sync.RWMutex
+	smSessionID string
+
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
@@ -269,6 +325,52 @@ type Server struct {
 	// mutex-guarded state is needed here.
 	fileCacheDir string
 	hostStoreDir string
+
+	// Debug view (condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md
+	// Revision E): a rolling buffer of stdout/stderr lines from the LR-managed
+	// sub-apps (see procman.go's lineLogWriter), capped at maxDebugLogEntries
+	// so a chatty child can't grow this unbounded. Oldest-first; recordDebugLog
+	// appends and trims under debugLogMu.
+	debugLogMu sync.Mutex
+	debugLog   []DebugLogEntry
+
+	// Debug view's "network" tab (Step1SubstepBPrompt.md Revision F): a
+	// rolling buffer of outbound HTTP calls made anywhere on the
+	// SM<->LR<->AC chain -- this LR's own "lr->ac" hop (see sessions.go's
+	// httpGetWithTimeout/fetchSessionFile) plus session-manager's "sm->lr"
+	// hop, reported over representable as a "chain-call" data message
+	// (see reprServer.SetDataHandler) -- capped at maxChainCallEntries.
+	// Mirrors debugLogMu/debugLog above; recordChainCall appends and trims
+	// under chainCallMu.
+	chainCallMu sync.Mutex
+	chainCall   []ChainCallEntry
+
+	// Debug view's "stateboard" tab (condocs/initialDistributedSessionsImpls/
+	// Step2Prompt.md Revision E): a generic key/value board any connected
+	// sub-app can post custom entries to (see setStateboardKV, stateboard.go),
+	// plus the default "present"/"hosts" rows derived live from
+	// representable's own connection health for every app named in
+	// stateboardApps. stateboardCustom is keyed by sub-app then key, matching
+	// StateboardEntry's two-level nesting (Revision F). fcHeads holds
+	// federation-command's self-reported head IDs, one per LR-launched
+	// instance (see setFCHead) -- the only way to list them individually
+	// despite representable tracking one connection identity per app name
+	// (see versionMu's comment above).
+	stateboardMu     sync.Mutex
+	stateboardCustom map[string]map[string]string
+	fcHeads          map[string]string // instance id -> federation-command's self-reported head ID
+
+	// Session sync (see sessions.go and
+	// docs/DistributedSessionsBrainstorm.md): recordsPath is where clauditable
+	// session directories live (AGENT_RECORDS_PATH, resolved the same way
+	// clauditable itself does); acHTTPPort is agent-coordinator's own HTTP
+	// port (distinct from acPort above, which is its representable port),
+	// used to reach both agent-coordinator's "/api/hosts" and its
+	// "/host/<id>/*" transparent proxy when pulling another host's session
+	// files. Both are set once at startup, unlike acHost/acPort, which can
+	// change at runtime via the "connect to AC" widget.
+	recordsPath string
+	acHTTPPort  string
 
 	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
 	// available on any host" verdict, relayed down from agent-coordinator's
@@ -294,6 +396,8 @@ func newServer(lrName string) *Server {
 		managedVersions:        make(map[string]string),
 		managedUpdateAvailable: make(map[string]bool),
 		managedPendingVersion:  make(map[string]string),
+		stateboardCustom:       make(map[string]map[string]string),
+		fcHeads:                make(map[string]string),
 	}
 }
 
@@ -495,6 +599,9 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
 	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
+	ac.SendData("debug-log-state", s.debugLogState())
+	ac.SendData("chain-call-state", s.chainCallState())
+	ac.SendData("stateboard-state", s.stateboard())
 	if cc := s.getCondoccerState(); cc != nil {
 		ac.SendData("condoccer-state", *cc)
 	}
@@ -504,6 +611,175 @@ func (s *Server) pushStateToAC() {
 	if cv := s.getConvoState(); cv != nil {
 		ac.SendData("convo-state", *cv)
 	}
+}
+
+// notifyCloseConn wraps a net.Conn so closing it -- as net/http does once the
+// peer (agent-coordinator's proxy) disconnects -- also signals a
+// singleConnListener, so its second Accept call returns instead of blocking
+// forever. That lets http.Serve return from serveTunnel so it can redial a
+// replacement tunnel.
+type notifyCloseConn struct {
+	net.Conn
+	onClose func()
+}
+
+func (c *notifyCloseConn) Close() error {
+	err := c.Conn.Close()
+	c.onClose()
+	return err
+}
+
+// singleConnListener is a net.Listener whose Accept hands back one
+// pre-established connection exactly once, then blocks until Close -- just
+// enough of net.Listener for http.Serve to run a full http.Server off a
+// single tunnel connection (see serveTunnel) instead of a real listening
+// socket.
+type singleConnListener struct {
+	conn   net.Conn
+	used   bool
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	l := &singleConnListener{closed: make(chan struct{})}
+	signalClosed := func() { l.once.Do(func() { close(l.closed) }) }
+	l.conn = &notifyCloseConn{Conn: conn, onClose: signalClosed}
+	return l
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if !l.used {
+		l.used = true
+		return l.conn, nil
+	}
+	<-l.closed
+	return nil, io.EOF
+}
+
+func (l *singleConnListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// serveTunnel opens the standing tunnel connection a NAT'd local-representative
+// needs (see representable.DialTunnel) and serves this LR's own HTTP mux over
+// it, so agent-coordinator's proxy can reach this host without dialing back
+// in -- the only direction guaranteed to work from behind NAT is the one LR
+// already opened (see condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md, Revision I). For this iteration there is exactly
+// one such connection (N==1) parked at any moment, replacing
+// agent-coordinator's old dial-out for this host entirely.
+//
+// A naive "redial only after the current one closes" loop starves every
+// other proxied request for as long as the current tunnel stays claimed --
+// which, for a long-lived use like the dashboard's own WebSocket (see
+// handleWS), can be the entire lifetime of that browser tab. Revision J
+// fixed this (see Resource 3, "Debug Sessions 2": the per-host dashboard
+// showing "no sessions yet" and a false "not connected" footer, even though
+// the remote-session fan-out -- a separate, one-shot HTTP call that doesn't
+// compete for this tunnel -- had just successfully listed that same host's
+// sessions): as soon as the standing tunnel is actually claimed and used,
+// this immediately starts opening its replacement concurrently, rather than
+// waiting for agent-coordinator to finish with (and close) the one just
+// claimed.
+//
+// Revision J judged "claimed and used" by the first Read *attempt*, via a
+// now-removed firstUseConn wrapper, regardless of whether that Read ever
+// actually succeeded -- so a tunnel that gets parked and then torn down
+// (agent-coordinator restarted, a stale registration got evicted, a NAT/
+// firewall idle-reaped it) before any real request ever lands on it still
+// counted as "used": http.Serve's very first attempt to parse a request off
+// the dead conn fails instantly, firing that trigger on its way to an
+// immediate "closed" below. With no delay anywhere on that path, a tunnel
+// that keeps dying this way (see the architecture doc's "known gap" note on
+// NAT-idle-reaping) reopened and redialed at native CPU speed -- "tunnel:
+// opened"/"tunnel: closed (EOF)" pairs many times a second.
+//
+// Revision C tried to fix this by adding firstByteConn below, which only
+// fires once a Read actually returns bytes, and gating a 2s backoff on
+// whether it ever did -- but it left the *trigger that opens the next
+// tunnel* wired to the old first-Read-attempt signal instead of switching it
+// to firstByteConn too. That trigger called openNext() directly and
+// unconditionally, and openNextOnce means whichever caller reaches it first
+// wins -- so a dead conn's immediate, failed first Read still spawned the
+// replacement instantly, and the backoff-gated openNext() call below arrived
+// after the fact as a no-op. The busy loop was unchanged in practice.
+//
+// Revision D removes the separate first-attempt trigger entirely and drives
+// both decisions -- "this tunnel is genuinely in use, open a concurrent
+// replacement" and "this tunnel was used for real, so no backoff is needed"
+// -- off the single firstByteConn.onFirstByte signal below: a tunnel that
+// returns real data opens its replacement immediately (preserving the
+// no-starvation behavior Revision J added), while a tunnel that dies
+// without ever doing so only gets a replacement after the same 2s backoff
+// as a failed dial.
+func (s *Server) serveTunnel(addr string, devMode bool, stillCurrent func() bool) {
+	// This goroutine serves exactly one tunnel connection per iteration, then
+	// returns -- a replacement is always handed off to a freshly spawned
+	// goroutine (see openNext below) rather than looped back onto here, so a
+	// long AC outage retrying every 2s can't grow this call stack unbounded.
+	for stillCurrent() {
+		conn, err := representable.DialTunnel(addr, s.lrName, 5*time.Second)
+		if err != nil {
+			log.Printf("tunnel: failed to open to agent-coordinator at %s: %v", addr, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		log.Printf("tunnel: opened to agent-coordinator at %s", addr)
+
+		var openNextOnce sync.Once
+		var usedForReal atomic.Bool
+		openNext := func() {
+			openNextOnce.Do(func() {
+				go s.serveTunnel(addr, devMode, stillCurrent)
+			})
+		}
+		tracked := &firstByteConn{Conn: conn, onFirstByte: func() {
+			usedForReal.Store(true)
+			openNext()
+		}}
+
+		err = http.Serve(newSingleConnListener(tracked), s.setupRoutes(devMode))
+		log.Printf("tunnel: closed (%v)", err)
+		// If this tunnel closed (idle-reaped, or the AC process restarted)
+		// before agent-coordinator ever claimed and used it, openNext above
+		// never fired -- make sure a replacement still gets opened. Either
+		// way, a replacement is now owned by another goroutine, so this one
+		// is done.
+		if !usedForReal.Load() {
+			// Never carried a single real byte -- dialing a replacement
+			// immediately would just repeat whatever killed this one, at
+			// native CPU speed. Back off like a failed dial.
+			time.Sleep(2 * time.Second)
+		}
+		openNext()
+		return
+	}
+}
+
+// firstByteConn wraps a net.Conn and invokes onFirstByte (at most once) the
+// first time a Read actually returns data, as opposed to a Read merely being
+// *attempted* -- a dead/reaped tunnel conn's first (and only) Read fails
+// instantly with zero bytes, so it never fires. serveTunnel (see Revision D
+// above) drives both "open the next tunnel concurrently" and "this tunnel
+// was used for real, skip the backoff" off this single signal, so a tunnel
+// that never carries real traffic can no longer trigger an instant,
+// backoff-free redial of its replacement.
+type firstByteConn struct {
+	net.Conn
+	once        sync.Once
+	onFirstByte func()
+}
+
+func (c *firstByteConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.once.Do(c.onFirstByte)
+	}
+	return n, err
 }
 
 // connectAC dials agent-coordinator and maintains the connection lifecycle.
@@ -560,6 +836,15 @@ func (s *Server) connectAC(host, port string) {
 	})
 	client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
 		s.setModeMismatch("agent-coordinator", mismatched, peerMode)
+	})
+
+	// Open this connection's standing tunnel (see serveTunnel) -- the second,
+	// plain socket agent-coordinator's proxy now reaches this host through,
+	// instead of dialing back in.
+	go s.serveTunnel(addr, s.dev, func() bool {
+		s.acMu.RLock()
+		defer s.acMu.RUnlock()
+		return s.acClient == client
 	})
 
 	s.pushStateToAC()
@@ -771,6 +1056,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "system-state", s.systemState())
 		s.sendToClient(c, "repo-state", s.repoState())
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
+		s.sendToClient(c, "debug-log-state", s.debugLogState())
+		s.sendToClient(c, "chain-call-state", s.chainCallState())
+		s.sendToClient(c, "stateboard-state", s.stateboard())
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
 		}
@@ -1026,6 +1314,8 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/convo/", s.proxyToConvo)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
+	mux.HandleFunc("/api/sessions", s.handleSessionsIndex)
+	mux.HandleFunc("/api/sessions/", s.handleSessionsAPI)
 
 	if devMode {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1072,6 +1362,7 @@ type appConfig struct {
 	autoConnect   bool
 	acHost        string
 	acPort        string
+	acHTTPPort    string   // agent-coordinator's HTTP port -- see Server.acHTTPPort
 	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
 	fcBin         string   // explicit path to the federation-command binary
 	terminal      string   // command prefix used to host an interactive child in a terminal
@@ -1120,6 +1411,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		name:          pick("name", defaults.name),
 		acHost:        pick("ac-host", defaults.acHost),
 		acPort:        pick("ac-port", defaults.acPort),
+		acHTTPPort:    pick("ac-http-port", defaults.acHTTPPort),
 		autoLaunch:    splitList(pick("auto-launch", strings.Join(defaults.autoLaunch, ","))),
 		fcBin:         pick("fc-bin", defaults.fcBin),
 		terminal:      pick("terminal", defaults.terminal),
@@ -1220,6 +1512,7 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
+	acHTTPPort := flag.String("ac-http-port", defaultACHTTPPort, "agent-coordinator HTTP port (for session-file pulls via its /host/<id>/* proxy and /api/hosts -- see sessions.go)")
 	autoLaunch := flag.String("auto-launch", "", "comma/space-separated child applications to launch on startup; each token is \"app\" or \"app:N\" (e.g. federation-command:2)")
 	fcBin := flag.String("fc-bin", "", "path to the federation-command binary (default: search next to LR, the dev bin dir, then PATH)")
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
@@ -1249,6 +1542,7 @@ func main() {
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
+		acHTTPPort:    *acHTTPPort,
 		autoLaunch:    splitList(*autoLaunch),
 		fcBin:         *fcBin,
 		terminal:      *terminal,
@@ -1303,6 +1597,7 @@ func main() {
 		}
 	}
 	s.devMode = cfg.devMode
+	s.dev = cfg.dev
 	if s.devMode {
 		// Per-sub-application out-of-date detection (see pollManagedVersions)
 		// is, like the rest of this dev/ops-mode-gated feature set, only
@@ -1319,6 +1614,8 @@ func main() {
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
 	s.hostStoreDir = cfg.hostStoreDir
+	s.acHTTPPort = cfg.acHTTPPort
+	s.recordsPath = resolveRecordsPath()
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}
@@ -1382,6 +1679,9 @@ func main() {
 					ac.SendData("sessions-state", empty)
 				}
 				s.setModeMismatch("sessions", false, "")
+				// Clear its stateboard row rather than leave a stale session
+				// id up once session-manager itself is gone.
+				s.setStateboardKV("session-manager", "current-session", "")
 			}
 			return
 		}
@@ -1415,6 +1715,17 @@ func main() {
 					ac.SendData("condoc-state", CondocStateMsg{Active: false})
 				}
 				s.setModeMismatch("federation-command", false, "")
+				// Every federation-command instance shares this one
+				// representable connection identity (see versionMu's
+				// comment above), so a disconnect means none are reachable
+				// any more -- drop every self-reported head rather than let
+				// a stale one linger on the stateboard (also refreshes
+				// "federation-command: present"/"hosts", which read
+				// reprServer.IsHealthy live but only on the next broadcast).
+				s.stateboardMu.Lock()
+				s.fcHeads = make(map[string]string)
+				s.stateboardMu.Unlock()
+				s.broadcastStateboard()
 			}
 		}
 	})
@@ -1440,6 +1751,27 @@ func main() {
 	})
 
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if dataType == "stateboard" {
+			// Generic across every app name, like "version" above -- any
+			// connected sub-app can post any key, which is the point of the
+			// stateboard (see stateboard.go's setStateboardKV and
+			// condocs/initialDistributedSessionsImpls/Step2Prompt.md
+			// Revision E).
+			var payload StateboardEntry
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.setStateboardKV(payload.App, payload.Key, payload.Value)
+				if payload.App == "session-manager" && payload.Key == "current-session" && payload.Value != "" {
+					// Remembered separately from the stateboard row itself
+					// (which gets blanked for display on disconnect) so a
+					// relaunch can hand it back -- see smSessionID's comment
+					// and managedApps["sessions"].buildArgs.
+					s.smSessionMu.Lock()
+					s.smSessionID = payload.Value
+					s.smSessionMu.Unlock()
+				}
+			}
+			return
+		}
 		if dataType == "version" {
 			// Every managed app reports its build version once it connects
 			// (see docs/DevMode.md "Versioning") -- generic across app names
@@ -1485,6 +1817,14 @@ func main() {
 						ac.SendData("sessions-state", payload)
 					}
 				}
+			} else if dataType == "chain-call" {
+				// session-manager's own report of its "sm->lr" hop (see
+				// repr.go's reportChainCall) -- folded into the same buffer
+				// as this LR's "lr->ac" hop, see recordChainCall.
+				var payload ChainCallEntry
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.recordChainCall(payload)
+				}
 			}
 			return
 		}
@@ -1528,6 +1868,12 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("condoc-state", payload)
 				}
+			}
+		case "fc-session":
+			var payload FCSessionMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.setFCSessionState(payload.ID, payload.Name)
+				s.setFCHead(payload.InstanceID, payload.Head)
 			}
 		}
 	})

@@ -273,6 +273,21 @@ func loadCondocSession(filePath string, verbose bool, cwd string) (*CondocSessio
 	cs.stepNum = lastStepNum
 	cs.stepFile = stepPath
 
+	// If the step file shows a substep is currently active, resume watching
+	// the substep file instead of the step file itself. Without this, a
+	// fresh load sits forever polling the step file for a !HANDOFF! that
+	// only ever lands in the substep file (condoccer's detectPhase already
+	// handles this for the web dashboard; this mirrors it for the TUI).
+	if stepContent, err := os.ReadFile(stepPath); err == nil {
+		if m := condocSubstepActiveRe.FindStringSubmatch(string(stepContent)); m != nil {
+			substepPath := filepath.Join(filepath.Dir(stepPath), m[2])
+			if substepContent, err := os.ReadFile(substepPath); err != nil || !condocSubstepCompletedRe.Match(substepContent) {
+				cs.substepFile = substepPath
+				cs.substepLetter = m[1]
+			}
+		}
+	}
+
 	// Try to recover the step-start commit hash so retry-from-start works correctly.
 	hashCmd := exec.Command("git", "log", "--format=%H",
 		"--grep=condoc: step "+strconv.Itoa(lastStepNum)+" started")
@@ -735,6 +750,7 @@ var condocInitialReplyRe = regexp.MustCompile(`(?m)^## Reply$`)
 var condocRetryHeadingRe = regexp.MustCompile(`(?m)^## Retry ([A-Z])(?:\s+\(from\s+(start|[A-Z])\))?$`)
 var condocSubstepHeadingRe = regexp.MustCompile(`(?m)^## Substep ([A-Z]) - (.+)$`)
 var condocSubstepCompletedRe = regexp.MustCompile(`(?m)^## Substep Completed$`)
+var condocSubstepActiveRe = regexp.MustCompile(`Substep ([A-Z]) is now active\. Interact with the substep file \(([^)]+)\)`)
 var condocRevertRe = regexp.MustCompile(`(?m)^!REVERT-(\d+)(?:-([A-Z])(?:-([A-Z]))?)?!\s*$`)
 
 // pendingRevisionLetter returns the letter of a Revision heading that has no

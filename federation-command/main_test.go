@@ -103,6 +103,54 @@ func TestParseRidealongCommand(t *testing.T) {
 	}
 }
 
+// TestStripSurroundingQuotes verifies new-session's name argument loses a
+// single matching pair of quotes (typed habit, e.g. `new-session "My New
+// Session"`) without mangling names that aren't quoted at all.
+func TestStripSurroundingQuotes(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`"My New Session"`, "My New Session"},
+		{`'My New Session'`, "My New Session"},
+		{"My New Session", "My New Session"},
+		{`"unterminated`, `"unterminated`},
+		{`"`, `"`},
+		{"", ""},
+		{`"mismatched'`, `"mismatched'`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := stripSurroundingQuotes(tt.in); got != tt.want {
+				t.Errorf("stripSurroundingQuotes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUpdateSessionNameStampsOwnerOnCreate verifies updateSessionName's
+// create-fallback (taken when renaming a session that has no session.yaml
+// yet) stamps an owner field naming this host -- see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
+func TestUpdateSessionNameStampsOwnerOnCreate(t *testing.T) {
+	prevHostID := fcHostID
+	fcHostID = "test-host-123"
+	defer func() { fcHostID = prevHostID }()
+
+	dir := t.TempDir()
+	if err := updateSessionName(dir, "My Session"); err != nil {
+		t.Fatalf("updateSessionName: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "session.yaml"))
+	if err != nil {
+		t.Fatalf("reading session.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "owner: test-host-123") {
+		t.Errorf("session.yaml should contain owner, got: %s", data)
+	}
+}
+
 // TestIsValidAgent verifies agent validation
 func TestIsValidAgent(t *testing.T) {
 	tests := []struct {

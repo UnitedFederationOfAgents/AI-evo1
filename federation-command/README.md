@@ -36,6 +36,7 @@ and exits — but nothing relaunches it in that case.
 | `--auto-connect` | `auto-connect` | `false` | on startup, dial `local-representative` in the background (retry every 10s for up to 10m) **and adopt remote control** once connected — for fully machine-driven auto-launch/auto-connect chains |
 | `--lr-host <host>` | `lr-host` | `localhost` | `local-representative` host for auto-connect and the manual blinker connect |
 | `--lr-port <n>` | `lr-port` | `8082` | `local-representative` `representable` port (same two flows) |
+| `--session <id>` | `session` | — | session ID to begin with, taking priority over `$AGENT_SESSION` and the `clauditable` default-session lookup — set by `local-representative` when relaunching a managed instance so a restart lands back in the same session |
 | `--version`, `-v` | — | — | print version and exit (build-time-injected — see [`docs/DevMode.md`](../docs/DevMode.md) "Versioning"); also available inside the shell as `version` / `ufa version` |
 
 Single-dash spellings (`-auto-connect`, `-lr-port`, ...) also work. Unknown
@@ -53,6 +54,8 @@ flags and above the config file:
 | `FC_AUTO_CONNECT` | `--auto-connect` | truthy = any value except `0`/`false`/`no`/`off`/empty; also selects remote control |
 | `FC_LR_HOST` | `--lr-host` | non-empty value overrides the host |
 | `FC_LR_PORT` | `--lr-port` | non-empty value overrides the port (validated 1–65535) |
+| `FC_SESSION` | `--session` | non-empty value overrides the starting session |
+| `FC_INSTANCE_ID` | — | no flag equivalent; set only by local-representative when it launches this instance, so it can tell this instance's self-reported head ID apart from its other FC instances on the stateboard's "federation-command-instances" row (see [`docs/DevMode.md`](../docs/DevMode.md)-style launch-arg cascading and `local-representative/stateboard.go`) |
 
 ## Configuration files
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
@@ -1611,6 +1611,91 @@ function markupCopyUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/copy`
 }
 
+// NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
+// Revision J: "add a 'new text file' button to the files tab ... accepts the
+// name and text (with optional voice input with mic icon when available)").
+// There's no dedicated "create file" API on the server -- this reuses the
+// very same multipart upload endpoint every drag-and-drop/browse upload
+// already goes through (relayed via handleFileUploadRelay to the target
+// host's own handleFileUpload, in files.go) by synthesizing a File from the
+// typed name and body client-side, the same trick the debug-log panel's
+// "save to file" button already uses. Mirrors local-representative's own
+// copy of this dialog.
+function NewTextFileDialog({
+  onCreate,
+  onClose,
+}: {
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState('')
+  const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    // Mirrors files.go's saveUploadedFile reserved-prefix checks -- a
+    // friendlier client-side echo of a rejection the server would otherwise
+    // give silently (a rejected file is just dropped from the response).
+    if (trimmed.startsWith('.manifest_') || trimmed.startsWith('.markup_')) {
+      setError("that name is reserved for the host-cache's own bookkeeping files")
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([body], finalName, { type: 'text/plain' })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">new text file</span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          className="new-file-name-input"
+          placeholder="file name (e.g. notes.txt)"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          autoFocus
+        />
+        <div className="field-with-mic">
+          <textarea
+            className="new-file-body-input"
+            placeholder="file contents…"
+            value={body}
+            onChange={e => setBody(e.target.value)}
+            rows={10}
+          />
+          <MicButton onTranscript={text => setBody(prev => appendTranscript(prev, text))} />
+        </div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function FilesPanel({
   files, active, selectedId, onSelect, onEnter, onUpload,
 }: {
@@ -1619,9 +1704,10 @@ function FilesPanel({
   selectedId: string | null
   onSelect: (id: string) => void
   onEnter: (id: string) => void
-  onUpload: (files: FileList) => void
+  onUpload: (files: FileList | File[]) => void
 }) {
   const [dragging, setDragging] = useState(false)
+  const [newFileOpen, setNewFileOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
   if (!active) {
@@ -1653,6 +1739,12 @@ function FilesPanel({
           }}
         />
       </div>
+      <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+        + new text file
+      </button>
+      {newFileOpen && (
+        <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
       {files.length === 0 ? (
         <div className="files-empty">no files in the host-cache</div>
       ) : (
@@ -2935,7 +3027,15 @@ function LRView({
     : null
   const isEmbedTab = EMBED_TABS.has(activeTab)
 
+  // Drives every MicButton under this host's view (Step2Prompt.md Revision
+  // J) via TCCaptureContext, below -- gated on this host's own data.convo
+  // (whether a the-conversationalist instance is actually running there),
+  // not the header's global tcAvailable, since dictation has to reach this
+  // specific host's convo instance -- see useTCCapture's doc comment.
+  const tcCapture = useTCCapture(Boolean(data.convo), host.id)
+
   return (
+    <TCCaptureContext.Provider value={{ available: tcCapture.available, capture: tcCapture.capture }}>
     <div className="lr-view">
       <div className="lr-header">
         <span className="lr-host-label">{host.label}</span>
@@ -3106,7 +3206,11 @@ function LRView({
           onClose={() => setMarkupFile(null)}
         />
       )}
+      {tcCapture.captureURL && (
+        <TCCaptureOverlay url={tcCapture.captureURL} onCancel={tcCapture.cancel} />
+      )}
     </div>
+    </TCCaptureContext.Provider>
   )
 }
 
@@ -3166,6 +3270,121 @@ const MIC_ICON = (
     <path d="M8 21h8" />
   </svg>
 )
+
+// ---- The Conversationalist mic-capture, for per-field dictation ----
+//
+// Step2Prompt.md Revision J adds the files tab's "new text file" dialog, whose
+// body field gets the same mic-dictation affordance condoccer's inputs
+// already have. Mirrors condoccer's and local-representative's own copies of
+// this block almost exactly, with one difference: agent-coordinator only
+// ever reaches a the-conversationalist instance *through* a specific host's
+// local-representative (/host/<id>/convo/, reverse-proxied by proxyToHost in
+// main.go), so both the capture URL and the "is TC available" gate are
+// host-scoped rather than global -- see LRView's own per-host
+// TCCaptureContext.Provider, below, which already knows which host (and
+// whether that host's own data.convo says TC is running there) it's for.
+function tcCaptureURL(hostId: string): string {
+  return `${window.location.origin}/host/${encodeURIComponent(hostId)}/convo/?embed=capture`
+}
+
+interface TCCaptureContextValue {
+  available: boolean
+  capture: (onTranscript: (text: string) => void) => void
+}
+
+// Default value only matters if a MicButton somehow renders outside a
+// TCCaptureContext.Provider -- available: false keeps it inert.
+const TCCaptureContext = createContext<TCCaptureContextValue>({ available: false, capture: () => {} })
+
+// useTCCapture owns the one hidden-until-active iframe a given host's
+// TCCaptureContext.Provider ever opens into that host's the-conversationalist,
+// and the postMessage listener that receives its transcript back. `available`
+// gates every MicButton under that provider; `capture` starts a capture,
+// invoking its callback once (and only once) with the final text.
+function useTCCapture(tcAvailable: boolean, hostId: string) {
+  const [captureURL, setCaptureURL] = useState<string | null>(null)
+  const onTranscriptRef = useRef<((text: string) => void) | null>(null)
+
+  const capture = useCallback((onTranscript: (text: string) => void) => {
+    onTranscriptRef.current = onTranscript
+    setCaptureURL(tcCaptureURL(hostId))
+  }, [hostId])
+
+  const cancel = useCallback(() => {
+    onTranscriptRef.current = null
+    setCaptureURL(null)
+  }, [])
+
+  useEffect(() => {
+    if (!captureURL) return
+    let expectedOrigin: string
+    try {
+      expectedOrigin = new URL(captureURL).origin
+    } catch {
+      return
+    }
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== expectedOrigin) return
+      const data = ev.data as { type?: string; text?: string } | undefined
+      if (data?.type === 'tc-transcript') {
+        onTranscriptRef.current?.(data.text ?? '')
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      } else if (data?.type === 'tc-transcript-cancel') {
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [captureURL])
+
+  return { available: tcAvailable, capture, captureURL, cancel }
+}
+
+// MicButton is the per-field affordance -- renders nothing while the
+// enclosing TCCaptureContext.Provider says TC isn't available for that host.
+// See the new-text-file dialog's body field, below, for its one call site in
+// this app so far.
+function MicButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const { available, capture } = useContext(TCCaptureContext)
+  if (!available) return null
+  return (
+    <button
+      type="button"
+      className="mic-btn"
+      title="dictate with The Conversationalist"
+      onClick={() => capture(onTranscript)}
+    >
+      {MIC_ICON}
+    </button>
+  )
+}
+
+// appendTranscript is the shared "insert dictated text" behaviour every
+// MicButton call site uses: appended after any existing content, space-
+// separated, rather than overwriting it. Mirrors condoccer's own copy.
+function appendTranscript(prev: string, text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return prev
+  return prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed
+}
+
+// TCCaptureOverlay hosts the actual iframe while a capture is in progress --
+// mirrors condoccer's own copy.
+function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void }) {
+  return (
+    <div className="tc-capture-backdrop" onClick={onCancel}>
+      <div className="tc-capture-panel" onClick={e => e.stopPropagation()}>
+        <div className="tc-capture-panel-header">
+          <span>The Conversationalist</span>
+          <button type="button" className="tc-capture-close" onClick={onCancel} aria-label="Cancel dictation">×</button>
+        </div>
+        <iframe className="tc-capture-frame" src={url} title="the-conversationalist capture" allow="microphone" />
+      </div>
+    </div>
+  )
+}
 
 // TCAvailabilityIndicator sits beside the camera/screenshot icon in the
 // header: illuminated (mic-btn-active) once at least one

@@ -237,3 +237,20 @@ export interface LRChainCallMsg {
   active: boolean
   entries?: ChainCallEntry[]
 }
+
+// StateboardEntry mirrors local-representative's same-named type: one
+// key/value row on the system tab's debug view's "stateboard" tab
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E) --
+// a generic board any representable-connected sub-app can post custom
+// entries to, plus the default "<app>-present"/"<app>-hosts" rows
+// local-representative derives itself from its own connection health.
+export interface StateboardEntry {
+  key: string
+  value: string
+}
+
+export interface LRStateboardMsg {
+  host_id: string
+  active: boolean
+  entries?: StateboardEntry[]
+}

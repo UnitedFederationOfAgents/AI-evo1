@@ -76,6 +76,16 @@ type FCLogMsg struct {
 type FCSessionMsg struct {
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
+
+	// InstanceID and Head are the stateboard's half of this message (see
+	// stateboard.go's setFCHead): InstanceID is the LR-assigned instance id
+	// this FC instance was launched with (FC_INSTANCE_ID -- see
+	// managedApps["federation-command"].buildEnv), empty for an
+	// independently-launched FC; Head is that instance's own self-generated
+	// head ID (federation-command/main.go's fcHeadID). Both piggyback on
+	// this already-frequent message rather than a dedicated one.
+	InstanceID string `json:"instance_id,omitempty"`
+	Head       string `json:"head,omitempty"`
 }
 
 // RidealongStateMsg is the payload of "ridealong-state" WebSocket messages.
@@ -322,6 +332,19 @@ type Server struct {
 	chainCallMu sync.Mutex
 	chainCall   []ChainCallEntry
 
+	// Debug view's "stateboard" tab (condocs/initialDistributedSessionsImpls/
+	// Step2Prompt.md Revision E): a generic key/value board any connected
+	// sub-app can post custom entries to (see setStateboardKV, stateboard.go),
+	// plus the default "<app>-present"/"<app>-hosts" rows derived live from
+	// representable's own connection health for every app named in
+	// stateboardApps. fcHeads holds federation-command's self-reported head
+	// IDs, one per LR-launched instance (see setFCHead) -- the only way to
+	// list them individually despite representable tracking one connection
+	// identity per app name (see versionMu's comment above).
+	stateboardMu     sync.Mutex
+	stateboardCustom map[string]string
+	fcHeads          map[string]string // instance id -> federation-command's self-reported head ID
+
 	// Session sync (see sessions.go and
 	// docs/DistributedSessionsBrainstorm.md): recordsPath is where clauditable
 	// session directories live (AGENT_RECORDS_PATH, resolved the same way
@@ -358,6 +381,8 @@ func newServer(lrName string) *Server {
 		managedVersions:        make(map[string]string),
 		managedUpdateAvailable: make(map[string]bool),
 		managedPendingVersion:  make(map[string]string),
+		stateboardCustom:       make(map[string]string),
+		fcHeads:                make(map[string]string),
 	}
 }
 
@@ -561,6 +586,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("files-state", FilesStateMsg{Files: s.listFiles()})
 	ac.SendData("debug-log-state", s.debugLogState())
 	ac.SendData("chain-call-state", s.chainCallState())
+	ac.SendData("stateboard-state", s.stateboard())
 	if cc := s.getCondoccerState(); cc != nil {
 		ac.SendData("condoccer-state", *cc)
 	}
@@ -1017,6 +1043,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "files-state", FilesStateMsg{Files: s.listFiles()})
 		s.sendToClient(c, "debug-log-state", s.debugLogState())
 		s.sendToClient(c, "chain-call-state", s.chainCallState())
+		s.sendToClient(c, "stateboard-state", s.stateboard())
 		if cc := s.getCondoccerState(); cc != nil {
 			s.sendToClient(c, "condoccer-state", *cc)
 		}
@@ -1637,6 +1664,9 @@ func main() {
 					ac.SendData("sessions-state", empty)
 				}
 				s.setModeMismatch("sessions", false, "")
+				// Clear its stateboard row rather than leave a stale session
+				// id up once session-manager itself is gone.
+				s.setStateboardKV("session-manager-current-session", "")
 			}
 			return
 		}
@@ -1670,6 +1700,17 @@ func main() {
 					ac.SendData("condoc-state", CondocStateMsg{Active: false})
 				}
 				s.setModeMismatch("federation-command", false, "")
+				// Every federation-command instance shares this one
+				// representable connection identity (see versionMu's
+				// comment above), so a disconnect means none are reachable
+				// any more -- drop every self-reported head rather than let
+				// a stale one linger on the stateboard (also refreshes
+				// "federation-command-present"/"-hosts", which read
+				// reprServer.IsHealthy live but only on the next broadcast).
+				s.stateboardMu.Lock()
+				s.fcHeads = make(map[string]string)
+				s.stateboardMu.Unlock()
+				s.broadcastStateboard()
 			}
 		}
 	})
@@ -1695,6 +1736,18 @@ func main() {
 	})
 
 	reprSrv.SetDataHandler(func(name, dataType string, data json.RawMessage) {
+		if dataType == "stateboard" {
+			// Generic across every app name, like "version" above -- any
+			// connected sub-app can post any key, which is the point of the
+			// stateboard (see stateboard.go's setStateboardKV and
+			// condocs/initialDistributedSessionsImpls/Step2Prompt.md
+			// Revision E).
+			var payload StateboardEntry
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.setStateboardKV(payload.Key, payload.Value)
+			}
+			return
+		}
 		if dataType == "version" {
 			// Every managed app reports its build version once it connects
 			// (see docs/DevMode.md "Versioning") -- generic across app names
@@ -1796,6 +1849,7 @@ func main() {
 			var payload FCSessionMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
 				s.setFCSessionState(payload.ID, payload.Name)
+				s.setFCHead(payload.InstanceID, payload.Head)
 			}
 		}
 	})

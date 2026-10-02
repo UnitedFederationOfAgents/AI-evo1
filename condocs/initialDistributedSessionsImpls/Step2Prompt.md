@@ -119,3 +119,22 @@ In this increment we will implement:
 - Those default fields
 - The ability to see this list live in a new 'debug-->stateboard' area beside network and logs
 - A new field for 'session-manager: current-session: <id>'
+
+
+prompt: [`e033a3c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e033a3cc3ede786ebd4ae2515254661fcc04bea4) → reply: [`cd96a21`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/cd96a21b4fd6c93846054a6ed4b68327c8c57e23)
+
+## Reply E
+
+I implemented Revision E's generic stateboard capability: a new `stateboard.go` in `local-representative` collects a free-form key/value board (any sub-app can post custom entries via representable's existing generic "data" channel, now carrying a "stateboard" message type) plus auto-derived `<app>-present`/`<app>-hosts` rows for federation-command/condoccer/session-manager/the-conversationalist from representable's own connection health, and a `federation-command-instances: <host>:<head>, ...` row built from each FC instance's self-reported head ID (plumbed through a new `FC_INSTANCE_ID` LR assigns at launch, since representable only tracks one connection identity per app name for this N-per-host app). I added `session-manager-current-session: <id>` as the first real user of the generic capability (session-manager now pushes it via `SendData("stateboard", ...)` whenever its current session changes), relayed the whole board LR→AC exactly like the existing debug-log/chain-call buffers, and added a new "stateboard" tab beside "network"/"logs" in agent-coordinator's frontend (both the global and per-host debug views) that renders it live via the same `DebugLogPane` viewer.
+
+As with every prior reply on this condoc, `go build`/`go test`/`tsc` were blocked by the sandbox's permission policy, so this was verified by careful manual review (tracing every call site and type end-to-end) rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

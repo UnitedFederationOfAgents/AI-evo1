@@ -79,6 +79,16 @@ var fcHeadID string
 // fcHostID is the stable per-host identifier, resolved once in main() via ufahostid.
 var fcHostID string
 
+// fcInstanceID is the LR-assigned instance id this FC instance was launched
+// with (FC_INSTANCE_ID -- set by local-representative's managedApps
+// ["federation-command"].buildEnv, see local-representative/procman.go),
+// read once in main(). Empty for an independently-launched FC that
+// --auto-connects without having been launched by an LR -- sendSessionState
+// then reports no head for the stateboard's "federation-command-instances"
+// row (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E),
+// the same way such an instance is absent from the system tab's managed list.
+var fcInstanceID string
+
 // Available agents (must match ambiguous-agent configurations)
 var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
 
@@ -644,6 +654,12 @@ func (m appModel) sendVersion() {
 type sessionStatePayload struct {
 	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
+
+	// InstanceID and Head piggyback the stateboard's "federation-command-
+	// instances" row (local-representative/stateboard.go's setFCHead) onto
+	// this already-frequent message rather than a dedicated one.
+	InstanceID string `json:"instance_id,omitempty"`
+	Head       string `json:"head,omitempty"`
 }
 
 // sendSessionState reports the current session to local-representative.
@@ -654,8 +670,10 @@ func (m appModel) sendSessionState() {
 		return
 	}
 	m.reprClient.SendData("fc-session", sessionStatePayload{
-		ID:   m.sessionID,
-		Name: readSessionName(m.sessionDir),
+		ID:         m.sessionID,
+		Name:       readSessionName(m.sessionDir),
+		InstanceID: fcInstanceID,
+		Head:       fcHeadID,
 	})
 }
 
@@ -5371,6 +5389,7 @@ func parseLRPort(s string) (int, error) {
 func main() {
 	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
 	fcHostID = ufahostid.GetHostID()
+	fcInstanceID = strings.TrimSpace(os.Getenv("FC_INSTANCE_ID"))
 
 	cfg, handled, err := parseCLIArgs(os.Args[1:])
 	if handled {

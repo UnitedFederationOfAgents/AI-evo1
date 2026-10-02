@@ -62,6 +62,7 @@ func (s *Server) setCurrentSession(id string) {
 	s.sessMu.Lock()
 	s.currentSession = id
 	s.sessMu.Unlock()
+	s.pushCurrentSessionStateboard()
 }
 
 // sendSessions replies to c only.

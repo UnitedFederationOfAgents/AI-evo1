@@ -101,11 +101,11 @@ type SystemStateMsg struct {
 
 // launchSpec describes how to start one managed application.
 type launchSpec struct {
-	binName   string                   // executable name to resolve
-	singleton bool                     // true: at most one running instance per host; false: N-per-host
-	terminal  bool                     // true: an interactive TUI that must be hosted in a terminal
-	buildArgs func(s *Server) []string // argv after the program name
-	buildEnv  func(s *Server) []string // extra KEY=VALUE entries appended to the child environment
+	binName   string                                    // executable name to resolve
+	singleton bool                                      // true: at most one running instance per host; false: N-per-host
+	terminal  bool                                       // true: an interactive TUI that must be hosted in a terminal
+	buildArgs func(s *Server, instanceID string) []string // argv after the program name; instanceID is the id about to be launched (see nextInstanceLocked)
+	buildEnv  func(s *Server, instanceID string) []string // extra KEY=VALUE entries appended to the child environment
 }
 
 // managedApps is the fixed set of applications local-representative knows how to
@@ -116,7 +116,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "condoccer",
 		singleton: true,  // condoccer is one-per-box: it serves a single repo view
 		terminal:  false, // plain HTTP server — no TTY needed
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			// Bring condoccer up already wired to this LR: --auto-connect makes it
 			// retry the representable heartbeat to our server in the background and
 			// push its condoc summary once landed, and --port fixes the HTTP port
@@ -144,7 +144,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "session-manager",
 		singleton: true,  // one per box, like condoccer
 		terminal:  false, // plain HTTP server — no TTY needed
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			args := []string{
 				"--auto-connect",
 				"--lr-host", "localhost",
@@ -164,7 +164,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "the-conversationalist",
 		singleton: true,  // one per box, like condoccer
 		terminal:  false, // plain HTTP server — no TTY needed
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			args := []string{
 				"--auto-connect",
 				"--lr-host", "localhost",
@@ -184,7 +184,7 @@ var managedApps = map[string]launchSpec{
 		binName:   "federation-command",
 		singleton: false, // federation-command is N-per-host
 		terminal:  true,  // it is an interactive shell — needs a real terminal
-		buildArgs: func(s *Server) []string {
+		buildArgs: func(s *Server, instanceID string) []string {
 			// Bring FC up already wired to this LR. --auto-connect makes it retry
 			// the heartbeat connection in the background and adopt remote control
 			// the moment it lands (auto-connect implies remote — there is no
@@ -208,7 +208,7 @@ var managedApps = map[string]launchSpec{
 			}
 			return args
 		},
-		buildEnv: func(s *Server) []string {
+		buildEnv: func(s *Server, instanceID string) []string {
 			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
 			// wrapper can swallow or re-quote trailing argv, which would drop
 			// --auto-connect and leave FC in *local* control — unusable in a
@@ -222,6 +222,12 @@ var managedApps = map[string]launchSpec{
 				"FC_AUTO_CONNECT=1",
 				"FC_LR_HOST=localhost",
 				"FC_LR_PORT=" + s.heartbeatPort,
+				// Lets this instance self-report its head ID back under a
+				// stable key on the stateboard's "federation-command-instances"
+				// row (see stateboard.go's setFCHead) despite representable
+				// tracking one connection identity per app name regardless of
+				// how many instances share it.
+				"FC_INSTANCE_ID=" + instanceID,
 			}
 			if s.devMode {
 				env = append(env, "FC_DEV_MODE=1")
@@ -887,7 +893,7 @@ func (s *Server) launchManaged(app string) (string, error) {
 		return id, err
 	}
 
-	appArgs := spec.buildArgs(s)
+	appArgs := spec.buildArgs(s, id)
 	prog, args := bin, appArgs
 	var hosting terminalHosting
 	if spec.terminal {
@@ -911,7 +917,7 @@ func (s *Server) launchManaged(app string) (string, error) {
 		cmd.Env = os.Environ()
 	}
 	if spec.buildEnv != nil {
-		cmd.Env = append(cmd.Env, spec.buildEnv(s)...)
+		cmd.Env = append(cmd.Env, spec.buildEnv(s, id)...)
 	}
 	// Own process group so terminate can signal the whole child tree (terminal
 	// wrapper included).
@@ -999,6 +1005,12 @@ func (s *Server) reapManaged(p *managedProc) {
 	p.mu.Unlock()
 
 	log.Printf("system: %s (pid %d) %s (exit %d)", p.instanceID, p.pid, status, code)
+	if p.app == "federation-command" {
+		// This instance is no longer reachable -- drop its self-reported
+		// head from the stateboard's "federation-command-instances" row
+		// (see stateboard.go's setFCHead).
+		s.clearFCHead(p.instanceID)
+	}
 	s.broadcastSystemState()
 }
 
@@ -1021,6 +1033,9 @@ func (s *Server) terminateManaged(target string) error {
 		s.procMu.Lock()
 		delete(s.managed, id)
 		s.procMu.Unlock()
+		if p.app == "federation-command" {
+			s.clearFCHead(id)
+		}
 		if len(p.killCmd) > 0 {
 			log.Printf("system: stopping detached session for %s: %v", id, p.killCmd)
 			if out, err := exec.Command(p.killCmd[0], p.killCmd[1:]...).CombinedOutput(); err != nil {
@@ -1037,6 +1052,9 @@ func (s *Server) terminateManaged(target string) error {
 		s.procMu.Lock()
 		delete(s.managed, id)
 		s.procMu.Unlock()
+		if p.app == "federation-command" {
+			s.clearFCHead(id)
+		}
 		s.broadcastSystemState()
 		return nil
 	}

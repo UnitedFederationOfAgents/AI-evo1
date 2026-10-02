@@ -55,6 +55,7 @@ flags and above the config file:
 | `FC_LR_HOST` | `--lr-host` | non-empty value overrides the host |
 | `FC_LR_PORT` | `--lr-port` | non-empty value overrides the port (validated 1–65535) |
 | `FC_SESSION` | `--session` | non-empty value overrides the starting session |
+| `FC_INSTANCE_ID` | — | no flag equivalent; set only by local-representative when it launches this instance, so it can tell this instance's self-reported head ID apart from its other FC instances on the stateboard's "federation-command-instances" row (see [`docs/DevMode.md`](../docs/DevMode.md)-style launch-arg cascading and `local-representative/stateboard.go`) |
 
 ## Configuration files
 

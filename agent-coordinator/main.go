@@ -477,6 +477,31 @@ type LRChainCallMsg struct {
 	Entries []ChainCallEntry `json:"entries,omitempty"`
 }
 
+// StateboardEntry mirrors local-representative's same-named type (see
+// local-representative/stateboard.go): one key/value row on the system
+// tab's debug view's "stateboard" tab
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
+type StateboardEntry struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// StateboardMsg matches the stateboard-state payload sent from LR over
+// representable.
+type StateboardMsg struct {
+	Entries []StateboardEntry `json:"entries"`
+}
+
+// LRStateboardMsg is the host-scoped "lr-stateboard-state" message sent to
+// browser clients: the debug view's current stateboard for one host. Active
+// is false when that LR is not connected -- mirrors LRDebugLogMsg/
+// LRChainCallMsg.
+type LRStateboardMsg struct {
+	HostID  string            `json:"host_id"`
+	Active  bool              `json:"active"`
+	Entries []StateboardEntry `json:"entries,omitempty"`
+}
+
 // wsMsg is the wire format for all WebSocket messages.
 type wsMsg struct {
 	Type    string          `json:"type"`
@@ -505,6 +530,7 @@ type hostState struct {
 	files      *FilesStateMsg
 	debugLog   *DebugLogStateMsg
 	chainCall  *ChainCallStateMsg
+	stateboard *StateboardMsg
 	lrHTTPPort string
 }
 
@@ -1323,6 +1349,7 @@ func main() {
 			hs.files = nil
 			hs.debugLog = nil
 			hs.chainCall = nil
+			hs.stateboard = nil
 			hs.lrHTTPPort = ""
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
@@ -1338,6 +1365,7 @@ func main() {
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
 			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
+			s.broadcast("lr-stateboard-state", LRStateboardMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 			s.broadcastTCAvailability()
 		}
@@ -1496,6 +1524,14 @@ func main() {
 				hs.chainCall = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: true, Entries: payload.Entries})
+			}
+		case "stateboard-state":
+			var payload StateboardMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.stateboard = &payload
+				hs.mu.Unlock()
+				s.broadcast("lr-stateboard-state", LRStateboardMsg{HostID: name, Active: true, Entries: payload.Entries})
 			}
 		}
 	})

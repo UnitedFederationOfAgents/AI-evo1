@@ -232,6 +232,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		})
 		s.pushSessionsState()
 		s.sendVersion()
+		s.pushCurrentSessionStateboard()
 		go s.refreshSessionsAfterConnect(client)
 
 		<-client.DisconnectCh()
@@ -333,6 +334,34 @@ func (s *Server) sendVersion() {
 		return
 	}
 	client.SendData("version", versionPayload{Version: ufaversion.Version})
+}
+
+// stateboardKV is the payload of representable's generic "stateboard" data
+// message -- one key/value row posted to local-representative's stateboard
+// (see local-representative/stateboard.go's setStateboardKV and
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
+// Mirrors local-representative's own StateboardEntry.
+type stateboardKV struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// pushCurrentSessionStateboard reports this instance's current session on
+// the stateboard as "session-manager-current-session" -- called whenever it
+// changes (see sessions.go's setCurrentSession) and right after a
+// representable connection lands, mirroring sendVersion/pushSessionsState.
+// No-op when not connected or when nothing is current yet.
+func (s *Server) pushCurrentSessionStateboard() {
+	s.reprMu.Lock()
+	client := s.reprClient
+	s.reprMu.Unlock()
+	if client == nil {
+		return
+	}
+	client.SendData("stateboard", stateboardKV{
+		Key:   "session-manager-current-session",
+		Value: s.getCurrentSession(),
+	})
 }
 
 // handleReprCommand handles commands local-representative relays down the

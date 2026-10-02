@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
@@ -33,6 +33,7 @@ interface HostClientState {
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
+  stateboard?: LRStateboardMsg
 }
 
 function emptyHostState(): HostClientState {
@@ -336,6 +337,14 @@ function useCoordinatorWS() {
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), chainCall: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-stateboard-state': {
+            const p = msg.payload as LRStateboardMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), stateboard: p.active ? p : undefined },
             }))
             break
           }
@@ -1154,6 +1163,18 @@ function formatDebugLogLine(e: DebugLogEntry, hostLabel?: string): string {
   return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.app}]${marker} ${e.line}`
 }
 
+// formatStateboardLine renders one stateboard key/value row (see
+// StateboardEntry) for the debug view's "stateboard" tab
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
+// hostLabel is only passed in the global perspective, same as
+// formatDebugLogLine/formatChainCallLine -- a stateboard entry has no
+// timestamp of its own (it's a live snapshot, not a log), so unlike those
+// two this is plain text with no time prefix.
+function formatStateboardLine(e: StateboardEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel}  ` : ''
+  return `${host}${e.key} = ${e.value || '(empty)'}`
+}
+
 // resolveGlobalDebugUploadHost picks the "preferred file store" to save a
 // global-perspective debug capture to, where there's no single selected host
 // to fall back on the way ScreenshotButton's per-host case does: this
@@ -1213,22 +1234,25 @@ function DebugLogPane({
   )
 }
 
-const DEBUG_TABS = ['network', 'logs'] as const
+const DEBUG_TABS = ['network', 'logs', 'stateboard'] as const
 type DebugTab = typeof DEBUG_TABS[number]
 
 // DebugView is the system tab's "debug" button destination: network capture
 // (see useNetworkLog, app-wide and identical in both perspectives since it's
 // this one frontend's own request log -- merged chronologically with
 // chainLines, the backend-to-backend SM<->LR<->AC calls the caller already
-// formatted via formatChainCallLine, same reasoning as logLines below) and
+// formatted via formatChainCallLine, same reasoning as logLines below),
 // logs (logLines, already formatted by the caller -- see
 // formatDebugLogLine -- since per-host and global differ in whether a host
-// tag is needed).
+// tag is needed), and stateboard (stateLines, formatted the same way via
+// formatStateboardLine -- condocs/initialDistributedSessionsImpls/
+// Step2Prompt.md Revision E).
 function DebugView({
-  logLines, chainLines, uploadHostId, uploadFiles,
+  logLines, chainLines, stateLines, uploadHostId, uploadFiles,
 }: {
   logLines: string[]
   chainLines: TimedLine[]
+  stateLines: string[]
   uploadHostId: string | null
   uploadFiles: (hostId: string, files: File[]) => void
 }) {
@@ -1259,13 +1283,21 @@ function DebugView({
           uploadFiles={uploadFiles}
           emptyMessage="no network activity captured yet"
         />
-      ) : (
+      ) : tab === 'logs' ? (
         <DebugLogPane
           lines={logLines}
           toFileName={`logs-debug-${Date.now()}.log`}
           uploadHostId={uploadHostId}
           uploadFiles={uploadFiles}
           emptyMessage="no LR-managed sub-app log lines captured yet"
+        />
+      ) : (
+        <DebugLogPane
+          lines={stateLines}
+          toFileName={`stateboard-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no stateboard entries reported yet"
         />
       )}
     </div>
@@ -2729,6 +2761,9 @@ function GlobalView({
               chainLines={hosts.flatMap(h =>
                 (hostData[h.id]?.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e, h.label) })),
               )}
+              stateLines={hosts.flatMap(h =>
+                (hostData[h.id]?.stateboard?.entries ?? []).map(e => formatStateboardLine(e, h.label)),
+              )}
               uploadHostId={resolveGlobalDebugUploadHost(hosts, selfHostId)}
               uploadFiles={uploadFiles}
             />
@@ -2946,6 +2981,7 @@ function LRView({
                   <DebugView
                     logLines={(data.debugLog?.entries ?? []).map(e => formatDebugLogLine(e))}
                     chainLines={(data.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e) }))}
+                    stateLines={(data.stateboard?.entries ?? []).map(e => formatStateboardLine(e))}
                     uploadHostId={active ? host.id : null}
                     uploadFiles={uploadFiles}
                   />

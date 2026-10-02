@@ -157,6 +157,16 @@ var managedApps = map[string]launchSpec{
 				// docs/DevMode.md.
 				args = append(args, "--dev-mode")
 			}
+			if id := s.smSession(); id != "" {
+				// A previous (or still-running) session-manager instance
+				// reported this session -- hand it straight back so a restart
+				// lands in the same place, mirroring federation-command's
+				// --session above (see
+				// condocs/initialDistributedSessionsImpls/Step2Prompt.md
+				// Revision H). Harmless on a first launch with nothing
+				// reported yet: smSession returns "" and this is skipped.
+				args = append(args, "--session", id)
+			}
 			return args
 		},
 	},
@@ -382,6 +392,15 @@ func (s *Server) fcSession() (id, name string) {
 	s.fcSessionMu.RLock()
 	defer s.fcSessionMu.RUnlock()
 	return s.fcSessionID, s.fcSessionName
+}
+
+// smSession returns the session most recently reported by a connected
+// session-manager instance, for relaunching it (--session) -- mirrors
+// fcSession. "" if none has connected/reported yet.
+func (s *Server) smSession() string {
+	s.smSessionMu.RLock()
+	defer s.smSessionMu.RUnlock()
+	return s.smSessionID
 }
 
 // managedVersion returns the build version most recently reported by the

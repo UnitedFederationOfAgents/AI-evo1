@@ -206,3 +206,20 @@ For Revision G, I fixed the agent-coordinator frontend's "global" debug stateboa
 ## Revision H
 
 Let's make the current session persist through SM restarts.
+
+
+prompt: [`37c0cc5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/37c0cc59453a29fdfd3614259d4a63e2fb627538) → reply: [`9ab8cbb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9ab8cbb101beff9ab8b6cd49b2d8aa21642eb05c)
+
+## Reply H
+
+I implemented Revision H: session-manager now accepts a `--session <id>`/`SM_SESSION` startup value (mirroring federation-command's `--session`/`FC_SESSION`) that seeds `currentSession` before it connects to local-representative. On the local-representative side, I added `smSessionID` state (mirroring the existing `fcSessionID`) that records whatever session a connected session-manager reports via the stateboard's `session-manager: current-session` entry — deliberately not cleared on disconnect — and wired `managedApps["sessions"].buildArgs` to pass it back via `--session` on relaunch, so restarting session-manager (via LR's system-tab restart or any future auto-relaunch) lands it back in the same session. As in every prior reply on this condoc, `go build`/`go test` were blocked by the sandbox's permission policy, so this was verified via careful manual review and tracing rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

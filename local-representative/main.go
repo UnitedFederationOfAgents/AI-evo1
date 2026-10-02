@@ -296,6 +296,19 @@ type Server struct {
 	fcSessionID   string
 	fcSessionName string
 
+	// smSessionMu guards smSessionID: the session a managed session-manager
+	// most recently reported over representable's generic "stateboard" data
+	// message (App "session-manager", Key "current-session" -- see
+	// session-manager/repr.go's pushCurrentSessionStateboard), mirroring
+	// fcSessionID above. Deliberately *not* cleared when session-manager
+	// disconnects (unlike the stateboard row itself, which setStateChangeHandler
+	// does blank for display -- see stateboard's "session-manager" case) so it
+	// survives the gap between restartManaged's terminate and relaunch, letting
+	// managedApps["sessions"].buildArgs hand it straight back (see
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision H).
+	smSessionMu sync.RWMutex
+	smSessionID string
+
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
 	condoccerState *CondoccerStateMsg
@@ -1747,6 +1760,15 @@ func main() {
 			var payload StateboardEntry
 			if err := json.Unmarshal(data, &payload); err == nil {
 				s.setStateboardKV(payload.App, payload.Key, payload.Value)
+				if payload.App == "session-manager" && payload.Key == "current-session" && payload.Value != "" {
+					// Remembered separately from the stateboard row itself
+					// (which gets blanked for display on disconnect) so a
+					// relaunch can hand it back -- see smSessionID's comment
+					// and managedApps["sessions"].buildArgs.
+					s.smSessionMu.Lock()
+					s.smSessionID = payload.Value
+					s.smSessionMu.Unlock()
+				}
 			}
 			return
 		}

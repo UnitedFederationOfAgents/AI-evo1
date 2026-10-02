@@ -55,7 +55,11 @@ type Server struct {
 	// session" (AGENT_SESSION/m.sessionID): the session "ufa session
 	// set"/"get" parity (set-session/get-session below) act on. Empty until
 	// a client sets one -- session-manager has no session of its own to
-	// default to the way a TUI invoking commands would.
+	// default to the way a TUI invoking commands would. Seeded from
+	// --session/SM_SESSION at startup (see main()) so local-representative
+	// can hand a restarted instance back its prior session, mirroring
+	// federation-command's --session/FC_SESSION (see
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision H).
 	sessMu         sync.RWMutex
 	currentSession string
 
@@ -310,6 +314,7 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
+	session := flag.String("session", "", "session ID to make current on startup (also SM_SESSION); lets local-representative hand a restarted instance back its prior session, see condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision H")
 	flag.Parse()
 
 	s := newServer()
@@ -317,6 +322,16 @@ func main() {
 	s.name = *name
 	s.devMode = *devMode
 	go watchRestartSignal()
+
+	// --session wins over SM_SESSION, mirroring federation-command's
+	// --session/FC_SESSION precedence. Set directly (not via setCurrentSession)
+	// since nothing is connected or listening yet; local-representative gets
+	// told once auto-connect lands (connectLoop's pushCurrentSessionStateboard).
+	if sessionID := strings.TrimSpace(*session); sessionID != "" {
+		s.currentSession = sessionID
+	} else if sessionID := strings.TrimSpace(os.Getenv("SM_SESSION")); sessionID != "" {
+		s.currentSession = sessionID
+	}
 
 	if *autoConnect {
 		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",

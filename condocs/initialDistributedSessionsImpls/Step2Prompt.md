@@ -130,11 +130,10 @@ I implemented Revision E's generic stateboard capability: a new `stateboard.go` 
 As with every prior reply on this condoc, `go build`/`go test`/`tsc` were blocked by the sandbox's permission policy, so this was verified by careful manual review (tracing every call site and type end-to-end) rather than a compiled run.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Nothing is currently displaying in the stateboard view. Let's do another pass to fix that.
 
+Note that we also DO want nested keys - 'session-manager-current-session: <id>' should be 'session-manager: current-session: <id>'
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We can assume for now that keys will only be two levels deep. (sub-app: key: <value>)

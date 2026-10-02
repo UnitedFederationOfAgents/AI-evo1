@@ -152,11 +152,45 @@ I found and fixed the actual display bug plus the nesting request from Revision 
 `go build`/`gofmt`/`tsc` remain blocked by the sandbox's permission policy (as in every prior reply on this condoc), so this was verified via careful manual tracing of every call site rather than a compiled run.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+We now have the stateboard working correctly at the LR level, at the AC level we need to make adjustments.
+
+Currently we see at the AC level that we see per-host collections:
+8082c7f2a286-o3x0  condoccer: hosts = (empty)
+8082c7f2a286-o3x0  condoccer: present = false
+8082c7f2a286-o3x0  federation-command: hosts = 8082c7f2a286-o3x0
+8082c7f2a286-o3x0  federation-command: present = true
+8082c7f2a286-o3x0  session-manager: current-session = (empty)
+8082c7f2a286-o3x0  session-manager: hosts = 8082c7f2a286-o3x0
+8082c7f2a286-o3x0  session-manager: present = true
+8082c7f2a286-o3x0  the-conversationalist: hosts = (empty)
+8082c7f2a286-o3x0  the-conversationalist: present = false
+provisioner01-rfge  condoccer: hosts = provisioner01-rfge
+provisioner01-rfge  condoccer: present = true
+provisioner01-rfge  federation-command: hosts = provisioner01-rfge
+provisioner01-rfge  federation-command: instances = provisioner01-rfge:fc-tz6k
+provisioner01-rfge  federation-command: present = true
+provisioner01-rfge  session-manager: current-session = 2026-10-02_13-10-42_sm-created-1
+provisioner01-rfge  session-manager: hosts = provisioner01-rfge
+provisioner01-rfge  session-manager: present = true
+provisioner01-rfge  the-conversationalist: hosts = provisioner01-rfge
+provisioner01-rfge  the-conversationalist: present = true
+
+What we need to see is the "global" view. More like this:
+
+condoccer: hosts = provisioner01-rfge
+condoccer: present = true
+federation-command: hosts = provisioner01-rfge
+federation-command: present = true
+federation-command: instances = provisioner01-rfge:fc-tz6k
+session-manager: current-session = 2026-10-02_13-10-42_sm-created-1
+session-manager: hosts = 8082c7f2a286-o3x0, provisioner01-rfge
+session-manager: present = true
+the-conversationalist: hosts = provisioner01-rfge
+the-conversationalist: present = true
 
 
-## Human-Prompt
+Note that each LR instance *presents* their local view but can *see* the global view (this is how they recognize that capabilities like transcription are available on another node and can make use of them).
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's make this correction.

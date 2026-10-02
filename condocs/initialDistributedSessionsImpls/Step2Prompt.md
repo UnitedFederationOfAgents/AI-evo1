@@ -59,11 +59,10 @@ I implemented Revision B's three asks in `federation-command/main.go` and `local
 Note: as in the prior replies on this condoc, `go build`/`go test` and frontend builds were blocked by the sandbox's permission policy, so this was verified via careful manual review (diff re-read end-to-end, call-site tracing) rather than a compiled run.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's take another look here - we expect to see FC's session in the federation-command tab.
 
+Let's finish this implementation.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also add the 'owner' field to the session.yaml (starts with creating host ID), and when we create defaults the names will now be '<date> Default <host>'.

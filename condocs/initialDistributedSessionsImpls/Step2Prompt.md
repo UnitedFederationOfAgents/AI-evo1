@@ -83,11 +83,18 @@ For Revision C I made two changes:
 2. **`owner` field + host-qualified default names**: Added an `owner: <host ID>` line (via `ufahostid.GetHostID()`/`fcHostID`) to every place a `session.yaml` gets freshly written — `clauditable`'s `writeSessionYAMLIfAbsent`/`updateSessionYAMLName`, `session-manager`'s mirrored `writeSessionYAMLIfAbsent` (plus its `go.mod`/import to pull in `ufa-hostid`), and `federation-command`'s `updateSessionName` create-fallback — so the owner always reflects the creating host and is left untouched on rename. Default-session names (`clauditable get-default-session`, the only place that mints them) now read `"<date> Default <host>"`. Since all three apps' describe/list code already renders `session.yaml` fields generically, `owner` shows up automatically without further changes. Added/extended unit tests in all three packages to cover the new field; as in prior replies, `go build`/`go test` were blocked by the sandbox, so this was verified by careful manual review rather than a compiled run.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+There are still some issues to fix -- a new default session was created:
 
+id	2026-10-02-default
+location	/host-agent-files/agent-records/2026-10-02-default
+name	2026-10-02-default
+owner	provisioner01-rfge
+created	2026-10-02T12:12:40Z
 
-## Human-Prompt
+The name should have included the host name and it should have been "human readable"/"pretty print".
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix this.
+
+We have also updated LR correctly so we can see the FC session, but we do not see it in AC. We need to see this in both UIs. Let's fix this as well.

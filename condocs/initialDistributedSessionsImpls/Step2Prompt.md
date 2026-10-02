@@ -109,11 +109,13 @@ Both changes look syntactically clean. `go build`/`go test` were blocked by the 
 I fixed both Revision D issues: (1) in `clauditable/main.go`, the dispatch-time `writeSessionYAMLIfAbsent` fallback (triggered any time a command runs before `get-default-session` wins the race to create the day's session.yaml) was writing the bare session ID as the name instead of the pretty `"<date> Default <host>"` name — added a shared `defaultSessionName()` helper and used it in both that fallback and `runGetDefaultSession`. (2) in `agent-coordinator/main.go`, the `ProcInfo` struct used to decode LR's relayed system-state was missing the `Session` field entirely (same class of silent-drop bug as the earlier `AutoUpdate`/Revision K issue noted in its own comment), so FC's session info was always discarded before reaching AC's frontend even though the frontend lookup code was already correct — added the matching `Session string \`json:"session,omitempty"\`` field.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Let's add a generic capability for LR-connected sub-apps to submit data to a simple key-value 'stateboard'. (This stateboard exists in LR and AC)
 
+Each sub-app will have default keys '<sub-app>-present:' and '<sub-app>-hosts:' where the 'present' field is true or false based on whether one or more hosts are connected, and the 'hosts' field is a list of the currently connected hosts. Apps with multiple instances like FC will also have 'federation-command-instances: <host>:<head>, <host>:<head>'.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In this increment we will implement:
+- Those default fields
+- The ability to see this list live in a new 'debug-->stateboard' area beside network and logs
+- A new field for 'session-manager: current-session: <id>'

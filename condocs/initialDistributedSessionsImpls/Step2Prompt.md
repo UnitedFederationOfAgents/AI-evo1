@@ -215,11 +215,8 @@ prompt: [`37c0cc5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3
 I implemented Revision H: session-manager now accepts a `--session <id>`/`SM_SESSION` startup value (mirroring federation-command's `--session`/`FC_SESSION`) that seeds `currentSession` before it connects to local-representative. On the local-representative side, I added `smSessionID` state (mirroring the existing `fcSessionID`) that records whatever session a connected session-manager reports via the stateboard's `session-manager: current-session` entry — deliberately not cleared on disconnect — and wired `managedApps["sessions"].buildArgs` to pass it back via `--session` on relaunch, so restarting session-manager (via LR's system-tab restart or any future auto-relaunch) lands it back in the same session. As in every prior reply on this condoc, `go build`/`go test` were blocked by the sandbox's permission policy, so this was verified via careful manual review and tracing rather than a compiled run.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+When we have a default session in SM and we launch a NEW FC instance from the system tab we expect to have it take the current session.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's ensure this works.

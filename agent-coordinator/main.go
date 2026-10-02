@@ -201,6 +201,14 @@ type ConvoStateMsg struct {
 	HTTPPort string `json:"http_port"`
 }
 
+// RobotStateMsg matches the robot-state payload forwarded up from LR
+// (originating at a managed ianar). HTTPPort is ianar's own port on the LR
+// box; the coordinator reverse-proxies its UI at /host/<id>/robot/. Grows
+// domain-specific fields in a later step (see condocs/InitialRobot.md).
+type RobotStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
 // LRHTTPMsg matches the lr-http payload: the HTTP port an LR's dashboard listens
 // on, used to build the /host/<id>/ reverse-proxy target.
 type LRHTTPMsg struct {
@@ -259,6 +267,14 @@ type LRSessionsMsg struct {
 // clients: whether a managed the-conversationalist's forwarded UI is
 // available on that host -- mirrors LRCondoccerMsg.
 type LRConvoMsg struct {
+	HostID    string `json:"host_id"`
+	Available bool   `json:"available"`
+}
+
+// LRRobotMsg is the host-scoped "lr-robot-state" message sent to browser
+// clients: whether a managed ianar's forwarded UI is available on that host
+// -- mirrors LRCondoccerMsg.
+type LRRobotMsg struct {
 	HostID    string `json:"host_id"`
 	Available bool   `json:"available"`
 }
@@ -529,6 +545,7 @@ type hostState struct {
 	condoccer  *CondoccerStateMsg
 	sessions   *SessionsStateMsg
 	convo      *ConvoStateMsg
+	robot      *RobotStateMsg
 	files      *FilesStateMsg
 	debugLog   *DebugLogStateMsg
 	chainCall  *ChainCallStateMsg
@@ -772,6 +789,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	condoccer := hs.condoccer
 	sessions := hs.sessions
 	convo := hs.convo
+	robot := hs.robot
 	files := hs.files
 	debugLog := hs.debugLog
 	chainCall := hs.chainCall
@@ -801,6 +819,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
 	s.sendToClient(c, "lr-sessions-state", sessionsMsg(name, sessions))
 	s.sendToClient(c, "lr-convo-state", convoMsg(name, convo))
+	s.sendToClient(c, "lr-robot-state", robotMsg(name, robot))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
@@ -857,6 +876,15 @@ func convoMsg(hostID string, cv *ConvoStateMsg) LRConvoMsg {
 		return LRConvoMsg{HostID: hostID, Available: false}
 	}
 	return LRConvoMsg{HostID: hostID, Available: true}
+}
+
+// robotMsg builds a host-scoped lr-robot-state payload; a nil state means no
+// managed ianar is currently reporting on that host -- mirrors condoccerMsg.
+func robotMsg(hostID string, rb *RobotStateMsg) LRRobotMsg {
+	if rb == nil || rb.HTTPPort == "" {
+		return LRRobotMsg{HostID: hostID, Available: false}
+	}
+	return LRRobotMsg{HostID: hostID, Available: true}
 }
 
 func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
@@ -1373,6 +1401,7 @@ func main() {
 			hs.condoccer = nil
 			hs.sessions = nil
 			hs.convo = nil
+			hs.robot = nil
 			hs.files = nil
 			hs.debugLog = nil
 			hs.chainCall = nil
@@ -1389,6 +1418,7 @@ func main() {
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
 			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
+			s.broadcast("lr-robot-state", LRRobotMsg{HostID: name, Available: false})
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
 			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
@@ -1520,6 +1550,18 @@ func main() {
 				hs.mu.Unlock()
 				s.broadcast("lr-convo-state", convoMsg(name, cv))
 				s.broadcastTCAvailability()
+			}
+		case "robot-state":
+			var payload RobotStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var rb *RobotStateMsg
+				if payload.HTTPPort != "" {
+					rb = &payload
+				}
+				hs.mu.Lock()
+				hs.robot = rb
+				hs.mu.Unlock()
+				s.broadcast("lr-robot-state", robotMsg(name, rb))
 			}
 		case "lr-http":
 			var payload LRHTTPMsg

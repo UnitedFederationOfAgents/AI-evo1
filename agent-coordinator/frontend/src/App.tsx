@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 
@@ -12,6 +12,7 @@ const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'condoccer', multi: false },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
+  { name: 'robot', multi: false },
 ]
 
 interface LogEntry {
@@ -30,6 +31,7 @@ interface HostClientState {
   condoccer?: LRCondoccerMsg
   sessions?: LRSessionsMsg
   convo?: LRConvoMsg
+  robot?: LRRobotMsg
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
@@ -316,6 +318,14 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-robot-state': {
+            const p = msg.payload as LRRobotMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), robot: p.available ? p : undefined },
+            }))
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
@@ -419,7 +429,7 @@ function HostSidebar({
   )
 }
 
-const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'] as const
+const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'] as const
 // "system" and "files" sit to the right of the service tabs, mirroring
 // local-representative's own dashboard: they drive/view that LR's process
 // management and host-cache from the coordinator. Upload on this files tab is
@@ -437,7 +447,7 @@ type LRTab = typeof LR_TABS[number]
 // under the tab bar, so the embedded app's own UI (including its own
 // "DEV MODE" border, when that sub-app runs in dev mode) fills the space
 // instead of floating in a padded, header-topped box.
-const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo'])
+const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
 
 // Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
 // BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
@@ -1066,8 +1076,8 @@ function RepoWatchPanel({
 // from this one page, wrapping window.fetch once (see installNetworkCapture)
 // covers all of them without needing each sub-app's own embedded iframe to
 // cooperate. It doesn't yet see network activity that happens entirely
-// inside an embedded iframe's own document (condoccer/sessions/convo's own
-// UI) -- a later increment could thread that through postMessage if needed.
+// inside an embedded iframe's own document (condoccer/sessions/convo/robot's
+// own UI) -- a later increment could thread that through postMessage if needed.
 interface NetworkLogEntry {
   id: number
   time: number // unix ms
@@ -2331,7 +2341,7 @@ function hostOutOfDate(data: HostClientState | undefined): boolean {
 function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
   const services = data?.lrState?.services
   const managed = data?.system?.managed
-  return ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'].some(
+  return ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'].some(
     name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
   )
 }
@@ -2367,16 +2377,19 @@ function TopologyNodeCard({
   const coHealthy = serviceHealthy(services, 'condoccer')
   const tcHealthy = serviceHealthy(services, 'convo')
   const smHealthy = serviceHealthy(services, 'sessions')
+  const rbHealthy = serviceHealthy(services, 'robot')
   const wHealthy = serviceHealthy(services, 'worker')
   const fcManaged = subAppManaged(managed, 'federation-command')
   const coManaged = subAppManaged(managed, 'condoccer')
   const tcManaged = subAppManaged(managed, 'convo')
   const smManaged = subAppManaged(managed, 'sessions')
+  const rbManaged = subAppManaged(managed, 'robot')
   const wManaged = subAppManaged(managed, 'worker')
   const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
   const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
   const tcOutdated = devMode && tcHealthy && subAppOutOfDate(managed, 'convo')
   const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
+  const rbOutdated = devMode && rbHealthy && subAppOutOfDate(managed, 'robot')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
 
   return (
@@ -2412,6 +2425,10 @@ function TopologyNodeCard({
             className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
             title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
           >SM</span>
+          <span
+            className={subAppBoxClass(rbHealthy, rbManaged, !!rbOutdated)}
+            title={rbOutdated ? "robot is connected but running an older build than what's on disk" : undefined}
+          >RB</span>
           <span
             className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
@@ -3097,6 +3114,14 @@ function LRView({
             ) : (
               <div className="service-empty service-empty-embed">
                 sessions is not running on this host — launch it from the system tab
+              </div>
+            )
+          ) : activeTab === 'robot' ? (
+            data.robot ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/robot/`} title={`robot on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                robot is not running on this host — launch it from the system tab
               </div>
             )
           ) : (

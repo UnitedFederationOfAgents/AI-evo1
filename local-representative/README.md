@@ -82,6 +82,7 @@ it back once LR is listening again).
 | `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
 | `--sessions-port` | `sessions-port` | `8085` | HTTP port a managed `session-manager` serves on; its UI is reverse-proxied at `/sessions/` |
 | `--convo-port` | `convo-port` | `8086` | HTTP port a managed `the-conversationalist` serves on; its UI is reverse-proxied at `/convo/` |
+| `--robot-port` | `robot-port` | `8087` | HTTP port a managed `ianar` serves on; its UI is reverse-proxied at `/robot/` |
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
 | `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
 

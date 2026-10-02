@@ -178,6 +178,11 @@ export interface LRConvoMsg {
   available: boolean
 }
 
+export interface LRRobotMsg {
+  host_id: string
+  available: boolean
+}
+
 export interface FileInfo {
   id: string
   name: string

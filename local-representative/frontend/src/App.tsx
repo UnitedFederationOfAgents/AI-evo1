@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
 import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 
-const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker', 'system', 'files'] as const
+const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -12,7 +12,7 @@ type Tab = typeof TABS[number]
 // embedded app's own UI (including its own "DEV MODE" border, when that
 // sub-app runs in dev mode) fills the space instead of floating in a
 // padded, header-topped box.
-const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo'])
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
 
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
 // Step5Prompt.md Revision M): how many recently-visited tabs we keep around
@@ -26,6 +26,7 @@ const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'condoccer', multi: false },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
+  { name: 'robot', multi: false },
 ]
 
 interface LogEntry {
@@ -2159,6 +2160,8 @@ export default function App() {
               />
             ) : activeTab === 'sessions' ? (
               <iframe className="embed-frame" src="/sessions/" title="sessions" />
+            ) : activeTab === 'robot' ? (
+              <iframe className="embed-frame" src="/robot/" title="robot" />
             ) : (
               <iframe className="embed-frame" src="/convo/" title="convo" />
             )

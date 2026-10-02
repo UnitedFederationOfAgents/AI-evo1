@@ -190,6 +190,26 @@ var managedApps = map[string]launchSpec{
 			return args
 		},
 	},
+	"robot": {
+		binName:   "ianar",
+		singleton: true,  // one per box, like condoccer
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.robotPort,
+				"--name", "robot",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
 	"federation-command": {
 		binName:   "federation-command",
 		singleton: false, // federation-command is N-per-host

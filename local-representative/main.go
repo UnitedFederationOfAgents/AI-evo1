@@ -166,6 +166,15 @@ type ConvoStateMsg struct {
 	HTTPPort string `json:"http_port"`
 }
 
+// RobotStateMsg is the "robot-state" payload: a managed ianar pushes it to
+// LR over representable, and LR forwards a copy up to agent-coordinator and
+// out to browser clients so the forwarded 'robot' view has the port to
+// reverse-proxy from. Grows domain-specific fields in a later step (see
+// condocs/InitialRobot.md).
+type RobotStateMsg struct {
+	HTTPPort string `json:"http_port"`
+}
+
 // LRHTTPMsg tells agent-coordinator which HTTP port this LR's dashboard listens
 // on, so AC can reverse-proxy the forwarded condoccer UI back through this LR.
 type LRHTTPMsg struct {
@@ -247,6 +256,7 @@ type Server struct {
 	condoccerRoot string                  // repo root a managed condoccer scans (empty: condoccer's default)
 	sessionsPort  string                  // HTTP port a managed session-manager serves on / is proxied from
 	convoPort     string                  // HTTP port a managed the-conversationalist serves on / is proxied from
+	robotPort     string                  // HTTP port a managed ianar serves on / is proxied from
 	selfStart     time.Time               // when this LR process started
 	binOverrides  map[string]string       // app name -> explicit binary path (from config)
 	terminalCmd   string                  // command prefix that hosts an interactive child in a terminal
@@ -314,11 +324,13 @@ type Server struct {
 	condoccerState *CondoccerStateMsg
 
 	// Latest state pushed up by a managed session-manager / the-conversationalist
-	// over representable -- see condoccerState above.
+	// / ianar over representable -- see condoccerState above.
 	sessionsMu    sync.RWMutex
 	sessionsState *SessionsStateMsg
 	convoMu       sync.RWMutex
 	convoState    *ConvoStateMsg
+	robotMu       sync.RWMutex
+	robotState    *RobotStateMsg
 
 	// Files tab: where uploaded files land, and where "persist" moves them to
 	// (see files.go). listFiles() scans these directly, so no further
@@ -484,12 +496,17 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("convo") {
 		convoStatus = "healthy"
 	}
+	robotStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("robot") {
+		robotStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
 			{Name: "condoccer", Status: condoccerStatus},
 			{Name: "convo", Status: convoStatus},
 			{Name: "sessions", Status: sessionsStatus},
+			{Name: "robot", Status: robotStatus},
 			{Name: "worker", Status: "healthy"},
 		},
 	}
@@ -548,6 +565,12 @@ func (s *Server) getConvoState() *ConvoStateMsg {
 	s.convoMu.RLock()
 	defer s.convoMu.RUnlock()
 	return s.convoState
+}
+
+func (s *Server) getRobotState() *RobotStateMsg {
+	s.robotMu.RLock()
+	defer s.robotMu.RUnlock()
+	return s.robotState
 }
 
 func (s *Server) getACClient() *representable.Client {
@@ -610,6 +633,9 @@ func (s *Server) pushStateToAC() {
 	}
 	if cv := s.getConvoState(); cv != nil {
 		ac.SendData("convo-state", *cv)
+	}
+	if rb := s.getRobotState(); rb != nil {
+		ac.SendData("robot-state", *rb)
 	}
 }
 
@@ -1068,6 +1094,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if cv := s.getConvoState(); cv != nil {
 			s.sendToClient(c, "convo-state", *cv)
 		}
+		if rb := s.getRobotState(); rb != nil {
+			s.sendToClient(c, "robot-state", *rb)
+		}
 		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 		for _, mm := range s.currentModeMismatches() {
 			s.sendToClient(c, "mode-mismatch", mm)
@@ -1306,12 +1335,41 @@ func (s *Server) proxyToConvo(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// proxyToRobot reverse-proxies /robot/* to a managed ianar's HTTP server on
+// loopback, stripping the /robot prefix -- mirrors proxyToCondoccer.
+func (s *Server) proxyToRobot(w http.ResponseWriter, r *http.Request) {
+	port := s.robotPort
+	if rb := s.getRobotState(); rb != nil && rb.HTTPPort != "" {
+		port = rb.HTTPPort // trust the port ianar actually reported
+	}
+	if port == "" {
+		http.Error(w, "ianar port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/robot")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "ianar not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 	mux.HandleFunc("/sessions/", s.proxyToSessions)
 	mux.HandleFunc("/convo/", s.proxyToConvo)
+	mux.HandleFunc("/robot/", s.proxyToRobot)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
 	mux.HandleFunc("/api/sessions", s.handleSessionsIndex)
@@ -1370,6 +1428,7 @@ type appConfig struct {
 	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
 	sessionsPort  string   // HTTP port a managed session-manager serves on / is reverse-proxied from
 	convoPort     string   // HTTP port a managed the-conversationalist serves on / is reverse-proxied from
+	robotPort     string   // HTTP port a managed ianar serves on / is reverse-proxied from
 	fileCacheDir  string   // directory uploaded files land in for the files tab
 	hostStoreDir  string   // directory a "persist" press moves a file into
 }
@@ -1419,6 +1478,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
 		sessionsPort:  pick("sessions-port", defaults.sessionsPort),
 		convoPort:     pick("convo-port", defaults.convoPort),
+		robotPort:     pick("robot-port", defaults.robotPort),
 		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
 		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
 	}
@@ -1520,6 +1580,7 @@ func main() {
 	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
 	sessionsPort := flag.String("sessions-port", "8085", "HTTP port a managed session-manager serves on; its UI is reverse-proxied at /sessions/")
 	convoPort := flag.String("convo-port", "8086", "HTTP port a managed the-conversationalist serves on; its UI is reverse-proxied at /convo/")
+	robotPort := flag.String("robot-port", "8087", "HTTP port a managed ianar serves on; its UI is reverse-proxied at /robot/")
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	flag.Parse()
@@ -1550,6 +1611,7 @@ func main() {
 		condoccerRoot: *condoccerRoot,
 		sessionsPort:  *sessionsPort,
 		convoPort:     *convoPort,
+		robotPort:     *robotPort,
 		fileCacheDir:  *fileCacheDir,
 		hostStoreDir:  *hostStoreDir,
 	})
@@ -1611,6 +1673,7 @@ func main() {
 	s.condoccerRoot = cfg.condoccerRoot
 	s.sessionsPort = cfg.sessionsPort
 	s.convoPort = cfg.convoPort
+	s.robotPort = cfg.robotPort
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
 	s.hostStoreDir = cfg.hostStoreDir
@@ -1696,6 +1759,20 @@ func main() {
 					ac.SendData("convo-state", empty)
 				}
 				s.setModeMismatch("convo", false, "")
+			}
+			return
+		}
+		if name == "robot" {
+			if state == "disconnected" {
+				s.robotMu.Lock()
+				s.robotState = nil
+				s.robotMu.Unlock()
+				empty := RobotStateMsg{}
+				s.broadcast("robot-state", empty)
+				if ac := s.getACClient(); ac != nil {
+					ac.SendData("robot-state", empty)
+				}
+				s.setModeMismatch("robot", false, "")
 			}
 			return
 		}
@@ -1838,6 +1915,21 @@ func main() {
 					s.broadcast("convo-state", payload)
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("convo-state", payload)
+					}
+				}
+			}
+			return
+		}
+		if name == "robot" {
+			if dataType == "robot-state" {
+				var payload RobotStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.robotMu.Lock()
+					s.robotState = &payload
+					s.robotMu.Unlock()
+					s.broadcast("robot-state", payload)
+					if ac := s.getACClient(); ac != nil {
+						ac.SendData("robot-state", payload)
 					}
 				}
 			}

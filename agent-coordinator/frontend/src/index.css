@@ -820,6 +820,7 @@ body {
 .sys-col-name { color: #d4d4d4; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow: visible; white-space: normal; }
 .sys-col-name-main { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sys-version-tag { font-size: 10px; font-weight: 400; color: #666; white-space: normal; overflow-wrap: anywhere; }
+.sys-session-tag { font-size: 10px; font-weight: 400; color: #888; white-space: normal; overflow-wrap: anywhere; }
 .sys-col-pid { color: #9c9c9c; }
 .sys-col-detail { color: #9c9c9c; }
 .sys-self-tag { margin-left: 8px; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; }

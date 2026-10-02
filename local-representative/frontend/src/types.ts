@@ -65,6 +65,7 @@ export interface ProcInfo {
   version?: string // this process's build version -- see docs/DevMode.md "Versioning". On self it's LR's own; on a managed instance it's whatever it last reported over representable, empty until it has
   update_available?: boolean // self only: the on-disk binary now answers --version differently than this running process -- see docs/DevMode.md "Loader"
   auto_update?: boolean // self only: restart automatically the moment update_available goes true, instead of waiting for the "update and restart" button -- see docs/DevMode.md "Loader"
+  session?: string // federation-command only: the session it's currently on (display name if session.yaml has one, otherwise the bare id) -- empty until an instance has connected and reported
 }
 
 export interface SystemStateMsg {

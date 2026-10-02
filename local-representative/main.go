@@ -67,6 +67,17 @@ type FCLogMsg struct {
 	Kind string `json:"kind,omitempty"` // "cmd" or "output"
 }
 
+// FCSessionMsg is the payload of federation-command's "fc-session" data
+// message: the session it is currently on (see federation-command/main.go's
+// sendSessionState). Not broadcast as its own WebSocket message type --
+// setFCSessionState folds it into ProcInfo.Session on the next system-state
+// (see procman.go), mirroring how a reported build version folds into
+// ProcInfo.Version.
+type FCSessionMsg struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
 // RidealongStateMsg is the payload of "ridealong-state" WebSocket messages.
 type RidealongStateMsg struct {
 	Active       bool     `json:"active"`
@@ -260,6 +271,20 @@ type Server struct {
 	// the two maps above. Empty until pollManagedVersions has run at least
 	// once for that app.
 	managedPendingVersion map[string]string
+
+	// fcSessionMu guards fcSessionID/fcSessionName: the session a
+	// federation-command instance most recently reported over representable's
+	// "fc-session" data message (see setFCSessionState in procman.go), folded
+	// into ProcInfo.Session on the system tab. Keyed implicitly to the app
+	// name "federation-command" like managedVersions above, for the same
+	// reason. Deliberately *not* cleared when FC disconnects (unlike
+	// ridealongState/condocState below) -- it has to survive the gap between
+	// restartManaged's terminate and relaunch so the relaunch can pass it back
+	// (see managedApps["federation-command"].buildArgs/buildEnv and
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+	fcSessionMu   sync.RWMutex
+	fcSessionID   string
+	fcSessionName string
 
 	// Latest condoc summary pushed up by a managed condoccer over representable.
 	condoccerMu    sync.RWMutex
@@ -1766,6 +1791,11 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("condoc-state", payload)
 				}
+			}
+		case "fc-session":
+			var payload FCSessionMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.setFCSessionState(payload.ID, payload.Name)
 			}
 		}
 	})

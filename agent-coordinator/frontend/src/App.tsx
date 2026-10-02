@@ -759,6 +759,9 @@ function SystemProcRow({
         {proc.version && (
           <span className="sys-version-tag" title="build version">{proc.version}</span>
         )}
+        {proc.session && (
+          <span className="sys-session-tag" title="active session">{proc.session}</span>
+        )}
       </span>
       <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
       <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
@@ -853,6 +856,14 @@ function SystemProcDetails({ proc, nowSec }: { proc: ProcInfo; nowSec: number })
             : proc.pending_version || <span className="sys-readout-placeholder">update available (version unknown)</span>}
         </span>
       </div>
+      {proc.name === 'federation-command' && (
+        <div className="sys-readout-row">
+          <span className="sys-readout-label">session</span>
+          <span className="sys-readout-value">
+            {proc.session || <span className="sys-readout-placeholder">not yet reported</span>}
+          </span>
+        </div>
+      )}
     </div>
   )
 }

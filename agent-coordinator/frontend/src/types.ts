@@ -70,6 +70,7 @@ export interface ProcInfo {
   update_available?: boolean // the on-disk binary now answers --version differently than this running process (self: docs/DevMode.md "Loader"; managed: Step4Prompt.md Revision D)
   pending_version?: string // the on-disk version update_available refers to; empty whenever update_available is false -- see Step5Prompt.md Revision J
   auto_update?: boolean // self only: restart that host's LR automatically the moment update_available goes true, instead of waiting for the "restart and update" control -- see docs/DevMode.md "Loader"
+  session?: string // federation-command only: the session it's currently on (display name if session.yaml has one, otherwise the bare id) -- empty until an instance has connected and reported
 }
 
 // SelfInfoMsg discloses this agent-coordinator instance's own dev-mode

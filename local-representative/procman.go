@@ -74,6 +74,15 @@ type ProcInfo struct {
 	// "auto-update" checkbox (see selfversion.go and
 	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E).
 	AutoUpdate bool `json:"auto_update,omitempty"`
+
+	// Session is federation-command-specific: the session it most recently
+	// reported over representable's "fc-session" data message (see
+	// setFCSessionState) -- its session.yaml display name when it has one,
+	// otherwise the bare session ID. Empty for every other managed app, and
+	// for FC itself until an instance has connected and reported at least
+	// once. See condocs/initialDistributedSessionsImpls/Step2Prompt.md
+	// Revision B.
+	Session string `json:"session,omitempty"`
 }
 
 // VersionMsg is the payload of a representable "version" data message: sent
@@ -188,6 +197,15 @@ var managedApps = map[string]launchSpec{
 				// docs/DevMode.md.
 				args = append(args, "--dev-mode")
 			}
+			if id, _ := s.fcSession(); id != "" {
+				// A previous (or still-running) FC instance reported this session —
+				// hand it straight back so a restart lands in the same place (see
+				// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+				// Harmless on a first launch with nothing reported yet: fcSession
+				// returns "" and this is skipped, leaving FC to resolve its own
+				// default session as before.
+				args = append(args, "--session", id)
+			}
 			return args
 		},
 		buildEnv: func(s *Server) []string {
@@ -207,6 +225,9 @@ var managedApps = map[string]launchSpec{
 			}
 			if s.devMode {
 				env = append(env, "FC_DEV_MODE=1")
+			}
+			if id, _ := s.fcSession(); id != "" {
+				env = append(env, "FC_SESSION="+id)
 			}
 			return env
 		},
@@ -273,6 +294,15 @@ func (s *Server) systemState() SystemStateMsg {
 		info.Version = s.managedVersion(p.app)
 		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
 		info.PendingVersion = s.managedPendingVersionFor(p.app)
+		if p.app == "federation-command" {
+			if id, name := s.fcSession(); id != "" {
+				if name != "" {
+					info.Session = name
+				} else {
+					info.Session = id
+				}
+			}
+		}
 		procs = append(procs, info)
 	}
 	s.procMu.Unlock()
@@ -315,6 +345,37 @@ func (s *Server) setManagedVersion(name, version string) {
 	if changed {
 		s.broadcastSystemState()
 	}
+}
+
+// setFCSessionState records the session a federation-command instance most
+// recently reported over representable's "fc-session" data message (see
+// main.go's SetDataHandler), broadcasting a fresh system-state if it's new or
+// has changed since the last report -- mirrors setManagedVersion. Unlike
+// managedVersions, this is never cleared on disconnect: it has to survive the
+// gap between restartManaged's terminate and relaunch so buildArgs/buildEnv
+// below can hand it straight back (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+func (s *Server) setFCSessionState(id, name string) {
+	s.fcSessionMu.Lock()
+	changed := s.fcSessionID != id || s.fcSessionName != name
+	if changed {
+		s.fcSessionID = id
+		s.fcSessionName = name
+	}
+	s.fcSessionMu.Unlock()
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// fcSession returns the session most recently reported by a connected
+// federation-command instance: id for relaunching it (--session/FC_SESSION),
+// name for display when session.yaml has one (falling back to id otherwise
+// -- see systemState). Both empty if none has connected/reported yet.
+func (s *Server) fcSession() (id, name string) {
+	s.fcSessionMu.RLock()
+	defer s.fcSessionMu.RUnlock()
+	return s.fcSessionID, s.fcSessionName
 }
 
 // managedVersion returns the build version most recently reported by the

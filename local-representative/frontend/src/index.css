@@ -951,6 +951,14 @@ body {
   overflow-wrap: anywhere;
 }
 
+.sys-session-tag {
+  font-size: 10px;
+  font-weight: 400;
+  color: #888;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .sys-col-status { font-weight: 600; }
 .sys-status-running { color: #4ec94e; }
 .sys-status-exited { color: #9c9c9c; }

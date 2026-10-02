@@ -44,3 +44,26 @@ Let's do a quick detour to FC - let's make it so that federation-command can acc
 Let's make it so it also communicates its session to LR, so we can see it on LR or AC.
 
 When LR restarts FC it should bring it back to the same session.
+
+
+prompt: [`deffb45`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/deffb4570b6e243183186a2f334309fca4efa871) → reply: [`25605bf`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/25605bffb8ff4180e4becc0af02d3de654bb7dd2)
+
+## Reply B
+
+I implemented Revision B's three asks in `federation-command/main.go` and `local-representative/{main.go,procman.go}` (plus matching frontend/README updates):
+
+1. **FC launch-arg for session**: added `--session <id>` / `-session` / `--session=` (plus `FC_SESSION` env var and a `session` config key), mirroring the existing `--lr-host` pattern, taking priority over `$AGENT_SESSION` in session resolution.
+2. **FC reports its session to LR**: added a `sendSessionState()`/`fc-session` representable message (mirroring `sendVersion`), called on connect and at every point the session changes (`switchToSession`, `set-session`/`clear-session`, `ufa session set`, rename-session). LR folds it into `ProcInfo.Session` on the system tab (visible on both LR's and agent-coordinator's frontends), relayed the same way build versions already are.
+3. **Restart continuity**: LR now remembers the last-reported FC session (deliberately *not* cleared on disconnect) and passes it back via `--session`/`FC_SESSION` whenever it relaunches a `federation-command` instance (both the system tab's "restart" and any future launch), so a restarted FC lands back in the same session.
+
+Note: as in the prior replies on this condoc, `go build`/`go test` and frontend builds were blocked by the sandbox's permission policy, so this was verified via careful manual review (diff re-read end-to-end, call-site tracing) rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

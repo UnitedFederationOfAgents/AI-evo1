@@ -307,6 +307,16 @@ type ProcInfo struct {
 	// silently dropped the flag, so the frontend's "auto-update" checkbox
 	// could never render as checked (Revision K).
 	AutoUpdate bool `json:"auto_update,omitempty"`
+
+	// Session is federation-command-specific: the session it most recently
+	// reported over representable's "fc-session" data message, relayed here
+	// unchanged by LR -- see local-representative/procman.go's own ProcInfo.
+	// Without this field, decoding LR's system-state payload into this struct
+	// silently dropped it the same way AutoUpdate did above (Revision K), so
+	// the federation-command tab's session tag could never render here even
+	// though LR's own frontend showed it fine (see
+	// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision D).
+	Session string `json:"session,omitempty"`
 }
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.

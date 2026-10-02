@@ -144,7 +144,17 @@ func main() {
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to create session directory: %v\n", err)
 	}
-	_ = writeSessionYAMLIfAbsent(sessionDir, session, session)
+	// Use the pretty "<date> Default <host>" name when this dispatch is the
+	// one racing to create the day's default session.yaml (see
+	// defaultSessionName) -- plain `session` (the bare ID) is only right here
+	// as a last-resort name for a non-default session that somehow has no
+	// session.yaml yet, which new-session's own ensureSession should already
+	// have prevented.
+	fallbackName := session
+	if session == defaultSessionID() {
+		fallbackName = defaultSessionName()
+	}
+	_ = writeSessionYAMLIfAbsent(sessionDir, session, fallbackName)
 
 	// Write the writing file at dispatch time — signals that a writer is starting
 	startTime := time.Now()
@@ -463,6 +473,17 @@ func getSession() string {
 	return defaultSessionID()
 }
 
+// defaultSessionName returns today's default session's human-readable display
+// name ("<date> Default <host>") -- see runGetDefaultSession. Shared with the
+// dispatch-time writeSessionYAMLIfAbsent fallback below so that whichever
+// clauditable invocation happens to be first to create the day's default
+// session.yaml (get-default-session, or a plain dispatched command racing
+// ahead of it) still gets the pretty name instead of the bare session ID
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision D).
+func defaultSessionName() string {
+	return time.Now().Format("2006-01-02") + " Default " + ufahostid.GetHostID()
+}
+
 // defaultSessionID returns today's default session identifier (YYYY-MM-DD-default).
 // This is day-granular, not per-invocation, so that every instance started on
 // the same day — local or distributed — resolves to the one session already
@@ -748,7 +769,7 @@ func isUnixTimestamp(s string) bool {
 func runGetDefaultSession() int {
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
 	sessionID := defaultSessionID()
-	name := time.Now().Format("2006-01-02") + " Default " + ufahostid.GetHostID()
+	name := defaultSessionName()
 	if err := ensureSession(recordsPath, sessionID, name); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable get-default-session: %v\n", err)
 		return 1

@@ -98,3 +98,22 @@ The name should have included the host name and it should have been "human reada
 Let's fix this.
 
 We have also updated LR correctly so we can see the FC session, but we do not see it in AC. We need to see this in both UIs. Let's fix this as well.
+
+
+prompt: [`bc2a83a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bc2a83a3aaeb026b717c36fc2b931e3089c84ad9) → reply: [`7304d14`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7304d14e2ca8f293bf17a26738c896849d26c6de)
+
+## Reply D
+
+Both changes look syntactically clean. `go build`/`go test` were blocked by the sandbox as in prior replies, so this was verified by manual review/tracing rather than a compiled run.
+
+I fixed both Revision D issues: (1) in `clauditable/main.go`, the dispatch-time `writeSessionYAMLIfAbsent` fallback (triggered any time a command runs before `get-default-session` wins the race to create the day's session.yaml) was writing the bare session ID as the name instead of the pretty `"<date> Default <host>"` name — added a shared `defaultSessionName()` helper and used it in both that fallback and `runGetDefaultSession`. (2) in `agent-coordinator/main.go`, the `ProcInfo` struct used to decode LR's relayed system-state was missing the `Session` field entirely (same class of silent-drop bug as the earlier `AutoUpdate`/Revision K issue noted in its own comment), so FC's session info was always discarded before reaching AC's frontend even though the frontend lookup code was already correct — added the matching `Session string \`json:"session,omitempty"\`` field.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -3,9 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"image"
 	"math"
-	"os"
 	"testing"
 	"time"
 )
@@ -33,89 +32,41 @@ func decodeSent(t *testing.T, c *wsClient, wantType string, out interface{}) {
 	}
 }
 
-// withStubbedLookPath overrides the package-level lookPath for the duration
-// of fn, restoring the original afterwards -- lets findNativeCaptureCommand
-// and circleMouse be tested without depending on what's actually installed
-// on the box running the tests.
-func withStubbedLookPath(t *testing.T, found map[string]bool, fn func()) {
-	t.Helper()
-	orig := lookPath
-	lookPath = func(bin string) (string, error) {
-		if found[bin] {
-			return "/usr/bin/" + bin, nil
-		}
-		return "", fmt.Errorf("exec: %q: executable file not found in $PATH", bin)
-	}
-	defer func() { lookPath = orig }()
-	fn()
-}
-
-// ---- findNativeCaptureCommand ----
-
-func TestFindNativeCaptureCommandPrefersFirstMatch(t *testing.T) {
-	withStubbedLookPath(t, map[string]bool{"maim": true, "gnome-screenshot": true}, func() {
-		bin, _, err := findNativeCaptureCommand()
-		if err != nil {
-			t.Fatalf("findNativeCaptureCommand: %v", err)
-		}
-		if bin != "maim" {
-			t.Errorf("bin = %q, want %q (first match in preference order)", bin, "maim")
-		}
-	})
-}
-
-func TestFindNativeCaptureCommandNoneFound(t *testing.T) {
-	withStubbedLookPath(t, map[string]bool{}, func() {
-		_, _, err := findNativeCaptureCommand()
-		if err == nil {
-			t.Fatalf("expected an error when no candidate is on PATH")
-		}
-	})
-}
-
 // ---- captureNativeDisplay ----
 
-func TestCaptureNativeDisplayNoToolFound(t *testing.T) {
-	withStubbedLookPath(t, map[string]bool{}, func() {
-		if _, err := captureNativeDisplay(); err == nil {
-			t.Fatalf("expected an error when no screenshot tool is on PATH")
-		}
-	})
-}
-
-func TestCaptureNativeDisplayWritesAndReadsTempFile(t *testing.T) {
-	origRun := runCapture
-	defer func() { runCapture = origRun }()
-	runCapture = func(bin string, args []string) error {
-		// Simulate the tool writing its output to the path IANAR resolved
-		// in place of the capture command's "%s" placeholder.
-		path := args[len(args)-1]
-		return os.WriteFile(path, []byte("fake-png-bytes"), 0o600)
+func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
+	orig := captureScreenImg
+	defer func() { captureScreenImg = orig }()
+	captureScreenImg = func() (image.Image, error) {
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
 	}
 
-	withStubbedLookPath(t, map[string]bool{"scrot": true}, func() {
-		data, err := captureNativeDisplay()
-		if err != nil {
-			t.Fatalf("captureNativeDisplay: %v", err)
+	data, err := captureNativeDisplay()
+	if err != nil {
+		t.Fatalf("captureNativeDisplay: %v", err)
+	}
+	// A valid PNG starts with the 8-byte PNG signature.
+	pngSig := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	if len(data) < len(pngSig) {
+		t.Fatalf("captured data too short to be a PNG: %d bytes", len(data))
+	}
+	for i, b := range pngSig {
+		if data[i] != b {
+			t.Fatalf("captured data isn't a PNG (byte %d = %#x, want %#x)", i, data[i], b)
 		}
-		if string(data) != "fake-png-bytes" {
-			t.Errorf("captured data = %q, want %q", data, "fake-png-bytes")
-		}
-	})
+	}
 }
 
-func TestCaptureNativeDisplayToolFailure(t *testing.T) {
-	origRun := runCapture
-	defer func() { runCapture = origRun }()
-	runCapture = func(bin string, args []string) error {
-		return errors.New("boom")
+func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
+	orig := captureScreenImg
+	defer func() { captureScreenImg = orig }()
+	captureScreenImg = func() (image.Image, error) {
+		return nil, errors.New("boom")
 	}
 
-	withStubbedLookPath(t, map[string]bool{"scrot": true}, func() {
-		if _, err := captureNativeDisplay(); err == nil {
-			t.Fatalf("expected captureNativeDisplay to propagate the tool's error")
-		}
-	})
+	if _, err := captureNativeDisplay(); err == nil {
+		t.Fatalf("expected captureNativeDisplay to propagate robotgo's error")
+	}
 }
 
 // ---- circlePoints ----
@@ -155,12 +106,14 @@ func TestCirclePointsClockwise(t *testing.T) {
 
 // ---- circleMouse ----
 
-func TestCircleMouseNoXdotool(t *testing.T) {
-	withStubbedLookPath(t, map[string]bool{}, func() {
-		if err := circleMouse(); err == nil {
-			t.Fatalf("expected an error when xdotool is not on PATH")
-		}
-	})
+func TestCircleMousePropagatesLocationError(t *testing.T) {
+	orig := mouseLocation
+	defer func() { mouseLocation = orig }()
+	mouseLocation = func() (int, int, error) { return 0, 0, errors.New("boom") }
+
+	if err := circleMouse(); err == nil {
+		t.Fatalf("expected an error when mouseLocation fails")
+	}
 }
 
 // ---- WebSocket handlers ----
@@ -187,12 +140,15 @@ func TestHandleCaptureBrowserPassesThroughImage(t *testing.T) {
 	}
 }
 
-func TestHandleCaptureNativeNoToolReportsError(t *testing.T) {
+func TestHandleCaptureNativeReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
-	withStubbedLookPath(t, map[string]bool{}, func() {
-		s.handleCaptureNative(c)
-	})
+
+	orig := captureScreenImg
+	defer func() { captureScreenImg = orig }()
+	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
+
+	s.handleCaptureNative(c)
 	var p CaptureResultMsg
 	decodeSent(t, c, "capture-result", &p)
 	if p.Success || p.Source != "native" || p.Error == "" {
@@ -203,9 +159,12 @@ func TestHandleCaptureNativeNoToolReportsError(t *testing.T) {
 func TestHandleCircleMouseReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
-	withStubbedLookPath(t, map[string]bool{}, func() {
-		s.handleCircleMouse(c)
-	})
+
+	orig := mouseLocation
+	defer func() { mouseLocation = orig }()
+	mouseLocation = func() (int, int, error) { return 0, 0, errors.New("boom") }
+
+	s.handleCircleMouse(c)
 	var p CircleMouseResultMsg
 	decodeSent(t, c, "circle-mouse-result", &p)
 	if p.Success || p.Error == "" {
@@ -214,16 +173,16 @@ func TestHandleCircleMouseReportsError(t *testing.T) {
 }
 
 // TestDriveCircle verifies the stepping loop visits every circlePoints
-// waypoint via runMouseMove, sleeping circleDur/circleSteps between each --
+// waypoint via moveMouse, sleeping circleDur/circleSteps between each --
 // split out from circleMouse (see driveCircle) specifically so this is
-// testable without xdotool or a real second of wall-clock time.
+// testable without robotgo or a real second of wall-clock time.
 func TestDriveCircle(t *testing.T) {
-	origMove, origSleep := runMouseMove, sleep
-	defer func() { runMouseMove, sleep = origMove, origSleep }()
+	origMove, origSleep := moveMouse, sleep
+	defer func() { moveMouse, sleep = origMove, origSleep }()
 
 	var moves [][2]int
 	var slept []time.Duration
-	runMouseMove = func(x, y int) error {
+	moveMouse = func(x, y int) error {
 		moves = append(moves, [2]int{x, y})
 		return nil
 	}
@@ -253,23 +212,23 @@ func TestDriveCircle(t *testing.T) {
 	}
 }
 
-// TestDriveCirclePropagatesMoveError verifies a failing runMouseMove call
+// TestDriveCirclePropagatesMoveError verifies a failing moveMouse call
 // aborts the loop rather than continuing through the remaining waypoints.
 func TestDriveCirclePropagatesMoveError(t *testing.T) {
-	origMove, origSleep := runMouseMove, sleep
-	defer func() { runMouseMove, sleep = origMove, origSleep }()
+	origMove, origSleep := moveMouse, sleep
+	defer func() { moveMouse, sleep = origMove, origSleep }()
 
 	calls := 0
-	runMouseMove = func(x, y int) error {
+	moveMouse = func(x, y int) error {
 		calls++
 		return errors.New("boom")
 	}
 	sleep = func(time.Duration) {}
 
 	if err := driveCircle(0, 0); err == nil {
-		t.Fatalf("expected driveCircle to propagate runMouseMove's error")
+		t.Fatalf("expected driveCircle to propagate moveMouse's error")
 	}
 	if calls != 1 {
-		t.Errorf("runMouseMove called %d times, want 1 (loop should abort on first error)", calls)
+		t.Errorf("moveMouse called %d times, want 1 (loop should abort on first error)", calls)
 	}
 }

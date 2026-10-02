@@ -194,3 +194,20 @@ the-conversationalist: present = true
 Note that each LR instance *presents* their local view but can *see* the global view (this is how they recognize that capabilities like transcription are available on another node and can make use of them).
 
 Let's make this correction.
+
+
+prompt: [`d5f2e34`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d5f2e341b455d560da41674ed0959ac80de2e598) → reply: [`2efa24c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2efa24c3259002d9f6bc04701acf4b34108b5c8e)
+
+## Reply G
+
+For Revision G, I fixed the agent-coordinator frontend's "global" debug stateboard view in `agent-coordinator/frontend/src/App.tsx`: it was previously flat-mapping each host's local stateboard entries with a host-label prefix (the same treatment used for logs/chain-calls), which just produced the per-host breakdown the revision complained about instead of a true global summary. I added a `mergeGlobalStateboard` helper that combines all hosts' entries per `(app, key)` — ORing `present` booleans across hosts, and unioning/sorting the distinct non-empty values for every other row (`hosts`, `instances`, and any custom key like `current-session`) — and wired `GlobalView`'s stateboard tab to render that merged set instead of the per-host flat-map; the per-host debug view is untouched. As with every prior reply on this condoc, `tsc`/`vite build` were blocked by the sandbox's permission policy, so this was verified via careful manual review rather than a compiled run.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -1177,6 +1177,51 @@ function formatStateboardLine(e: StateboardEntry, hostLabel?: string): string {
   return `${host}${e.app}: ${e.key} = ${e.value || '(empty)'}`
 }
 
+// mergeGlobalStateboard combines every host's locally-reported stateboard
+// into one process-wide view (Revision G): each LR only *presents* its own
+// local view (what's connected to it), but the global perspective needs to
+// show what's reachable across every host -- the same way an LR recognizes
+// a capability like transcription is usable from another node once *any*
+// host reports it present, rather than only its own. Flat-mapping per-host
+// entries with a host label (the old behaviour, still used for logs/chain
+// calls where per-host attribution is the point) just produced a repeated
+// per-host breakdown here instead of a merged summary. "present" rows OR
+// together across hosts; every other row (the "hosts"/"instances" list rows
+// and any custom key a sub-app posts, e.g. "current-session") unions the
+// distinct non-empty values reported by each host, sorted, so e.g. a
+// "hosts" row ends up listing every host where that app is present instead
+// of just whichever single host happened to report it.
+function mergeGlobalStateboard(hosts: Host[], hostData: Record<string, HostClientState>): StateboardEntry[] {
+  const present = new Map<string, boolean>()
+  const values = new Map<string, Set<string>>()
+  const idOf = (app: string, key: string) => `${app}\x00${key}`
+  for (const h of hosts) {
+    for (const e of hostData[h.id]?.stateboard?.entries ?? []) {
+      const id = idOf(e.app, e.key)
+      if (e.key === 'present') {
+        present.set(id, (present.get(id) ?? false) || e.value === 'true')
+      } else {
+        const set = values.get(id) ?? new Set<string>()
+        for (const part of e.value.split(',').map(v => v.trim())) {
+          if (part) set.add(part)
+        }
+        values.set(id, set)
+      }
+    }
+  }
+  const entries: StateboardEntry[] = []
+  for (const [id, isPresent] of present) {
+    const [app, key] = id.split('\x00')
+    entries.push({ app, key, value: String(isPresent) })
+  }
+  for (const [id, set] of values) {
+    const [app, key] = id.split('\x00')
+    entries.push({ app, key, value: [...set].sort().join(', ') })
+  }
+  entries.sort((a, b) => (a.app !== b.app ? a.app.localeCompare(b.app) : a.key.localeCompare(b.key)))
+  return entries
+}
+
 // resolveGlobalDebugUploadHost picks the "preferred file store" to save a
 // global-perspective debug capture to, where there's no single selected host
 // to fall back on the way ScreenshotButton's per-host case does: this
@@ -2763,9 +2808,7 @@ function GlobalView({
               chainLines={hosts.flatMap(h =>
                 (hostData[h.id]?.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e, h.label) })),
               )}
-              stateLines={hosts.flatMap(h =>
-                (hostData[h.id]?.stateboard?.entries ?? []).map(e => formatStateboardLine(e, h.label)),
-              )}
+              stateLines={mergeGlobalStateboard(hosts, hostData).map(e => formatStateboardLine(e))}
               uploadHostId={resolveGlobalDebugUploadHost(hosts, selfHostId)}
               uploadFiles={uploadFiles}
             />

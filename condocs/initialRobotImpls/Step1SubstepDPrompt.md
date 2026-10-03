@@ -294,12 +294,41 @@ I tracked down why the warm-up hedge from Revision C didn't help (its own startu
 
 I fixed that structurally: added `ianar/xerror_linux.go`, a small cgo file installing a custom `XSetErrorHandler` that logs the error instead of exiting, wired into `warmUpRobotDisplay()` via a new overridable `installXErrorHandler` var in `robot.go` (plus a test verifying it's called). I couldn't build/test this myself (same sandbox gate as every prior reply on this step — even `go env`/`git status` require approval here), and flagged in the comments that since Xlib's error callback is async and can't map back to the specific failing call, `captureScreenImg` may still return an empty/corrupt image on the errored request rather than a clean Go error — worth confirming on a real build/run pass.
 
+## Resource 2 -- Browser Error 1
 
-## <REPLACE-Revision|Retry> E
+robotgo capture: Capture image not found.
 
-<REPLACE-PROMPT>
+## Resource 3 -- Log Errors 1
+
+line(s) captured this session
+to file
+10:55:49 AM  [condoccer]! 2026/10/03 13:55:49 auto-connect enabled: dialing local-representative at localhost:8082 every 10s for up to 10m0s (runs in background)
+10:55:49 AM  [condoccer]! 2026/10/03 13:55:49 condoccer listening on http://localhost:8080 (root: /home/jedsall/workspace/research/AI-evo1)
+10:55:49 AM  [condoccer]! 2026/10/03 13:55:49 connected to local-representative at localhost:8082 as "condoccer"
+10:55:50 AM  [convo]! 2026/10/03 13:55:50 auto-connect enabled: dialing local-representative at localhost:8082 every 10s for up to 10m0s (runs in background)
+10:55:50 AM  [convo]! 2026/10/03 13:55:50 the-conversationalist listening on http://localhost:8086
+10:55:50 AM  [convo]! 2026/10/03 13:55:50 connected to local-representative at localhost:8082 as "convo"
+10:55:51 AM  [sessions]! 2026/10/03 13:55:51 auto-connect enabled: dialing local-representative at localhost:8082 every 10s for up to 10m0s (runs in background)
+10:55:51 AM  [sessions]! 2026/10/03 13:55:51 session-manager listening on http://localhost:8085
+10:55:51 AM  [sessions]! 2026/10/03 13:55:51 connected to local-representative at localhost:8082 as "sessions"
+10:57:29 AM  [robot]! 2026/10/03 13:57:29 robot: warmed up robotgo display connection at startup, reported screen size 3840x1080
+10:57:29 AM  [robot]! 2026/10/03 13:57:29 auto-connect enabled: dialing local-representative at localhost:8082 every 10s for up to 10m0s (runs in background)
+10:57:29 AM  [robot]! 2026/10/03 13:57:29 ianar listening on http://localhost:8087
+10:57:29 AM  [robot]! 2026/10/03 13:57:29 connected to local-representative at localhost:8082 as "robot"
+11:33:19 AM  [robot]! 2026/10/03 14:33:19 robot: capturing native display, robotgo reports screen size 3840x1080
+11:33:19 AM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
+11:33:48 AM  [robot]! 2026/10/03 14:33:48 robot: capturing native display, robotgo reports screen size 3840x1080
+11:33:48 AM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
+11:35:09 AM  [robot]! 2026/10/03 14:35:09 robot: capturing native display, robotgo reports screen size 3840x1080
+11:35:09 AM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
+11:35:12 AM  [robot]! 2026/10/03 14:35:12 robot: capturing native display, robotgo reports screen size 3840x1080
+11:35:12 AM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
 
 
-## Human-Prompt
+## Revision E
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+See 'Browser Error 1' and 'Log Errors 1' resources - we now have failures happening but not causing crashes.
+
+Let's fix the errors.
+
+The mouse circle may be working correctly.

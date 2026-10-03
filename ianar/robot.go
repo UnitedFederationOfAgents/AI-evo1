@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/png"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/go-vgo/robotgo"
@@ -77,6 +78,25 @@ func (s *Server) handleCircleMouse(c *wsClient) {
 	s.sendToClient(c, "circle-mouse-result", CircleMouseResultMsg{Success: true})
 }
 
+// robotMu serializes every call into robotgo. On Linux robotgo's capture
+// and input functions are thin cgo wrappers around Xlib, which is only
+// safe for single-threaded access to a given Display connection -- it
+// isn't goroutine-safe, and robotgo never calls XInitThreads() to make it
+// so. main.go's WebSocket loop hands each incoming message (including
+// "capture-native" and "circle-mouse") to its own goroutine
+// (`go s.handleClientMsg(c, m)`), so two overlapping requests -- e.g. a
+// double-clicked capture button, or a capture while circle-mouse is still
+// stepping -- can run robotgo calls concurrently on different OS threads.
+// That corrupts Xlib's request sequencing: the symptom is exactly an
+// "X_GetImage"/"BadMatch"-style X protocol error with the failing
+// request's serial number matching (or trailing just behind) the
+// connection's current serial, reported as a crash because Xlib's default
+// error handler calls exit() on unexpected protocol errors. Holding this
+// lock around every robotgo entry point below ensures only one such call
+// is ever in flight at a time, regardless of how many goroutines the
+// WebSocket layer spins up.
+var robotMu sync.Mutex
+
 // ---- Native display capture ----
 
 // captureScreenImg is overridden in tests so captureNativeDisplay can be
@@ -90,7 +110,9 @@ var captureScreenImg = func() (image.Image, error) {
 // binary required) to capture the full native display, returning the
 // resulting PNG bytes.
 func captureNativeDisplay() ([]byte, error) {
+	robotMu.Lock()
 	img, err := captureScreenImg()
+	robotMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("robotgo capture: %w", err)
 	}
@@ -151,7 +173,14 @@ var sleep = time.Sleep
 // circleMouse drives the native pointer through a clockwise circle centered
 // on its current position, via robotgo -- "native control" per
 // condocs/InitialRobot.md. Blocks for about circleDur.
+//
+// Held under robotMu for its whole ~circleDur run (not just the individual
+// mouseLocation/moveMouse calls) so a capture-native (or another
+// circle-mouse) request can't interleave its own robotgo calls partway
+// through the drive -- see robotMu's doc comment.
 func circleMouse() error {
+	robotMu.Lock()
+	defer robotMu.Unlock()
 	cx, cy, err := mouseLocation()
 	if err != nil {
 		return err

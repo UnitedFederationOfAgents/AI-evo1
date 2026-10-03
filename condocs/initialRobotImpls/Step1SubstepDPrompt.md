@@ -390,3 +390,34 @@ Still broken:
 Let's make another attempt if there's anything obvious, but let's also describe a systematic approach we can use to zero in on the problem. We could consider experiments and/or creating a temporary piece of code which exercises the basics around our problem area.
 
 In this response let's also include links to open source projects that perform the actions we're trying with the same library.
+
+
+prompt: [`1180500`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/118050045cd0bd2adc0ba43037d197901beb2ee4) → reply: [`ac611a9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ac611a936e0db9893dee2cd70f29077f7c3751aa)
+
+## Reply G
+
+## Reply G
+
+**Scope check:** I couldn't run `git status` myself to confirm (same sandbox approval gate every prior reply on this step has hit — it blocks `go`/`git` invocations here), but the only file I touched is the one new file below; nothing in `robot.go`/`xerror_linux.go`/`xgeometry_linux.go` changed.
+
+**Why no new structural fix in `robot.go` this round:** this revision's own log already falsifies Revision F's theory the same way Revision E falsified Revision D's — the geometry check now explicitly confirms robotgo's reported size *matches* the real root window, and the capture still fails identically at request serial 7. That's the third consecutive revision (C's warm-up timing, E's split-screen fallback, F's geometry check) where a plausible, specific guess about the request's *rectangle or timing* got shipped and was disproven by the next round's logs. The common thread across all of them (whole-screen and a region fully inside one output both fail identically, at the same serial, even once the rectangle is confirmed correct) says the failure doesn't vary with *what pixels are requested* at all — so guessing a fourth rectangle-shaped theory isn't a good use of another revision.
+
+**What I did instead:** added `ianar/cmd/xgetimagediag/main.go`, a temporary, standalone diagnostic (not wired into the Makefile/build, bypasses robotgo entirely) that talks to Xlib directly and runs a battery of `XGetImage` variants against the real display — holding the rectangle fixed and instead varying `format`/`plane_mask` (ZPixmap vs. XYPixmap, `AllPlanes` vs. a plane mask sized to the drawable's actual depth), plus a 1x1-pixel attempt to definitively close the "rectangle size" question. It also prints the root window's and default screen's depth/visual info up front, since request code 73 is the core `X_GetImage` request (not an SHM extension call), and a depth/visual mismatch (e.g. a 32-bit ARGB root under a compositor vs. the `AllPlanes`/implicit-24-bit assumption a plain capture call makes) is a textbook cause of exactly this signature but invisible to every theory tried so far. Run it with `cd ianar/cmd/xgetimagediag && CGO_ENABLED=1 go run .` on a host that can reproduce the failure; delete it once the cause is confirmed.
+
+As a second, independent systematic check: run a known-good external tool (`scrot`, `xwd`, or ImageMagick's `import`) against the same display right alongside this diagnostic. If those succeed where robotgo's path fails, that isolates the bug to robotgo's own Linux capture internals rather than the server/environment — pointing at reverting *just* native capture to shelling out (Step1Prompt's original pre-Revision-A approach), keeping robotgo only for mouse input, rather than continuing to patch around its capture path blindly.
+
+**Open-source references for the same actions/library** (I don't have working web access in this sandbox this round — `WebSearch`/`WebFetch` came back permission-denied — so these are from memory, not freshly verified; worth double-checking the exact URLs land where expected):
+- `github.com/go-vgo/robotgo` — the library itself; its issue tracker is the natural place to check for other Linux multi-monitor/X11 `BadMatch`/`X_GetImage` reports, and its `examples/` directory has minimal capture usage to diff against.
+- `github.com/kbinani/screenshot` — one of robotgo's Linux capture dependencies (seen in `go.mod`); closer to the metal than robotgo's own API.
+- `github.com/robotn/xgb` and `github.com/robotn/xgbutil` — robotgo's other Linux X11 dependencies (also in `go.mod`), worth cross-referencing against which path `CaptureImg` actually dispatches through on this build.
+- `xwd` (X.org's own tool, `gitlab.freedesktop.org/xorg/app/xwd`) and `scrot` (`github.com/resurrecting-open-source-projects/scrot`) — tiny, well-understood reference implementations built around one or two plain `XGetImage` calls, useful as known-good baselines.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

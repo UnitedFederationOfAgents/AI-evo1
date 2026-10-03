@@ -391,11 +391,11 @@ prompt: [`6afa22b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6
 I resolved the `gcc: executable file not found` failure from Resource 2 by moving the C-toolchain/X11-dev-header install into `scripts/install-dev-deps.sh` (new `check_cgo_toolchain`/`install_cgo_toolchain` functions checking `gcc` plus `build-essential`, `libx11-dev`, `libxtst-dev`, `libpng-dev` via `dpkg -s`, wired into `run_all_checks` and the install dispatch) rather than baking any one-time `apt` step into `deploy-dev-binaries` or the `ianar` Makefile itself. Also updated `ianar/Makefile`'s `build-go` comment to point at this script as the source of the prerequisite now that it's automated via `make check-dev-deps`/`make deploy-dev-binaries`.
 
 
-## <REPLACE-Revision|Retry> D
+## Substep D - Debug Robot Basics
 
-<REPLACE-PROMPT>
+[Step 1 Substep D](Step1SubstepDPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep D is now active. Interact with the substep file (Step1SubstepDPrompt.md).

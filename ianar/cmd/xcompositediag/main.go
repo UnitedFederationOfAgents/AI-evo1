@@ -81,7 +81,7 @@ static int hasCompositingManager(Display *d) {
 
 // tryGetImage runs a plain XGetImage against the given drawable (root or
 // the Composite overlay window) and reports success/failure, returning the
-// XImage (caller must XDestroyImage) on success or NULL on failure.
+// XImage (caller must destroyImage) on success or NULL on failure.
 static XImage *tryGetImage(Display *d, Window win, int w, int h, const char *label) {
 	printf("%s (%dx%d):\n", label, w, h);
 	XImage *img = XGetImage(d, win, 0, 0, w, h, AllPlanes, ZPixmap);
@@ -91,6 +91,21 @@ static XImage *tryGetImage(Display *d, Window win, int w, int h, const char *lab
 	}
 	printf("  -> OK (depth=%d bits_per_pixel=%d bytes_per_line=%d)\n", img->depth, img->bits_per_pixel, img->bytes_per_line);
 	return img;
+}
+
+// destroyImage wraps XDestroyImage -- which isn't a plain function but a
+// macro expanding to a call through the XImage struct's own function-pointer
+// table -- in a real, cgo-callable C function. Resource 6's
+// "could not determine what C.XDestroyImage refers to" came from calling
+// C.XDestroyImage directly from Go: cgo can only call actual exported
+// symbols, and can't resolve a macro that expands to a struct-field function
+// call, even with the right header included (that fixed the separate
+// implicit-declaration error in Revision J/M, but not this one). Routing the
+// call through this wrapper, which plain C compiles the macro inside just
+// fine, is the same reason xcomposite_linux.go's captureViaXCompositeC
+// already works: it calls XDestroyImage from C code, never from Go.
+static void destroyImage(XImage *img) {
+	XDestroyImage(img);
 }
 */
 import "C"
@@ -142,7 +157,7 @@ func main() {
 	defer C.free(unsafe.Pointer(rootLabel))
 	rootImg := C.tryGetImage(d, root, attrs.width, attrs.height, rootLabel)
 	if rootImg != nil {
-		C.XDestroyImage(rootImg)
+		C.destroyImage(rootImg)
 	}
 
 	fmt.Println()
@@ -159,7 +174,7 @@ func main() {
 		fmt.Println("\nOverlay-window GetImage failed the same way the root window does -- Revision L's theory is likely wrong too; see this step's next-debugging-steps notes for what to try instead.")
 		os.Exit(1)
 	}
-	defer C.XDestroyImage(overlayImg)
+	defer C.destroyImage(overlayImg)
 
 	// Success: decode and write a PNG so the captured content can be
 	// visually confirmed, not just "no error happened" -- same bar Revision

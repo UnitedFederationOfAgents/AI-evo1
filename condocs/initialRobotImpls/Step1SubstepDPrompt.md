@@ -703,3 +703,22 @@ See the latest resource and the UI error output:
 robotgo capture: Capture image not found. (XComposite fallback also failed: XComposite overlay-window capture failed (extension unavailable, no overlay window, or GetImage rejected it the same way it rejects the bare root))
 
 Let's fix both the experimental utility and ianar.
+
+
+prompt: [`36abeeb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/36abeeb5bc1e619b5f89129f136edae719ed1e76) → reply: [`651ab26`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/651ab26cc5df3f64e673275b01640e42eef8b0f4)
+
+## Reply N
+
+Only the one call site, consistently updated. Both fixes are self-contained and don't touch any other files.
+
+I fixed two things for Revision N: in `ianar/cmd/xcompositediag/main.go`, the `C.XDestroyImage` calls on the Go side were invoking a macro cgo can't resolve directly (the `#include` fix in Revision M only addressed the implicit-declaration variant of this error, not this one) — added a small `destroyImage` C wrapper function and routed both call sites through it. In `ianar/xcomposite_linux.go`, I replaced the single generic "extension unavailable, no overlay window, or GetImage rejected it" error with distinct reason codes threaded back from `captureViaXCompositeC`, so the next production failure names the actual cause (open-display/extension-missing/root-attrs/no-overlay/GetImage-rejected) instead of listing all possibilities — making the real diagnostic (now that it builds) and the production logs both conclusive going forward.
+
+
+## <REPLACE-Revision|Retry> O
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

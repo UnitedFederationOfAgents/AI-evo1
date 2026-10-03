@@ -11,6 +11,18 @@ import type { CaptureResultMsg, CircleMouseResultMsg, ModeMismatchMsg, ReprStatu
 type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
 type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
 
+// browserCaptureSupported: the Screen Capture API (getDisplayMedia) is a
+// desktop-browser feature -- no mobile browser (iOS Safari, Android Chrome,
+// etc.) exposes an OS-level screen-picker to web pages, so
+// `navigator.mediaDevices.getDisplayMedia` is simply undefined there (and
+// also under a non-secure context, i.e. http:// on anything but
+// localhost). That's a capability gap, not a permissions gap: a real
+// permissions denial only happens *after* the picker is shown, as a
+// NotAllowedError rejection from a call that does exist. Checked once at
+// module load since it depends only on the browser, not any app state.
+const browserCaptureSupported =
+  typeof navigator !== 'undefined' && !!navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function'
+
 function useRobotWS() {
   const [connected, setConnected] = useState(false)
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
@@ -132,6 +144,20 @@ function useRobotWS() {
   // renders through the same capture-result path as a native capture.
   const captureBrowser = useCallback(async () => {
     setCaptureStatus({ kind: 'pending' })
+    if (!browserCaptureSupported) {
+      // Fail fast with a message that names the real cause -- without this,
+      // calling the missing method throws a generic
+      // "getDisplayMedia is not a function" TypeError that reads like a
+      // bug rather than "this browser/context can't do this at all."
+      setCaptureStatus({
+        kind: 'error',
+        message:
+          'browser capture is not available: this browser (or an insecure, non-HTTPS connection) does not support screen capture -- ' +
+          'this is expected on mobile browsers, which have no OS screen-picker for web pages to use. Try Capture Native from a ' +
+          "machine with direct display access to the robot's host instead.",
+      })
+      return
+    }
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
       try {
@@ -151,6 +177,10 @@ function useRobotWS() {
         stream.getTracks().forEach((t) => t.stop())
       }
     } catch (err) {
+      // Past the support check above, a rejection here is a genuine
+      // permissions/user-action outcome (e.g. NotAllowedError from
+      // dismissing the picker), not a capability gap -- labeled
+      // separately so the two causes aren't conflated in the UI.
       setCaptureStatus({ kind: 'error', message: `browser capture failed: ${String(err)}` })
     }
   }, [send])
@@ -290,7 +320,16 @@ function RobotPanel({
         <button className="btn-secondary" disabled={!connected || captureStatus.kind === 'pending'} onClick={onCaptureNative}>
           Capture Native
         </button>
-        <button className="btn-secondary" disabled={!connected || captureStatus.kind === 'pending'} onClick={onCaptureBrowser}>
+        <button
+          className="btn-secondary"
+          disabled={!connected || captureStatus.kind === 'pending' || !browserCaptureSupported}
+          title={
+            browserCaptureSupported
+              ? undefined
+              : 'Not supported by this browser/connection -- screen capture has no mobile equivalent and requires HTTPS (or localhost)'
+          }
+          onClick={onCaptureBrowser}
+        >
           Capture Browser
         </button>
         <button className="btn-secondary" disabled={!connected || circleStatus.kind === 'running'} onClick={onCircleMouse}>

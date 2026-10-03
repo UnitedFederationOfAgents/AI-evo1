@@ -422,3 +422,24 @@ Is this due to a permissions gap or something else?
 Note we are interacting from a mobile browser.
 
 Let's fix this and explain the full expected interaction path for browser capture in our response.
+
+
+prompt: [`6fa2a4d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6fa2a4d331e295706f5fd477a08048e0655e0085) → reply: [`102d3fc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/102d3fca7adc52ae7f98b4a6a4bf69948d760b3f)
+
+## Reply H
+
+I tracked the `getDisplayMedia is not a function` error to a capability gap, not a permissions gap: the Screen Capture API has no mobile equivalent (no mobile browser exposes an OS-level screen-picker to web pages), so `navigator.mediaDevices.getDisplayMedia` is simply `undefined` there — a real permission denial would instead surface as a `NotAllowedError` rejection from a call that does exist, after the picker is shown.
+
+I fixed it in `ianar/frontend/src/App.tsx`: added a `browserCaptureSupported` feature check (desktop + secure context), used it to (1) disable the "Capture Browser" button with an explanatory tooltip before the user even clicks it, and (2) fail `captureBrowser()` fast with a clear "not supported on this browser/connection, expected on mobile — try Capture Native" message instead of the raw TypeError, while keeping the original catch block (now labeled as a genuine permission/user-action outcome) for real `getDisplayMedia` rejections on supported browsers.
+
+Full expected interaction path for browser capture (on a supported desktop browser over HTTPS/localhost): user clicks "Capture Browser" → `getDisplayMedia({video:true})` triggers the browser's native OS screen/window/tab picker → user selects a source and grants it → the resulting `MediaStream` is drawn to an off-screen `<video>`, then a single frame is drawn to a `<canvas>` → the canvas is PNG-encoded to a data URL and sent over the existing WebSocket as a `capture-browser` message → `ianar`'s backend (`robot.go`'s `handleCaptureBrowser`) passes it straight through and replies with the same `capture-result` message type the native-capture path uses, rendering in the preview pane. Since we're operating remotely on a mobile browser, this path is unavailable by design — `Capture Native` (robotgo/X11 on the robot's own host) is the only capture option that currently works from a mobile client. As with every prior reply on this step, I couldn't run `tsc`/`npm run build` myself (same sandbox compiler-invocation gate), so this still needs a real build pass to confirm.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -20,8 +20,9 @@ build-frontend:
 # "undefined: Move"/etc. compile errors from its remaining non-cgo files.
 # Forcing it on here (and only here) fixes that without touching the other
 # subprojects' preference for static, cgo-free binaries. Needs a C toolchain
-# and X11 dev headers (e.g. build-essential, libx11-dev, libxtst-dev,
-# libpng-dev) on the build host.
+# and X11 dev headers (build-essential, libx11-dev, libxtst-dev, libpng-dev)
+# on the build host -- see scripts/install-dev-deps.sh, which checks for/
+# installs these as part of `make check-dev-deps`/`make deploy-dev-binaries`.
 build-go:
 	CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 

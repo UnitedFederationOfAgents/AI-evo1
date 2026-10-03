@@ -382,3 +382,20 @@ make: *** [Makefile:77: deploy-dev-binaries] Error 1
 Let's look at the 'BUILD ERRORS 2' resource and fix the new issue.
 
 Note that we'll want to use the install-dev-deps approach rather than the deploy-dev-binaries call itself if these are one-time dependency installs (such as through 'apt').
+
+
+prompt: [`6afa22b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6afa22bc9193cd0e5b2e4555b885634914ff9060) → reply: [`54ba737`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/54ba73746ce61030fe452a1ee2f375f1ec429c92)
+
+## Reply C
+
+I resolved the `gcc: executable file not found` failure from Resource 2 by moving the C-toolchain/X11-dev-header install into `scripts/install-dev-deps.sh` (new `check_cgo_toolchain`/`install_cgo_toolchain` functions checking `gcc` plus `build-essential`, `libx11-dev`, `libxtst-dev`, `libpng-dev` via `dpkg -s`, wired into `run_all_checks` and the install dispatch) rather than baking any one-time `apt` step into `deploy-dev-binaries` or the `ianar` Makefile itself. Also updated `ianar/Makefile`'s `build-go` comment to point at this script as the source of the prerequisite now that it's automated via `make check-dev-deps`/`make deploy-dev-binaries`.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

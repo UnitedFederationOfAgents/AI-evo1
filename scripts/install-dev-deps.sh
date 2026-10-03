@@ -21,6 +21,11 @@ GO_INSTALL_DIR=/usr/local
 # Node.js major version to install when missing (must be >= NODE_MIN_MAJOR)
 NODE_INSTALL_MAJOR=20
 
+# apt packages providing the C toolchain + X11/libpng dev headers that ianar's
+# cgo-enabled robotgo build needs (see ianar/Makefile build-go, Step1Prompt.md
+# Revision B/C). Checked via the dpkg package name, installed via apt-get.
+CGO_APT_PACKAGES=(build-essential libx11-dev libxtst-dev libpng-dev)
+
 # Directories required at build and runtime (deepest paths; parents are created automatically)
 REQUIRED_DIRS=(
     "/AI-evo1-dev/bin"
@@ -163,12 +168,29 @@ check_dirs() {
     done
 }
 
+check_cgo_toolchain() {
+    hdr "C toolchain + X11/libpng dev headers (for ianar's CGO_ENABLED=1 robotgo build):"
+    if ! command -v gcc &>/dev/null; then
+        fail "gcc not found in PATH"
+    else
+        ok "gcc  ($(command -v gcc))"
+    fi
+    for pkg in "${CGO_APT_PACKAGES[@]}"; do
+        if dpkg -s "$pkg" &>/dev/null; then
+            ok "$pkg"
+        else
+            fail "$pkg  (not installed)"
+        fi
+    done
+}
+
 run_all_checks() {
     printf '=== Dependency check for: make deploy-dev-binaries ===\n'
     check_go
     check_node
     check_npm
     check_make
+    check_cgo_toolchain
     check_dirs
     printf '\n'
 }
@@ -226,6 +248,12 @@ install_make_pkg() {
     apt-get install -y make
 }
 
+install_cgo_toolchain() {
+    hdr "Installing C toolchain + X11/libpng dev headers..."
+    apt-get update -qq
+    apt-get install -y "${CGO_APT_PACKAGES[@]}"
+}
+
 create_missing_dirs() {
     hdr "Creating missing directories..."
     local created=0
@@ -280,6 +308,7 @@ require_root
 need_go=false
 need_node=false
 need_make=false
+need_cgo_toolchain=false
 
 if ! command -v go &>/dev/null; then
     need_go=true
@@ -304,10 +333,22 @@ if ! command -v make &>/dev/null; then
     need_make=true
 fi
 
+if ! command -v gcc &>/dev/null; then
+    need_cgo_toolchain=true
+else
+    for pkg in "${CGO_APT_PACKAGES[@]}"; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            need_cgo_toolchain=true
+            break
+        fi
+    done
+fi
+
 # Install in dependency order
-if "$need_go";   then install_go;       fi
-if "$need_node"; then install_node_npm; fi
-if "$need_make"; then install_make_pkg; fi
+if "$need_go";            then install_go;            fi
+if "$need_node";          then install_node_npm;       fi
+if "$need_make";          then install_make_pkg;       fi
+if "$need_cgo_toolchain"; then install_cgo_toolchain;  fi
 create_missing_dirs
 
 # Verify everything is now in order

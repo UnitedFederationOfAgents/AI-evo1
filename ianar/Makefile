@@ -13,8 +13,17 @@ build: build-frontend build-go
 build-frontend:
 	cd frontend && npm install && npm run build
 
+# robotgo (native capture/mouse control, see Step1Prompt.md Revision A) links
+# against libX11/libXtst/etc. via cgo. Other subprojects build fine with this
+# host's CGO_ENABLED=0 default since they're pure Go, but that default leaves
+# robotgo's cgo-only files out of the build, producing "undefined: Bitmap"/
+# "undefined: Move"/etc. compile errors from its remaining non-cgo files.
+# Forcing it on here (and only here) fixes that without touching the other
+# subprojects' preference for static, cgo-free binaries. Needs a C toolchain
+# and X11 dev headers (e.g. build-essential, libx11-dev, libxtst-dev,
+# libpng-dev) on the build host.
 build-go:
-	go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
+	CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 run: build
 	./$(BINARY_NAME)
@@ -24,7 +33,7 @@ run-loader: build
 	$(LOADER_DIR)/ufa-loader ./$(BINARY_NAME) $(ARGS)
 
 dev:
-	go run . -dev
+	CGO_ENABLED=1 go run . -dev
 
 dev-frontend:
 	cd frontend && npm run dev
@@ -37,7 +46,7 @@ clean:
 	echo "<!doctype html><html><body>Run make build to build the frontend.</body></html>" > frontend/dist/index.html
 
 test:
-	go test -v ./...
+	CGO_ENABLED=1 go test -v ./...
 
 deploy-dev-binary: build
 	@mkdir -p $(DEV_BIN_DIR)

@@ -355,3 +355,22 @@ make: *** [Makefile:77: deploy-dev-binaries] Error 1
 ## Revision B
 
 We have build errors after the latest changes, let's fix them.
+
+
+prompt: [`5cf78e7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5cf78e77326bbbbf1977cc9ff392225d3f09949a) → reply: [`6056c57`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6056c57f3199b630a407468b0da32f14765b683b)
+
+## Reply B
+
+Fixed the `ianar` build failure described in Revision B: the `go: undefined: Bitmap/Rect/Move/Toggle/MilliSleep/MoveSmooth` errors are the classic symptom of `robotgo`'s cgo-only platform files (which actually define those symbols) being left out of the build because this build host's `CGO_ENABLED=0` default — fine for every other, pure-Go subproject — silently drops them, leaving robotgo's remaining non-cgo files referencing symbols that no longer exist in the build.
+
+I updated `ianar/Makefile`'s `build-go`, `test`, and `dev` targets to force `CGO_ENABLED=1` for just this subproject (leaving the other subprojects' cgo-free static-binary default untouched), with a comment explaining why and noting the C-toolchain/X11-dev-header (`build-essential`, `libx11-dev`, `libxtst-dev`, `libpng-dev`) prerequisite on the build host. As in the prior replies for this step, I couldn't run `go build`/`go test` myself to confirm — this sandbox still blocks all `go` invocations — so this should be verified with a real build/test pass on a machine with both Go and a C toolchain installed.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

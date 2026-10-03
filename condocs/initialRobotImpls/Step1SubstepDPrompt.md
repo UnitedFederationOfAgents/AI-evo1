@@ -40,12 +40,200 @@ I tracked the X_GetImage crash to a goroutine-safety bug rather than an environm
 
 I fixed it in `ianar/robot.go` by adding a package-level `robotMu sync.Mutex` and holding it around every robotgo entry point: the capture call in `captureNativeDisplay()`, and the whole `circleMouse()` drive (location read through the full ~1s stepped move), each with a comment explaining why. I couldn't run `go build`/`go vet`/`go test` myself — same compiler-invocation approval gate noted in every prior reply on this step — so this still needs a real build/test pass to confirm.
 
+## Resource 1 -- Build Debug 3
 
-## <REPLACE-Revision|Retry> B
+make deploy-dev-binaries
+=== Dependency check for: make deploy-dev-binaries ===
+Go (>= 1.25):
+  [  OK  ] go 1.25  (/usr/local/bin/go)
+Node.js (>= 18):
+  [  OK  ] node v20.20.2  (/usr/bin/node)
+npm:
+  [  OK  ] npm 10.8.2  (/usr/bin/npm)
+make:
+  [  OK  ] make found  (/usr/bin/make)
+C toolchain + X11/libpng dev headers (for ianar's CGO_ENABLED=1 robotgo build):
+  [  OK  ] gcc  (/usr/bin/gcc)
+  [  OK  ] build-essential
+  [  OK  ] libx11-dev
+  [  OK  ] libxtst-dev
+  [  OK  ] libpng-dev
+Required directories:
+  [  OK  ] /AI-evo1-dev/bin
+  [  OK  ] /host-agent-files/agent-records
+  [  OK  ] /host-agent-files/exchange
+=== All dependencies satisfied. ===
+Building into staging dir /AI-evo1-dev/bin.new...
+rm -rf /AI-evo1-dev/bin.new
+mkdir -p /AI-evo1-dev/bin.new
+=== Building ufa-configurable ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/ufa-configurable'
+ufa-configurable is a library; nothing to deploy
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ufa-configurable'
+=== Building ufa-version ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/ufa-version'
+ufa-version is a library; nothing to deploy
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ufa-version'
+=== Building ufa-loader ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/ufa-loader'
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o ufa-loader .
+cp ufa-loader /AI-evo1-dev/bin.new/ufa-loader
+ufa-loader deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ufa-loader'
+=== Building clauditable ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/clauditable'
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o clauditable .
+cp clauditable /AI-evo1-dev/bin.new/clauditable
+clauditable deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/clauditable'
+=== Building clod ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/clod'
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o clod .
+cp clod /AI-evo1-dev/bin.new/clod
+clod deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/clod'
+=== Building ambiguous-agent ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/ambiguous-agent'
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o ambiguous-agent .
+cp ambiguous-agent /AI-evo1-dev/bin.new/ambiguous-agent
+ambiguous-agent deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ambiguous-agent'
+=== Building federation-command ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/federation-command'
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o federation-command .
+cp federation-command /AI-evo1-dev/bin.new/federation-command
+federation-command deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/federation-command'
+=== Building dungeon-keeper ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/dungeon-keeper'
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o dungeon-keeper .
+cp dungeon-keeper /AI-evo1-dev/bin.new/dungeon-keeper
+dungeon-keeper deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/dungeon-keeper'
+=== Building condoccer ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/condoccer'
+cd frontend && npm install && npm run build
+up to date, audited 69 packages in 2s
+7 packages are looking for funding
+  run `npm fund` for details
+6 vulnerabilities (2 moderate, 4 high)
+To address issues that do not require attention, run:
+  npm audit fix
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+Run `npm audit` for details.
+> condoccer-frontend@1.0.0 build
+> tsc && vite build
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+vite v5.4.21 building for production...
+transforming...
+✓ 31 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.40 kB │ gzip:  0.26 kB
+dist/assets/index-DCsivToX.css   13.99 kB │ gzip:  3.30 kB
+dist/assets/index-z9PhiDwc.js   187.66 kB │ gzip: 57.70 kB
+✓ built in 2.00s
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o condoccer .
+cp condoccer /AI-evo1-dev/bin.new/condoccer
+condoccer deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/condoccer'
+=== Building session-manager ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/session-manager'
+cd frontend && npm install && npm run build
+up to date, audited 69 packages in 1s
+7 packages are looking for funding
+  run `npm fund` for details
+2 vulnerabilities (1 moderate, 1 high)
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+Run `npm audit` for details.
+> session-manager-frontend@1.0.0 build
+> tsc && vite build
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+vite v5.4.21 building for production...
+transforming...
+✓ 31 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.40 kB │ gzip:  0.27 kB
+dist/assets/index-CTgh1_AI.css    7.25 kB │ gzip:  1.97 kB
+dist/assets/index-CVIf32a5.js   153.94 kB │ gzip: 49.11 kB
+✓ built in 1.82s
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o session-manager .
+cp session-manager /AI-evo1-dev/bin.new/session-manager
+session-manager deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/session-manager'
+=== Building the-conversationalist ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/the-conversationalist'
+cd frontend && npm install && npm run build
+up to date, audited 69 packages in 1s
+7 packages are looking for funding
+  run `npm fund` for details
+2 vulnerabilities (1 moderate, 1 high)
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+Run `npm audit` for details.
+> the-conversationalist-frontend@1.0.0 build
+> tsc && vite build
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+vite v5.4.21 building for production...
+transforming...
+✓ 31 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.41 kB │ gzip:  0.27 kB
+dist/assets/index-Be4yWqpY.css    4.52 kB │ gzip:  1.44 kB
+dist/assets/index-DSjE-OoU.js   150.99 kB │ gzip: 48.64 kB
+✓ built in 1.83s
+# go.sum is missing entries for the AWS SDK deps added in Revision D --
+# they were added from a sandbox with no network access to resolve them
+# (see that step's Reply), so `go build`'s default -mod=readonly refuses
+# to build. Reconcile against the network here as a stopgap; once
+# someone with network access runs `make deps` and commits the
+# resulting go.sum, this line is a fast no-op and can be dropped to
+# match the other subprojects' build-go.
+go mod tidy
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o the-conversationalist .
+cp the-conversationalist /AI-evo1-dev/bin.new/the-conversationalist
+the-conversationalist deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/the-conversationalist'
+=== Building ianar ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/ianar'
+cd frontend && npm install && npm run build
+up to date, audited 69 packages in 1s
+7 packages are looking for funding
+  run `npm fund` for details
+2 vulnerabilities (1 moderate, 1 high)
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+Run `npm audit` for details.
+> ianar-frontend@1.0.0 build
+> tsc && vite build
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+vite v5.4.21 building for production...
+transforming...
+✓ 31 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.40 kB │ gzip:  0.27 kB
+dist/assets/index-5m3gOsGj.css    3.51 kB │ gzip:  1.20 kB
+dist/assets/index-DxPH-9b4.js   149.17 kB │ gzip: 48.07 kB
+✓ built in 22.01s
+CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-fa7cdf7" -o ianar .
+go: golang.org/x/sys@v0.48.0 requires go >= 1.26.0 (running go 1.25.0)
+make[1]: *** [Makefile:27: build-go] Error 1
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ianar'
+=== Build failed -- leaving /AI-evo1-dev/bin untouched ===
+make: *** [Makefile:77: deploy-dev-binaries] Error 1
 
-<REPLACE-PROMPT>
 
+## Revision B
 
-## Human-Prompt
+We have a build error.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's correct this - ideally we will keep go <=1.25
+
+We will respond with any commands we'll need to use to regenerate sums or similar.
+
+If we MUST exceed 1.25 we'll explain why.

@@ -453,11 +453,24 @@ Tracked the "browser capture now unavailable on desktop" regression to a diagnos
 I fixed it in `ianar/frontend/src/App.tsx` by replacing the boolean `browserCaptureSupported` check with a `browserCaptureUnsupportedReason` that distinguishes `window.isSecureContext === false` (insecure/remote connection — affects every browser) from a genuine missing-API case (mobile), and threaded that precise reason into both the button's tooltip and the `captureBrowser()` error message. As with every prior reply on this step, I couldn't run `tsc`/`npm run build` myself (same sandbox compiler-invocation gate), so this still needs a real build pass to confirm.
 
 
-## <REPLACE-Revision|Retry> J
+## Revision J
 
-<REPLACE-PROMPT>
+Getting back to the temporary 'ianar/cmd/xgetimagediag/main.go' - we have an error to fix there:
+
+jedsall@provisioner01:~/workspace/research/AI-evo1/ianar/cmd/xgetimagediag$ go run main.go 
+# command-line-arguments
+./main.go: In function 'tryGetImage':
+./main.go:113:17: error: implicit declaration of function 'XDestroyImage'; did you mean 'XDestroyIC'? [-Wimplicit-function-declaration]
+  113 |                 XDestroyImage(img);
+      |                 ^~~~~~~~~~~~~
+      |                 XDestroyIC
+jedsall@provisioner01:~/workspace/research/AI-evo1/ianar/cmd/xgetimagediag$ CGO_ENABLED=1 go run .
+# ianar/cmd/xgetimagediag
+./main.go: In function 'tryGetImage':
+./main.go:113:17: error: implicit declaration of function 'XDestroyImage'; did you mean 'XDestroyIC'? [-Wimplicit-function-declaration]
+  113 |                 XDestroyImage(img);
+      |                 ^~~~~~~~~~~~~
+      |                 XDestroyIC
 
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix that now.

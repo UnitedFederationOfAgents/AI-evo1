@@ -40,6 +40,11 @@ package main
 /*
 #cgo LDFLAGS: -lX11
 #include <X11/Xlib.h>
+// XDestroyImage isn't declared by Xlib.h itself -- it's a macro in
+// Xutil.h that dispatches through the XImage's own function table
+// (((ximage)->f.destroy_image)(ximage)), which is why the compiler saw
+// it as an undeclared function rather than finding a missing prototype.
+#include <X11/Xutil.h>
 #include <stdio.h>
 #include <string.h>
 

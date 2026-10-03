@@ -688,12 +688,18 @@ Only the two intended files changed, each by a single `#include <X11/Xutil.h>` l
 
 I fixed the new build error by adding `#include <X11/Xutil.h>` to the cgo preambles in `ianar/xcomposite_linux.go` and `ianar/cmd/xcompositediag/main.go`: this is the exact same `XDestroyImage` implicit-declaration error fixed for `xgetimagediag` in Revision J, which recurred here because the two newer files added in Revision L never got that same include when they independently called `XDestroyImage`. As with every prior reply on this step, I couldn't build/test this myself (same sandbox gate), so it still needs a real build pass to confirm.
 
+## Resource 6 -- xcompositediag error
 
-## <REPLACE-Revision|Retry> N
+cd ianar/cmd/xcompositediag
+ go run .
+# ianar/cmd/xcompositediag
+./main.go:145:3: could not determine what C.XDestroyImage refers to
 
-<REPLACE-PROMPT>
 
+## Revision N
 
-## Human-Prompt
+See the latest resource and the UI error output:
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+robotgo capture: Capture image not found. (XComposite fallback also failed: XComposite overlay-window capture failed (extension unavailable, no overlay window, or GetImage rejected it the same way it rejects the bare root))
+
+Let's fix both the experimental utility and ianar.

@@ -678,3 +678,22 @@ make: *** [Makefile:77: deploy-dev-binaries] Error 1
 
 
 Let's fix that.
+
+
+prompt: [`a8634b7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a8634b7833ae079d86fe866e42207b05e51ccce9) → reply: [`7da7941`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7da7941a758b12d8510dfcf2b7a670e0b39e2ed6)
+
+## Reply M
+
+Only the two intended files changed, each by a single `#include <X11/Xutil.h>` line plus explanatory comment — nothing else was touched.
+
+I fixed the new build error by adding `#include <X11/Xutil.h>` to the cgo preambles in `ianar/xcomposite_linux.go` and `ianar/cmd/xcompositediag/main.go`: this is the exact same `XDestroyImage` implicit-declaration error fixed for `xgetimagediag` in Revision J, which recurred here because the two newer files added in Revision L never got that same include when they independently called `XDestroyImage`. As with every prior reply on this step, I couldn't build/test this myself (same sandbox gate), so it still needs a real build pass to confirm.
+
+
+## <REPLACE-Revision|Retry> N
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

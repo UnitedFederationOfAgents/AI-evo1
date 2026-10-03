@@ -45,6 +45,11 @@ package main
 /*
 #cgo LDFLAGS: -lX11 -lXcomposite
 #include <X11/Xlib.h>
+// XDestroyImage below isn't a plain Xlib function but a macro defined in
+// Xutil.h that dispatches through the XImage struct's own function table --
+// same fix as Revision J's (now-deleted) xgetimagediag diagnostic needed for
+// the identical error.
+#include <X11/Xutil.h>
 #include <X11/extensions/Xcomposite.h>
 #include <stdio.h>
 #include <string.h>

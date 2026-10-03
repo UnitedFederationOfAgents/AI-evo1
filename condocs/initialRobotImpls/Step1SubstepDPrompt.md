@@ -248,11 +248,13 @@ Root cause: the earlier `go mod tidy` run (commit `54a4c26`) bumped `golang.org/
 I fixed it in `ianar/Makefile`'s `build-go` target by adding `go mod edit -droprequire=golang.org/x/sys` followed by `go mod tidy` before the build step (with a comment explaining why), mirroring the existing stopgap pattern already used in `the-conversationalist/Makefile` for a similar go.sum staleness issue. This drops the stale pin and lets MVS re-derive a `go <=1.25`-compatible `x/sys` version from the real transitive requirers (robotgo et al.) using the build host's network access, so go.mod/go.sum self-heal on the next `make deploy-dev-binaries` run — no exceeding `go 1.25` was needed. I didn't hand-edit `go.mod`/`go.sum` directly since I can't invoke `go`/network from this sandbox to verify an exact replacement version; those commands are the ones needed to regenerate the sums.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's make another attempt to fix ianar:
 
+10:28:03 AM  [robot]! X Error of failed request:  BadMatch (invalid parameter attributes)
+10:28:03 AM  [robot]!   Major opcode of failed request:  73 (X_GetImage)
+10:28:03 AM  [robot]!   Serial number of failed request:  7
+10:28:03 AM  [robot]!   Current serial number in output stream:  7
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add slightly more logging for next time in case this fix doesn't succeed.

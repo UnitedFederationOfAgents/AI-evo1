@@ -646,11 +646,35 @@ I've executed Revision L. Here's a summary of what I did:
 **Changes:** Reverted `ianar/robot.go`'s capture path from `scrot` back to in-process `robotgo.CaptureImg`/`CaptureImg(x,y,w,h)` as requested, and added a new fallback, `captureViaXComposite`, used only when that fails — a Linux-only cgo helper (`ianar/xcomposite_linux.go`) that reads pixels from the Composite extension's overlay window instead of the bare root. I also added a temporary standalone diagnostic (`ianar/cmd/xcompositediag`, mirroring Revision G's now-deleted `xgetimagediag`) that independently confirms whether a compositing manager is active and whether overlay-window `GetImage` succeeds where root `GetImage` fails — run it to get a conclusive answer before trusting the fallback. Updated `robot_test.go`, `install-dev-deps.sh`, and `Makefile` accordingly (added `libxcomposite-dev`, kept `scrot` installed only as a diagnostic baseline per Revision G). As with every prior reply on this step, I couldn't build/test any of this myself (same sandbox gate), so the overlay-window theory is a best-effort attempt, not a verified fix — the diagnostic tool is the fastest way to confirm or rule it out.
 
 
-## <REPLACE-Revision|Retry> M
+## Revision M
 
-<REPLACE-PROMPT>
+Now that we have run 'install-dev-deps.sh' we have a new build error:
+
+# go.mod's indirect golang.org/x/sys requirement got bumped to v0.48.0 (whose
+# own go.mod demands go >= 1.26) by the `go mod tidy` run in 54a4c26, which also
+# bumped this module's `go` directive to 1.26.0 to match. Revision A's reply
+# hand-reverted just that directive back to `go 1.25` (to match this host's
+# installed toolchain -- see Step1SubstepDPrompt.md's dependency check) without
+# re-resolving the now-inconsistent x/sys pin, so `go build` refuses to load the
+# module graph (Build Debug 3). Drop the stale pin and re-tidy here as a
+# stopgap so MVS re-derives a go1.25-compatible version from the real
+# transitive requirers (robotgo et al) using this host's network access; once
+# someone does that and commits the resulting go.mod/go.sum, these two lines
+# are fast no-ops and can be dropped to match the other subprojects' build-go.
+go mod edit -droprequire=golang.org/x/sys
+go mod tidy
+CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-5871e87" -o ianar .
+# ianar
+./xcomposite_linux.go: In function 'captureViaXCompositeC':
+./xcomposite_linux.go:51:17: error: implicit declaration of function 'XDestroyImage'; did you mean 'XDestroyIC'? [-Wimplicit-function-declaration]
+   51 |                 XDestroyImage(img);
+      |                 ^~~~~~~~~~~~~
+      |                 XDestroyIC
+make[1]: *** [Makefile:42: build-go] Error 1
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ianar'
+
+=== Build failed -- leaving /AI-evo1-dev/bin untouched ===
+make: *** [Makefile:77: deploy-dev-binaries] Error 1
 
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix that.

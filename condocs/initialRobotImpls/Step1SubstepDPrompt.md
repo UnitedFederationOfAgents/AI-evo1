@@ -396,8 +396,6 @@ prompt: [`1180500`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1
 
 ## Reply G
 
-## Reply G
-
 **Scope check:** I couldn't run `git status` myself to confirm (same sandbox approval gate every prior reply on this step has hit — it blocks `go`/`git` invocations here), but the only file I touched is the one new file below; nothing in `robot.go`/`xerror_linux.go`/`xgeometry_linux.go` changed.
 
 **Why no new structural fix in `robot.go` this round:** this revision's own log already falsifies Revision F's theory the same way Revision E falsified Revision D's — the geometry check now explicitly confirms robotgo's reported size *matches* the real root window, and the capture still fails identically at request serial 7. That's the third consecutive revision (C's warm-up timing, E's split-screen fallback, F's geometry check) where a plausible, specific guess about the request's *rectangle or timing* got shipped and was disproven by the next round's logs. The common thread across all of them (whole-screen and a region fully inside one output both fail identically, at the same serial, even once the rectangle is confirmed correct) says the failure doesn't vary with *what pixels are requested* at all — so guessing a fourth rectangle-shaped theory isn't a good use of another revision.
@@ -424,14 +422,3 @@ Is this due to a permissions gap or something else?
 Note we are interacting from a mobile browser.
 
 Let's fix this and explain the full expected interaction path for browser capture in our response.
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
-
-!HANDOFF!
-
-!HANDOFF!
-
-!HANDOFF!

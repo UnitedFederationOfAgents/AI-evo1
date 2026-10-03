@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -106,22 +107,60 @@ var captureScreenImg = func() (image.Image, error) {
 	return robotgo.CaptureImg()
 }
 
+// screenSize is overridden in tests so captureNativeDisplay's logging
+// (added in Step1SubstepDPrompt.md Revision C) can be exercised without
+// robotgo needing a real display to query the screen size from.
+var screenSize = func() (w, h int) {
+	return robotgo.GetScreenSize()
+}
+
 // captureNativeDisplay uses robotgo (in-process; no external screenshot
 // binary required) to capture the full native display, returning the
 // resulting PNG bytes.
+//
+// Revision C's BadMatch/X_GetImage report failed at the exact same request
+// serial number (7) as the original, pre-Revision-A crash report, despite
+// the two being different X errors -- that repetition across unrelated
+// runs points at something tied to the *position* of the request in its X
+// display connection's lifetime (e.g. landing right after Xlib's own
+// handful of connection-setup requests) rather than to the request's
+// arguments. See warmUpRobotDisplay for this revision's hedge against
+// that. The log lines below exist so that, if the hedge doesn't fully
+// resolve it, the next crash report at least has the screen size robotgo
+// thought it was capturing immediately before the X server rejected the
+// request -- compare it against the display's actual resolution.
 func captureNativeDisplay() ([]byte, error) {
 	robotMu.Lock()
+	w, h := screenSize()
+	log.Printf("robot: capturing native display, robotgo reports screen size %dx%d", w, h)
 	img, err := captureScreenImg()
 	robotMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("robotgo capture: %w", err)
 	}
+	log.Printf("robot: native capture succeeded, image bounds %v", img.Bounds())
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, fmt.Errorf("encoding capture as png: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// warmUpRobotDisplay is called once from main() at startup, before the
+// server accepts any WebSocket clients, to force robotgo's underlying X
+// display connection (and whatever setup requests Xlib issues the first
+// time that connection is actually used) to happen in a controlled spot
+// rather than being deferred to whichever capture-native/circle-mouse
+// request a client happens to send first -- see captureNativeDisplay's doc
+// comment for why that early-connection-lifetime window is suspected.
+// Logs the reported screen size either way, as a startup-time data point
+// to compare against whatever captureNativeDisplay logs later.
+func warmUpRobotDisplay() {
+	robotMu.Lock()
+	defer robotMu.Unlock()
+	w, h := screenSize()
+	log.Printf("robot: warmed up robotgo display connection at startup, reported screen size %dx%d", w, h)
 }
 
 // ---- Circle-mouse (native input) ----

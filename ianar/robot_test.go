@@ -35,11 +35,12 @@ func decodeSent(t *testing.T, c *wsClient, wantType string, out interface{}) {
 // ---- captureNativeDisplay ----
 
 func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
-	orig := captureScreenImg
-	defer func() { captureScreenImg = orig }()
+	orig, origSize := captureScreenImg, screenSize
+	defer func() { captureScreenImg, screenSize = orig, origSize }()
 	captureScreenImg = func() (image.Image, error) {
 		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
 	}
+	screenSize = func() (int, int) { return 4, 4 }
 
 	data, err := captureNativeDisplay()
 	if err != nil {
@@ -58,11 +59,12 @@ func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
 }
 
 func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
-	orig := captureScreenImg
-	defer func() { captureScreenImg = orig }()
+	orig, origSize := captureScreenImg, screenSize
+	defer func() { captureScreenImg, screenSize = orig, origSize }()
 	captureScreenImg = func() (image.Image, error) {
 		return nil, errors.New("boom")
 	}
+	screenSize = func() (int, int) { return 4, 4 }
 
 	if _, err := captureNativeDisplay(); err == nil {
 		t.Fatalf("expected captureNativeDisplay to propagate robotgo's error")
@@ -144,9 +146,10 @@ func TestHandleCaptureNativeReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 
-	orig := captureScreenImg
-	defer func() { captureScreenImg = orig }()
+	orig, origSize := captureScreenImg, screenSize
+	defer func() { captureScreenImg, screenSize = orig, origSize }()
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
+	screenSize = func() (int, int) { return 4, 4 }
 
 	s.handleCaptureNative(c)
 	var p CaptureResultMsg

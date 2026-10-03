@@ -9,3 +9,20 @@ We now have the robot compiling, but we are getting a crash when we try to captu
 8:55:32 AM  [robot]!   Current serial number in output stream:  7
 
 Let's either resolve this if it is obvious or discuss steps we can take to analyze the failure if it is not.
+
+
+prompt: [`1a6d556`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1a6d556a1e0612558afe55fa4eb8ec4499907eed) → reply: [`74fc78c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/74fc78c590eae536e8e68484465c3aec8c95bde8)
+
+## Reply
+
+(no reply captured)
+
+
+## <REPLACE-Revision|Retry> A
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.

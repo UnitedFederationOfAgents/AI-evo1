@@ -1,6 +1,6 @@
 module ianar
 
-go 1.26.0
+go 1.25
 
 require (
 	github.com/go-vgo/robotgo v0.110.5

@@ -375,11 +375,18 @@ Resource 4 (Browser Error 2) falsified Revision E's "dual-output boundary" theor
 I removed the now-disproven split-screen fallback (`shouldTrySplitFallback`/`captureSplitScreenFallback` and their tests) and replaced it in `ianar/robot.go` with a new `rootWindowGeometry` check backed by a small Xlib helper (`ianar/xgeometry_linux.go`, cgo `XGetWindowAttributes` on the real root window) that queries the root window's actual geometry as ground truth. `captureNativeDisplay` now compares that against robotgo's self-reported `screenSize` and captures the real rectangle when they disagree, logging which path was taken either way. As with every prior reply on this step, I couldn't build/test this myself, so it still needs a real run to confirm — but even if the mismatch isn't the true cause, the new log line will conclusively rule it in or out for the next attempt.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+Still broken:
+
+12:28:13 PM  [robot]! 2026/10/03 15:28:13 robot: capturing native display, robotgo reports screen size 3840x1080 (matches real root window geometry)
+12:28:13 PM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
+12:28:23 PM  [robot]! 2026/10/03 15:28:23 robot: capturing native display, robotgo reports screen size 3840x1080 (matches real root window geometry)
+12:28:23 PM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
+12:28:24 PM  [robot]! 2026/10/03 15:28:24 robot: capturing native display, robotgo reports screen size 3840x1080 (matches real root window geometry)
+12:28:24 PM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
 
 
-## Human-Prompt
+Let's make another attempt if there's anything obvious, but let's also describe a systematic approach we can use to zero in on the problem. We could consider experiments and/or creating a temporary piece of code which exercises the basics around our problem area.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In this response let's also include links to open source projects that perform the actions we're trying with the same library.

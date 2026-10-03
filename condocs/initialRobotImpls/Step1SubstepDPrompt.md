@@ -435,11 +435,6 @@ I fixed it in `ianar/frontend/src/App.tsx`: added a `browserCaptureSupported` fe
 Full expected interaction path for browser capture (on a supported desktop browser over HTTPS/localhost): user clicks "Capture Browser" → `getDisplayMedia({video:true})` triggers the browser's native OS screen/window/tab picker → user selects a source and grants it → the resulting `MediaStream` is drawn to an off-screen `<video>`, then a single frame is drawn to a `<canvas>` → the canvas is PNG-encoded to a data URL and sent over the existing WebSocket as a `capture-browser` message → `ianar`'s backend (`robot.go`'s `handleCaptureBrowser`) passes it straight through and replies with the same `capture-result` message type the native-capture path uses, rendering in the preview pane. Since we're operating remotely on a mobile browser, this path is unavailable by design — `Capture Native` (robotgo/X11 on the robot's own host) is the only capture option that currently works from a mobile client. As with every prior reply on this step, I couldn't run `tsc`/`npm run build` myself (same sandbox compiler-invocation gate), so this still needs a real build pass to confirm.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The browser capture function has now become unavailable for my desktop browser. Let's fix this...

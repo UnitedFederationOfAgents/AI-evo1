@@ -284,3 +284,22 @@ We still have a failure, but more logs:
 10:44:32 AM  [robot]!   Current serial number in output stream:  7
 
 Let's fix the error.
+
+
+prompt: [`6c4a6d7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6c4a6d7ada5502173ccbda28907786165d10c5b5) → reply: [`5f6dce2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5f6dce2fb8c4f913f90edcdac582d386bb51cbd8)
+
+## Reply D
+
+I tracked down why the warm-up hedge from Revision C didn't help (its own startup call completed cleanly, yet the next real capture still crashed at the identical request serial 7), which rules out "early connection lifetime" as the cause and instead points at Xlib's *default* error handler — it calls `exit()` on any unexpected X protocol error, which is the actual reason a BadMatch takes down the whole process regardless of what specifically triggers it.
+
+I fixed that structurally: added `ianar/xerror_linux.go`, a small cgo file installing a custom `XSetErrorHandler` that logs the error instead of exiting, wired into `warmUpRobotDisplay()` via a new overridable `installXErrorHandler` var in `robot.go` (plus a test verifying it's called). I couldn't build/test this myself (same sandbox gate as every prior reply on this step — even `go env`/`git status` require approval here), and flagged in the comments that since Xlib's error callback is async and can't map back to the specific failing call, `captureScreenImg` may still return an empty/corrupt image on the errored request rather than a clean Go error — worth confirming on a real build/run pass.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

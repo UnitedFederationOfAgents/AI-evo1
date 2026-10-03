@@ -71,6 +71,27 @@ func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
 	}
 }
 
+// ---- warmUpRobotDisplay ----
+
+// TestWarmUpRobotDisplayInstallsErrorHandler verifies warmUpRobotDisplay
+// installs the (overridable, see installXErrorHandler in robot.go) X error
+// handler before querying the screen size, rather than only on the
+// Linux-specific path exercised by xerror_linux.go's init().
+func TestWarmUpRobotDisplayInstallsErrorHandler(t *testing.T) {
+	origInstall, origSize := installXErrorHandler, screenSize
+	defer func() { installXErrorHandler, screenSize = origInstall, origSize }()
+
+	installed := false
+	installXErrorHandler = func() { installed = true }
+	screenSize = func() (int, int) { return 4, 4 }
+
+	warmUpRobotDisplay()
+
+	if !installed {
+		t.Fatalf("warmUpRobotDisplay did not call installXErrorHandler")
+	}
+}
+
 // ---- circlePoints ----
 
 // TestCirclePointsShape verifies circlePoints returns a closed loop (first

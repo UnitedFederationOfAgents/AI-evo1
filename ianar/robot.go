@@ -118,17 +118,37 @@ var screenSize = func() (w, h int) {
 // binary required) to capture the full native display, returning the
 // resulting PNG bytes.
 //
-// Revision C's BadMatch/X_GetImage report failed at the exact same request
-// serial number (7) as the original, pre-Revision-A crash report, despite
-// the two being different X errors -- that repetition across unrelated
-// runs points at something tied to the *position* of the request in its X
-// display connection's lifetime (e.g. landing right after Xlib's own
-// handful of connection-setup requests) rather than to the request's
-// arguments. See warmUpRobotDisplay for this revision's hedge against
-// that. The log lines below exist so that, if the hedge doesn't fully
-// resolve it, the next crash report at least has the screen size robotgo
-// thought it was capturing immediately before the X server rejected the
-// request -- compare it against the display's actual resolution.
+// Revision C's hedge (warming up robotgo's X connection at startup, see
+// warmUpRobotDisplay) didn't hold: Revision D's logs show the warm-up
+// itself completing cleanly -- logging the same 3840x1080 screen size --
+// and the very next real capture-native request still crashing with the
+// identical BadMatch/X_GetImage at request serial 7. That rules out "early
+// position in the display connection's lifetime" as the cause: the
+// warmed-up connection never even reached the failing request. What's
+// unchanged across every report of this bug (the original, Revision C's,
+// and Revision D's) is that it's always request serial 7 that fails,
+// across otherwise-unrelated runs -- which instead points at robotgo
+// opening a *fresh* X display connection per call (so request numbering
+// restarts each time, landing the first substantive request -- the actual
+// XGetImage -- at a fixed serial once Xlib's own handful of per-connection
+// setup requests are accounted for), with something about that XGetImage
+// request's parameters (plausibly the captured rectangle vs. the root
+// window's actual geometry on this 3840x1080 multi-monitor layout -- see
+// screenSize's log line) not matching what the X server will accept.
+//
+// Rather than keep guessing at that exact geometry mismatch blind (no
+// build/X server access from this sandbox to confirm it -- see this
+// reply's note on verification), this revision fixes the actual "crash":
+// Xlib's *default* error handler calls exit() on any unexpected protocol
+// error, including this one, which is why a BadMatch here takes down the
+// whole ianar process instead of surfacing as an ordinary error return.
+// warmUpRobotDisplay now installs a non-fatal replacement (see
+// installXErrorHandler) before anything touches the display, so whatever
+// specifically triggers serial 7's BadMatch, it no longer crashes --
+// though captureScreenImg's result for that call may still come back
+// empty/corrupt rather than cleanly erroring, see installXErrorHandler's
+// doc comment. The screen-size logging stays in place either way, to help
+// tell those cases apart in the next report if one still comes in.
 func captureNativeDisplay() ([]byte, error) {
 	robotMu.Lock()
 	w, h := screenSize()
@@ -147,18 +167,43 @@ func captureNativeDisplay() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// installXErrorHandler overrides Xlib's default X protocol error handler
+// -- which calls exit() on an unexpected error such as the
+// BadMatch/X_GetImage this step keeps hitting -- with one that just logs
+// and lets the process continue (see xerror_linux.go for the real
+// handler). It's a no-op on non-Linux builds: this subproject's native
+// capture/input is Linux/Xlib-only (see robotMu's doc comment), and
+// everything else here follows the same overridable-var pattern
+// (captureScreenImg, screenSize, mouseLocation, moveMouse, sleep) so
+// xerror_linux.go's init() can swap in the real implementation without an
+// import cycle or a build-tagged call site.
+//
+// An Xlib error handler is necessarily process-global and async relative
+// to the call that triggered it (XErrorEvent doesn't identify which Go
+// call provoked it), so this can't turn a BadMatch into a clean, local Go
+// `error` the way the rest of robot.go reports failures -- it only stops
+// that error from taking the whole process down. Must be installed before
+// anything touches the display, which is why it's called from
+// warmUpRobotDisplay below rather than per-capture.
+var installXErrorHandler = func() {}
+
 // warmUpRobotDisplay is called once from main() at startup, before the
-// server accepts any WebSocket clients, to force robotgo's underlying X
-// display connection (and whatever setup requests Xlib issues the first
-// time that connection is actually used) to happen in a controlled spot
-// rather than being deferred to whichever capture-native/circle-mouse
-// request a client happens to send first -- see captureNativeDisplay's doc
-// comment for why that early-connection-lifetime window is suspected.
-// Logs the reported screen size either way, as a startup-time data point
-// to compare against whatever captureNativeDisplay logs later.
+// server accepts any WebSocket clients, to (a) install the non-fatal X
+// error handler above before anything else touches the display, and (b)
+// force robotgo's underlying X display connection to get used once in a
+// controlled spot rather than only on whichever capture-native/circle-mouse
+// request a client happens to send first. (Revision D's logs show that
+// second part, on its own, doesn't prevent the BadMatch/X_GetImage crash
+// this step is chasing -- see captureNativeDisplay's doc comment -- so (a)
+// is this revision's actual fix for that; (b) is kept since it's still
+// useful for surfacing *other* display-setup problems at a predictable
+// point in the startup log.) Logs the reported screen size either way, as
+// a startup-time data point to compare against whatever captureNativeDisplay
+// logs later.
 func warmUpRobotDisplay() {
 	robotMu.Lock()
 	defer robotMu.Unlock()
+	installXErrorHandler()
 	w, h := screenSize()
 	log.Printf("robot: warmed up robotgo display connection at startup, reported screen size %dx%d", w, h)
 }

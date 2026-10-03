@@ -438,3 +438,26 @@ Full expected interaction path for browser capture (on a supported desktop brows
 ## Revision I
 
 The browser capture function has now become unavailable for my desktop browser. Let's fix this...
+
+
+prompt: [`9458856`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/94588561f3b8a78c34480086567b28fd7aa84180) → reply: [`d9163ff`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d9163ffc94ff70312909fc23b95fa55e4ef42509)
+
+## Reply I
+
+This all looks consistent. The fix is complete.
+
+## Summary
+
+Tracked the "browser capture now unavailable on desktop" regression to a diagnosis bug in Revision H's fix, not a new break: the `browserCaptureSupported` check conflated "missing API" with "mobile browser," but `getDisplayMedia` disappears identically on **any** browser — desktop included — once the connection isn't a secure context (plain `http://` on a non-localhost host, e.g. reached remotely through `agent-coordinator`'s reverse proxy, which has no TLS termination today; the Tailscale Funnel HTTPS front door designed in `agent-coordinator/web-exposure-poc/` hasn't actually been brought up yet). So a desktop user hitting the tool remotely over plain HTTP was always going to lose this capability, but the old message told them it was "expected on mobile," which is misleading and reads as broken.
+
+I fixed it in `ianar/frontend/src/App.tsx` by replacing the boolean `browserCaptureSupported` check with a `browserCaptureUnsupportedReason` that distinguishes `window.isSecureContext === false` (insecure/remote connection — affects every browser) from a genuine missing-API case (mobile), and threaded that precise reason into both the button's tooltip and the `captureBrowser()` error message. As with every prior reply on this step, I couldn't run `tsc`/`npm run build` myself (same sandbox compiler-invocation gate), so this still needs a real build pass to confirm.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

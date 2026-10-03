@@ -413,11 +413,21 @@ As a second, independent systematic check: run a known-good external tool (`scro
 - `xwd` (X.org's own tool, `gitlab.freedesktop.org/xorg/app/xwd`) and `scrot` (`github.com/resurrecting-open-source-projects/scrot`) — tiny, well-understood reference implementations built around one or two plain `XGetImage` calls, useful as known-good baselines.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+We are operating remotely for now so we'll focus on browser capture for a revision. We get this error:
+
+browser capture failed: TypeError: navigator.mediaDevices.getDisplayMedia is not a function
+
+Is this due to a permissions gap or something else?
+
+Note we are interacting from a mobile browser.
+
+Let's fix this and explain the full expected interaction path for browser capture in our response.
 
 
 ## Human-Prompt
 
 When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+
+!HANDOFF!

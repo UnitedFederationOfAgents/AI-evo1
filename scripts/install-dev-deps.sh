@@ -23,8 +23,12 @@ NODE_INSTALL_MAJOR=20
 
 # apt packages providing the C toolchain + X11/libpng dev headers that ianar's
 # cgo-enabled robotgo build needs (see ianar/Makefile build-go, Step1Prompt.md
-# Revision B/C). Checked via the dpkg package name, installed via apt-get.
-CGO_APT_PACKAGES=(build-essential libx11-dev libxtst-dev libpng-dev)
+# Revision B/C), plus the `scrot` binary ianar's native capture shells out to
+# at runtime (see ianar/robot.go's captureViaScrot, Step1SubstepDPrompt.md
+# Revision K -- robotgo's own in-process XGetImage capture turned out not to
+# work against this host's display at all, regardless of parameters, while
+# scrot does). Checked via the dpkg package name, installed via apt-get.
+CGO_APT_PACKAGES=(build-essential libx11-dev libxtst-dev libpng-dev scrot)
 
 # Directories required at build and runtime (deepest paths; parents are created automatically)
 REQUIRED_DIRS=(
@@ -169,7 +173,7 @@ check_dirs() {
 }
 
 check_cgo_toolchain() {
-    hdr "C toolchain + X11/libpng dev headers (for ianar's CGO_ENABLED=1 robotgo build):"
+    hdr "C toolchain + X11/libpng dev headers + scrot (for ianar's CGO_ENABLED=1 robotgo build and native capture):"
     if ! command -v gcc &>/dev/null; then
         fail "gcc not found in PATH"
     else
@@ -249,7 +253,7 @@ install_make_pkg() {
 }
 
 install_cgo_toolchain() {
-    hdr "Installing C toolchain + X11/libpng dev headers..."
+    hdr "Installing C toolchain + X11/libpng dev headers + scrot..."
     apt-get update -qq
     apt-get install -y "${CGO_APT_PACKAGES[@]}"
 }

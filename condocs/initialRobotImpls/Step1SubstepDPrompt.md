@@ -613,3 +613,24 @@ drwxrwxr-x 2 jedsall jedsall  4096 Oct  3 17:42 .
 -rw-rw-r-- 1 jedsall jedsall 12189 Oct  3 17:42 2026-10-03-174217_3840x1080_scrot.png
 
 Let's fix them.
+
+
+prompt: [`7c08db3`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7c08db39fa2f0dcc58a3918d10c2062bfe9ff0d1) → reply: [`03993e7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/03993e7be932fac86723bb7e0e9d41a4b116fee9)
+
+## Reply K
+
+All remaining mentions are historical/explanatory comments, not actual calls — no dangling references to the removed diagnostic in any build files. The change set is complete and self-consistent. I was not able to invoke `go build`/`go test` myself (same sandbox gate as every prior reply on this step), so this still needs a real build/run pass to confirm.
+
+## Summary
+
+Revision K's `xgetimagediag` battery proved the BadMatch/X_GetImage failure is invariant across every GetImage parameter (format, plane_mask, even a 1x1px rectangle), ruling out all prior rectangle/format-based theories (Revisions C/E/F/G) — while confirming `scrot` succeeds against the identical display. Per Revision G's flagged fallback, I fixed it in `ianar/robot.go` by replacing the in-process `robotgo.CaptureImg()` calls with a new `captureViaScrot` that shells out to `scrot` (writing to a temp PNG and decoding it), keeping robotgo only for mouse input/screen-size/geometry queries that were never implicated. I also added `scrot` to `scripts/install-dev-deps.sh`'s dependency list/installer, and deleted the now-fulfilled temporary `ianar/cmd/xgetimagediag` diagnostic (per its own doc comment's "delete it once the cause is confirmed").
+
+
+## <REPLACE-Revision|Retry> L
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

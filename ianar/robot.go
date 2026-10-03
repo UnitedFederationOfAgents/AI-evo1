@@ -8,6 +8,9 @@ import (
 	"image/png"
 	"log"
 	"math"
+	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,10 +24,14 @@ import (
 // message (see main.go's handleClientMsg) and reported back over
 // "capture-result" / "circle-mouse-result".
 //
-// Native capture and native input are both driven in-process via robotgo
-// (github.com/go-vgo/robotgo) rather than shelling out to external tools
-// (scrot/maim/xdotool/etc.) -- see condocs/initialRobotImpls/Step1Prompt.md
-// Revision A.
+// Native *input* (circleMouse) is driven in-process via robotgo
+// (github.com/go-vgo/robotgo) -- see condocs/initialRobotImpls/Step1Prompt.md
+// Revision A. Native *capture* originally was too (robotgo.CaptureImg, an
+// in-process Xlib XGetImage wrapper), but as of Revision K it instead
+// shells out to the external `scrot` binary -- see captureViaScrot's doc
+// comment below for why, after Revisions A/C/D/E/F/G chased an
+// in-process-only fix through goroutine-safety, warm-up timing,
+// split-screen geometry, and root-window geometry theories without success.
 
 // CaptureResultMsg is the "capture-result" WebSocket payload reporting a
 // completed native or browser capture.
@@ -100,11 +107,89 @@ var robotMu sync.Mutex
 
 // ---- Native display capture ----
 
+// scrotRegion is captureViaScrot's optional sub-rectangle argument, mirroring
+// robotgo.CaptureImg's own "no args means whole screen, explicit x/y/w/h
+// means just this region" shape so captureNativeDisplay's existing
+// useReal/captureRegionImg branch (below) didn't need to change shape when
+// its backing implementation switched to scrot.
+type scrotRegion struct{ x, y, w, h int }
+
+// captureViaScrot shells out to the external `scrot` binary to capture a
+// PNG screenshot (whole screen, or just region if non-nil) and decodes it
+// back into an image.Image.
+//
+// This replaces what used to be a direct, in-process robotgo.CaptureImg()
+// call (an Xlib XGetImage wrapper). Revision K's diagnostic
+// (ianar/cmd/xgetimagediag) ran a battery of XGetImage variants -- holding
+// the rectangle fixed and instead varying format/plane_mask, plus a bare
+// 1x1px request to rule out rectangle size entirely -- against this host's
+// real display, and *every single one* failed identically with the same
+// BadMatch/X_GetImage error chased since Revision A. That rules out every
+// rectangle/format/plane-mask theory tried across Revisions C/E/F/G: the
+// failure doesn't depend on what GetImage is asked for at all. What the
+// same revision's log *also* shows: a plain `scrot` invocation, run
+// immediately after, against the identical display, succeeding and
+// writing a correct 3840x1080 PNG.
+//
+// The most likely explanation (and the one Revision G's "second,
+// independent systematic check" flagged in advance) is that this host's
+// X server is XWayland -- an X11-compatibility layer in front of a Wayland
+// compositor, not a real standalone X server -- whose root window isn't
+// backed by a literal framebuffer that XGetImage can read, regardless of
+// request parameters; scrot (1.10+) detects this and captures through the
+// compositor's own screenshot protocol instead of issuing a raw
+// XGetImage. I can't confirm WAYLAND_DISPLAY/XDG_SESSION_TYPE directly to
+// verify this live -- same sandbox approval gate blocking env/process
+// inspection that every prior reply on this step has hit -- so this is
+// inferred from the observed behavior rather than independently verified.
+// Either way, this fix doesn't depend on that explanation being exactly
+// right: scrot succeeding where every GetImage variant failed is enough on
+// its own to justify shelling out to it, per Revision G's fallback plan.
+//
+// robotgo is kept for everything this failure never implicated:
+// circleMouse's pointer warps (Revision E's reply already confirmed those
+// work), and the lightweight screenSize()/rootWindowGeometry() queries
+// (robot.go/xgeometry_linux.go) that only inspect window attributes, never
+// GetImage.
+func captureViaScrot(region *scrotRegion) (image.Image, error) {
+	f, err := os.CreateTemp("", "ianar-capture-*.png")
+	if err != nil {
+		return nil, fmt.Errorf("scrot capture: creating temp file: %w", err)
+	}
+	path := f.Name()
+	f.Close()
+	defer os.Remove(path)
+
+	args := []string{"--overwrite"}
+	if region != nil {
+		args = append(args, "-a", fmt.Sprintf("%d,%d,%d,%d", region.x, region.y, region.w, region.h))
+	}
+	args = append(args, path)
+
+	cmd := exec.Command("scrot", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("scrot capture: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	out, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("scrot capture: opening output: %w", err)
+	}
+	defer out.Close()
+	img, err := png.Decode(out)
+	if err != nil {
+		return nil, fmt.Errorf("scrot capture: decoding output: %w", err)
+	}
+	return img, nil
+}
+
 // captureScreenImg is overridden in tests so captureNativeDisplay can be
-// exercised without robotgo actually needing a real display to grab a
+// exercised without scrot actually needing a real display to grab a
 // screenshot from.
 var captureScreenImg = func() (image.Image, error) {
-	return robotgo.CaptureImg()
+	return captureViaScrot(nil)
 }
 
 // screenSize is overridden in tests so captureNativeDisplay's logging
@@ -124,9 +209,11 @@ var rootWindowGeometry = func() (x, y, w, h int, ok bool) {
 	return 0, 0, 0, 0, false
 }
 
-// captureNativeDisplay uses robotgo (in-process; no external screenshot
-// binary required) to capture the full native display, returning the
-// resulting PNG bytes.
+// captureNativeDisplay captures the full native display (or, if the real
+// root window geometry disagrees with robotgo's self-reported screenSize,
+// just the real rectangle), returning the resulting PNG bytes. As of
+// Revision K this shells out to scrot rather than capturing in-process --
+// see captureViaScrot's doc comment.
 //
 // Revision C's hedge (warming up robotgo's X connection at startup, see
 // warmUpRobotDisplay) didn't hold: Revision D's logs show the warm-up
@@ -174,6 +261,16 @@ var rootWindowGeometry = func() (x, y, w, h int, ok bool) {
 // rule the mismatch theory in or out for whoever looks at this next,
 // which neither of the last two revisions' hedges (warm-up timing,
 // split-screen geometry) were able to do.
+//
+// Revision K's follow-up exhausted that geometry-matching theory too
+// (its own log shows "matches real root window geometry" immediately
+// before the identical BadMatch) and, via xgetimagediag's wider battery,
+// every GetImage format/plane_mask variant along with it. The real fix
+// landed one level down, in how the image actually gets captured: see
+// captureViaScrot's doc comment. The useReal/captureRegionImg branch
+// below is unchanged -- captureScreenImg/captureRegionImg now shell out
+// to scrot instead of calling robotgo.CaptureImg, but still respect
+// whichever rectangle this function decides is the real one.
 func captureNativeDisplay() ([]byte, error) {
 	robotMu.Lock()
 	w, h := screenSize()
@@ -209,12 +306,13 @@ func captureNativeDisplay() ([]byte, error) {
 }
 
 // captureRegionImg is overridden in tests, parallel to captureScreenImg --
-// it's the same robotgo entry point (CaptureImg is variadic: no args means
-// "whole screen", explicit x/y/w/h means "just this region"), split out
-// separately so captureNativeDisplay's real-geometry capture can be
-// exercised without robotgo needing a real display.
+// it's the same captureViaScrot entry point with a non-nil scrotRegion
+// (scrot's "-a x,y,w,h" flag is the equivalent of CaptureImg's variadic
+// region args), split out separately so captureNativeDisplay's
+// real-geometry capture can be exercised without scrot needing a real
+// display.
 var captureRegionImg = func(x, y, w, h int) (image.Image, error) {
-	return robotgo.CaptureImg(x, y, w, h)
+	return captureViaScrot(&scrotRegion{x, y, w, h})
 }
 
 // installXErrorHandler overrides Xlib's default X protocol error handler

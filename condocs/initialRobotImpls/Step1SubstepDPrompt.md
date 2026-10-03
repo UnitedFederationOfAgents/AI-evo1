@@ -269,11 +269,18 @@ Only the intended three files changed. That's my implementation for this revisio
 Both the original crash report and Revision C's new BadMatch/X_GetImage error failed at the exact same X request serial number (7), despite being different errors months apart — pointing less at the request's content and more at something tied to where it lands in robotgo's X display connection's lifetime. As a hedge, I added `warmUpRobotDisplay()` (`ianar/robot.go`), called synchronously from `main()` before the server accepts any WebSocket clients, which forces robotgo's X connection setup to happen at a controlled startup point instead of on a user's first capture-native click. Per the explicit ask, I also added logging: `captureNativeDisplay()` now logs robotgo's reported screen size immediately before each capture and the resulting image bounds immediately after (via a new mockable `screenSize` var, with the three affected tests in `robot_test.go` updated to stub it), so if this fix doesn't fully resolve it, the next crash report will at least include the screen dimensions robotgo thought it was capturing right before the X server rejected the request. I couldn't build/test this myself (same compiler-invocation gate as every prior reply on this step), so it still needs a real build/run pass to confirm.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+We still have a failure, but more logs:
 
+10:44:04 AM  [robot]! 2026/10/03 13:44:04 robot: warmed up robotgo display connection at startup, reported screen size 3840x1080
+10:44:04 AM  [robot]! 2026/10/03 13:44:04 auto-connect enabled: dialing local-representative at localhost:8082 every 10s for up to 10m0s (runs in background)
+10:44:04 AM  [robot]! 2026/10/03 13:44:04 ianar listening on http://localhost:8087
+10:44:04 AM  [robot]! 2026/10/03 13:44:04 connected to local-representative at localhost:8082 as "robot"
+10:44:32 AM  [robot]! 2026/10/03 13:44:32 robot: capturing native display, robotgo reports screen size 3840x1080
+10:44:32 AM  [robot]! X Error of failed request:  BadMatch (invalid parameter attributes)
+10:44:32 AM  [robot]!   Major opcode of failed request:  73 (X_GetImage)
+10:44:32 AM  [robot]!   Serial number of failed request:  7
+10:44:32 AM  [robot]!   Current serial number in output stream:  7
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix the error.

@@ -345,12 +345,18 @@ I've implemented the Revision E fix. Summary of changes (all in `ianar/`):
 
 As with every prior reply on this step, I couldn't invoke `go build`/`go vet`/`go test` myself (same sandbox compiler-invocation gate), so this still needs a real build/run pass to confirm it actually resolves the capture failure.
 
+## Resource 4 -- Browser Error 2
 
-## <REPLACE-Revision|Retry> F
+robotgo capture: Capture image not found. (split-screen fallback also failed: left half (0,0,1920x1080): Capture image not found.)
 
-<REPLACE-PROMPT>
+## Resource 5 -- Log Errors 2
+
+12:10:48 PM  [robot]! 2026/10/03 15:10:48 robot: capturing native display, robotgo reports screen size 3840x1080
+12:10:48 PM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
+12:10:48 PM  [robot]! 2026/10/03 15:10:48 robot: whole-screen capture failed (Capture image not found.); screen reports as 3840x1080 (wide enough to be two side-by-side outputs), retrying as two separate regions
+12:10:48 PM  [robot]! ianar: X protocol error (previously would have crashed the process): BadMatch (invalid parameter attributes) (request code 73, minor code 0, serial 7)
 
 
-## Human-Prompt
+## Revision F
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's try the fix again - resources Browser Error 2 and Log Errors 2 for context.

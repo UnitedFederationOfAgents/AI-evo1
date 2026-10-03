@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"log"
 	"math"
@@ -124,36 +125,53 @@ var screenSize = func() (w, h int) {
 // and the very next real capture-native request still crashing with the
 // identical BadMatch/X_GetImage at request serial 7. That rules out "early
 // position in the display connection's lifetime" as the cause: the
-// warmed-up connection never even reached the failing request. What's
-// unchanged across every report of this bug (the original, Revision C's,
-// and Revision D's) is that it's always request serial 7 that fails,
-// across otherwise-unrelated runs -- which instead points at robotgo
-// opening a *fresh* X display connection per call (so request numbering
-// restarts each time, landing the first substantive request -- the actual
-// XGetImage -- at a fixed serial once Xlib's own handful of per-connection
-// setup requests are accounted for), with something about that XGetImage
-// request's parameters (plausibly the captured rectangle vs. the root
-// window's actual geometry on this 3840x1080 multi-monitor layout -- see
-// screenSize's log line) not matching what the X server will accept.
+// warmed-up connection never even reached the failing request.
 //
-// Rather than keep guessing at that exact geometry mismatch blind (no
-// build/X server access from this sandbox to confirm it -- see this
-// reply's note on verification), this revision fixes the actual "crash":
-// Xlib's *default* error handler calls exit() on any unexpected protocol
-// error, including this one, which is why a BadMatch here takes down the
-// whole ianar process instead of surfacing as an ordinary error return.
-// warmUpRobotDisplay now installs a non-fatal replacement (see
-// installXErrorHandler) before anything touches the display, so whatever
-// specifically triggers serial 7's BadMatch, it no longer crashes --
-// though captureScreenImg's result for that call may still come back
-// empty/corrupt rather than cleanly erroring, see installXErrorHandler's
-// doc comment. The screen-size logging stays in place either way, to help
-// tell those cases apart in the next report if one still comes in.
+// Revision D's actual fix (installXErrorHandler, so a BadMatch logs and
+// returns an ordinary error instead of taking the whole process down) held
+// up: per Revision E's prompt (Browser Error 1 / Log Errors 1), the crash
+// is gone, but capture-native now just *fails* every time instead, still
+// at the same request serial (7) as every report of this bug. Revision E
+// also notes circleMouse (native input) works fine on this same display
+// connection -- and circleMouse's pointer warps
+// (XWarpPointer/XTestFakeMotionEvent) are a fundamentally different kind
+// of X request from X_GetImage: they ask the server to resolve a
+// coordinate, not read pixel data back. So whatever's wrong is specific to
+// reading pixels, and -- since it's utterly deterministic, not an
+// occasional race -- specific to *this* request's parameters against the
+// server's actual state, not timing. The one fact logged on every report
+// of this bug is the screen size: 3840x1080, which is exactly two
+// 1920x1080 outputs' width side by side. A single X_GetImage spanning both
+// halves of a dual-output layout is a known failure mode when the two
+// outputs are backed differently server-side (e.g. hybrid/PRIME-offload
+// graphics splitting rendering across GPUs) -- the same combined root
+// window that a coordinate-only request like XWarpPointer resolves fine,
+// but that a single whole-desktop pixel read gets rejected on.
+//
+// I can't confirm that's actually this machine's setup -- same build/X
+// access sandbox gate as every prior reply on this step -- so rather than
+// changing the primary capture path on an unconfirmed theory, this
+// revision adds captureSplitScreenFallback as a fallback: only once the
+// whole-screen captureScreenImg call has already failed, and only when the
+// reported screen size looks plausibly like two side-by-side outputs (see
+// shouldTrySplitFallback), it retries as two separate same-height regions
+// and composites them, so a genuinely single-monitor or
+// differently-shaped failure isn't masked by a pointless retry. If the
+// fallback also fails, both errors are returned together.
 func captureNativeDisplay() ([]byte, error) {
 	robotMu.Lock()
 	w, h := screenSize()
 	log.Printf("robot: capturing native display, robotgo reports screen size %dx%d", w, h)
 	img, err := captureScreenImg()
+	if err != nil && shouldTrySplitFallback(w, h) {
+		log.Printf("robot: whole-screen capture failed (%v); screen reports as %dx%d (wide enough to be two side-by-side outputs), retrying as two separate regions", err, w, h)
+		if fbImg, fbErr := captureSplitScreenFallback(w, h); fbErr == nil {
+			img, err = fbImg, nil
+			log.Printf("robot: split-screen fallback capture succeeded")
+		} else {
+			err = fmt.Errorf("%w (split-screen fallback also failed: %v)", err, fbErr)
+		}
+	}
 	robotMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("robotgo capture: %w", err)
@@ -165,6 +183,47 @@ func captureNativeDisplay() ([]byte, error) {
 		return nil, fmt.Errorf("encoding capture as png: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// captureRegionImg is overridden in tests, parallel to captureScreenImg --
+// it's the same robotgo entry point (CaptureImg is variadic: no args means
+// "whole screen", explicit x/y/w/h means "just this region"), split out
+// separately so captureSplitScreenFallback's two region calls can be
+// exercised without robotgo needing a real display.
+var captureRegionImg = func(x, y, w, h int) (image.Image, error) {
+	return robotgo.CaptureImg(x, y, w, h)
+}
+
+// shouldTrySplitFallback reports whether a screen of the given reported
+// size looks enough like two side-by-side outputs (at least twice as wide
+// as it is tall) to be worth retrying as captureSplitScreenFallback --
+// see captureNativeDisplay's doc comment -- rather than retrying (and
+// potentially masking a differently-caused failure) on every whole-screen
+// capture error regardless of shape.
+func shouldTrySplitFallback(w, h int) bool {
+	return h > 0 && w >= 2*h
+}
+
+// captureSplitScreenFallback re-captures the screen as two side-by-side
+// halves instead of one whole-desktop region, then composites them back
+// into a single image the size screenSize() reported -- see
+// captureNativeDisplay's doc comment for why a split capture might survive
+// where the single whole-screen one didn't.
+func captureSplitScreenFallback(w, h int) (image.Image, error) {
+	leftW := w / 2
+	rightW := w - leftW
+	left, err := captureRegionImg(0, 0, leftW, h)
+	if err != nil {
+		return nil, fmt.Errorf("left half (0,0,%dx%d): %w", leftW, h, err)
+	}
+	right, err := captureRegionImg(leftW, 0, rightW, h)
+	if err != nil {
+		return nil, fmt.Errorf("right half (%d,0,%dx%d): %w", leftW, rightW, h, err)
+	}
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(out, left.Bounds(), left, image.Point{}, draw.Src)
+	draw.Draw(out, image.Rect(leftW, 0, w, h), right, right.Bounds().Min, draw.Src)
+	return out, nil
 }
 
 // installXErrorHandler overrides Xlib's default X protocol error handler

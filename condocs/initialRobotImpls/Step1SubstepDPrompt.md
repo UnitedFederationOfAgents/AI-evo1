@@ -332,3 +332,25 @@ See 'Browser Error 1' and 'Log Errors 1' resources - we now have failures happen
 Let's fix the errors.
 
 The mouse circle may be working correctly.
+
+
+prompt: [`d868df0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d868df043cad76776581e21cedd1231762c8c0b5) → reply: [`622052f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/622052f37e0e0580b4a77cec8b1f099df96b8d4d)
+
+## Reply E
+
+I've implemented the Revision E fix. Summary of changes (all in `ianar/`):
+
+- **`robot.go`**: Added `captureSplitScreenFallback` — when the whole-screen `captureScreenImg()` call fails *and* the reported screen size looks like two side-by-side outputs (`shouldTrySplitFallback`: width ≥ 2×height, matching the logged 3840x1080), `captureNativeDisplay` now retries by capturing each half separately via a new `captureRegionImg` var (same `robotgo.CaptureImg`, just with explicit region args) and compositing them into one image. Rationale: circle-mouse's pointer warps resolve fine on the same connection, so the deterministic BadMatch is specific to reading pixels across the full combined root window — a known failure mode for dual-output layouts backed differently server-side — while a region-bounded read is far more likely to land within one output's actual drawable.
+- **`robot_test.go`**: Added tests for the heuristic, the composite/error-propagation behavior of the fallback itself, and `captureNativeDisplay`'s wiring (falls back and succeeds on a wide/dual-output-shaped screen; does *not* attempt the fallback — and still surfaces the original error — on a narrow/single-monitor screen, so other causes aren't masked).
+
+As with every prior reply on this step, I couldn't invoke `go build`/`go vet`/`go test` myself (same sandbox compiler-invocation gate), so this still needs a real build/run pass to confirm it actually resolves the capture failure.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

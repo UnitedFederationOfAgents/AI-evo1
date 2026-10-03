@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"image"
-	"image/color"
-	"image/draw"
 	"math"
 	"testing"
 	"time"
@@ -37,12 +35,13 @@ func decodeSent(t *testing.T, c *wsClient, wantType string, out interface{}) {
 // ---- captureNativeDisplay ----
 
 func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
-	orig, origSize := captureScreenImg, screenSize
-	defer func() { captureScreenImg, screenSize = orig, origSize }()
+	orig, origSize, origGeom := captureScreenImg, screenSize, rootWindowGeometry
+	defer func() { captureScreenImg, screenSize, rootWindowGeometry = orig, origSize, origGeom }()
 	captureScreenImg = func() (image.Image, error) {
 		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
 	}
 	screenSize = func() (int, int) { return 4, 4 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
 
 	data, err := captureNativeDisplay()
 	if err != nil {
@@ -61,136 +60,117 @@ func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
 }
 
 func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
-	orig, origSize := captureScreenImg, screenSize
-	defer func() { captureScreenImg, screenSize = orig, origSize }()
+	orig, origSize, origGeom := captureScreenImg, screenSize, rootWindowGeometry
+	defer func() { captureScreenImg, screenSize, rootWindowGeometry = orig, origSize, origGeom }()
 	captureScreenImg = func() (image.Image, error) {
 		return nil, errors.New("boom")
 	}
 	screenSize = func() (int, int) { return 4, 4 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
 
 	if _, err := captureNativeDisplay(); err == nil {
 		t.Fatalf("expected captureNativeDisplay to propagate robotgo's error")
 	}
 }
 
-// ---- shouldTrySplitFallback / captureSplitScreenFallback ----
+// ---- rootWindowGeometry ----
 
-// TestShouldTrySplitFallback verifies the side-by-side-outputs heuristic:
-// wide-and-short (like the 3840x1080 this step keeps seeing) says yes, an
-// ordinary single monitor's aspect ratio says no.
-func TestShouldTrySplitFallback(t *testing.T) {
-	cases := []struct {
-		w, h int
-		want bool
-	}{
-		{3840, 1080, true},  // two 1920x1080 outputs side by side
-		{1920, 1080, false}, // an ordinary single monitor
-		{100, 0, false},     // degenerate height shouldn't divide-by-zero or match
+// TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryUnavailable verifies
+// captureNativeDisplay falls back to robotgo's own whole-screen
+// captureScreenImg -- not captureRegionImg -- when rootWindowGeometry can't
+// query the real root window at all (e.g. non-Linux, or no display to
+// query), since there's no ground truth to prefer over robotgo's own
+// report in that case.
+func TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryUnavailable(t *testing.T) {
+	origCapture, origSize, origRegion, origGeom := captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry
+	defer func() {
+		captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry = origCapture, origSize, origRegion, origGeom
+	}()
+
+	screenSize = func() (int, int) { return 3840, 1080 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	screenCalled, regionCalled := false, false
+	captureScreenImg = func() (image.Image, error) {
+		screenCalled = true
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
 	}
-	for _, c := range cases {
-		if got := shouldTrySplitFallback(c.w, c.h); got != c.want {
-			t.Errorf("shouldTrySplitFallback(%d, %d) = %v, want %v", c.w, c.h, got, c.want)
-		}
-	}
-}
-
-// TestCaptureSplitScreenFallbackComposites verifies the two halves are
-// requested at the right (x,y,w,h) and land in the composited output at
-// their own offset, not just concatenated blindly.
-func TestCaptureSplitScreenFallbackComposites(t *testing.T) {
-	orig := captureRegionImg
-	defer func() { captureRegionImg = orig }()
-
-	var gotCalls [][4]int
 	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
-		gotCalls = append(gotCalls, [4]int{x, y, w, h})
-		img := image.NewRGBA(image.Rect(0, 0, w, h))
-		draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: uint8(x % 256), A: 255}}, image.Point{}, draw.Src)
-		return img, nil
-	}
-
-	out, err := captureSplitScreenFallback(3840, 1080)
-	if err != nil {
-		t.Fatalf("captureSplitScreenFallback: %v", err)
-	}
-	if out.Bounds() != image.Rect(0, 0, 3840, 1080) {
-		t.Fatalf("out.Bounds() = %v, want (0,0)-(3840,1080)", out.Bounds())
-	}
-	wantCalls := [][4]int{{0, 0, 1920, 1080}, {1920, 0, 1920, 1080}}
-	if len(gotCalls) != len(wantCalls) {
-		t.Fatalf("captureRegionImg called %d times, want %d", len(gotCalls), len(wantCalls))
-	}
-	for i, w := range wantCalls {
-		if gotCalls[i] != w {
-			t.Errorf("call %d = %v, want %v", i, gotCalls[i], w)
-		}
-	}
-	if c, ok := out.At(0, 0).(color.RGBA); !ok || c.R != 0 {
-		t.Errorf("left half pixel at (0,0) = %+v, want R=0", c)
-	}
-	if c, ok := out.At(1920, 0).(color.RGBA); !ok || c.R != 1920%256 {
-		t.Errorf("right half pixel at (1920,0) = %+v, want R=%d", c, 1920%256)
-	}
-}
-
-// TestCaptureSplitScreenFallbackPropagatesHalfError verifies a failing
-// region capture aborts the fallback with an error rather than compositing
-// a partial image.
-func TestCaptureSplitScreenFallbackPropagatesHalfError(t *testing.T) {
-	orig := captureRegionImg
-	defer func() { captureRegionImg = orig }()
-	captureRegionImg = func(x, y, w, h int) (image.Image, error) { return nil, errors.New("boom") }
-
-	if _, err := captureSplitScreenFallback(3840, 1080); err == nil {
-		t.Fatalf("expected an error when captureRegionImg fails")
-	}
-}
-
-// TestCaptureNativeDisplayFallsBackOnWideScreenFailure verifies
-// captureNativeDisplay retries via captureSplitScreenFallback -- and
-// succeeds -- when the whole-screen capture fails on a screen shaped like
-// two side-by-side outputs.
-func TestCaptureNativeDisplayFallsBackOnWideScreenFailure(t *testing.T) {
-	origCapture, origSize, origRegion := captureScreenImg, screenSize, captureRegionImg
-	defer func() { captureScreenImg, screenSize, captureRegionImg = origCapture, origSize, origRegion }()
-
-	captureScreenImg = func() (image.Image, error) { return nil, errors.New("BadMatch") }
-	screenSize = func() (int, int) { return 8, 4 } // shouldTrySplitFallback(8, 4) == true
-	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
+		regionCalled = true
 		return image.NewRGBA(image.Rect(0, 0, w, h)), nil
 	}
 
-	data, err := captureNativeDisplay()
-	if err != nil {
+	if _, err := captureNativeDisplay(); err != nil {
 		t.Fatalf("captureNativeDisplay: %v", err)
 	}
-	pngSig := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
-	if len(data) < len(pngSig) || string(data[:len(pngSig)]) != string(pngSig) {
-		t.Fatalf("captureNativeDisplay didn't return a PNG after falling back")
+	if !screenCalled || regionCalled {
+		t.Errorf("screenCalled = %v, regionCalled = %v, want true, false", screenCalled, regionCalled)
 	}
 }
 
-// TestCaptureNativeDisplayNoFallbackOnNarrowScreen verifies the fallback is
-// never attempted on a screen that doesn't look like a side-by-side dual
-// output, so a differently-caused failure on an ordinary monitor isn't
-// masked by a pointless retry.
-func TestCaptureNativeDisplayNoFallbackOnNarrowScreen(t *testing.T) {
-	origCapture, origSize, origRegion := captureScreenImg, screenSize, captureRegionImg
-	defer func() { captureScreenImg, screenSize, captureRegionImg = origCapture, origSize, origRegion }()
+// TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryMatches verifies
+// captureNativeDisplay still uses robotgo's own whole-screen captureScreenImg
+// when the real root window geometry agrees with robotgo's self-reported
+// screenSize, rather than needlessly switching paths when there's nothing
+// to correct.
+func TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryMatches(t *testing.T) {
+	origCapture, origSize, origRegion, origGeom := captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry
+	defer func() {
+		captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry = origCapture, origSize, origRegion, origGeom
+	}()
 
-	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
-	screenSize = func() (int, int) { return 4, 4 } // not wide enough for the fallback heuristic
-	called := false
+	screenSize = func() (int, int) { return 1920, 1080 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 1920, 1080, true }
+	screenCalled, regionCalled := false, false
+	captureScreenImg = func() (image.Image, error) {
+		screenCalled = true
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+	}
 	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
-		called = true
+		regionCalled = true
 		return image.NewRGBA(image.Rect(0, 0, w, h)), nil
 	}
 
-	if _, err := captureNativeDisplay(); err == nil {
-		t.Fatalf("expected captureNativeDisplay to still fail on a narrow/single-monitor screen")
+	if _, err := captureNativeDisplay(); err != nil {
+		t.Fatalf("captureNativeDisplay: %v", err)
 	}
-	if called {
-		t.Errorf("captureNativeDisplay should not have attempted the split-screen fallback on a narrow screen")
+	if !screenCalled || regionCalled {
+		t.Errorf("screenCalled = %v, regionCalled = %v, want true, false", screenCalled, regionCalled)
+	}
+}
+
+// TestCaptureNativeDisplayUsesRealGeometryWhenItDisagrees verifies
+// captureNativeDisplay captures the real root window rectangle (via
+// captureRegionImg) instead of robotgo's own whole-screen captureScreenImg
+// when rootWindowGeometry disagrees with robotgo's self-reported
+// screenSize -- see captureNativeDisplay's doc comment (Step1SubstepDPrompt
+// Revision F) for why the real rectangle is the one worth trusting.
+func TestCaptureNativeDisplayUsesRealGeometryWhenItDisagrees(t *testing.T) {
+	origCapture, origSize, origRegion, origGeom := captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry
+	defer func() {
+		captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry = origCapture, origSize, origRegion, origGeom
+	}()
+
+	screenSize = func() (int, int) { return 3840, 1080 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 1920, 1080, true }
+	screenCalled := false
+	var gotRegion [4]int
+	captureScreenImg = func() (image.Image, error) {
+		screenCalled = true
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+	}
+	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
+		gotRegion = [4]int{x, y, w, h}
+		return image.NewRGBA(image.Rect(0, 0, w, h)), nil
+	}
+
+	if _, err := captureNativeDisplay(); err != nil {
+		t.Fatalf("captureNativeDisplay: %v", err)
+	}
+	if screenCalled {
+		t.Errorf("captureNativeDisplay should not have called captureScreenImg when real geometry disagrees")
+	}
+	if want := [4]int{0, 0, 1920, 1080}; gotRegion != want {
+		t.Errorf("captureRegionImg called with %v, want %v", gotRegion, want)
 	}
 }
 
@@ -290,10 +270,11 @@ func TestHandleCaptureNativeReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 
-	orig, origSize := captureScreenImg, screenSize
-	defer func() { captureScreenImg, screenSize = orig, origSize }()
+	orig, origSize, origGeom := captureScreenImg, screenSize, rootWindowGeometry
+	defer func() { captureScreenImg, screenSize, rootWindowGeometry = orig, origSize, origGeom }()
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
 	screenSize = func() (int, int) { return 4, 4 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
 
 	s.handleCaptureNative(c)
 	var p CaptureResultMsg

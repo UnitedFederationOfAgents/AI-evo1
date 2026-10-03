@@ -360,3 +360,26 @@ robotgo capture: Capture image not found. (split-screen fallback also failed: le
 ## Revision F
 
 Let's try the fix again - resources Browser Error 2 and Log Errors 2 for context.
+
+
+prompt: [`fd0827c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fd0827c2eea482eb3c40a6e775c224a3e85734e3) → reply: [`08c094d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/08c094d2cf187a734455f9cc9d993335ff201236)
+
+## Reply F
+
+Good, imports are clean.
+
+## Summary
+
+Resource 4 (Browser Error 2) falsified Revision E's "dual-output boundary" theory: capturing just the left half region independently failed with the identical error, which a region fully inside one output's bounds shouldn't have. Resource 5's logs revealed the real clue — the whole-screen attempt and the region retry, two necessarily distinct X requests, both land on the same request serial number (7), meaning each capture opens its own fresh display connection and every one hits BadMatch on its very first `GetImage` regardless of geometry.
+
+I removed the now-disproven split-screen fallback (`shouldTrySplitFallback`/`captureSplitScreenFallback` and their tests) and replaced it in `ianar/robot.go` with a new `rootWindowGeometry` check backed by a small Xlib helper (`ianar/xgeometry_linux.go`, cgo `XGetWindowAttributes` on the real root window) that queries the root window's actual geometry as ground truth. `captureNativeDisplay` now compares that against robotgo's self-reported `screenSize` and captures the real rectangle when they disagree, logging which path was taken either way. As with every prior reply on this step, I couldn't build/test this myself, so it still needs a real run to confirm — but even if the mismatch isn't the true cause, the new log line will conclusively rule it in or out for the next attempt.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

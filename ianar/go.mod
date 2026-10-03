@@ -1,6 +1,6 @@
 module ianar
 
-go 1.25
+go 1.26.0
 
 require (
 	github.com/go-vgo/robotgo v0.110.5
@@ -37,7 +37,7 @@ require (
 	golang.org/x/exp v0.0.0-20241004190924-225e2abe05e6 // indirect
 	golang.org/x/image v0.21.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )
 
 replace representable => ../representable

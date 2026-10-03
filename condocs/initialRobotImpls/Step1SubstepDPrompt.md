@@ -626,11 +626,10 @@ All remaining mentions are historical/explanatory comments, not actual calls —
 Revision K's `xgetimagediag` battery proved the BadMatch/X_GetImage failure is invariant across every GetImage parameter (format, plane_mask, even a 1x1px rectangle), ruling out all prior rectangle/format-based theories (Revisions C/E/F/G) — while confirming `scrot` succeeds against the identical display. Per Revision G's flagged fallback, I fixed it in `ianar/robot.go` by replacing the in-process `robotgo.CaptureImg()` calls with a new `captureViaScrot` that shells out to `scrot` (writing to a temp PNG and decoding it), keeping robotgo only for mouse input/screen-size/geometry queries that were never implicated. I also added `scrot` to `scripts/install-dev-deps.sh`'s dependency list/installer, and deleted the now-fulfilled temporary `ianar/cmd/xgetimagediag` diagnostic (per its own doc comment's "delete it once the cause is confirmed").
 
 
-## <REPLACE-Revision|Retry> L
+## Revision L
 
-<REPLACE-PROMPT>
+We do not want to capture via scrot. We want to capture using robotgo.
 
+Could it be issues with the cgo bindings?
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We need to fix this properly. Let's attempt a fix if there is one we can think of or determine next debugging steps if nothing is immediately apparent.

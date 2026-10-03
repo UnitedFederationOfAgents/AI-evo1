@@ -431,3 +431,5 @@ Let's fix this and explain the full expected interaction path for browser captur
 When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
 
 !HANDOFF!
+
+!HANDOFF!

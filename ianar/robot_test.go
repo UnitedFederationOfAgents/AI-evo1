@@ -5,6 +5,7 @@ import (
 	"errors"
 	"image"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,16 +61,71 @@ func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
 }
 
 func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
-	orig, origSize, origGeom := captureScreenImg, screenSize, rootWindowGeometry
-	defer func() { captureScreenImg, screenSize, rootWindowGeometry = orig, origSize, origGeom }()
+	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
+	defer func() {
+		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
+	}()
 	captureScreenImg = func() (image.Image, error) {
 		return nil, errors.New("boom")
 	}
 	screenSize = func() (int, int) { return 4, 4 }
 	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	// The XComposite fallback (Revision L) also fails here, so the original
+	// robotgo error should still propagate (wrapped) rather than disappear.
+	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("no overlay") }
 
 	if _, err := captureNativeDisplay(); err == nil {
 		t.Fatalf("expected captureNativeDisplay to propagate robotgo's error")
+	}
+}
+
+// ---- captureViaXComposite fallback (Revision L) ----
+
+// TestCaptureNativeDisplayFallsBackToXCompositeOnCaptureError verifies
+// captureNativeDisplay retries via captureViaXComposite -- and succeeds --
+// when the primary robotgo capture fails, rather than giving up immediately
+// the way it did before Revision L.
+func TestCaptureNativeDisplayFallsBackToXCompositeOnCaptureError(t *testing.T) {
+	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
+	defer func() {
+		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
+	}()
+	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
+	screenSize = func() (int, int) { return 4, 4 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	compositeCalled := false
+	captureViaXComposite = func() (image.Image, error) {
+		compositeCalled = true
+		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+	}
+
+	if _, err := captureNativeDisplay(); err != nil {
+		t.Fatalf("captureNativeDisplay: %v", err)
+	}
+	if !compositeCalled {
+		t.Errorf("expected captureNativeDisplay to fall back to captureViaXComposite after the primary capture failed")
+	}
+}
+
+// TestCaptureNativeDisplayPropagatesCombinedErrorWhenBothFail verifies the
+// returned error mentions both failures when neither the primary capture
+// nor the XComposite fallback succeeds, rather than silently dropping one.
+func TestCaptureNativeDisplayPropagatesCombinedErrorWhenBothFail(t *testing.T) {
+	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
+	defer func() {
+		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
+	}()
+	captureScreenImg = func() (image.Image, error) { return nil, errors.New("primary boom") }
+	screenSize = func() (int, int) { return 4, 4 }
+	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("fallback boom") }
+
+	_, err := captureNativeDisplay()
+	if err == nil {
+		t.Fatalf("expected an error when both the primary capture and the XComposite fallback fail")
+	}
+	if !strings.Contains(err.Error(), "primary boom") || !strings.Contains(err.Error(), "fallback boom") {
+		t.Errorf("error = %q, want it to mention both failures", err.Error())
 	}
 }
 
@@ -270,11 +326,14 @@ func TestHandleCaptureNativeReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 
-	orig, origSize, origGeom := captureScreenImg, screenSize, rootWindowGeometry
-	defer func() { captureScreenImg, screenSize, rootWindowGeometry = orig, origSize, origGeom }()
+	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
+	defer func() {
+		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
+	}()
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
 	screenSize = func() (int, int) { return 4, 4 }
 	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("no overlay") }
 
 	s.handleCaptureNative(c)
 	var p CaptureResultMsg

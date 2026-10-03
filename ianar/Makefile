@@ -20,9 +20,11 @@ build-frontend:
 # "undefined: Move"/etc. compile errors from its remaining non-cgo files.
 # Forcing it on here (and only here) fixes that without touching the other
 # subprojects' preference for static, cgo-free binaries. Needs a C toolchain
-# and X11 dev headers (build-essential, libx11-dev, libxtst-dev, libpng-dev)
-# on the build host -- see scripts/install-dev-deps.sh, which checks for/
-# installs these as part of `make check-dev-deps`/`make deploy-dev-binaries`.
+# and X11 dev headers (build-essential, libx11-dev, libxtst-dev, libpng-dev,
+# libxcomposite-dev -- the last for xcomposite_linux.go's overlay-window
+# capture fallback, Step1SubstepDPrompt.md Revision L) on the build host --
+# see scripts/install-dev-deps.sh, which checks for/installs these as part
+# of `make check-dev-deps`/`make deploy-dev-binaries`.
 build-go:
 	# go.mod's indirect golang.org/x/sys requirement got bumped to v0.48.0 (whose
 	# own go.mod demands go >= 1.26) by the `go mod tidy` run in 54a4c26, which also

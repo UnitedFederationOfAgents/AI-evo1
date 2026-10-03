@@ -633,3 +633,24 @@ We do not want to capture via scrot. We want to capture using robotgo.
 Could it be issues with the cgo bindings?
 
 We need to fix this properly. Let's attempt a fix if there is one we can think of or determine next debugging steps if nothing is immediately apparent.
+
+
+prompt: [`9fd4a68`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9fd4a687a8498b5521a42b52b763e4f3ce328b14) → reply: [`67790cb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/67790cb98d0dedc4fb0f3c11ed2e4d6d17772f79)
+
+## Reply L
+
+I've executed Revision L. Here's a summary of what I did:
+
+**On the cgo-bindings question:** No — Revision K's own `xgetimagediag` already bypassed robotgo's bindings entirely (raw Xlib calls) and hit the identical BadMatch, so the bug isn't in robotgo's glue code. The more likely culprit, newly identified here, is that this host's compositing manager (GNOME Shell — confirmed running in Revision K's logs) paints the composited screen only into the X Composite extension's overlay window, leaving the bare root window without real backing content for a plain `XGetImage` to read — which would explain the failure regardless of rectangle/format and why `scrot` succeeded.
+
+**Changes:** Reverted `ianar/robot.go`'s capture path from `scrot` back to in-process `robotgo.CaptureImg`/`CaptureImg(x,y,w,h)` as requested, and added a new fallback, `captureViaXComposite`, used only when that fails — a Linux-only cgo helper (`ianar/xcomposite_linux.go`) that reads pixels from the Composite extension's overlay window instead of the bare root. I also added a temporary standalone diagnostic (`ianar/cmd/xcompositediag`, mirroring Revision G's now-deleted `xgetimagediag`) that independently confirms whether a compositing manager is active and whether overlay-window `GetImage` succeeds where root `GetImage` fails — run it to get a conclusive answer before trusting the fallback. Updated `robot_test.go`, `install-dev-deps.sh`, and `Makefile` accordingly (added `libxcomposite-dev`, kept `scrot` installed only as a diagnostic baseline per Revision G). As with every prior reply on this step, I couldn't build/test any of this myself (same sandbox gate), so the overlay-window theory is a best-effort attempt, not a verified fix — the diagnostic tool is the fastest way to confirm or rule it out.
+
+
+## <REPLACE-Revision|Retry> M
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

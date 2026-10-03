@@ -365,12 +365,20 @@ Fixed the `ianar` build failure described in Revision B: the `go: undefined: Bit
 
 I updated `ianar/Makefile`'s `build-go`, `test`, and `dev` targets to force `CGO_ENABLED=1` for just this subproject (leaving the other subprojects' cgo-free static-binary default untouched), with a comment explaining why and noting the C-toolchain/X11-dev-header (`build-essential`, `libx11-dev`, `libxtst-dev`, `libpng-dev`) prerequisite on the build host. As in the prior replies for this step, I couldn't run `go build`/`go test` myself to confirm — this sandbox still blocks all `go` invocations — so this should be verified with a real build/test pass on a machine with both Go and a C toolchain installed.
 
+## Resource 2 -- Build Errors 2
 
-## <REPLACE-Revision|Retry> C
+✓ built in 21.52s
+CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-4de7744" -o ianar .
+# runtime/cgo
+cgo: C compiler "gcc" not found: exec: "gcc": executable file not found in $PATH
+make[1]: *** [Makefile:26: build-go] Error 1
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ianar'
+=== Build failed -- leaving /AI-evo1-dev/bin untouched ===
+make: *** [Makefile:77: deploy-dev-binaries] Error 1
 
-<REPLACE-PROMPT>
 
+## Revision C
 
-## Human-Prompt
+Let's look at the 'BUILD ERRORS 2' resource and fix the new issue.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Note that we'll want to use the install-dev-deps approach rather than the deploy-dev-binaries call itself if these are one-time dependency installs (such as through 'apt').

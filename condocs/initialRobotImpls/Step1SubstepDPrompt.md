@@ -736,11 +736,12 @@ Most of the diagnostic's progress was already in ianar on the branch: the D-Bus 
 - **Tests:** they now stub the XWAYLAND check so they never open a real display, and a new `TestWaylandSessionNote` covers each detection case.
 
 
-## <REPLACE-Revision|Retry> P
+## Revision P
 
-<REPLACE-PROMPT>
+Things are now working correctly with the native capture and the browser capture.
 
+Let's remove all of the test code and excessive notes about failure modes.
 
-## Human-Prompt
+We should also be able to remove 'scrot' from the dev dependencies and elsewhere.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's implement these changes now.

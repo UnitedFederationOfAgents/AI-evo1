@@ -197,6 +197,13 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 	case "clip-native":
 		s.handleClipNative(c)
 
+	case "inspect-screen":
+		var p struct {
+			Find string `json:"find"` // optional text to look for; see vision.go
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleInspectScreen(c, p.Find)
+
 	// sequence-v1 tab -- see sequence.go.
 	case "run-sequence":
 		var p struct {

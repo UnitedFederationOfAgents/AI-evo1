@@ -88,12 +88,14 @@ export interface SequenceProgressMsg {
   step: number
   status: 'running' | 'success' | 'error'
   message?: string
+  image_url?: string // what the step saw, if it looked at the screen
 }
 
 export interface SequenceStepResult {
   status: 'success' | 'error' | 'skipped'
   message?: string
   duration_ms: number
+  image_url?: string // what the step saw, if it looked at the screen
 }
 
 // SequenceResultMsg is the "sequence-result" payload reporting a finished
@@ -110,6 +112,33 @@ export interface SequenceResultMsg {
   recording?: ClipResultMsg
 }
 
+// OCRLine is a line of text read off the screen, boxed in capture pixels
+// (see vision.go).
+export interface OCRLine {
+  text: string
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+// InspectResultMsg is the "inspect-result" payload: a capture, the text read
+// off it, and the lines matching the requested text, if any. Boxes are in
+// the capture's pixels (width x height), not image_url's.
+export interface InspectResultMsg {
+  success: boolean
+  error?: string
+  image_url?: string
+  width: number
+  height: number
+  capture_via?: string
+  lines: OCRLine[] | null
+  find?: string
+  matches: OCRLine[] | null
+  partial: OCRLine[] | null
+  duration_ms: number
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -120,3 +149,4 @@ export type ServerMsg =
   | { type: 'sequence-defs'; payload: SequenceDefsMsg }
   | { type: 'sequence-progress'; payload: SequenceProgressMsg }
   | { type: 'sequence-result'; payload: SequenceResultMsg }
+  | { type: 'inspect-result'; payload: InspectResultMsg }

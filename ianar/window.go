@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,12 +18,17 @@ import (
 // running in, for the sequence-v1 tab's "Select the terminal with
 // federation-command" step (see sequence.go).
 //
-// A window is matched first by title -- federation-command sets its terminal
-// window's title to "federation-command" at startup -- and otherwise by
-// process: the window owned by the closest ancestor of a running
-// federation-command process (its terminal emulator). Each focus path below
-// is tried in turn; none can see a window for an FC running in a detached
-// tmux/screen session, which has no window until something attaches to it.
+// The window is found by sight first (focusViaVision): federation-command
+// sets its terminal window's title to "federation-command" at startup, so
+// IANAR reads the screen (see vision.go) for a line reading exactly that --
+// the title bar -- and clicks it. That needs nothing from the window manager,
+// which on GNOME Wayland gives other apps no way to list or focus windows.
+//
+// If that fails, the window-manager paths below are tried: matching by title,
+// and otherwise by process -- the window owned by the closest ancestor of a
+// running federation-command process (its terminal emulator). None of these
+// can see a window for an FC running in a detached tmux/screen session,
+// which has no window until something attaches to it.
 
 const (
 	fcProcessName = "federation-command"
@@ -184,6 +191,58 @@ func federationCommandTarget() (windowTarget, error) {
 		}
 	}
 	return windowTarget{title: fcWindowTitle, pids: own}, nil
+}
+
+// focusViaVision finds the window titled title on screen by reading it (see
+// vision.go) and clicks its title to focus it. It reports what it did and a
+// JPEG data: URL showing what it saw: a crop around the title it clicked,
+// boxed, or on failure the whole screen with any near misses boxed.
+//
+// Only a line reading exactly title counts, not one merely containing it --
+// IANAR's own sequence-v1 tab mentions federation-command, as can a browser
+// tab or terminal output. If several lines match (FC in two terminals, or a
+// tab label as well as the window title), the top-most is clicked.
+func focusViaVision(title string) (desc, shot string, err error) {
+	sr, err := readScreen()
+	if err != nil {
+		return "", "", err
+	}
+	exact, partial := findLines(sr.lines, title)
+	var near []image.Rectangle
+	for _, l := range partial {
+		near = append(near, l.rect())
+	}
+	if len(exact) == 0 {
+		shot = jpegDataURL(annotate(sr.img, map[color.RGBA][]image.Rectangle{otherColor: near}), inspectMaxWidth)
+		var seen []string
+		for _, l := range partial {
+			seen = append(seen, fmt.Sprintf("%q", l.Text))
+		}
+		msg := fmt.Sprintf("no line on screen reads %q (read %d lines of text)", title, len(sr.lines))
+		if len(seen) > 0 {
+			msg += "; lines containing it: " + strings.Join(seen, ", ")
+		}
+		return "", shot, errors.New(msg)
+	}
+
+	hit := exact[0]
+	for _, l := range exact[1:] {
+		near = append(near, l.rect())
+	}
+	marked := annotate(sr.img, map[color.RGBA][]image.Rectangle{matchColor: {hit.rect()}, otherColor: near})
+	at := hit.center()
+	shot = jpegDataURL(cropAround(marked, at, matchCropW, matchCropH), matchCropW)
+
+	via, err := clickAt(at.X, at.Y, sr.img.Bounds().Dx())
+	if err != nil {
+		return "", shot, fmt.Errorf("found %q at (%d, %d) but clicking it via %s failed: %w", hit.Text, at.X, at.Y, via, err)
+	}
+	sleep(focusSettle)
+	desc = fmt.Sprintf("saw %q at (%d, %d) and clicked it via %s", hit.Text, at.X, at.Y, via)
+	if len(exact) > 1 {
+		desc += fmt.Sprintf(" (top-most of %d matches)", len(exact))
+	}
+	return desc, shot, nil
 }
 
 // focusViaRobotgo activates the X11 window owned by the best-ranked pid that

@@ -56,6 +56,7 @@ type SequenceProgressMsg struct {
 	Step       int    `json:"step"`
 	Status     string `json:"status"` // "running" | "success" | "error"
 	Message    string `json:"message,omitempty"`
+	ImageURL   string `json:"image_url,omitempty"` // what the step saw, if it looked at the screen
 }
 
 // SequenceStepResult is one step's outcome in a SequenceResultMsg.
@@ -63,6 +64,7 @@ type SequenceStepResult struct {
 	Status     string `json:"status"` // "success" | "error" | "skipped"
 	Message    string `json:"message,omitempty"`
 	DurationMs int64  `json:"duration_ms"`
+	ImageURL   string `json:"image_url,omitempty"` // what the step saw, if it looked at the screen
 }
 
 // SequenceResultMsg is the "sequence-result" WebSocket payload reporting a
@@ -80,9 +82,11 @@ type SequenceResultMsg struct {
 	Recording   *ClipResultMsg       `json:"recording,omitempty"`
 }
 
-// seqEnv is what a running step can drive.
+// seqEnv is what a running step can drive. A step that looked at the screen
+// leaves what it saw in shot (a data: URL), to be shown with its result.
 type seqEnv struct {
-	kb keyboard
+	kb   keyboard
+	shot string
 }
 
 // seqStep is a SequenceStepDef plus the code that carries it out. run
@@ -107,13 +111,23 @@ func (q sequence) def() SequenceDef {
 }
 
 // focusFederationCommand finds federation-command's terminal window and
-// focuses it (see window.go). Overridable in tests.
-var focusFederationCommand = func() (string, error) {
-	t, err := federationCommandTarget()
-	if err != nil {
-		return "", err
+// focuses it (see window.go): by sight first, then through the window
+// manager. It also returns an image of what visual detection saw, if it got
+// that far. Overridable in tests.
+var focusFederationCommand = func() (string, string, error) {
+	desc, shot, visErr := focusViaVision(fcWindowTitle)
+	if visErr == nil {
+		return desc, shot, nil
 	}
-	return focusWindow(t, focusAttempts())
+	log.Printf("robot: visual detection of %s's window failed (%v); trying the window manager", fcProcessName, visErr)
+	t, err := federationCommandTarget()
+	if err == nil {
+		desc, err = focusWindow(t, focusAttempts())
+		if err == nil {
+			return fmt.Sprintf("%s (visual detection failed: %v)", desc, visErr), shot, nil
+		}
+	}
+	return "", shot, fmt.Errorf("visual detection: %v; window-manager fallback: %v", visErr, err)
 }
 
 // tapStep returns a step run that taps each key in turn.
@@ -143,17 +157,19 @@ var sequences = []sequence{
 				SequenceStepDef{
 					Label: "Select the terminal with federation-command",
 					Detail: []string{
-						"find the running federation-command process",
-						`focus its terminal window: the one titled "federation-command", else the window of its nearest ancestor process`,
+						"capture the screen and read its text (OCR)",
+						`find the line reading exactly "federation-command" -- FC's terminal title bar -- and click it`,
+						"if that fails, ask the window manager to focus FC's window",
 					},
 				},
-				func(*seqEnv) (string, error) {
-					desc, err := focusFederationCommand()
+				func(env *seqEnv) (string, error) {
+					desc, shot, err := focusFederationCommand()
+					env.shot = shot
 					if err != nil {
 						return "", err
 					}
 					sleep(focusSettle)
-					return "focused " + desc, nil
+					return desc, nil
 				},
 			},
 			{
@@ -268,18 +284,19 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 	for i, st := range q.steps {
 		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "running"})
 		t0 := clock()
+		env.shot = ""
 		note, err := st.run(env)
 		took := clock().Sub(t0).Milliseconds()
 		if err != nil {
-			res.Steps[i] = SequenceStepResult{Status: "error", Message: err.Error(), DurationMs: took}
+			res.Steps[i] = SequenceStepResult{Status: "error", Message: err.Error(), DurationMs: took, ImageURL: env.shot}
 			res.FailedStep = i
 			res.Error = fmt.Sprintf("step %d (%s): %v", i+1, st.Label, err)
-			progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "error", Message: err.Error()})
+			progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "error", Message: err.Error(), ImageURL: env.shot})
 			log.Printf("robot: sequence %q failed at %s", q.id, res.Error)
 			break
 		}
-		res.Steps[i] = SequenceStepResult{Status: "success", Message: note, DurationMs: took}
-		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "success", Message: note})
+		res.Steps[i] = SequenceStepResult{Status: "success", Message: note, DurationMs: took, ImageURL: env.shot}
+		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "success", Message: note, ImageURL: env.shot})
 	}
 	res.DurationMs = clock().Sub(start).Milliseconds()
 	res.Success = res.FailedStep < 0

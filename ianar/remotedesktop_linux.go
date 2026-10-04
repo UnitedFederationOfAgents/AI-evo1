@@ -21,8 +21,8 @@ import (
 // mid-drive. While it runs, GNOME shows its remote-control indicator in the
 // top bar.
 //
-// init() overrides robot.go's moveByViaCompositor and keyboard.go's
-// openCompositorKeyboard vars, so non-Linux builds keep the "unavailable"
+// init() overrides robot.go's moveByViaCompositor, pointer.go's
+// openCompositorPointer and keyboard.go's openCompositorKeyboard vars, so non-Linux builds keep the "unavailable"
 // stubs and tests can substitute their own.
 
 const rdSessionIface = "org.gnome.Mutter.RemoteDesktop.Session"
@@ -73,6 +73,30 @@ func init() {
 			}
 			return nil
 		})
+	}
+
+	openCompositorPointer = func() (compositorPointer, func(), error) {
+		session, stop, err := startRemoteDesktopSession()
+		if err != nil {
+			return compositorPointer{}, nil, err
+		}
+		return compositorPointer{
+			moveBy: func(dx, dy float64) error {
+				if err := session.Call(rdSessionIface+".NotifyPointerMotionRelative", 0, dx, dy).Err; err != nil {
+					return fmt.Errorf("NotifyPointerMotionRelative: %w", err)
+				}
+				return nil
+			},
+			button: func(pressed bool) error {
+				// NotifyPointerButton(in i button, in b state), button as an
+				// evdev code.
+				const btnLeft int32 = 0x110
+				if err := session.Call(rdSessionIface+".NotifyPointerButton", 0, btnLeft, pressed).Err; err != nil {
+					return fmt.Errorf("NotifyPointerButton: %w", err)
+				}
+				return nil
+			},
+		}, stop, nil
 	}
 
 	openCompositorKeyboard = func() (keyboard, func(), error) {

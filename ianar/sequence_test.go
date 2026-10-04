@@ -44,7 +44,9 @@ func stubSequence(t *testing.T) (*fakeKeyboard, *int) {
 	})
 	kb := &fakeKeyboard{failAt: -1}
 	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
-	focusFederationCommand = func() (string, error) { return `"federation-command" (pid 42)`, nil }
+	focusFederationCommand = func() (string, string, error) {
+		return `saw "federation-command" at (640, 20) and clicked it via test`, "data:image/jpeg;base64,c2hvdA==", nil
+	}
 	stops := 0
 	startNativeRecording = func(time.Duration, time.Duration) func() ClipResultMsg {
 		return func() ClipResultMsg {
@@ -116,6 +118,9 @@ func TestRunSequenceDrivesFederationCommand(t *testing.T) {
 	if !strings.Contains(res.Steps[0].Message, "federation-command") {
 		t.Errorf("focus step message = %q, want it to name the focused window", res.Steps[0].Message)
 	}
+	if res.Steps[0].ImageURL == "" || res.Steps[1].ImageURL != "" {
+		t.Errorf("step images = %q / %q, want only the focus step's", res.Steps[0].ImageURL, res.Steps[1].ImageURL)
+	}
 	if *stops != 1 || res.Recording == nil || !res.Recording.Success {
 		t.Errorf("recording stopped %d times, result %+v", *stops, res.Recording)
 	}
@@ -126,11 +131,16 @@ func TestRunSequenceDrivesFederationCommand(t *testing.T) {
 
 func TestRunSequenceStopsAtFocusFailure(t *testing.T) {
 	kb, stops := stubSequence(t)
-	focusFederationCommand = func() (string, error) { return "", errors.New("no federation-command process is running") }
+	focusFederationCommand = func() (string, string, error) {
+		return "", "data:image/jpeg;base64,c2NyZWVu", errors.New(`no line on screen reads "federation-command"`)
+	}
 
 	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
-	if res.Success || res.FailedStep != 0 || !strings.Contains(res.Error, "no federation-command process") {
+	if res.Success || res.FailedStep != 0 || !strings.Contains(res.Error, `no line on screen reads "federation-command"`) {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+	if res.Steps[0].ImageURL != "data:image/jpeg;base64,c2NyZWVu" {
+		t.Errorf("failed focus step image = %q, want what visual detection saw", res.Steps[0].ImageURL)
 	}
 	if len(kb.calls) != 0 {
 		t.Errorf("keys were sent after the focus step failed: %q", kb.calls)

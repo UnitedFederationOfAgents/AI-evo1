@@ -4,7 +4,9 @@ import type {
   CircleMouseResultMsg,
   ClipFrame,
   ClipResultMsg,
+  InspectResultMsg,
   ModeMismatchMsg,
+  OCRLine,
   ReprStatus,
   ReprStatusMsg,
   SelfInfoMsg,
@@ -18,22 +20,25 @@ import type {
 //
 // Wires up the representable connect/disconnect widget, dev-mode banner, and
 // version-mismatch reload check shared by every sub-app in this repo, plus
-// IANAR's own capture-native/capture-browser/circle-mouse/clip-native
-// channels (see condocs/InitialRobot.md, robot.go and clip.go) and the
-// sequence-v1 runner (sequence.go).
+// IANAR's own capture-native/capture-browser/circle-mouse/clip-native/
+// inspect-screen channels (see condocs/InitialRobot.md, robot.go, clip.go and
+// vision.go) and the sequence-v1 runner (sequence.go).
 
 type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
 type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
 type ClipStatus = { kind: 'idle' | 'recording' | 'success' | 'error'; message?: string }
+type InspectStatus = { kind: 'idle' | 'reading' | 'success' | 'error'; message?: string }
 
 // Preview is whatever a preview pane shows: on the simple tab the latest
-// capture or clip, whichever finished last; on the sequence-v1 tab the last
-// run's recording. A compositor recording is a video; a frame-sampled one
-// (see clip.go's fallback) is played back by FramePlayer.
+// capture, clip or screen inspection, whichever finished last; on the
+// sequence-v1 tab the last run's recording. A compositor recording is a
+// video; a frame-sampled one (see clip.go's fallback) is played back by
+// FramePlayer; an inspection is drawn by InspectView.
 type Preview =
   | { kind: 'image'; url: string }
   | { kind: 'video'; url: string }
   | { kind: 'frames'; frames: ClipFrame[]; durationMs: number }
+  | { kind: 'inspect'; result: InspectResultMsg }
 
 // clipPreview turns a successful clip/recording result into a Preview, or
 // null if it has nothing to play.
@@ -50,7 +55,7 @@ type StepStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped'
 type SeqRun = {
   sequenceId: string
   running: boolean
-  steps: { status: StepStatus; message?: string; durationMs?: number }[]
+  steps: { status: StepStatus; message?: string; durationMs?: number; imageUrl?: string }[]
   result?: SequenceResultMsg
   recording?: Preview | null
   lostConnection?: boolean
@@ -104,6 +109,7 @@ function useRobotWS() {
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus>({ kind: 'idle' })
   const [circleStatus, setCircleStatus] = useState<CircleStatus>({ kind: 'idle' })
   const [clipStatus, setClipStatus] = useState<ClipStatus>({ kind: 'idle' })
+  const [inspectStatus, setInspectStatus] = useState<InspectStatus>({ kind: 'idle' })
   const [sequences, setSequences] = useState<SequenceDef[]>([])
   const [seqRun, setSeqRun] = useState<SeqRun | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -218,7 +224,7 @@ function useRobotWS() {
             setSeqRun((run) => {
               if (!run || run.sequenceId !== p.sequence_id) return run
               const steps = run.steps.slice()
-              steps[p.step] = { ...steps[p.step], status: p.status, message: p.message }
+              steps[p.step] = { ...steps[p.step], status: p.status, message: p.message, imageUrl: p.image_url }
               return { ...run, steps }
             })
           } else if (msg.type === 'sequence-result') {
@@ -226,10 +232,27 @@ function useRobotWS() {
             setSeqRun({
               sequenceId: p.sequence_id,
               running: false,
-              steps: (p.steps ?? []).map((s) => ({ status: s.status, message: s.message, durationMs: s.duration_ms })),
+              steps: (p.steps ?? []).map((s) => ({
+                status: s.status,
+                message: s.message,
+                durationMs: s.duration_ms,
+                imageUrl: s.image_url,
+              })),
               result: p,
               recording: p.recording ? clipPreview(p.recording) : null,
             })
+          } else if (msg.type === 'inspect-result') {
+            const p = msg.payload as InspectResultMsg
+            if (p.success) {
+              setPreview({ kind: 'inspect', result: p })
+              const found = p.find ? ` · ${p.matches?.length ?? 0} line(s) read "${p.find}"` : ''
+              setInspectStatus({
+                kind: 'success',
+                message: `Read ${p.lines?.length ?? 0} lines in ${(p.duration_ms / 1000).toFixed(1)}s via ${p.capture_via}${found}`,
+              })
+            } else {
+              setInspectStatus({ kind: 'error', message: p.error ?? 'screen inspection failed' })
+            }
           }
         } catch {
           // ignore malformed messages
@@ -316,6 +339,14 @@ function useRobotWS() {
     send('clip-native', {})
   }, [send])
 
+  const inspectScreen = useCallback(
+    (find: string) => {
+      setInspectStatus({ kind: 'reading' })
+      send('inspect-screen', { find })
+    },
+    [send],
+  )
+
   const runSequence = useCallback(
     (seq: SequenceDef) => {
       setSeqRun({
@@ -344,10 +375,12 @@ function useRobotWS() {
     captureStatus,
     circleStatus,
     clipStatus,
+    inspectStatus,
     captureNative,
     captureBrowser,
     circleMouse,
     clipNative,
+    inspectScreen,
     sequences,
     seqRun,
     runSequence,
@@ -490,6 +523,68 @@ function FramePlayer({ frames, durationMs }: FramePlayerProps) {
   )
 }
 
+// ---- Inspect view: a capture with the text read off it boxed ----
+
+// InspectView draws an inspection's capture with every line of text it read
+// outlined: lines matching the requested text in green, lines merely
+// containing it in amber, the rest faintly. Boxes are placed in percentages
+// of the capture so they track the image at any display size. Tapping a box
+// shows its text; the full reading is listed underneath.
+function InspectView({ result }: { result: InspectResultMsg }) {
+  const [picked, setPicked] = useState<OCRLine | null>(null)
+  useEffect(() => setPicked(null), [result])
+
+  const box = (l: OCRLine, cls: string, key: string) => (
+    <div
+      key={key}
+      className={`inspect-box ${cls}${picked === l ? ' inspect-box-picked' : ''}`}
+      style={{
+        left: `${(l.x / result.width) * 100}%`,
+        top: `${(l.y / result.height) * 100}%`,
+        width: `${(l.w / result.width) * 100}%`,
+        height: `${(l.h / result.height) * 100}%`,
+      }}
+      title={l.text}
+      onClick={() => setPicked(l)}
+    />
+  )
+  const matches = result.matches ?? []
+  const partial = result.partial ?? []
+  const flagged = new Set([...matches, ...partial].map((l) => `${l.x},${l.y}`))
+  const lines = result.lines ?? []
+
+  return (
+    <div className="inspect-view">
+      <div className="inspect-image">
+        <img src={result.image_url} alt="screen inspection" />
+        {lines.filter((l) => !flagged.has(`${l.x},${l.y}`)).map((l, i) => box(l, 'inspect-box-line', `l${i}`))}
+        {partial.map((l, i) => box(l, 'inspect-box-partial', `p${i}`))}
+        {matches.map((l, i) => box(l, 'inspect-box-match', `m${i}`))}
+      </div>
+      {picked && (
+        <div className="inspect-picked">
+          "{picked.text}" at ({picked.x}, {picked.y}) · {picked.w}×{picked.h}
+        </div>
+      )}
+      <details className="inspect-lines">
+        <summary>
+          {lines.length} lines read from a {result.width}×{result.height} capture
+        </summary>
+        <ol>
+          {lines.map((l, i) => (
+            <li key={i}>
+              <span className="inspect-line-at">
+                ({l.x}, {l.y})
+              </span>{' '}
+              {l.text}
+            </li>
+          ))}
+        </ol>
+      </details>
+    </div>
+  )
+}
+
 // PreviewView renders a Preview, or placeholder text when there is none.
 function PreviewView({ preview, placeholder }: { preview: Preview | null | undefined; placeholder: string }) {
   return (
@@ -497,12 +592,13 @@ function PreviewView({ preview, placeholder }: { preview: Preview | null | undef
       {preview?.kind === 'image' && <img src={preview.url} alt="capture" />}
       {preview?.kind === 'video' && <video src={preview.url} controls autoPlay loop muted playsInline />}
       {preview?.kind === 'frames' && <FramePlayer frames={preview.frames} durationMs={preview.durationMs} />}
+      {preview?.kind === 'inspect' && <InspectView result={preview.result} />}
       {!preview && <span className="robot-preview-placeholder">{placeholder}</span>}
     </div>
   )
 }
 
-// ---- Simple tab: capture native / capture browser / circle mouse / native clip ----
+// ---- Simple tab: capture native / capture browser / circle mouse / native clip / inspect screen ----
 
 interface RobotPanelProps {
   connected: boolean
@@ -510,10 +606,12 @@ interface RobotPanelProps {
   captureStatus: CaptureStatus
   circleStatus: CircleStatus
   clipStatus: ClipStatus
+  inspectStatus: InspectStatus
   onCaptureNative: () => void
   onCaptureBrowser: () => void
   onCircleMouse: () => void
   onClipNative: () => void
+  onInspectScreen: (find: string) => void
 }
 
 function RobotPanel({
@@ -522,11 +620,15 @@ function RobotPanel({
   captureStatus,
   circleStatus,
   clipStatus,
+  inspectStatus,
   onCaptureNative,
   onCaptureBrowser,
   onCircleMouse,
   onClipNative,
+  onInspectScreen,
 }: RobotPanelProps) {
+  const [find, setFind] = useState('federation-command')
+  const reading = inspectStatus.kind === 'reading'
   return (
     <div className="robot-panel">
       <div className="robot-actions">
@@ -548,6 +650,24 @@ function RobotPanel({
           Native Clip
         </button>
       </div>
+      <form
+        className="robot-inspect"
+        onSubmit={(e) => {
+          e.preventDefault()
+          onInspectScreen(find.trim())
+        }}
+      >
+        <input
+          className="robot-inspect-input"
+          type="text"
+          placeholder="text to find (optional)"
+          value={find}
+          onChange={(e) => setFind(e.target.value)}
+        />
+        <button className="btn-secondary" type="submit" disabled={!connected || reading}>
+          Inspect Screen
+        </button>
+      </form>
       {captureStatus.kind === 'pending' && <div className="robot-status">Capturing…</div>}
       {captureStatus.kind === 'error' && <div className="robot-status robot-status-error">{captureStatus.message}</div>}
       {circleStatus.kind === 'running' && <div className="robot-status">Driving the pointer through a circle…</div>}
@@ -556,9 +676,12 @@ function RobotPanel({
       {clipStatus.kind === 'recording' && <div className="robot-status">Recording a 4 second clip of the desktop…</div>}
       {clipStatus.kind === 'success' && <div className="robot-status">Clip recorded{clipStatus.message}.</div>}
       {clipStatus.kind === 'error' && <div className="robot-status robot-status-error">{clipStatus.message}</div>}
+      {reading && <div className="robot-status">Capturing the screen and reading its text…</div>}
+      {inspectStatus.kind === 'success' && <div className="robot-status">{inspectStatus.message}.</div>}
+      {inspectStatus.kind === 'error' && <div className="robot-status robot-status-error">{inspectStatus.message}</div>}
       <PreviewView
         preview={preview}
-        placeholder={'Press "Capture Native", "Capture Browser" or "Native Clip" — the result appears here.'}
+        placeholder={'Press "Capture Native", "Capture Browser", "Native Clip" or "Inspect Screen" — the result appears here.'}
       />
     </div>
   )
@@ -633,6 +756,11 @@ function SequencePanel({ connected, sequences, run, onRun }: SequencePanelProps)
                   ))}
                 </ul>
                 {s?.message && <div className="seq-step-message">{s.message}</div>}
+                {s?.imageUrl && (
+                  <a href={s.imageUrl} target="_blank" rel="noreferrer">
+                    <img className="seq-step-shot" src={s.imageUrl} alt={`what step ${i + 1} saw`} />
+                  </a>
+                )}
               </div>
               {s?.durationMs !== undefined && status !== 'skipped' && (
                 <span className="seq-step-time">{(s.durationMs / 1000).toFixed(1)}s</span>
@@ -685,10 +813,12 @@ export default function App() {
     captureStatus,
     circleStatus,
     clipStatus,
+    inspectStatus,
     captureNative,
     captureBrowser,
     circleMouse,
     clipNative,
+    inspectScreen,
     sequences,
     seqRun,
     runSequence,
@@ -735,10 +865,12 @@ export default function App() {
             captureStatus={captureStatus}
             circleStatus={circleStatus}
             clipStatus={clipStatus}
+            inspectStatus={inspectStatus}
             onCaptureNative={captureNative}
             onCaptureBrowser={captureBrowser}
             onCircleMouse={circleMouse}
             onClipNative={clipNative}
+            onInspectScreen={inspectScreen}
           />
         )}
         {tab === 'sequence-v1' && (

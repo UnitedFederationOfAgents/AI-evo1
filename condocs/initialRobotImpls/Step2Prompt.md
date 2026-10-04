@@ -104,3 +104,32 @@ This is a good start, but let's use a visual detection method to identify the wi
 We see the roundabout technique is failing, and we also need direct visual inspection capability for future work.
 
 Let's implement this now.
+
+
+prompt: [`51d2d19`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/51d2d197f05aee7e7ae96c79436f7a693a899447) → reply: [`466cc33`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/466cc33e4ab72e510968810e157cf60e9c21ffd5)
+
+## Reply C
+
+I changed step 1 to find federation-command's window by looking at the screen, and added a reusable screen-reading feature. None of it has been built or tested: `go test`, `gofmt` and the tesseract check all needed approval, so it needs a `make build` / `make test` on the host, and `tesseract-ocr` installed there (`sudo apt install tesseract-ocr`).
+
+- **Step 1:** IANAR takes a screenshot and reads its text with the tesseract OCR engine. It looks for a line that says exactly "federation-command" (the terminal's title bar) and clicks it to focus the window. Lines that only mention it, like IANAR's own sequence tab, don't count. If more than one line matches, it clicks the top-most.
+- **What the step shows:** step 1 now includes an image of what IANAR saw. On success it's a crop with the clicked title boxed in green. On failure it's the whole screen with near-misses boxed in amber.
+- **Fallback:** if the visual search fails, IANAR still tries the old window-manager methods before reporting step 1 as failed.
+- **Inspect Screen:** a new control on the simple tab, with an optional "text to find" field. It shows the screenshot with every line of text it read boxed and a list of those lines, so you can check what IANAR sees.
+- **Clicking:** the click goes through the same GNOME remote-desktop input as Circle Mouse, with robotgo as the fallback. GNOME's input only allows relative moves here, so IANAR first pushes the pointer into the top-left corner, then moves it to the title. Scaling is corrected using the screen size robotgo reports.
+
+Things to check on the host:
+- **Click position:** on a scaled (HiDPI) display, the click may land in the wrong place if robotgo reports the screen size wrongly.
+- **Dark themes:** each screenshot is read twice, as is and with colours inverted, to help with light text on dark title bars. It's still the first thing to look at if the title isn't found.
+
+The new code is in `ianar/vision.go` and `ianar/pointer.go`, with tests in `ianar/vision_test.go`. I also changed `window.go`, `sequence.go`, `remotedesktop_linux.go`, `main.go` and `sequence_test.go`, the frontend's `App.tsx`, `types.ts` and `index.css`, and added `tesseract-ocr` to `scripts/install-dev-deps.sh`.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

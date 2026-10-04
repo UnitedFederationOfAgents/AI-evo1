@@ -326,6 +326,88 @@ button:disabled {
   padding: 0 24px;
 }
 
+/* ---- Inspect Screen (see vision.go) ---- */
+
+.robot-inspect {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.robot-inspect-input {
+  flex: 1;
+  min-width: 0;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #cccccc;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.robot-inspect button {
+  flex-shrink: 0;
+  padding: 7px 14px;
+}
+
+.inspect-view {
+  align-self: stretch;
+  width: 100%;
+  overflow: auto;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.inspect-image {
+  position: relative;
+  line-height: 0;
+}
+
+.robot-preview .inspect-image img {
+  width: 100%;
+  max-height: none;
+}
+
+.inspect-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid rgba(120, 160, 255, 0.45);
+  cursor: pointer;
+}
+
+.inspect-box-partial { border: 2px solid #ffb020; }
+.inspect-box-match   { border: 2px solid #3fd05a; background: rgba(63, 208, 90, 0.15); }
+.inspect-box-picked  { outline: 2px solid #ffffff; }
+
+.inspect-picked {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #cccccc;
+  overflow-wrap: anywhere;
+}
+
+.inspect-lines {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.inspect-lines summary {
+  cursor: pointer;
+}
+
+.inspect-lines ol {
+  margin: 4px 0 0 20px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.inspect-line-at {
+  color: #666;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- Tabs (simple / sequence-v1) — styled like local-representative's ---- */
 
 .tab-bar {
@@ -432,6 +514,14 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.seq-step-shot {
+  display: block;
+  margin-top: 6px;
+  max-width: 100%;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+}
+
 .seq-step-time {
   flex-shrink: 0;
   font-size: 11px;
@@ -504,6 +594,12 @@ button:disabled {
   .robot-actions button {
     min-height: 44px;
     padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .robot-inspect button,
+  .robot-inspect-input {
+    min-height: 44px;
     font-size: 13px;
   }
 

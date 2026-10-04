@@ -275,11 +275,8 @@ func main() {
 	s.devMode = *devMode
 	go watchRestartSignal()
 
-	// Warm up robotgo's X display connection now, synchronously, before we
-	// start accepting WebSocket clients -- see warmUpRobotDisplay's doc
-	// comment (robot.go) for why. If this crashes, it'll do so here, at a
-	// predictable point in the startup log, rather than mysteriously
-	// during a user's first capture-native/circle-mouse click.
+	// Set up robotgo's X display before accepting WebSocket clients -- see
+	// warmUpRobotDisplay (robot.go).
 	warmUpRobotDisplay()
 
 	if *autoConnect {

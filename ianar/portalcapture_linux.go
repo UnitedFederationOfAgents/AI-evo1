@@ -15,26 +15,11 @@ import (
 	"github.com/godbus/dbus/v5"
 )
 
-// This file is the capture path that can actually see this host's screen.
-//
-// Everything in xcomposite_linux.go talks X11, and on a GNOME *Wayland*
-// session -- which is what this host is -- X11 cannot see the desktop at all.
-// DISPLAY=:0 is served by rootless XWayland (`/usr/bin/Xwayland :0 -rootless`,
-// a child of gnome-shell). "Rootless" is the operative word: XWayland gives
-// each X11 toplevel its own Wayland surface and never composites anything into
-// the X root window, so the root has no backing storage for GetImage to read.
-// That is why every GetImage against it returns BadMatch no matter the
-// rectangle, format or plane mask (Revisions C/E/F/G/K each varied one of those
-// and got the identical error), why the Composite overlay is IsUnmapped and
-// fails the same way, and why `scrot` exits 0 while writing an all-black PNG.
-// It is architectural, not a bug, and no other choice of X11 drawable fixes it.
-//
-// The composited desktop only exists on the Wayland side, inside mutter, so the
-// only way to obtain it is to ask the compositor. Two D-Bus interfaces do that,
-// and both are in-process here via github.com/godbus/dbus/v5 -- no external
-// binary, which is what Revision L's "we want to capture using robotgo, not
-// scrot" was actually asking for (the objection was shelling out, and robotgo
-// cannot be made to work on a display that holds no pixels):
+// This file captures the screen by asking the compositor over D-Bus, for
+// GNOME Wayland sessions. There DISPLAY is rootless XWayland, which never
+// composites anything into the X root window, so robotgo's XGetImage has no
+// pixels to read. Two D-Bus interfaces are tried, in-process via
+// github.com/godbus/dbus/v5:
 //
 //   - org.gnome.Shell.Screenshot -- gnome-shell's own interface. Synchronous,
 //     non-interactive, no permission prompt. Recent GNOME restricts it to an
@@ -48,9 +33,8 @@ import (
 //     first time. That is acceptable here: capture-native is a button a human
 //     clicks, and the grant is remembered afterwards.
 //
-// init() overrides robot.go's captureViaPortal var, following the same
-// overridable-var pattern as captureViaXComposite/installXErrorHandler, so
-// non-Linux builds keep the no-op and tests can substitute their own.
+// init() overrides robot.go's captureViaPortal var, so non-Linux builds keep
+// the no-op and tests can substitute their own.
 func init() {
 	captureViaPortal = func() (image.Image, error) {
 		conn, err := dbus.ConnectSessionBus()

@@ -156,12 +156,8 @@ function useRobotWS() {
   const captureBrowser = useCallback(async () => {
     setCaptureStatus({ kind: 'pending' })
     if (!browserCaptureSupported) {
-      // Fail fast with a message that names the real cause -- without this,
-      // calling the missing method throws a generic
-      // "getDisplayMedia is not a function" TypeError that reads like a
-      // bug rather than "this browser/context can't do this at all," and
-      // (per Revision I) the two actual causes need different messages: an
-      // insecure connection blocks desktop browsers just as much as mobile.
+      // Fail fast with a message naming the real cause (insecure connection
+      // or no getDisplayMedia support) instead of a generic TypeError.
       setCaptureStatus({
         kind: 'error',
         message:

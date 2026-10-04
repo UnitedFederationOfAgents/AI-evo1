@@ -745,3 +745,27 @@ Let's remove all of the test code and excessive notes about failure modes.
 We should also be able to remove 'scrot' from the dev dependencies and elsewhere.
 
 Let's implement these changes now.
+
+
+prompt: [`fbe8b57`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fbe8b576f75c49e5e19301c8dc673d74d23a0b0d) → reply: [`c7d18ea`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c7d18eaa4d9b7e7938fe13bea4f17fb5717a4c50)
+
+## Reply P
+
+Revision P is done, but I couldn't build or run the tests to check it: the sandbox blocked `go test`, as on earlier revisions. So it still needs a `make build` / `make test` on the host.
+
+- **Experimental code removed:** I deleted the `ianar/cmd/xcompositediag` tool along with its script and PNG, and its `.gitignore` entry. I also removed `xcomposite_linux.go` (the X11 pixmap-copy fallback that never produced a real screenshot) and `xgeometry_linux.go` (the root-geometry and XWayland checks). The `rootWindowGeometry`, `captureRegionImg` and `waylandSessionNote` code in `robot.go` went with them.
+- **Capture logic:** `captureNativeDisplay` now just tries robotgo first, then the D-Bus compositor screenshot. It moves on from any frame that comes back all black.
+- **Notes trimmed:** the long revision-by-revision failure write-ups are gone. Short comments remain in `robot.go`, `portalcapture_linux.go`, `xerror_linux.go`, `main.go`, `ianar/Makefile` and one comment in `App.tsx`.
+- **Dependencies:** `scrot` and `libxcomposite-dev` are out of `scripts/install-dev-deps.sh` and the Makefile notes. Nothing uses either any more.
+
+I read "test code" as the experimental and diagnostic code, so I kept the unit tests in `robot_test.go`. They're cut down to cover only what remains. If you meant the unit tests should go too, I can delete them.
+
+
+## <REPLACE-Revision|Retry> Q
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

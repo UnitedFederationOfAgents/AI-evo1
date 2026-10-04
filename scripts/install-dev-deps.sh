@@ -23,16 +23,8 @@ NODE_INSTALL_MAJOR=20
 
 # apt packages providing the C toolchain + X11/libpng dev headers that ianar's
 # cgo-enabled robotgo build needs (see ianar/Makefile build-go, Step1Prompt.md
-# Revision B/C), plus libxcomposite-dev for the X Composite extension's
-# overlay-window capture fallback added in ianar/xcomposite_linux.go
-# (Step1SubstepDPrompt.md Revision L). `scrot` is kept too, not because
-# ianar's native capture calls it anymore (Revision L moved that back to
-# in-process robotgo.CaptureImg/captureViaXComposite, per that revision's
-# explicit ask not to depend on scrot) but because it's still useful as the
-# known-good external baseline Revision G's reply recommended keeping around
-# for comparison when debugging this display's capture quirks by hand.
-# Checked via the dpkg package name, installed via apt-get.
-CGO_APT_PACKAGES=(build-essential libx11-dev libxtst-dev libpng-dev libxcomposite-dev scrot)
+# Revision B/C). Checked via the dpkg package name, installed via apt-get.
+CGO_APT_PACKAGES=(build-essential libx11-dev libxtst-dev libpng-dev)
 
 # Directories required at build and runtime (deepest paths; parents are created automatically)
 REQUIRED_DIRS=(
@@ -177,7 +169,7 @@ check_dirs() {
 }
 
 check_cgo_toolchain() {
-    hdr "C toolchain + X11/libpng/libxcomposite dev headers + scrot (for ianar's CGO_ENABLED=1 robotgo build and native capture):"
+    hdr "C toolchain + X11/libpng dev headers (for ianar's CGO_ENABLED=1 robotgo build):"
     if ! command -v gcc &>/dev/null; then
         fail "gcc not found in PATH"
     else
@@ -257,7 +249,7 @@ install_make_pkg() {
 }
 
 install_cgo_toolchain() {
-    hdr "Installing C toolchain + X11/libpng/libxcomposite dev headers + scrot..."
+    hdr "Installing C toolchain + X11/libpng dev headers..."
     apt-get update -qq
     apt-get install -y "${CGO_APT_PACKAGES[@]}"
 }

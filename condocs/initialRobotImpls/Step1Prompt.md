@@ -396,11 +396,10 @@ I resolved the `gcc: executable file not found` failure from Resource 2 by movin
 [Step 1 Substep D](Step1SubstepDPrompt.md)
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Now that we have fixed the native and browser capture we want to get the mouse circle working.
 
+Right now we see no evidence of mouse movement.
 
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's either fix that or explain in our response why we do not expect to see it, and another simple action we can perform to ensure we have mouse control.

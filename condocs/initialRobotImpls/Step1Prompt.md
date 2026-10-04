@@ -422,11 +422,6 @@ I fixed the mouse circle, but I couldn't build or test it: the sandbox blocked `
 **A simple check that you have mouse control:** note where the cursor is, click Circle Mouse, and look again. The circle starts and ends 80px to the right of where the cursor was, so even if you miss the motion, the cursor should end up visibly shifted right. While it runs, GNOME may briefly show its remote-control indicator in the top bar. If GNOME refuses the request, the reason is logged as `robot: ... driving the pointer with robotgo instead`.
 
 
-## <REPLACE-Revision|Retry> E
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1791139349 (Sun Oct 4 06:42:29 PM UTC 2026).

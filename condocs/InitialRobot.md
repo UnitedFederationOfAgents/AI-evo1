@@ -31,6 +31,13 @@ It will also be given a:
 ```
 
 
+### Step 2 - <REPLACE-TITLE>
+
+```prompt
+<REPLACE-PROMPT>
+```
+
+
 ## Human-Prompt
 
-The flow of the condoc is now within the first step.
+Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.

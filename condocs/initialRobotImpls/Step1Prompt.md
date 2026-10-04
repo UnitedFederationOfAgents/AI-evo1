@@ -396,6 +396,11 @@ I resolved the `gcc: executable file not found` failure from Resource 2 by movin
 [Step 1 Substep D](Step1SubstepDPrompt.md)
 
 
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep D is now active. Interact with the substep file (Step1SubstepDPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

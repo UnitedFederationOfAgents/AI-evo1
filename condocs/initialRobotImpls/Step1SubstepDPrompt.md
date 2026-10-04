@@ -761,11 +761,6 @@ Revision P is done, but I couldn't build or run the tests to check it: the sandb
 I read "test code" as the experimental and diagnostic code, so I kept the unit tests in `robot_test.go`. They're cut down to cover only what remains. If you meant the unit tests should go too, I can delete them.
 
 
-## <REPLACE-Revision|Retry> Q
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1791129765 (Sun Oct 4 04:02:45 PM UTC 2026).

@@ -125,11 +125,12 @@ Things to check on the host:
 The new code is in `ianar/vision.go` and `ianar/pointer.go`, with tests in `ianar/vision_test.go`. I also changed `window.go`, `sequence.go`, `remotedesktop_linux.go`, `main.go` and `sequence_test.go`, the frontend's `App.tsx`, `types.ts` and `index.css`, and added `tesseract-ocr` to `scripts/install-dev-deps.sh`.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+The sequence now ran and successfully identified federation-command, but it did not succeed fully.
 
+Let's add a capability where any of the captures and/or the recorded sequence are able to upload to file (bringing them into the preferred LR/AC cache, similar to other save-to-file functions within UFA sub-apps).
 
-## Human-Prompt
+We will then use this to debug and iterate.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add that now.

@@ -13,7 +13,9 @@
 // Composite extension's overlay window, leaving the bare root without the
 // content a plain XGetImage expects.
 //
-// Revision O ran this and reported that the overlay GetImage failed too,
+// The first run of this after Revision N (done outside the condoc, before
+// Revision O rolled the results back into ianar) reported that the overlay
+// GetImage failed too,
 // concluding Revision L's theory was dead. That conclusion was drawn from a
 // run whose evidence had been destroyed by a bug in this file, and this
 // revision fixes it:
@@ -27,10 +29,10 @@
 //     flushed that buffer -- `os.Exit` skips libc's atexit handlers, and even
 //     a normal return from a Go `main` exits via the runtime, not libc
 //     `exit()`. So on *every* path, piped C output was silently dropped.
-//     Revision O's transcript shows exactly this: three Go lines, then three
+//     That run's transcript shows exactly this: three Go lines, then three
 //     bare newlines where the two probes' output should have been.
 //
-//     The consequence is that Revision O learned only "overlay GetImage
+//     The consequence is that that run learned only "overlay GetImage
 //     returned NULL" (a Go-side observation of the return value). Whether the
 //     root probe failed, and what X error *either* probe raised -- the entire
 //     point of running this -- was never seen. "failed the same way the root
@@ -100,7 +102,7 @@ package main
 
 // The error handler records the most recent X protocol error into these
 // statics for the Go side to read, rather than printing it itself. Printing
-// from C is what lost this diagnostic's entire output in Revision O -- see
+// from C is what lost this diagnostic's entire output in its first run -- see
 // this file's header comment (1). Recording it also lets Go attribute each
 // error to the probe that caused it and print them in order.
 static char xErrText[128];
@@ -251,7 +253,7 @@ func run() int {
 
 	w, h := C.int(attrs.width), C.int(attrs.height)
 
-	// Probe 4: plain root-window GetImage. Revision O never saw this result.
+	// Probe 4: plain root-window GetImage. The first run never saw this result.
 	rootOK, rootNonBlack := probe(d, "4) plain root-window GetImage",
 		C.Drawable(root), w, h, "xcompositediag_root.png")
 
@@ -355,7 +357,7 @@ func describeAttrs(a *C.XWindowAttributes) string {
 // clearXError, formatted for appending to a probe's result line, plus whether
 // there was one at all. Reading the flag rather than pattern-matching the
 // returned text keeps callers that branch on it (probePixmapCopy) honest.
-// This is the output Revision O's run dropped entirely.
+// This is the output the first run dropped entirely.
 func takeXError() (string, bool) {
 	if C.haveXError() == 0 {
 		return " (no X error raised)", false
@@ -514,7 +516,7 @@ func summarize(isXWayland, rootViewable, haveComposite bool,
 	case usable(overlayOK, overlayPct):
 		fmt.Println("The Composite overlay-window GetImage WORKED and returned real content" +
 			" where the root did not: Revision L's theory is confirmed after all, and" +
-			" Revision O's report to the contrary came from the lost-output bug described in" +
+			" the first run's report to the contrary came from the lost-output bug described in" +
 			" this file's header. ianar/xcomposite_linux.go's fallback is the right fix.")
 	case usable(pixmapOK, pixmapPct):
 		fmt.Println("Neither window could be read directly, but XCopyArea root -> pixmap ->" +
@@ -553,7 +555,7 @@ func summarize(isXWayland, rootViewable, haveComposite bool,
 				" Revision K's apt output) or org.gnome.Shell.Screenshot over D-Bus.")
 		} else {
 			fmt.Println("No capture route worked and this does not appear to be XWayland." +
-				" The per-probe X errors above (which Revision O never got to see) are the" +
+				" The per-probe X errors above (which the first run never got to see) are the" +
 				" thing to read: a BadMatch against a window reported IsViewable above means" +
 				" something other than viewability is rejecting the drawable.")
 		}

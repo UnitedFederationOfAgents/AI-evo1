@@ -81,11 +81,12 @@ static void xcapClearErr(void) {
 
 // captureViaPixmapCopyC copies a source drawable into a pixmap we own and
 // XGetImage's *that*, rather than XGetImage'ing the source drawable directly.
-// See captureViaXComposite's Go-side doc comment in robot.go, and the Go
-// wrapper below, for why the indirection is the whole point: on this host both
-// the bare root window and the Composite overlay window reject GetImage with
-// BadMatch, while the very same pixels read back fine once they have been
-// copied into an ordinary pixmap.
+// The indirection only means something when the source drawable has readable
+// backing content: on this host (rootless XWayland) the root and the Composite
+// overlay both reject GetImage with BadMatch, and a pixmap copied out of either
+// holds undefined server memory, not their pixels. The Go wrapper below
+// therefore only calls this after rootGetImageReadableC passes -- see
+// captureViaXComposite's doc comment in robot.go for the full account.
 //
 // src selects the drawable to copy from: XCAPTURE_SRC_ROOT (the root window)
 // or XCAPTURE_SRC_OVERLAY (the Composite extension's overlay window). On
@@ -279,8 +280,8 @@ func init() {
 	captureViaXComposite = func() (image.Image, error) {
 		// Refuse before copying anything if the source has no readable content.
 		//
-		// This is the guard that was missing when Revision P shipped the pixmap
-		// copy as the primary capture path on the strength of a frame that turned
+		// This is the guard that was missing when an out-of-condoc iteration
+		// after Revision N shipped the pixmap copy as the primary capture path on the strength of a frame that turned
 		// out to be recycled server memory. The X protocol makes the reasoning
 		// short: a new pixmap's contents are undefined, and XCopyArea from a
 		// drawable with no backing storage leaves them that way -- it is not an
@@ -414,7 +415,7 @@ func capturePixmapCopy(src C.int) (image.Image, int, error) {
 // there was one. Several of the failure points below (notably the XCopyArea)
 // are only detectable *as* X errors, so the text is the whole diagnosis;
 // others raise none, and inventing one would repeat the mistake that misled
-// Revision O.
+// the first out-of-condoc xcompositediag run after Revision N.
 func xErrorClause(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return ""

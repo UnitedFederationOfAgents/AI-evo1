@@ -32,6 +32,23 @@ static int rootWindowGeometryC(int *x, int *y, int *w, int *h) {
 	XCloseDisplay(d);
 	return ok;
 }
+
+// displayIsXWaylandC reports whether the X server behind DISPLAY advertises
+// the XWAYLAND extension -- the in-client way to tell that the "X server" is
+// really rootless XWayland, carried over from ianar/cmd/xcompositediag's
+// reportServer. Opens its own short-lived connection for the same reason
+// rootWindowGeometryC does. Returns 0 if the display can't be opened.
+static int displayIsXWaylandC(void) {
+	int opcode, event, error;
+	int found;
+	Display *d = XOpenDisplay(NULL);
+	if (d == NULL) {
+		return 0;
+	}
+	found = XQueryExtension(d, "XWAYLAND", &opcode, &event, &error);
+	XCloseDisplay(d);
+	return found;
+}
 */
 import "C"
 
@@ -46,5 +63,8 @@ func init() {
 			return 0, 0, 0, 0, false
 		}
 		return int(cx), int(cy), int(cw), int(ch), true
+	}
+	displayIsXWayland = func() bool {
+		return C.displayIsXWaylandC() != 0
 	}
 }

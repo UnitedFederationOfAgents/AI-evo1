@@ -723,3 +723,24 @@ We have also fixed the go version pinning back to <=1.25.0.
 This work has been done outside of the condoc, so in this increment let's roll our slight progress back into the main ianar logic and let things come back into sync with the branch. We do not expect this will get things fully functional, but it will be a step in the right direction.
 
 Let's implement this now.
+
+
+prompt: [`1c91ec2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1c91ec28917adc630b55732f0779202a5fba42c4) → reply: [`ced44ce`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ced44cef220dc6947665f27f415086b4471cb7bb)
+
+## Reply O
+
+Most of the diagnostic's progress was already in ianar on the branch: the D-Bus compositor capture path, the all-black frame check, and the gate that refuses the X11 pixmap copy. So this revision synced what was still missing. I couldn't run `go build`, `go test` or `gofmt` (same sandbox gate as before), so none of this has been built or run yet.
+
+- **XWAYLAND detection:** ianar now uses the diagnostic's check (asking the X server whether it advertises the XWAYLAND extension). It's in `xgeometry_linux.go`, exposed through a new overridable `displayIsXWayland` var in `robot.go`. `waylandSessionNote` uses it alongside the environment variables, and startup now logs when native capture will have to rely on the D-Bus path.
+- **Stale comments:** comments in `robot.go` and `xcomposite_linux.go` still said the pixmap copy "finally worked"; they now match the settled picture. Comments in `robot.go`, `xcomposite_linux.go` and `cmd/xcompositediag/main.go` also called the outside runs "Revision O/P", which collided with this condoc's own Revision O. Those now name them as out-of-condoc work done after Revision N.
+- **Tests:** they now stub the XWAYLAND check so they never open a real display, and a new `TestWaylandSessionNote` covers each detection case.
+
+
+## <REPLACE-Revision|Retry> P
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

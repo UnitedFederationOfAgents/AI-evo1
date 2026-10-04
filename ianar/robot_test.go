@@ -63,10 +63,15 @@ func stubCapturePaths(t *testing.T) {
 	t.Helper()
 	origScreen, origRegion, origSize := captureScreenImg, captureRegionImg, screenSize
 	origGeom, origComposite, origPortal := rootWindowGeometry, captureViaXComposite, captureViaPortal
+	origXWayland := displayIsXWayland
 	t.Cleanup(func() {
 		captureScreenImg, captureRegionImg, screenSize = origScreen, origRegion, origSize
 		rootWindowGeometry, captureViaXComposite, captureViaPortal = origGeom, origComposite, origPortal
+		displayIsXWayland = origXWayland
 	})
+	// Failure paths append waylandSessionNote, which would otherwise open a
+	// real X connection to look for the XWAYLAND extension.
+	displayIsXWayland = func() bool { return false }
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("captureScreenImg not stubbed") }
 	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
 		return nil, errors.New("captureRegionImg not stubbed")
@@ -321,17 +326,58 @@ func TestCaptureNativeDisplayUsesRealGeometryWhenItDisagrees(t *testing.T) {
 // handler before querying the screen size, rather than only on the
 // Linux-specific path exercised by xerror_linux.go's init().
 func TestWarmUpRobotDisplayInstallsErrorHandler(t *testing.T) {
-	origInstall, origSize := installXErrorHandler, screenSize
-	defer func() { installXErrorHandler, screenSize = origInstall, origSize }()
+	origInstall, origSize, origXWayland := installXErrorHandler, screenSize, displayIsXWayland
+	defer func() { installXErrorHandler, screenSize, displayIsXWayland = origInstall, origSize, origXWayland }()
 
 	installed := false
 	installXErrorHandler = func() { installed = true }
 	screenSize = func() (int, int) { return 4, 4 }
+	displayIsXWayland = func() bool { return false }
 
 	warmUpRobotDisplay()
 
 	if !installed {
 		t.Fatalf("warmUpRobotDisplay did not call installXErrorHandler")
+	}
+}
+
+// ---- waylandSessionNote ----
+
+// TestWaylandSessionNote covers both ways a Wayland session is detected: the
+// session's own environment variables, and -- when those have been stripped
+// from ianar's environment -- the X server advertising XWAYLAND, which is the
+// check carried over from ianar/cmd/xcompositediag.
+func TestWaylandSessionNote(t *testing.T) {
+	origXWayland := displayIsXWayland
+	defer func() { displayIsXWayland = origXWayland }()
+
+	cases := []struct {
+		name         string
+		waylandEnv   string
+		sessionType  string
+		xwayland     bool
+		wantNote     bool
+		wantMentions string
+	}{
+		{"plain X11", "", "x11", false, false, ""},
+		{"WAYLAND_DISPLAY set", "wayland-0", "", false, true, "WAYLAND_DISPLAY"},
+		{"XDG_SESSION_TYPE=wayland", "", "wayland", false, true, "WAYLAND_DISPLAY"},
+		{"env stripped but server is XWayland", "", "", true, true, "XWAYLAND extension"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WAYLAND_DISPLAY", tc.waylandEnv)
+			t.Setenv("XDG_SESSION_TYPE", tc.sessionType)
+			displayIsXWayland = func() bool { return tc.xwayland }
+
+			note := waylandSessionNote()
+			if (note != "") != tc.wantNote {
+				t.Fatalf("waylandSessionNote() = %q, want a note: %v", note, tc.wantNote)
+			}
+			if tc.wantMentions != "" && !strings.Contains(note, tc.wantMentions) {
+				t.Errorf("waylandSessionNote() = %q, want it to mention %q", note, tc.wantMentions)
+			}
+		})
 	}
 }
 

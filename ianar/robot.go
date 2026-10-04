@@ -124,7 +124,9 @@ var robotMu sync.Mutex
 // shows the overlay exists but is IsUnmapped, and GetImage against it fails
 // with the same BadMatch as the root.
 //
-// Revision P then reported that the indirection rather than the drawable was
+// A later out-of-condoc iteration (between Step1SubstepDPrompt.md's Revisions
+// N and O, rolled back in by Revision O) then reported that the indirection
+// rather than the drawable was
 // the answer -- XCopyArea the root into a pixmap we own, then GetImage *that*
 // -- on the strength of a PNG that was 93.55% non-black and "visually
 // confirmed". **That was wrong, and it is the most dangerous wrong answer this
@@ -172,7 +174,8 @@ var robotMu sync.Mutex
 //     evidence that it captured anything, and treating it as such is what kept
 //     the compositing-manager theory alive for several revisions.
 //   - "GetImage rejects the overlay the same way it rejects the bare root."
-//     Revision O reported this from a run whose X errors had been lost to C
+//     The first out-of-condoc xcompositediag run after Revision N reported
+//     this from a run whose X errors had been lost to C
 //     stdio buffering, so the two failures were never actually compared. They
 //     do in fact both fail with BadMatch -- but that was confirmed only once
 //     xcompositediag routed every probe's output through Go.
@@ -259,17 +262,36 @@ func hasVisibleContent(img image.Image) bool {
 // conclusion is the blunt one: X11 cannot do it, and the compositor has to be
 // asked over D-Bus instead (captureViaPortal).
 //
-// Checked from the environment rather than by probing for an XWAYLAND
-// extension: these two variables are set by the session itself and are the
-// reliable signal. Purely advisory -- it only ever adds explanatory text.
+// Checked two ways: from the environment, which the session sets itself, and
+// by asking the X server whether it advertises the XWAYLAND extension (see
+// displayIsXWayland), which is what ianar/cmd/xcompositediag uses to confirm
+// the same fact from inside the client. The second catches ianar being
+// started with WAYLAND_DISPLAY/XDG_SESSION_TYPE stripped from its environment
+// (e.g. by a service launcher) while DISPLAY still points at XWayland. Purely
+// advisory -- it only ever adds explanatory text.
 func waylandSessionNote() string {
-	if os.Getenv("WAYLAND_DISPLAY") == "" && os.Getenv("XDG_SESSION_TYPE") != "wayland" {
+	var why string
+	switch {
+	case os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("XDG_SESSION_TYPE") == "wayland":
+		why = "this is a Wayland session (WAYLAND_DISPLAY/XDG_SESSION_TYPE are set)"
+	case displayIsXWayland():
+		why = "the X server behind DISPLAY advertises the XWAYLAND extension"
+	default:
 		return ""
 	}
-	return " NOTE: this is a Wayland session (WAYLAND_DISPLAY/XDG_SESSION_TYPE are set), so" +
+	return " NOTE: " + why + ", so" +
 		" DISPLAY is rootless XWayland and no X11 drawable holds the composited desktop --" +
 		" the compositor must be asked over D-Bus instead." +
 		" Run ianar/cmd/xcompositediag to see what is and isn't readable here."
+}
+
+// displayIsXWayland reports whether the X server behind DISPLAY is XWayland,
+// by checking for its XWAYLAND extension (see xgeometry_linux.go, which
+// overrides this on Linux). Declared as a no-op reporting false so non-Linux
+// builds and tests never touch a real display, following the same
+// overridable-var pattern as rootWindowGeometry.
+var displayIsXWayland = func() bool {
+	return false
 }
 
 // captureScreenImg is overridden in tests so captureNativeDisplay can be
@@ -354,14 +376,16 @@ var rootWindowGeometry = func() (x, y, w, h int, ok bool) {
 // before the identical BadMatch) and, via xgetimagediag's wider battery,
 // every GetImage format/plane_mask variant along with it -- all read
 // directly from the root window, which is the one axis none of C/E/F/K
-// varied. Revision L's new theory targets exactly that: see
-// captureViaXComposite's doc comment above for what finally worked: the
-// drawable GetImage is pointed at, not the request's parameters, is what the
-// failure tracks, and copying into a pixmap first sidesteps it entirely.
-// The useReal/captureRegionImg branch below
-// is unchanged by that -- it still decides which rectangle is the real one
-// to ask robotgo.CaptureImg for; captureViaXComposite only comes into play
-// if that whole first attempt fails.
+// varied. Revision L targeted exactly that axis, and the out-of-condoc
+// xcompositediag work that followed Revision N settled it: on this host
+// (rootless XWayland) no X11 drawable holds the desktop at all, and the
+// pixmap-copy "fix" returns undefined server memory rather than a screenshot
+// -- see captureViaXComposite's doc comment above. The capture that can work
+// here goes through the compositor over D-Bus (captureViaPortal), which is
+// why it is tried before the X11 fallback below. The useReal/captureRegionImg
+// branch is unchanged by any of that -- it still decides which rectangle is
+// the real one to ask robotgo.CaptureImg for; the fallbacks only come into
+// play if that whole first attempt fails or returns an all-black frame.
 func captureNativeDisplay() ([]byte, error) {
 	robotMu.Lock()
 	w, h := screenSize()
@@ -508,6 +532,12 @@ func warmUpRobotDisplay() {
 	installXErrorHandler()
 	w, h := screenSize()
 	log.Printf("robot: warmed up robotgo display connection at startup, reported screen size %dx%d", w, h)
+	// Say up front, rather than only on a failed capture, when DISPLAY is
+	// XWayland: robotgo's capture (and the X11 fallback) cannot see the desktop
+	// there, so the first capture-native will go to the D-Bus compositor path.
+	if note := waylandSessionNote(); note != "" {
+		log.Printf("robot: native capture will rely on the D-Bus compositor path.%s", note)
+	}
 }
 
 // ---- Circle-mouse (native input) ----

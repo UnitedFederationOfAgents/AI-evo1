@@ -714,11 +714,12 @@ Only the one call site, consistently updated. Both fixes are self-contained and 
 I fixed two things for Revision N: in `ianar/cmd/xcompositediag/main.go`, the `C.XDestroyImage` calls on the Go side were invoking a macro cgo can't resolve directly (the `#include` fix in Revision M only addressed the implicit-declaration variant of this error, not this one) — added a small `destroyImage` C wrapper function and routed both call sites through it. In `ianar/xcomposite_linux.go`, I replaced the single generic "extension unavailable, no overlay window, or GetImage rejected it" error with distinct reason codes threaded back from `captureViaXCompositeC`, so the next production failure names the actual cause (open-display/extension-missing/root-attrs/no-overlay/GetImage-rejected) instead of listing all possibilities — making the real diagnostic (now that it builds) and the production logs both conclusive going forward.
 
 
-## <REPLACE-Revision|Retry> O
+## Revision O
 
-<REPLACE-PROMPT>
+We have made some progress in our temporary experimental 'cmd/xcompositediag'.
 
+We have also fixed the go version pinning back to <=1.25.0.
 
-## Human-Prompt
+This work has been done outside of the condoc, so in this increment let's roll our slight progress back into the main ianar logic and let things come back into sync with the branch. We do not expect this will get things fully functional, but it will be a step in the right direction.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's implement this now.

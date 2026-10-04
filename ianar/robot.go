@@ -8,6 +8,8 @@ import (
 	"image/png"
 	"log"
 	"math"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,9 +31,9 @@ import (
 // in-process-only fix through goroutine-safety, warm-up timing,
 // split-screen geometry, and root-window geometry theories without success,
 // but Revision L asked to go back to robotgo rather than depend on an
-// external binary. See captureViaXComposite's doc comment below for the new
-// theory Revision L adds on top of robotgo.CaptureImg to try to actually
-// make that work again, rather than just reverting Revision K outright.
+// external binary. Dropping `scrot` cost nothing in the end: it exits 0 on
+// this host but writes an all-black PNG. See captureViaXComposite's doc
+// comment below for the in-process fallback that does return real pixels.
 
 // CaptureResultMsg is the "capture-result" WebSocket payload reporting a
 // completed native or browser capture.
@@ -107,47 +109,167 @@ var robotMu sync.Mutex
 
 // ---- Native display capture ----
 
-// captureViaXComposite is Revision L's new fallback, tried when a plain
+// captureViaXComposite is the native-X11 fallback tried when a plain
 // robotgo.CaptureImg() call fails -- see captureNativeDisplay's doc comment
 // for the full chain of theories this follows on from. Declared as a no-op
-// returning an error here so non-Linux builds (and any Linux build that
-// somehow lacks the Composite extension) degrade cleanly; overridden with
-// the real Xlib/XComposite implementation by xcomposite_linux.go's init(),
+// returning an error here so non-Linux builds degrade cleanly; overridden
+// with the real Xlib implementation by xcomposite_linux.go's init(),
 // following the same overridable-var pattern as installXErrorHandler/
 // rootWindowGeometry.
 //
-// Why this, and not just reverting Revision K outright: Revision K's own
-// diagnostic (ianar/cmd/xgetimagediag, since deleted per its own "delete it
-// once confirmed" comment) called XGetImage *directly* via raw Xlib cgo --
-// bypassing robotgo's bindings entirely -- varying format/plane_mask/
-// rectangle size, and still hit the identical BadMatch every time. That
-// already rules out "robotgo's cgo bindings are buggy" (asked about in
-// Revision L's prompt): the failure reproduces with zero robotgo code in
-// the picture at all, so there's no robotgo-specific glue bug to fix. What
-// it doesn't rule out is *which window* GetImage is being asked to read
-// from: every attempt so far (robotgo's, and xgetimagediag's) read directly
-// from the literal root window. This host is running GNOME Shell as its
-// window/compositing manager (see Revision K's Resource -- the apt output
-// there lists `org.gnome.Shell@ubuntu.service` and the
-// `xdg-desktop-portal-gnome`/`xdg-desktop-portal` services running
-// alongside it). Compositing managers commonly redirect rendering into an
-// offscreen buffer and only ever paint the *composited result* into the X
-// Composite extension's overlay window (XCompositeGetOverlayWindow) --
-// not onto the bare root window underneath, which is exactly the kind of
-// drawable-mismatch GetImage reports as BadMatch regardless of the
-// rectangle/format/plane_mask requested against it (the three things every
-// theory from Revisions C through K varied). `scrot` has had
-// compositing-aware capture logic since well before this host's installed
-// version for precisely this reason, which is consistent with why it
-// succeeded here. I can't confirm this live myself -- same sandbox
-// approval gate blocking go/git/env inspection noted on every prior reply
-// on this step -- so captureViaXComposite is a best-effort attempt at
-// reading the overlay window's content directly instead of the root's, not
-// a verified fix; see ianar/cmd/xcompositediag (new, temporary, like
-// Revision G's xgetimagediag) for a standalone way to confirm or deny this
-// independently of whether this fallback itself works end-to-end.
+// The name is historical. Revision L introduced this to read the X Composite
+// extension's *overlay window*, on the theory that a compositing manager
+// paints the composited result there and not onto the bare root. That theory
+// is now settled, and it was wrong in its second half: ianar/cmd/xcompositediag
+// shows the overlay exists but is IsUnmapped, and GetImage against it fails
+// with the same BadMatch as the root.
+//
+// Revision P then reported that the indirection rather than the drawable was
+// the answer -- XCopyArea the root into a pixmap we own, then GetImage *that*
+// -- on the strength of a PNG that was 93.55% non-black and "visually
+// confirmed". **That was wrong, and it is the most dangerous wrong answer this
+// step has produced**, because unlike every earlier failure it looked like a
+// success all the way to the UI. Opening the PNG at full size shows the same
+// window content repeated twice at a nonsense offset of roughly (1920, 540),
+// wrapping at the image edge: the top-left terminal panel reappears
+// pixel-identically at bottom-right, scroll position and all, as does the
+// YouTube player bar. Real desktops do not contain shifted copies of
+// themselves, so the frame is not a screenshot of anything.
+//
+// The mechanism is now understood and makes that inevitable. A freshly created
+// pixmap's contents are undefined by the X protocol, and the root window on
+// rootless XWayland has no backing storage at all, so XCopyArea from it leaves
+// the destination holding whatever was already in server memory. On XWayland
+// that memory is recycled X client window buffers -- which is exactly why the
+// garbage looks like real terminals: those terminals *are* XWayland clients,
+// just reassembled at meaningless offsets. The black pre-fill in
+// xcomposite_linux.go was meant to make a no-op copy detectable, but a copy
+// that succeeds and transfers undefined memory overwrites the pre-fill with
+// plausible-looking junk and defeats the check entirely.
+//
+// So this path is no longer trusted on its own. It now first probes whether a
+// plain GetImage against the root succeeds; if that fails -- as it does on this
+// host -- the root has no readable content, anything copied out of it is
+// undefined, and the capture is refused rather than returned. See
+// captureViaPortal below for the path that actually works here.
+//
+// Why a fallback is needed at all, rather than fixing robotgo's call:
+// Revision K's diagnostic (ianar/cmd/xgetimagediag, since deleted per its own
+// "delete it once confirmed" comment) called XGetImage *directly* via raw
+// Xlib cgo -- bypassing robotgo's bindings entirely -- varying
+// format/plane_mask/rectangle size, and still hit the identical BadMatch
+// every time. That rules out "robotgo's cgo bindings are buggy" (asked about
+// in Revision L's prompt): the failure reproduces with zero robotgo code in
+// the picture, so there is no robotgo-specific glue bug to fix.
+//
+// Two things previously recorded here as supporting evidence were wrong, and
+// are corrected rather than deleted because they were each load-bearing for a
+// revision's conclusion:
+//
+//   - "`scrot` succeeds on this display, because it has compositing-aware
+//     capture logic." It does exit 0, which is what Revision K observed, but
+//     the PNG it writes is entirely black. A zero exit status was never
+//     evidence that it captured anything, and treating it as such is what kept
+//     the compositing-manager theory alive for several revisions.
+//   - "GetImage rejects the overlay the same way it rejects the bare root."
+//     Revision O reported this from a run whose X errors had been lost to C
+//     stdio buffering, so the two failures were never actually compared. They
+//     do in fact both fail with BadMatch -- but that was confirmed only once
+//     xcompositediag routed every probe's output through Go.
+//
+// The settled picture: this host is a GNOME *Wayland* session whose only X
+// server is rootless XWayland (`/usr/bin/Xwayland :0 -rootless`, a child of
+// gnome-shell), with mutter compositing on the Wayland side. _NET_WM_CM_S0 has
+// an owner, so the usual compositing-manager check cannot distinguish this
+// case. No X11 drawable here holds the composited desktop: not the root, not
+// the Composite overlay, and not a pixmap copied from either. The desktop
+// exists only inside mutter, on the Wayland side, so the compositor has to be
+// asked for it -- which is captureViaPortal's job.
 var captureViaXComposite = func() (image.Image, error) {
-	return nil, fmt.Errorf("XComposite-based capture not available on this platform")
+	return nil, fmt.Errorf("native X11 pixmap-copy capture not available on this platform")
+}
+
+// captureViaPortal asks the *compositor* for the screen over D-Bus, rather
+// than trying to read it out of an X drawable. On a Wayland session this is
+// the only thing that can work at all (see portalcapture_linux.go, which
+// overrides this on Linux, for the full reasoning and the two interfaces it
+// tries); on a real X server it is simply unavailable and the X11 paths above
+// are the ones that matter. Declared here as a no-op returning an error so
+// non-Linux builds degrade cleanly and tests can substitute their own,
+// following the same overridable-var pattern as captureViaXComposite.
+var captureViaPortal = func() (image.Image, error) {
+	return nil, fmt.Errorf("D-Bus compositor capture not available on this platform")
+}
+
+// hasVisibleContent reports whether an image contains any non-black pixel.
+//
+// Every capture path on this host has at some point returned a frame that was
+// structurally valid and completely empty -- robotgo's, `scrot`'s, the
+// Composite overlay's -- and an all-black PNG is indistinguishable from a
+// working capture at every layer above this one, which is how the step's
+// earlier revisions kept concluding a path worked when it did not. So the
+// answer to "did this capture anything" is computed, not assumed, on every
+// path rather than only on the fallbacks.
+//
+// Samples on a grid rather than walking all 4M pixels of a 3840x1080 frame:
+// any real screen content lights up far more than one sample in a thousand,
+// and an all-black frame is all-black everywhere, so the sparse walk reaches
+// the same verdict for a fraction of the work. Fully opaque black counts as
+// empty; alpha is ignored, since a capture path that returns zeroed alpha
+// everywhere is still carrying content.
+func hasVisibleContent(img image.Image) bool {
+	if img == nil {
+		return false
+	}
+	b := img.Bounds()
+	if b.Empty() {
+		return false
+	}
+	const samplesPerAxis = 256
+	stepX := max(1, b.Dx()/samplesPerAxis)
+	stepY := max(1, b.Dy()/samplesPerAxis)
+	for y := b.Min.Y; y < b.Max.Y; y += stepY {
+		for x := b.Min.X; x < b.Max.X; x += stepX {
+			if r, g, bl, _ := img.At(x, y).RGBA(); r|g|bl != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// waylandSessionNote returns a note naming a Wayland session as relevant
+// context, for appending to a capture failure (or an all-black capture).
+//
+// This host runs GNOME Shell on Wayland with DISPLAY=:0 served by rootless
+// XWayland (`/usr/bin/Xwayland :0 -rootless` as a child of `gnome-shell`), and
+// mutter composites on the Wayland side. That is why GetImage against the root
+// window and against the Composite overlay both fail, why `scrot` writes an
+// all-black PNG here, and why no choice of rectangle or pixel format
+// (Revisions C/E/F/G/K/L) changed the outcome. Note that _NET_WM_CM_S0 still
+// has an owner, so the usual compositing-manager check does not distinguish
+// this case.
+//
+// Two earlier revisions of this note each overstated the position in opposite
+// directions and both are corrected here. "No X11 path can work" was too
+// strong only in the sense that a pixmap copy *returns* something; "the pixmap
+// copy reads back real content" was simply false -- what it reads back is
+// undefined server memory that happens to resemble windows (see
+// captureViaXComposite's doc comment). For capturing this desktop the practical
+// conclusion is the blunt one: X11 cannot do it, and the compositor has to be
+// asked over D-Bus instead (captureViaPortal).
+//
+// Checked from the environment rather than by probing for an XWAYLAND
+// extension: these two variables are set by the session itself and are the
+// reliable signal. Purely advisory -- it only ever adds explanatory text.
+func waylandSessionNote() string {
+	if os.Getenv("WAYLAND_DISPLAY") == "" && os.Getenv("XDG_SESSION_TYPE") != "wayland" {
+		return ""
+	}
+	return " NOTE: this is a Wayland session (WAYLAND_DISPLAY/XDG_SESSION_TYPE are set), so" +
+		" DISPLAY is rootless XWayland and no X11 drawable holds the composited desktop --" +
+		" the compositor must be asked over D-Bus instead." +
+		" Run ianar/cmd/xcompositediag to see what is and isn't readable here."
 }
 
 // captureScreenImg is overridden in tests so captureNativeDisplay can be
@@ -233,9 +355,10 @@ var rootWindowGeometry = func() (x, y, w, h int, ok bool) {
 // every GetImage format/plane_mask variant along with it -- all read
 // directly from the root window, which is the one axis none of C/E/F/K
 // varied. Revision L's new theory targets exactly that: see
-// captureViaXComposite's doc comment above for why reading the Composite
-// extension's overlay window instead of the bare root is worth trying
-// before falling back further. The useReal/captureRegionImg branch below
+// captureViaXComposite's doc comment above for what finally worked: the
+// drawable GetImage is pointed at, not the request's parameters, is what the
+// failure tracks, and copying into a pixmap first sidesteps it entirely.
+// The useReal/captureRegionImg branch below
 // is unchanged by that -- it still decides which rectangle is the real one
 // to ask robotgo.CaptureImg for; captureViaXComposite only comes into play
 // if that whole first attempt fails.
@@ -253,31 +376,81 @@ func captureNativeDisplay() ([]byte, error) {
 		log.Printf("robot: capturing native display, robotgo reports screen size %dx%d (matches real root window geometry)", w, h)
 	}
 
+	// Each capture path in turn, best first, stopping at the first one that
+	// returns a frame with actual content in it. "Returned an image" is not the
+	// same test as "captured the screen" on this host -- see hasVisibleContent
+	// -- so a path that succeeds but hands back an entirely black frame does not
+	// end the search. It is still kept, though: a genuinely blanked or locked
+	// screen really is all black, and that shouldn't become a hard failure, so
+	// if no path produces content we return the first blank frame with a loud
+	// warning rather than an error.
+	//
+	// robotgo stays first, per Revision L: it is the in-process primary this
+	// step is meant to use, and on a normal X server it is the right answer. It
+	// is just not one this particular host can satisfy.
+	type attempt struct {
+		name string
+		grab func() (image.Image, error)
+	}
+	attempts := []attempt{{
+		name: "robotgo",
+		grab: func() (image.Image, error) {
+			if useReal {
+				return captureRegionImg(rx, ry, rw, rh)
+			}
+			return captureScreenImg()
+		},
+	}, {
+		// Whole-display only (no region support) for both fallbacks: the
+		// requested rectangle was never the issue -- the failure tracks the
+		// drawable, not the request -- so there is nothing to preserve by
+		// threading rx/ry/rw/rh through them.
+		name: "D-Bus compositor screenshot",
+		grab: captureViaPortal,
+	}, {
+		name: "native X11 pixmap copy",
+		grab: captureViaXComposite,
+	}}
+
 	var img image.Image
 	var err error
-	if useReal {
-		img, err = captureRegionImg(rx, ry, rw, rh)
-	} else {
-		img, err = captureScreenImg()
-	}
-	if err != nil {
-		// Revision L: robotgo.CaptureImg's plain root-window GetImage keeps
-		// hitting the same BadMatch Revisions A/C/D/E/F/G/K chased -- try
-		// reading the compositor's overlay window instead before giving up.
-		// Whole-display only (no region support): if the compositing-redirect
-		// theory is right, the requested rectangle was never the issue, so
-		// there's nothing to preserve by also threading rx/ry/rw/rh through
-		// here.
-		if compImg, compErr := captureViaXComposite(); compErr == nil {
-			log.Printf("robot: robotgo capture failed (%v); XComposite overlay-window fallback succeeded", err)
-			img, err = compImg, nil
-		} else {
-			err = fmt.Errorf("%w (XComposite fallback also failed: %v)", err, compErr)
+	var blank image.Image
+	var blankFrom string
+	var failures []string
+	for _, a := range attempts {
+		got, grabErr := a.grab()
+		switch {
+		case grabErr != nil:
+			failures = append(failures, fmt.Sprintf("%s: %v", a.name, grabErr))
+		case !hasVisibleContent(got):
+			failures = append(failures, fmt.Sprintf("%s: succeeded but every pixel is black", a.name))
+			if blank == nil {
+				blank, blankFrom = got, a.name
+			}
+		default:
+			if len(failures) > 0 {
+				log.Printf("robot: capture via %s succeeded after %d earlier path(s) did not: %s",
+					a.name, len(failures), strings.Join(failures, "; "))
+			}
+			img = got
 		}
+		if img != nil {
+			break
+		}
+	}
+	switch {
+	case img != nil:
+	case blank != nil:
+		log.Printf("robot: WARNING -- no capture path returned any screen content; handing back the"+
+			" entirely black frame from %s, which carries none. Tried: %s.%s",
+			blankFrom, strings.Join(failures, "; "), waylandSessionNote())
+		img = blank
+	default:
+		err = fmt.Errorf("every capture path failed: %s%s", strings.Join(failures, "; "), waylandSessionNote())
 	}
 	robotMu.Unlock()
 	if err != nil {
-		return nil, fmt.Errorf("robotgo capture: %w", err)
+		return nil, fmt.Errorf("native capture: %w", err)
 	}
 	log.Printf("robot: native capture succeeded, image bounds %v", img.Bounds())
 

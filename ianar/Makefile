@@ -25,20 +25,21 @@ build-frontend:
 # capture fallback, Step1SubstepDPrompt.md Revision L) on the build host --
 # see scripts/install-dev-deps.sh, which checks for/installs these as part
 # of `make check-dev-deps`/`make deploy-dev-binaries`.
+#
+# The `go mod edit -droprequire=golang.org/x/sys` + `go mod tidy` stopgap that
+# used to run here is gone: go.mod/go.sum now carry the resolved, go1.25-
+# compatible pin it was there to re-derive (x/sys v0.30.0, the real MVS maximum
+# across robotgo et al -- v0.48.0 was never derived from the graph, it came from
+# 54a4c26's tidy, and its own go.mod demands go >= 1.26, which this host's
+# 1.25.0 toolchain hard-errors on rather than switching for a *dependency's*
+# requirement). Dropping it is what that comment said to do once the resolved
+# state was committed, but it also fixes a loop: because the recipe rewrote
+# tracked go.mod/go.sum on every single build, it kept undoing exactly this
+# pin -- Revision K committed x/sys v0.30.0 and by Revision L's commit the tree
+# was back to v0.48.0/go 1.26.0 with no one having asked for it. A pin that the
+# build step re-derives is not a pin, so the fix could not stick until this
+# came out.
 build-go:
-	# go.mod's indirect golang.org/x/sys requirement got bumped to v0.48.0 (whose
-	# own go.mod demands go >= 1.26) by the `go mod tidy` run in 54a4c26, which also
-	# bumped this module's `go` directive to 1.26.0 to match. Revision A's reply
-	# hand-reverted just that directive back to `go 1.25` (to match this host's
-	# installed toolchain -- see Step1SubstepDPrompt.md's dependency check) without
-	# re-resolving the now-inconsistent x/sys pin, so `go build` refuses to load the
-	# module graph (Build Debug 3). Drop the stale pin and re-tidy here as a
-	# stopgap so MVS re-derives a go1.25-compatible version from the real
-	# transitive requirers (robotgo et al) using this host's network access; once
-	# someone does that and commits the resulting go.mod/go.sum, these two lines
-	# are fast no-ops and can be dropped to match the other subprojects' build-go.
-	go mod edit -droprequire=golang.org/x/sys
-	go mod tidy
 	CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 run: build

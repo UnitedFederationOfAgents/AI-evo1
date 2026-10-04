@@ -33,16 +33,55 @@ func decodeSent(t *testing.T, c *wsClient, wantType string, out interface{}) {
 	}
 }
 
-// ---- captureNativeDisplay ----
+// litImage returns a w x h image with content in it -- i.e. one that
+// hasVisibleContent reports true for.
+//
+// Every capture stub in this file has to return one of these rather than a
+// bare image.NewRGBA, because a freshly allocated RGBA is all zeroes, which is
+// opaque black, which captureNativeDisplay now treats as "this path returned
+// no screen content" and moves past. That is the whole point of the check (an
+// all-black frame was repeatedly mistaken for a working capture on the real
+// host), so the tests have to model a capture that actually captured something.
+func litImage(w, h int) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3] = 0x40, 0x80, 0xc0, 0xff
+	}
+	return img
+}
 
-func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
-	orig, origSize, origGeom := captureScreenImg, screenSize, rootWindowGeometry
-	defer func() { captureScreenImg, screenSize, rootWindowGeometry = orig, origSize, origGeom }()
-	captureScreenImg = func() (image.Image, error) {
-		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+// stubCapturePaths points every capture path captureNativeDisplay can take at
+// a stub that fails, and restores the real ones when the test ends. Tests then
+// override just the paths they're about and rely on this for the rest.
+//
+// Failing by default is deliberate: captureViaPortal's real implementation
+// opens a session-bus connection and can sit for portalResponseTimeout waiting
+// on a desktop permission dialog, so a test that forgot to stub it would hang
+// the suite on any Linux box with a running desktop. Defaulting it to an error
+// makes forgetting produce a fast, obvious failure instead.
+func stubCapturePaths(t *testing.T) {
+	t.Helper()
+	origScreen, origRegion, origSize := captureScreenImg, captureRegionImg, screenSize
+	origGeom, origComposite, origPortal := rootWindowGeometry, captureViaXComposite, captureViaPortal
+	t.Cleanup(func() {
+		captureScreenImg, captureRegionImg, screenSize = origScreen, origRegion, origSize
+		rootWindowGeometry, captureViaXComposite, captureViaPortal = origGeom, origComposite, origPortal
+	})
+	captureScreenImg = func() (image.Image, error) { return nil, errors.New("captureScreenImg not stubbed") }
+	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
+		return nil, errors.New("captureRegionImg not stubbed")
 	}
 	screenSize = func() (int, int) { return 4, 4 }
 	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("captureViaXComposite not stubbed") }
+	captureViaPortal = func() (image.Image, error) { return nil, errors.New("captureViaPortal not stubbed") }
+}
+
+// ---- captureNativeDisplay ----
+
+func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
+	stubCapturePaths(t)
+	captureScreenImg = func() (image.Image, error) { return litImage(4, 4), nil }
 
 	data, err := captureNativeDisplay()
 	if err != nil {
@@ -61,17 +100,11 @@ func TestCaptureNativeDisplayEncodesCapturedImage(t *testing.T) {
 }
 
 func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
-	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
-	defer func() {
-		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
-	}()
-	captureScreenImg = func() (image.Image, error) {
-		return nil, errors.New("boom")
-	}
-	screenSize = func() (int, int) { return 4, 4 }
-	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
-	// The XComposite fallback (Revision L) also fails here, so the original
-	// robotgo error should still propagate (wrapped) rather than disappear.
+	stubCapturePaths(t)
+	// Every fallback fails too, so the original robotgo error should still
+	// propagate (wrapped) rather than disappear.
+	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
+	captureViaPortal = func() (image.Image, error) { return nil, errors.New("no portal") }
 	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("no overlay") }
 
 	if _, err := captureNativeDisplay(); err == nil {
@@ -79,24 +112,20 @@ func TestCaptureNativeDisplayPropagatesCaptureError(t *testing.T) {
 	}
 }
 
-// ---- captureViaXComposite fallback (Revision L) ----
+// ---- capture fallbacks ----
 
 // TestCaptureNativeDisplayFallsBackToXCompositeOnCaptureError verifies
-// captureNativeDisplay retries via captureViaXComposite -- and succeeds --
+// captureNativeDisplay keeps going down the fallback chain -- and succeeds --
 // when the primary robotgo capture fails, rather than giving up immediately
 // the way it did before Revision L.
 func TestCaptureNativeDisplayFallsBackToXCompositeOnCaptureError(t *testing.T) {
-	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
-	defer func() {
-		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
-	}()
+	stubCapturePaths(t)
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
-	screenSize = func() (int, int) { return 4, 4 }
-	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	captureViaPortal = func() (image.Image, error) { return nil, errors.New("no portal") }
 	compositeCalled := false
 	captureViaXComposite = func() (image.Image, error) {
 		compositeCalled = true
-		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+		return litImage(4, 4), nil
 	}
 
 	if _, err := captureNativeDisplay(); err != nil {
@@ -107,25 +136,92 @@ func TestCaptureNativeDisplayFallsBackToXCompositeOnCaptureError(t *testing.T) {
 	}
 }
 
+// TestCaptureNativeDisplayPrefersPortalOverXComposite verifies the D-Bus
+// compositor capture is tried before the X11 pixmap copy, and that reaching a
+// working one stops the chain. The order matters on this subproject's own
+// host: X11 there cannot see the desktop at all, and the pixmap copy's
+// "success" is undefined server memory (see captureViaXComposite's doc
+// comment), so a run that consulted it first would return garbage in
+// preference to a real screenshot.
+func TestCaptureNativeDisplayPrefersPortalOverXComposite(t *testing.T) {
+	stubCapturePaths(t)
+	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
+	portalCalled, compositeCalled := false, false
+	captureViaPortal = func() (image.Image, error) {
+		portalCalled = true
+		return litImage(4, 4), nil
+	}
+	captureViaXComposite = func() (image.Image, error) {
+		compositeCalled = true
+		return litImage(4, 4), nil
+	}
+
+	if _, err := captureNativeDisplay(); err != nil {
+		t.Fatalf("captureNativeDisplay: %v", err)
+	}
+	if !portalCalled {
+		t.Errorf("expected captureNativeDisplay to try captureViaPortal after the primary capture failed")
+	}
+	if compositeCalled {
+		t.Errorf("captureViaXComposite should not have been reached once captureViaPortal returned content")
+	}
+}
+
+// TestCaptureNativeDisplaySkipsBlankFrames verifies a path that succeeds but
+// hands back an entirely black frame does not end the search, and that a later
+// path with real content wins.
+//
+// This is the check whose absence let several revisions of this step conclude
+// a capture path worked when it was returning nothing: an all-black PNG is
+// structurally valid and looks like a success at every layer above this one.
+func TestCaptureNativeDisplaySkipsBlankFrames(t *testing.T) {
+	stubCapturePaths(t)
+	// A bare NewRGBA -- all zeroes, i.e. opaque black -- is exactly the frame
+	// robotgo/scrot/the overlay each produced on the real host.
+	captureScreenImg = func() (image.Image, error) { return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil }
+	captureViaPortal = func() (image.Image, error) { return litImage(4, 4), nil }
+
+	data, err := captureNativeDisplay()
+	if err != nil {
+		t.Fatalf("captureNativeDisplay: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatalf("captureNativeDisplay returned no data")
+	}
+}
+
+// TestCaptureNativeDisplayReturnsBlankFrameWhenNothingHasContent verifies an
+// all-black capture is still returned (not turned into an error) when no path
+// does better, since a genuinely blanked or locked screen really is black and
+// shouldn't be a hard failure.
+func TestCaptureNativeDisplayReturnsBlankFrameWhenNothingHasContent(t *testing.T) {
+	stubCapturePaths(t)
+	captureScreenImg = func() (image.Image, error) { return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil }
+	captureViaPortal = func() (image.Image, error) { return nil, errors.New("no portal") }
+	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("no overlay") }
+
+	if _, err := captureNativeDisplay(); err != nil {
+		t.Fatalf("captureNativeDisplay should return the blank frame rather than an error: %v", err)
+	}
+}
+
 // TestCaptureNativeDisplayPropagatesCombinedErrorWhenBothFail verifies the
-// returned error mentions both failures when neither the primary capture
-// nor the XComposite fallback succeeds, rather than silently dropping one.
+// returned error mentions every failure when no path succeeds, rather than
+// silently dropping all but one.
 func TestCaptureNativeDisplayPropagatesCombinedErrorWhenBothFail(t *testing.T) {
-	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
-	defer func() {
-		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
-	}()
+	stubCapturePaths(t)
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("primary boom") }
-	screenSize = func() (int, int) { return 4, 4 }
-	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	captureViaPortal = func() (image.Image, error) { return nil, errors.New("portal boom") }
 	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("fallback boom") }
 
 	_, err := captureNativeDisplay()
 	if err == nil {
-		t.Fatalf("expected an error when both the primary capture and the XComposite fallback fail")
+		t.Fatalf("expected an error when every capture path fails")
 	}
-	if !strings.Contains(err.Error(), "primary boom") || !strings.Contains(err.Error(), "fallback boom") {
-		t.Errorf("error = %q, want it to mention both failures", err.Error())
+	for _, want := range []string{"primary boom", "portal boom", "fallback boom"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err.Error(), want)
+		}
 	}
 }
 
@@ -138,21 +234,17 @@ func TestCaptureNativeDisplayPropagatesCombinedErrorWhenBothFail(t *testing.T) {
 // query), since there's no ground truth to prefer over robotgo's own
 // report in that case.
 func TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryUnavailable(t *testing.T) {
-	origCapture, origSize, origRegion, origGeom := captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry
-	defer func() {
-		captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry = origCapture, origSize, origRegion, origGeom
-	}()
-
+	stubCapturePaths(t)
 	screenSize = func() (int, int) { return 3840, 1080 }
 	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
 	screenCalled, regionCalled := false, false
 	captureScreenImg = func() (image.Image, error) {
 		screenCalled = true
-		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+		return litImage(4, 4), nil
 	}
 	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
 		regionCalled = true
-		return image.NewRGBA(image.Rect(0, 0, w, h)), nil
+		return litImage(w, h), nil
 	}
 
 	if _, err := captureNativeDisplay(); err != nil {
@@ -169,21 +261,17 @@ func TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryUnavailable(t *testin
 // screenSize, rather than needlessly switching paths when there's nothing
 // to correct.
 func TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryMatches(t *testing.T) {
-	origCapture, origSize, origRegion, origGeom := captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry
-	defer func() {
-		captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry = origCapture, origSize, origRegion, origGeom
-	}()
-
+	stubCapturePaths(t)
 	screenSize = func() (int, int) { return 1920, 1080 }
 	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 1920, 1080, true }
 	screenCalled, regionCalled := false, false
 	captureScreenImg = func() (image.Image, error) {
 		screenCalled = true
-		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+		return litImage(4, 4), nil
 	}
 	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
 		regionCalled = true
-		return image.NewRGBA(image.Rect(0, 0, w, h)), nil
+		return litImage(w, h), nil
 	}
 
 	if _, err := captureNativeDisplay(); err != nil {
@@ -201,22 +289,18 @@ func TestCaptureNativeDisplayUsesRobotgoCaptureWhenGeometryMatches(t *testing.T)
 // screenSize -- see captureNativeDisplay's doc comment (Step1SubstepDPrompt
 // Revision F) for why the real rectangle is the one worth trusting.
 func TestCaptureNativeDisplayUsesRealGeometryWhenItDisagrees(t *testing.T) {
-	origCapture, origSize, origRegion, origGeom := captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry
-	defer func() {
-		captureScreenImg, screenSize, captureRegionImg, rootWindowGeometry = origCapture, origSize, origRegion, origGeom
-	}()
-
+	stubCapturePaths(t)
 	screenSize = func() (int, int) { return 3840, 1080 }
 	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 1920, 1080, true }
 	screenCalled := false
 	var gotRegion [4]int
 	captureScreenImg = func() (image.Image, error) {
 		screenCalled = true
-		return image.NewRGBA(image.Rect(0, 0, 4, 4)), nil
+		return litImage(4, 4), nil
 	}
 	captureRegionImg = func(x, y, w, h int) (image.Image, error) {
 		gotRegion = [4]int{x, y, w, h}
-		return image.NewRGBA(image.Rect(0, 0, w, h)), nil
+		return litImage(w, h), nil
 	}
 
 	if _, err := captureNativeDisplay(); err != nil {
@@ -326,13 +410,9 @@ func TestHandleCaptureNativeReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 
-	orig, origSize, origGeom, origComposite := captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite
-	defer func() {
-		captureScreenImg, screenSize, rootWindowGeometry, captureViaXComposite = orig, origSize, origGeom, origComposite
-	}()
+	stubCapturePaths(t)
 	captureScreenImg = func() (image.Image, error) { return nil, errors.New("boom") }
-	screenSize = func() (int, int) { return 4, 4 }
-	rootWindowGeometry = func() (int, int, int, int, bool) { return 0, 0, 0, 0, false }
+	captureViaPortal = func() (image.Image, error) { return nil, errors.New("no portal") }
 	captureViaXComposite = func() (image.Image, error) { return nil, errors.New("no overlay") }
 
 	s.handleCaptureNative(c)

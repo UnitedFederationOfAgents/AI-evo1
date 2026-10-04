@@ -134,3 +134,29 @@ Let's add a capability where any of the captures and/or the recorded sequence ar
 We will then use this to debug and iterate.
 
 Let's add that now.
+
+
+prompt: [`d360b41`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d360b4127d09e060f285f02cfcb7fbdea41ccf3e) → reply: [`ce6f360`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ce6f360363325ce5411a925b0ed55ce0f049ce30)
+
+## Reply D
+
+I added a Save to file button to IANAR. It uploads any capture, clip, screen inspection or sequence run into local-representative's files cache, the same files area agent-coordinator lists for this host. None of it has been built or tested: `go test`, `go vet`, `tsc` and `npx` all needed approval in this sandbox, so it still needs a `make build` / `make test` on the host. New tests are in `ianar/artifacts_test.go`.
+
+- **How it works:** IANAR keeps its last 16 results, and each result message now carries an id. Save to file asks IANAR's backend to upload that result, using the same upload call the-conversationalist's Save to File makes. The browser never has to send large recordings back.
+- **What gets saved:** a capture is saved as its PNG and a compositor clip as its video file. Results with several parts are saved as a `.zip`, each with a `report.txt`:
+  - **Frame-sampled clip:** the frames, named by their time into the clip.
+  - **Inspect Screen:** the capture, a copy with the text lines boxed, and the reading as text and JSON.
+  - **Sequence run, including a failed one:** the report lists each step's status, timing, sub-actions and message. The zip also holds what each step saw (`step-N.jpg`) and the whole recording.
+- **Where the button is:** on the simple tab it sits above the preview and saves whatever is showing. On the sequence-v1 tab "Save run to file" appears once a run finishes. Each button shows "saved as …" or the error, and stays disabled with a hint until IANAR is connected to local-representative.
+
+The new backend code is in `ianar/artifacts.go`. I also changed `robot.go`, `clip.go`, `vision.go`, `sequence.go` and `main.go`, plus the frontend's `App.tsx`, `types.ts` and `index.css`.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

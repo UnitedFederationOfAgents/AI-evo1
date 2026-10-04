@@ -552,6 +552,30 @@ button:disabled {
   color: #888;
 }
 
+/* ---- Save to file (see artifacts.go) ---- */
+
+.robot-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.robot-save button {
+  flex-shrink: 0;
+  padding: 5px 12px;
+}
+
+.robot-save-status {
+  font-size: 11px;
+  color: #aaa;
+  overflow-wrap: anywhere;
+}
+
+.robot-save-success { color: #6ec96e; }
+.robot-save-error   { color: #e07070; }
+
 /* ---- Mobile ----
  * On a phone the 260px sidebar left the robot panel ~half the screen: the
  * action row overflowed off the right edge (Circle Mouse / Native Clip were
@@ -598,7 +622,8 @@ button:disabled {
   }
 
   .robot-inspect button,
-  .robot-inspect-input {
+  .robot-inspect-input,
+  .robot-save button {
     min-height: 44px;
     font-size: 13px;
   }

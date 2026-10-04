@@ -33,6 +33,7 @@ export interface CaptureResultMsg {
   success: boolean
   image_url?: string
   error?: string
+  artifact_id?: string // names a successful capture for "save-artifact" (see artifacts.go)
 }
 
 // CircleMouseResultMsg is the "circle-mouse-result" payload reporting
@@ -60,6 +61,7 @@ export interface ClipResultMsg {
   frames?: ClipFrame[]
   duration_ms?: number
   error?: string
+  artifact_id?: string // names a successful Native Clip for "save-artifact" (see artifacts.go)
 }
 
 // SequenceStepDef is one high-level sequence step and the lower-level
@@ -110,6 +112,7 @@ export interface SequenceResultMsg {
   duration_ms: number
   keyboard_via?: string
   recording?: ClipResultMsg
+  artifact_id?: string // names the run for "save-artifact" (see artifacts.go)
 }
 
 // OCRLine is a line of text read off the screen, boxed in capture pixels
@@ -137,6 +140,18 @@ export interface InspectResultMsg {
   matches: OCRLine[] | null
   partial: OCRLine[] | null
   duration_ms: number
+  artifact_id?: string // names a successful inspection for "save-artifact" (see artifacts.go)
+}
+
+// SaveResultMsg is the "save-result" payload reporting whether a
+// "save-artifact" request made it into local-representative's files area
+// (see artifacts.go).
+export interface SaveResultMsg {
+  artifact_id: string
+  success: boolean
+  name?: string // name as uploaded
+  file_id?: string // local-representative's id for it
+  error?: string
 }
 
 export type ServerMsg =
@@ -150,3 +165,4 @@ export type ServerMsg =
   | { type: 'sequence-progress'; payload: SequenceProgressMsg }
   | { type: 'sequence-result'; payload: SequenceResultMsg }
   | { type: 'inspect-result'; payload: InspectResultMsg }
+  | { type: 'save-result'; payload: SaveResultMsg }

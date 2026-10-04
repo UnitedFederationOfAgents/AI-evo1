@@ -39,8 +39,9 @@ type wsClient struct {
 // Server manages WebSocket clients and this IANAR instance's representable
 // link to local-representative, plus the native/browser capture and
 // native-input ("circle mouse") channels described in
-// condocs/InitialRobot.md (see robot.go), Native Clip (clip.go) and the
-// sequence-v1 runner (sequence.go).
+// condocs/InitialRobot.md (see robot.go), Native Clip (clip.go), the
+// sequence-v1 runner (sequence.go), and saving any of their results into
+// local-representative's files area (artifacts.go).
 type Server struct {
 	httpPort string // HTTP port this instance serves on (reported to local-representative)
 	name     string // identifier reported to local-representative -- "robot" by default
@@ -59,6 +60,8 @@ type Server struct {
 	reprAutoConnect  bool          // persistent auto-connect toggle -- see repr.go's setAutoConnect
 	modeMismatch     bool          // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
 	modeMismatchPeer string        // the mismatched LR's disclosed mode ("dev" or "ops")
+
+	artifacts *artifactStore // results kept for "save-artifact" -- see artifacts.go
 }
 
 func newServer() *Server {
@@ -68,6 +71,7 @@ func newServer() *Server {
 		},
 		clients:    make(map[*wsClient]bool),
 		reprStatus: "disconnected",
+		artifacts:  newArtifactStore(),
 	}
 }
 
@@ -211,6 +215,14 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		}
 		json.Unmarshal(m.Payload, &p)
 		s.handleRunSequence(c, p.ID)
+
+	// Save to file -- see artifacts.go.
+	case "save-artifact":
+		var p struct {
+			ID string `json:"id"` // artifact_id from a result message
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleSaveArtifact(c, p.ID)
 	}
 }
 

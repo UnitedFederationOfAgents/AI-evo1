@@ -48,12 +48,17 @@ type ClipResultMsg struct {
 	Frames     []ClipFrame `json:"frames,omitempty"`
 	DurationMs int64       `json:"duration_ms,omitempty"`
 	Error      string      `json:"error,omitempty"`
+	ArtifactID string      `json:"artifact_id,omitempty"` // names a successful Native Clip for "save-artifact" (see artifacts.go)
 }
 
 // handleClipNative runs recordNativeClip and reports the result back to the
 // requesting client as a "clip-result" message.
 func (s *Server) handleClipNative(c *wsClient) {
-	s.sendToClient(c, "clip-result", recordNativeClip())
+	res := recordNativeClip()
+	if res.Success {
+		res.ArtifactID = s.artifacts.keep(clipArtifact(res))
+	}
+	s.sendToClient(c, "clip-result", res)
 }
 
 // clipMu allows one clip at a time. It is deliberately separate from robotMu

@@ -34,10 +34,11 @@ import (
 // CaptureResultMsg is the "capture-result" WebSocket payload reporting a
 // completed native or browser capture.
 type CaptureResultMsg struct {
-	Source   string `json:"source"` // "native" | "browser"
-	Success  bool   `json:"success"`
-	ImageURL string `json:"image_url,omitempty"` // data: URL
-	Error    string `json:"error,omitempty"`
+	Source     string `json:"source"` // "native" | "browser"
+	Success    bool   `json:"success"`
+	ImageURL   string `json:"image_url,omitempty"` // data: URL
+	Error      string `json:"error,omitempty"`
+	ArtifactID string `json:"artifact_id,omitempty"` // names a successful capture for "save-artifact" (see artifacts.go)
 }
 
 // CircleMouseResultMsg is the "circle-mouse-result" WebSocket payload
@@ -56,10 +57,12 @@ func (s *Server) handleCaptureNative(c *wsClient) {
 		s.sendToClient(c, "capture-result", CaptureResultMsg{Source: "native", Success: false, Error: err.Error()})
 		return
 	}
+	url := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
 	s.sendToClient(c, "capture-result", CaptureResultMsg{
-		Source:   "native",
-		Success:  true,
-		ImageURL: "data:image/png;base64," + base64.StdEncoding.EncodeToString(data),
+		Source:     "native",
+		Success:    true,
+		ImageURL:   url,
+		ArtifactID: s.artifacts.keep(captureArtifact("native", url)),
 	})
 }
 
@@ -72,7 +75,12 @@ func (s *Server) handleCaptureBrowser(c *wsClient, dataURL string) {
 		s.sendToClient(c, "capture-result", CaptureResultMsg{Source: "browser", Success: false, Error: "no image data received"})
 		return
 	}
-	s.sendToClient(c, "capture-result", CaptureResultMsg{Source: "browser", Success: true, ImageURL: dataURL})
+	s.sendToClient(c, "capture-result", CaptureResultMsg{
+		Source:     "browser",
+		Success:    true,
+		ImageURL:   dataURL,
+		ArtifactID: s.artifacts.keep(captureArtifact("browser", dataURL)),
+	})
 }
 
 // handleCircleMouse runs circleMouse and reports the result back to the

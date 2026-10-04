@@ -80,6 +80,7 @@ type SequenceResultMsg struct {
 	DurationMs  int64                `json:"duration_ms"`
 	KeyboardVia string               `json:"keyboard_via,omitempty"`
 	Recording   *ClipResultMsg       `json:"recording,omitempty"`
+	ArtifactID  string               `json:"artifact_id,omitempty"` // names the run for "save-artifact" (see artifacts.go)
 }
 
 // seqEnv is what a running step can drive. A step that looked at the screen
@@ -316,5 +317,10 @@ func (s *Server) handleRunSequence(c *wsClient, id string) {
 		return
 	}
 	res := runSequence(q, func(p SequenceProgressMsg) { s.sendToClient(c, "sequence-progress", p) })
+	// A run that got as far as starting its recording can be saved, failed
+	// or not -- a failed one most of all.
+	if res.Recording != nil {
+		res.ArtifactID = s.artifacts.keep(sequenceArtifact(q.def(), res))
+	}
 	s.sendToClient(c, "sequence-result", res)
 }

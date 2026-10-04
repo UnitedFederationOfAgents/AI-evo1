@@ -436,6 +436,7 @@ type InspectResultMsg struct {
 	Matches    []OCRLine `json:"matches"`
 	Partial    []OCRLine `json:"partial"`
 	DurationMs int64     `json:"duration_ms"`
+	ArtifactID string    `json:"artifact_id,omitempty"` // names a successful inspection for "save-artifact" (see artifacts.go)
 }
 
 // inspectScreen captures the screen and reads it, matching find if given.
@@ -462,5 +463,9 @@ func inspectScreen(find string) InspectResultMsg {
 // handleInspectScreen runs inspectScreen and reports the result back to the
 // requesting client as an "inspect-result" message.
 func (s *Server) handleInspectScreen(c *wsClient, find string) {
-	s.sendToClient(c, "inspect-result", inspectScreen(find))
+	res := inspectScreen(find)
+	if res.Success {
+		res.ArtifactID = s.artifacts.keep(inspectArtifact(res))
+	}
+	s.sendToClient(c, "inspect-result", res)
 }

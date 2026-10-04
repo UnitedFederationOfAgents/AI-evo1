@@ -9,6 +9,7 @@ import type {
   OCRLine,
   ReprStatus,
   ReprStatusMsg,
+  SaveResultMsg,
   SelfInfoMsg,
   SequenceDef,
   SequenceDefsMsg,
@@ -22,9 +23,11 @@ import type {
 // version-mismatch reload check shared by every sub-app in this repo, plus
 // IANAR's own capture-native/capture-browser/circle-mouse/clip-native/
 // inspect-screen channels (see condocs/InitialRobot.md, robot.go, clip.go and
-// vision.go) and the sequence-v1 runner (sequence.go).
+// vision.go), the sequence-v1 runner (sequence.go), and saving any of their
+// results into local-representative's files area (artifacts.go).
 
 type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
+type SaveStatus = { kind: 'saving' | 'success' | 'error'; message?: string }
 type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
 type ClipStatus = { kind: 'idle' | 'recording' | 'success' | 'error'; message?: string }
 type InspectStatus = { kind: 'idle' | 'reading' | 'success' | 'error'; message?: string }
@@ -33,18 +36,21 @@ type InspectStatus = { kind: 'idle' | 'reading' | 'success' | 'error'; message?:
 // capture, clip or screen inspection, whichever finished last; on the
 // sequence-v1 tab the last run's recording. A compositor recording is a
 // video; a frame-sampled one (see clip.go's fallback) is played back by
-// FramePlayer; an inspection is drawn by InspectView.
-type Preview =
+// FramePlayer; an inspection is drawn by InspectView. artifactId, when set,
+// is what "Save to file" asks the backend to upload (see artifacts.go).
+type Preview = (
   | { kind: 'image'; url: string }
   | { kind: 'video'; url: string }
   | { kind: 'frames'; frames: ClipFrame[]; durationMs: number }
   | { kind: 'inspect'; result: InspectResultMsg }
+) & { artifactId?: string }
 
 // clipPreview turns a successful clip/recording result into a Preview, or
 // null if it has nothing to play.
 function clipPreview(p: ClipResultMsg): Preview | null {
-  if (p.success && p.video_url) return { kind: 'video', url: dataURLToObjectURL(p.video_url) }
-  if (p.success && p.frames?.length) return { kind: 'frames', frames: p.frames, durationMs: p.duration_ms ?? 0 }
+  const artifactId = p.artifact_id
+  if (p.success && p.video_url) return { kind: 'video', url: dataURLToObjectURL(p.video_url), artifactId }
+  if (p.success && p.frames?.length) return { kind: 'frames', frames: p.frames, durationMs: p.duration_ms ?? 0, artifactId }
   return null
 }
 
@@ -112,6 +118,7 @@ function useRobotWS() {
   const [inspectStatus, setInspectStatus] = useState<InspectStatus>({ kind: 'idle' })
   const [sequences, setSequences] = useState<SequenceDef[]>([])
   const [seqRun, setSeqRun] = useState<SeqRun | null>(null)
+  const [saves, setSaves] = useState<Record<string, SaveStatus>>({})
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -193,7 +200,7 @@ function useRobotWS() {
           } else if (msg.type === 'capture-result') {
             const p = msg.payload as CaptureResultMsg
             if (p.success) {
-              if (p.image_url) setPreview({ kind: 'image', url: p.image_url })
+              if (p.image_url) setPreview({ kind: 'image', url: p.image_url, artifactId: p.artifact_id })
               setCaptureStatus({ kind: 'idle' })
             } else {
               setCaptureStatus({ kind: 'error', message: p.error ?? `${p.source} capture failed` })
@@ -244,7 +251,7 @@ function useRobotWS() {
           } else if (msg.type === 'inspect-result') {
             const p = msg.payload as InspectResultMsg
             if (p.success) {
-              setPreview({ kind: 'inspect', result: p })
+              setPreview({ kind: 'inspect', result: p, artifactId: p.artifact_id })
               const found = p.find ? ` · ${p.matches?.length ?? 0} line(s) read "${p.find}"` : ''
               setInspectStatus({
                 kind: 'success',
@@ -253,6 +260,14 @@ function useRobotWS() {
             } else {
               setInspectStatus({ kind: 'error', message: p.error ?? 'screen inspection failed' })
             }
+          } else if (msg.type === 'save-result') {
+            const p = msg.payload as SaveResultMsg
+            setSaves((s) => ({
+              ...s,
+              [p.artifact_id]: p.success
+                ? { kind: 'success', message: `saved to local-representative's files as ${p.name ?? p.file_id}` }
+                : { kind: 'error', message: p.error ?? 'save failed' },
+            }))
           }
         } catch {
           // ignore malformed messages
@@ -359,6 +374,16 @@ function useRobotWS() {
     [send],
   )
 
+  // saveArtifact asks the backend to upload a result it kept (see
+  // artifacts.go) into local-representative's files area.
+  const saveArtifact = useCallback(
+    (id: string) => {
+      setSaves((s) => ({ ...s, [id]: { kind: 'saving' } }))
+      send('save-artifact', { id })
+    },
+    [send],
+  )
+
   return {
     connected,
     reprStatus,
@@ -384,6 +409,8 @@ function useRobotWS() {
     sequences,
     seqRun,
     runSequence,
+    saves,
+    saveArtifact,
   }
 }
 
@@ -598,10 +625,49 @@ function PreviewView({ preview, placeholder }: { preview: Preview | null | undef
   )
 }
 
+// ---- Save to file ----
+
+interface SaveToFileProps {
+  artifactId: string
+  label: string
+  connected: boolean
+  reprStatus: ReprStatus
+  status: SaveStatus | undefined
+  onSave: (id: string) => void
+}
+
+// SaveToFile uploads a kept result into local-representative's files area --
+// its host-cache, also listed for this host in agent-coordinator's files tab
+// -- like the other sub-apps' "Save to File"/"to file" buttons. The backend
+// does the upload (see artifacts.go), so it needs IANAR's link to
+// local-representative.
+function SaveToFile({ artifactId, label, connected, reprStatus, status, onSave }: SaveToFileProps) {
+  const linked = reprStatus === 'connected'
+  return (
+    <div className="robot-save">
+      <button
+        className="btn-secondary"
+        disabled={!connected || !linked || status?.kind === 'saving'}
+        title={linked ? "upload into local-representative's files area" : 'connect to local-representative first'}
+        onClick={() => onSave(artifactId)}
+      >
+        {status?.kind === 'saving' ? 'Saving…' : label}
+      </button>
+      {status && status.kind !== 'saving' && (
+        <span className={`robot-save-status robot-save-${status.kind}`}>{status.message}</span>
+      )}
+      {!status && !linked && <span className="robot-save-status">connect to local-representative to save</span>}
+    </div>
+  )
+}
+
 // ---- Simple tab: capture native / capture browser / circle mouse / native clip / inspect screen ----
 
 interface RobotPanelProps {
   connected: boolean
+  reprStatus: ReprStatus
+  saves: Record<string, SaveStatus>
+  onSave: (id: string) => void
   preview: Preview | null
   captureStatus: CaptureStatus
   circleStatus: CircleStatus
@@ -616,6 +682,9 @@ interface RobotPanelProps {
 
 function RobotPanel({
   connected,
+  reprStatus,
+  saves,
+  onSave,
   preview,
   captureStatus,
   circleStatus,
@@ -679,6 +748,22 @@ function RobotPanel({
       {reading && <div className="robot-status">Capturing the screen and reading its text…</div>}
       {inspectStatus.kind === 'success' && <div className="robot-status">{inspectStatus.message}.</div>}
       {inspectStatus.kind === 'error' && <div className="robot-status robot-status-error">{inspectStatus.message}</div>}
+      {preview?.artifactId && (
+        <SaveToFile
+          artifactId={preview.artifactId}
+          label={
+            preview.kind === 'image'
+              ? 'Save capture to file'
+              : preview.kind === 'inspect'
+                ? 'Save inspection to file'
+                : 'Save clip to file'
+          }
+          connected={connected}
+          reprStatus={reprStatus}
+          status={saves[preview.artifactId]}
+          onSave={onSave}
+        />
+      )}
       <PreviewView
         preview={preview}
         placeholder={'Press "Capture Native", "Capture Browser", "Native Clip" or "Inspect Screen" — the result appears here.'}
@@ -699,12 +784,15 @@ const STEP_ICONS: Record<StepStatus, string> = {
 
 interface SequencePanelProps {
   connected: boolean
+  reprStatus: ReprStatus
+  saves: Record<string, SaveStatus>
+  onSave: (id: string) => void
   sequences: SequenceDef[]
   run: SeqRun | null
   onRun: (seq: SequenceDef) => void
 }
 
-function SequencePanel({ connected, sequences, run, onRun }: SequencePanelProps) {
+function SequencePanel({ connected, reprStatus, saves, onSave, sequences, run, onRun }: SequencePanelProps) {
   const [selectedId, setSelectedId] = useState('')
   const seq = sequences.find((s) => s.id === selectedId) ?? sequences[0]
 
@@ -788,6 +876,16 @@ function SequencePanel({ connected, sequences, run, onRun }: SequencePanelProps)
           {rec.success ? `Recorded via ${rec.via}.` : `Recording failed: ${rec.error ?? 'unknown error'}`}
         </div>
       )}
+      {result?.artifact_id && (
+        <SaveToFile
+          artifactId={result.artifact_id}
+          label="Save run to file"
+          connected={connected}
+          reprStatus={reprStatus}
+          status={saves[result.artifact_id]}
+          onSave={onSave}
+        />
+      )}
       <PreviewView preview={thisRun?.recording} placeholder="Run the sequence — its recording appears here." />
     </div>
   )
@@ -822,6 +920,8 @@ export default function App() {
     sequences,
     seqRun,
     runSequence,
+    saves,
+    saveArtifact,
   } = useRobotWS()
   const [tab, setTab] = useState<Tab>('simple')
 
@@ -861,6 +961,9 @@ export default function App() {
         {tab === 'simple' && (
           <RobotPanel
             connected={connected}
+            reprStatus={reprStatus}
+            saves={saves}
+            onSave={saveArtifact}
             preview={preview}
             captureStatus={captureStatus}
             circleStatus={circleStatus}
@@ -874,7 +977,15 @@ export default function App() {
           />
         )}
         {tab === 'sequence-v1' && (
-          <SequencePanel connected={connected} sequences={sequences} run={seqRun} onRun={runSequence} />
+          <SequencePanel
+            connected={connected}
+            reprStatus={reprStatus}
+            saves={saves}
+            onSave={saveArtifact}
+            sequences={sequences}
+            run={seqRun}
+            onRun={runSequence}
+          />
         )}
       </div>
     </div>

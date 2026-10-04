@@ -32,16 +32,26 @@ func (k *fakeKeyboard) tap(key string, mods ...string) error {
 
 func (k *fakeKeyboard) typeText(text string) error { return k.record("type " + text) }
 
-// stubSequence stubs the keyboard, window focus, recording and clock/sleep
-// for a sequence run, restoring everything when the test ends.
+// stubSequence stubs the keyboard, screen state, window focus, output
+// check, recording and clock/sleep for a sequence run, restoring everything
+// when the test ends. The output check sees one more "hello world!" line
+// each time it reads the screen.
 func stubSequence(t *testing.T) (*fakeKeyboard, *int) {
 	t.Helper()
 	origKb, origFocus, origRec := openCompositorKeyboard, focusFederationCommand, startNativeRecording
+	origCount := countOutputLines
 	origClock, origSleep := clock, sleep
 	t.Cleanup(func() {
 		openCompositorKeyboard, focusFederationCommand, startNativeRecording = origKb, origFocus, origRec
+		countOutputLines = origCount
 		clock, sleep = origClock, origSleep
 	})
+	stubScreenState(t, false, false)
+	outputs := 0
+	countOutputLines = func(string, string) (int, string, error) {
+		outputs++
+		return outputs, "data:image/jpeg;base64,b3V0", nil
+	}
 	kb := &fakeKeyboard{failAt: -1}
 	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
 	focusFederationCommand = func() (string, string, error) {
@@ -118,8 +128,11 @@ func TestRunSequenceDrivesFederationCommand(t *testing.T) {
 	if !strings.Contains(res.Steps[0].Message, "federation-command") {
 		t.Errorf("focus step message = %q, want it to name the focused window", res.Steps[0].Message)
 	}
-	if res.Steps[0].ImageURL == "" || res.Steps[1].ImageURL != "" {
-		t.Errorf("step images = %q / %q, want only the focus step's", res.Steps[0].ImageURL, res.Steps[1].ImageURL)
+	if res.Steps[0].ImageURL == "" || res.Steps[1].ImageURL != "" || res.Steps[4].ImageURL == "" {
+		t.Errorf("step images = %q / %q / %q, want only the focus and submit steps'", res.Steps[0].ImageURL, res.Steps[1].ImageURL, res.Steps[4].ImageURL)
+	}
+	if !strings.Contains(res.Steps[4].Message, "appeared on screen") {
+		t.Errorf("submit step message = %q, want it to confirm the output appeared", res.Steps[4].Message)
 	}
 	if *stops != 1 || res.Recording == nil || !res.Recording.Success {
 		t.Errorf("recording stopped %d times, result %+v", *stops, res.Recording)
@@ -165,6 +178,59 @@ func TestRunSequenceReportsKeyFailure(t *testing.T) {
 	}
 	if res.Steps[2].Status != "success" || res.Steps[3].Status != "error" || res.Steps[4].Status != "skipped" {
 		t.Errorf("step statuses = %+v", res.Steps)
+	}
+}
+
+// TestRunSequenceFailsWhenOutputNeverAppears covers Revision E's false
+// success: every key is sent without error, but they never reach FC, so no
+// new "hello world!" line shows up.
+func TestRunSequenceFailsWhenOutputNeverAppears(t *testing.T) {
+	kb, _ := stubSequence(t)
+	countOutputLines = func(string, string) (int, string, error) { return 2, "data:image/jpeg;base64,c2FtZQ==", nil }
+
+	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
+	if res.Success || res.FailedStep != 4 || !strings.Contains(res.Error, "no new") {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if res.Steps[4].ImageURL != "data:image/jpeg;base64,c2FtZQ==" {
+		t.Errorf("failed submit step image = %q, want what the check saw", res.Steps[4].ImageURL)
+	}
+	if res.Steps[5].Status != "skipped" || kb.calls[len(kb.calls)-1] != "enter" {
+		t.Errorf("step 6 = %q, keys = %q", res.Steps[5].Status, kb.calls)
+	}
+}
+
+func TestRunSequenceStopsOnLockedScreen(t *testing.T) {
+	kb, _ := stubSequence(t)
+	stubScreenState(t, true, true)
+	focused := false
+	focusFederationCommand = func() (string, string, error) {
+		focused = true
+		return "", "", nil
+	}
+
+	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
+	if res.Success || res.FailedStep != 0 || !strings.Contains(res.Error, "locked") {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if focused || len(kb.calls) != 0 {
+		t.Errorf("acted on a locked screen: focused=%v keys=%q", focused, kb.calls)
+	}
+}
+
+func TestOutputLines(t *testing.T) {
+	// The command itself, its output, output read loosely, IANAR's own step
+	// label, and something else.
+	lines := []OCRLine{
+		{Text: `> echo "hello world!"`},
+		{Text: "hello world!"},
+		{Text: "│ Hello, World"},
+		{Text: `Enter: 'echo "hello world!"'`},
+		{Text: "goodbye world"},
+	}
+	got := outputLines(lines, fcHelloOutput, fcHelloCommand)
+	if len(got) != 2 || got[0].Text != "hello world!" || got[1].Text != "│ Hello, World" {
+		t.Errorf("outputLines = %+v", got)
 	}
 }
 

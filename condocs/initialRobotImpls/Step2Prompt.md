@@ -166,3 +166,27 @@ Our sequence SUCCEEDS when run from the same node as the one it targets, and fai
 Let's determine why and fix it.
 
 Let's also respond with whether we can inspect the included zip resource for context.
+
+
+prompt: [`468022b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/468022bae13fa012b5355849f5f2478ed4f44077) → reply: [`6c4d8be`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6c4d8bee674a75158fa1b65553c6c9f9ce93c3f6)
+
+## Reply E
+
+I couldn't open the zip resource or watch the failure video, so I haven't confirmed the cause. The sandbox needs approval for `unzip`, Python and `go`. All I could read were the file names: `report.txt`, `step-1.jpg` and `recording/recording.webm`.
+
+Likely cause: from the code, a remote trigger differs from a local one only in that nobody has just used the target's desktop, so it is probably idle and GNOME has blanked or locked the screen. On a blank screen the first synthetic key only wakes it; on a locked screen the keys go to the password field instead of federation-command. It always reported success because every step only checked that a key was sent, never that federation-command reacted.
+
+- **Step 1 now checks the screen first:** if it's locked, the run fails with a clear error. If it has blanked, IANAR wakes it and waits before looking for the window. This is in the new `ianar/screenstate.go` and `screenstate_linux.go`.
+- **Step 5 now checks the command ran:** it counts the "hello world!" output lines on screen before and after Enter. If no new one appears, the step fails with a screenshot. This is in `ianar/sequence.go`. It could wrongly fail if an older output line scrolls off screen at the same moment the new one appears.
+
+New tests are in `ianar/screenstate_test.go` and `ianar/sequence_test.go`, but I couldn't run them or `gofmt`, so it needs a `make build` / `make test` on the host. If you approve `unzip` (or extract the zip for me), I can read `report.txt` and `step-1.jpg` to check the diagnosis. The video I can't view either way.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

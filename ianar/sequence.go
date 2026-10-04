@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"image"
+	"image/color"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -145,8 +148,73 @@ func tapStep(keys ...[]string) func(*seqEnv) (string, error) {
 }
 
 // fcHelloCommand is what the fc-hello-world sequence types into
-// federation-command.
-const fcHelloCommand = `echo "hello world!"`
+// federation-command, and fcHelloOutput what it prints.
+const (
+	fcHelloCommand = `echo "hello world!"`
+	fcHelloOutput  = "hello world!"
+)
+
+// countOutputLines reads the screen and counts the lines showing output as
+// a command's output (see outputLines), returning an image of the screen
+// with them boxed. Overridable in tests.
+var countOutputLines = func(output, command string) (int, string, error) {
+	sr, err := readScreen()
+	if err != nil {
+		return 0, "", err
+	}
+	lines := outputLines(sr.lines, output, command)
+	var boxes []image.Rectangle
+	for _, l := range lines {
+		boxes = append(boxes, l.rect())
+	}
+	shot := jpegDataURL(annotate(sr.img, map[color.RGBA][]image.Rectangle{matchColor: boxes}), inspectMaxWidth)
+	return len(lines), shot, nil
+}
+
+// outputLines returns the lines containing output (after normalizeText)
+// other than those showing the command that printed it -- the input line
+// before Enter, and FC's echo of it after -- which contain it too.
+func outputLines(lines []OCRLine, output, command string) []OCRLine {
+	want, cmd := normalizeText(output), normalizeText(command)
+	if want == "" {
+		return nil
+	}
+	var out []OCRLine
+	for _, l := range lines {
+		got := normalizeText(l.Text)
+		if strings.Contains(got, want) && !strings.Contains(got, cmd) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// submitAndVerify presses Enter and checks the command ran: one more line of
+// fcHelloOutput must be on screen afterwards than before. Key presses are
+// only ever confirmed as sent, so without this a run whose keys went
+// somewhere other than federation-command's input (Revision E) still
+// reported success.
+func submitAndVerify(env *seqEnv) (string, error) {
+	before, _, err := countOutputLines(fcHelloOutput, fcHelloCommand)
+	if err != nil {
+		return "", fmt.Errorf("reading the screen before submitting, to check the command runs: %w", err)
+	}
+	if err := env.kb.tap("enter"); err != nil {
+		return "", err
+	}
+	sleep(commandRunWait)
+	after, shot, err := countOutputLines(fcHelloOutput, fcHelloCommand)
+	env.shot = shot
+	if err != nil {
+		return "", fmt.Errorf("sent Enter, but couldn't read the screen to check the command ran: %w", err)
+	}
+	// The messages don't quote the output: IANAR's own tab may be on screen
+	// for the next run's count.
+	if after <= before {
+		return "", fmt.Errorf("sent Enter, but no new line of the command's output appeared on screen (%d before, %d after): the keys didn't reach federation-command's input", before, after)
+	}
+	return fmt.Sprintf("the command's output appeared on screen (%d such lines before, %d after)", before, after), nil
+}
 
 // sequences are the sequences the sequence-v1 tab offers, in display order.
 var sequences = []sequence{
@@ -158,18 +226,26 @@ var sequences = []sequence{
 				SequenceStepDef{
 					Label: "Select the terminal with federation-command",
 					Detail: []string{
+						"check the screen is unlocked, and wake it if it has blanked",
 						"capture the screen and read its text (OCR)",
 						`find the line reading exactly "federation-command" -- FC's terminal title bar -- and click it`,
 						"if that fails, ask the window manager to focus FC's window",
 					},
 				},
 				func(env *seqEnv) (string, error) {
+					woke, err := ensureScreenAwake()
+					if err != nil {
+						return "", err
+					}
 					desc, shot, err := focusFederationCommand()
 					env.shot = shot
 					if err != nil {
 						return "", err
 					}
 					sleep(focusSettle)
+					if woke != "" {
+						desc = woke + "; " + desc
+					}
 					return desc, nil
 				},
 			},
@@ -206,15 +282,14 @@ var sequences = []sequence{
 			{
 				SequenceStepDef{
 					Label:  "Press enter to submit the command",
-					Detail: []string{"press Enter", fmt.Sprintf("wait %s for the command to run", commandRunWait)},
+					Detail: []string{
+						"read the screen and count the lines showing the command's output",
+						"press Enter",
+						fmt.Sprintf("wait %s for the command to run", commandRunWait),
+						"read the screen again: there must be one more such line, or the keys didn't reach FC",
+					},
 				},
-				func(env *seqEnv) (string, error) {
-					if err := env.kb.tap("enter"); err != nil {
-						return "", err
-					}
-					sleep(commandRunWait)
-					return "", nil
-				},
+				submitAndVerify,
 			},
 			{
 				SequenceStepDef{

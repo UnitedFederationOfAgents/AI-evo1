@@ -31,13 +31,17 @@ It will also be given a:
 ```
 
 
-### Step 2 - <REPLACE-TITLE>
+### Step 2 - Add the 'Native Clip' control to IANAR
+
+[Step 2 Prompt](initialRobotImpls/Step2Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Now that we have our first few working controls we will add 'Native Clip'.
+
+The Native Clip button will capture a 4 second video clip of the desktop and present it for playback.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the second step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the second step.

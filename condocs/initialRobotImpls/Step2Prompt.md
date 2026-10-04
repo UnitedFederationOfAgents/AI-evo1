@@ -151,12 +151,18 @@ I added a Save to file button to IANAR. It uploads any capture, clip, screen ins
 
 The new backend code is in `ianar/artifacts.go`. I also changed `robot.go`, `clip.go`, `vision.go`, `sequence.go` and `main.go`, plus the frontend's `App.tsx`, `types.ts` and `index.css`.
 
+## Resource 3 -- Sequence Failure Video
 
-## <REPLACE-Revision|Retry> E
+This failure occurs only when the sequence is triggered from a node OTHER THAN the one where the sequence is being executed.
 
-<REPLACE-PROMPT>
+- [ianar-sequence-fc-hello-world-2026-10-04T23-32-58.zip](117e9380_ianar-sequence-fc-hello-world-2026-10-04T23-32-58.zip)
 
+## Revision E
 
-## Human-Prompt
+Let's take a look at the 'Sequence Failure Video' resource for context.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Our sequence SUCCEEDS when run from the same node as the one it targets, and fails when triggered from elsewhere. (Though it always REPORTS success)
+
+Let's determine why and fix it.
+
+Let's also respond with whether we can inspect the included zip resource for context.

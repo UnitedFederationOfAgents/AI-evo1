@@ -48,11 +48,24 @@ I made IANAR stack its layout on screens 760 px wide or narrower, so the robot p
 The layout changes are in `ianar/frontend/src/index.css`.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Now let's take those controls and put them under a tab within ianar called 'simple'.
 
+Let's also add a second tab called 'sequence-v1'.
 
-## Human-Prompt
+The sequence tab will allow us to put high level actions in a sequence (which under the hood correspond to more detailed instructions).
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+To start we will have it populated with a sequence:
+- Select the terminal with federation-command
+- Bring federation-command to local control
+- Bring the cursor to the command line input
+- Enter: 'echo "hello world!"'
+- Press enter to submit the command
+- Bring federation-command back to remote control
+
+The full sequence should be recorded.
+
+The execution of the sequence should report success or failure.
+
+Let's implement this now.

@@ -32,3 +32,27 @@ Screenshot
 Let's improve the appearance in mobile browsers.
 
 See the 'Mobile Appearance' resource for context.
+
+
+prompt: [`dfd9a48`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/dfd9a48509605d674d6bb16e578e7e051ec757a6) → reply: [`46e4081`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/46e4081d3c3068843435d45ec416b707511e2a78)
+
+## Reply A
+
+I made IANAR stack its layout on screens 760 px wide or narrower, so the robot panel gets the full width of a phone. I couldn't build or check it: running `tsc`/`vite` needed approval again, so it still needs a `make build` on the host and a look on the phone.
+
+- **Layout:** the sidebar now sits above the robot panel instead of taking 260 px beside it. This uses the same 760 px breakpoint as the other apps in the repo.
+- **Buttons:** the four action buttons are now a 2×2 grid of larger, touch-sized buttons. In the screenshot, Circle Mouse and Native Clip were pushed off the right edge where you couldn't reach them.
+- **Header:** on narrow screens the sidebar header gets extra top padding so the DEV MODE tag no longer covers it.
+- **Smaller fixes:** the preview area has a minimum height, the connect and clip-player buttons are bigger, and the version tag no longer shows "vv0.0.3". That last fix strips a leading `v` in `App.tsx`.
+
+The layout changes are in `ianar/frontend/src/index.css`.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

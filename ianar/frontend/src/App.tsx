@@ -520,7 +520,7 @@ export default function App() {
         <div className="sidebar">
           <div className="sidebar-header">
             <h1>I am Not a Robot</h1>
-            {version && <span className="app-version-tag">v{version}</span>}
+            {version && <span className="app-version-tag">v{version.replace(/^v/, '')}</span>}
           </div>
           <ReprFooter
             status={reprStatus}

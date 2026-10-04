@@ -325,3 +325,62 @@ button:disabled {
   text-align: center;
   padding: 0 24px;
 }
+
+/* ---- Mobile ----
+ * On a phone the 260px sidebar left the robot panel ~half the screen: the
+ * action row overflowed off the right edge (Circle Mouse / Native Clip were
+ * unreachable) and the sidebar header wrapped under the DEV MODE tag. Stack
+ * the sidebar above the panel and lay the actions out as a 2x2 grid of
+ * touch-sized buttons. Same 760px breakpoint as the sibling apps. */
+@media (max-width: 760px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    min-width: 0;
+    flex-shrink: 0;
+    border-right: none;
+    border-bottom: 1px solid #3c3c3c;
+  }
+
+  /* Clear the fixed DEV MODE tag, which sits centred over the header. */
+  .app-dev-mode .sidebar-header {
+    padding-top: 22px;
+  }
+
+  .main-content {
+    min-height: 0;
+  }
+
+  .robot-panel {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .robot-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .robot-actions button {
+    min-height: 44px;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  .repr-footer-form button {
+    min-height: 32px;
+    padding: 4px 12px;
+  }
+
+  .robot-preview {
+    min-height: 220px;
+  }
+
+  .robot-clip-controls button {
+    min-height: 36px;
+  }
+}

@@ -21,12 +21,14 @@ I added the Native Clip button to IANAR: it records 4 seconds of the desktop and
 
 If the recorder isn't allowed on this host, the fallback can only grab frames as fast as Capture Native's screenshot path allows, so those clips may come out choppy.
 
+## Resource 1 -- Mobile Appearance
 
-## <REPLACE-Revision|Retry> A
+Screenshot
 
-<REPLACE-PROMPT>
+- [Screenshot_20261004-183624.png](0ab10dae_Screenshot_20261004-183624.png)
 
+## Revision A
 
-## Human-Prompt
+Let's improve the appearance in mobile browsers.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+See the 'Mobile Appearance' resource for context.

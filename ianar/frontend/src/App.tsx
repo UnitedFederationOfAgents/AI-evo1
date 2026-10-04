@@ -1,15 +1,45 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CaptureResultMsg, CircleMouseResultMsg, ModeMismatchMsg, ReprStatus, ReprStatusMsg, SelfInfoMsg } from './types'
+import type {
+  CaptureResultMsg,
+  CircleMouseResultMsg,
+  ClipFrame,
+  ClipResultMsg,
+  ModeMismatchMsg,
+  ReprStatus,
+  ReprStatusMsg,
+  SelfInfoMsg,
+} from './types'
 
 // ---- WebSocket hook ----
 //
 // Wires up the representable connect/disconnect widget, dev-mode banner, and
 // version-mismatch reload check shared by every sub-app in this repo, plus
-// IANAR's own capture-native/capture-browser/circle-mouse channels (see
-// condocs/InitialRobot.md and robot.go).
+// IANAR's own capture-native/capture-browser/circle-mouse/clip-native
+// channels (see condocs/InitialRobot.md, robot.go and clip.go).
 
 type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
 type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
+type ClipStatus = { kind: 'idle' | 'recording' | 'success' | 'error'; message?: string }
+
+// Preview is whatever the preview pane shows: the latest capture or clip,
+// whichever finished last. A compositor-recorded clip is a video; a
+// frame-sampled one (see clip.go's fallback) is played back by FramePlayer.
+type Preview =
+  | { kind: 'image'; url: string }
+  | { kind: 'video'; url: string }
+  | { kind: 'frames'; frames: ClipFrame[]; durationMs: number }
+
+// dataURLToObjectURL turns a base64 data: URL into a blob: URL. Video
+// elements seek reliably in a blob: URL, and it avoids holding a
+// multi-megabyte string in the DOM.
+function dataURLToObjectURL(dataURL: string): string {
+  const comma = dataURL.indexOf(',')
+  const mime = dataURL.slice(0, comma).replace(/^data:/, '').replace(/;base64$/, '')
+  const bin = atob(dataURL.slice(comma + 1))
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return URL.createObjectURL(new Blob([bytes], { type: mime }))
+}
 
 // browserCaptureUnsupportedReason: why the Screen Capture API
 // (getDisplayMedia) is unavailable in this tab, named precisely instead of
@@ -43,9 +73,10 @@ function useRobotWS() {
   const [devMode, setDevMode] = useState(false)
   const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
-  const [captureImage, setCaptureImage] = useState<string | null>(null)
+  const [preview, setPreview] = useState<Preview | null>(null)
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus>({ kind: 'idle' })
   const [circleStatus, setCircleStatus] = useState<CircleStatus>({ kind: 'idle' })
+  const [clipStatus, setClipStatus] = useState<ClipStatus>({ kind: 'idle' })
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -124,7 +155,7 @@ function useRobotWS() {
           } else if (msg.type === 'capture-result') {
             const p = msg.payload as CaptureResultMsg
             if (p.success) {
-              setCaptureImage(p.image_url ?? null)
+              if (p.image_url) setPreview({ kind: 'image', url: p.image_url })
               setCaptureStatus({ kind: 'idle' })
             } else {
               setCaptureStatus({ kind: 'error', message: p.error ?? `${p.source} capture failed` })
@@ -137,6 +168,18 @@ function useRobotWS() {
                 ? { kind: 'success', message: via }
                 : { kind: 'error', message: (p.error ?? 'circle-mouse failed') + via },
             )
+          } else if (msg.type === 'clip-result') {
+            const p = msg.payload as ClipResultMsg
+            const via = p.via ? ` (via ${p.via})` : ''
+            if (p.success && p.video_url) {
+              setPreview({ kind: 'video', url: dataURLToObjectURL(p.video_url) })
+              setClipStatus({ kind: 'success', message: via })
+            } else if (p.success && p.frames?.length) {
+              setPreview({ kind: 'frames', frames: p.frames, durationMs: p.duration_ms ?? 0 })
+              setClipStatus({ kind: 'success', message: via })
+            } else {
+              setClipStatus({ kind: 'error', message: p.error ?? 'native clip failed' })
+            }
           }
         } catch {
           // ignore malformed messages
@@ -147,6 +190,13 @@ function useRobotWS() {
     connect()
     return () => wsRef.current?.close()
   }, [])
+
+  // Release a recorded clip's blob: URL once it's no longer being previewed.
+  useEffect(() => {
+    if (preview?.kind !== 'video') return
+    const url = preview.url
+    return () => URL.revokeObjectURL(url)
+  }, [preview])
 
   const captureNative = useCallback(() => {
     setCaptureStatus({ kind: 'pending' })
@@ -203,6 +253,11 @@ function useRobotWS() {
     send('circle-mouse', {})
   }, [send])
 
+  const clipNative = useCallback(() => {
+    setClipStatus({ kind: 'recording' })
+    send('clip-native', {})
+  }, [send])
+
   return {
     connected,
     reprStatus,
@@ -215,12 +270,14 @@ function useRobotWS() {
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
-    captureImage,
+    preview,
     captureStatus,
     circleStatus,
+    clipStatus,
     captureNative,
     captureBrowser,
     circleMouse,
+    clipNative,
   }
 }
 
@@ -306,26 +363,84 @@ function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, 
   )
 }
 
-// ---- Robot panel: capture native / capture browser / circle mouse ----
+// ---- Frame player: playback for a frame-sampled native clip ----
+
+interface FramePlayerProps {
+  frames: ClipFrame[]
+  durationMs: number
+}
+
+// FramePlayer plays a frame-sampled clip back at the pace it was captured,
+// looping, with play/pause and a scrubber.
+function FramePlayer({ frames, durationMs }: FramePlayerProps) {
+  const [index, setIndex] = useState(0)
+  const [playing, setPlaying] = useState(true)
+
+  useEffect(() => {
+    setIndex(0)
+    setPlaying(true)
+  }, [frames])
+
+  const current = Math.min(index, frames.length - 1)
+
+  useEffect(() => {
+    if (!playing || frames.length < 2) return
+    const next = current + 1 < frames.length ? current + 1 : 0
+    const delay =
+      next === 0 ? Math.max(0, durationMs - frames[current].at_ms) : frames[next].at_ms - frames[current].at_ms
+    const t = setTimeout(() => setIndex(next), delay)
+    return () => clearTimeout(t)
+  }, [playing, current, frames, durationMs])
+
+  return (
+    <div className="robot-clip-player">
+      <img src={frames[current].image_url} alt={`clip frame ${current + 1}`} />
+      <div className="robot-clip-controls">
+        <button className="btn-secondary" disabled={frames.length < 2} onClick={() => setPlaying((p) => !p)}>
+          {playing ? 'Pause' : 'Play'}
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={frames.length - 1}
+          value={current}
+          onChange={(e) => {
+            setPlaying(false)
+            setIndex(Number(e.target.value))
+          }}
+        />
+        <span className="robot-clip-time">
+          {(frames[current].at_ms / 1000).toFixed(1)}s / {(durationMs / 1000).toFixed(1)}s
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ---- Robot panel: capture native / capture browser / circle mouse / native clip ----
 
 interface RobotPanelProps {
   connected: boolean
-  captureImage: string | null
+  preview: Preview | null
   captureStatus: CaptureStatus
   circleStatus: CircleStatus
+  clipStatus: ClipStatus
   onCaptureNative: () => void
   onCaptureBrowser: () => void
   onCircleMouse: () => void
+  onClipNative: () => void
 }
 
 function RobotPanel({
   connected,
-  captureImage,
+  preview,
   captureStatus,
   circleStatus,
+  clipStatus,
   onCaptureNative,
   onCaptureBrowser,
   onCircleMouse,
+  onClipNative,
 }: RobotPanelProps) {
   return (
     <div className="robot-panel">
@@ -344,18 +459,25 @@ function RobotPanel({
         <button className="btn-secondary" disabled={!connected || circleStatus.kind === 'running'} onClick={onCircleMouse}>
           Circle Mouse
         </button>
+        <button className="btn-secondary" disabled={!connected || clipStatus.kind === 'recording'} onClick={onClipNative}>
+          Native Clip
+        </button>
       </div>
       {captureStatus.kind === 'pending' && <div className="robot-status">Capturing…</div>}
       {captureStatus.kind === 'error' && <div className="robot-status robot-status-error">{captureStatus.message}</div>}
       {circleStatus.kind === 'running' && <div className="robot-status">Driving the pointer through a circle…</div>}
       {circleStatus.kind === 'success' && <div className="robot-status">Circle complete{circleStatus.message}.</div>}
       {circleStatus.kind === 'error' && <div className="robot-status robot-status-error">{circleStatus.message}</div>}
+      {clipStatus.kind === 'recording' && <div className="robot-status">Recording a 4 second clip of the desktop…</div>}
+      {clipStatus.kind === 'success' && <div className="robot-status">Clip recorded{clipStatus.message}.</div>}
+      {clipStatus.kind === 'error' && <div className="robot-status robot-status-error">{clipStatus.message}</div>}
       <div className="robot-preview">
-        {captureImage ? (
-          <img src={captureImage} alt="capture" />
-        ) : (
+        {preview?.kind === 'image' && <img src={preview.url} alt="capture" />}
+        {preview?.kind === 'video' && <video src={preview.url} controls autoPlay loop muted playsInline />}
+        {preview?.kind === 'frames' && <FramePlayer frames={preview.frames} durationMs={preview.durationMs} />}
+        {!preview && (
           <span className="robot-preview-placeholder">
-            Press "Capture Native" or "Capture Browser" — the result appears here.
+            Press "Capture Native", "Capture Browser" or "Native Clip" — the result appears here.
           </span>
         )}
       </div>
@@ -376,12 +498,14 @@ export default function App() {
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
-    captureImage,
+    preview,
     captureStatus,
     circleStatus,
+    clipStatus,
     captureNative,
     captureBrowser,
     circleMouse,
+    clipNative,
   } = useRobotWS()
 
   return (
@@ -412,12 +536,14 @@ export default function App() {
       <div className="main-content">
         <RobotPanel
           connected={connected}
-          captureImage={captureImage}
+          preview={preview}
           captureStatus={captureStatus}
           circleStatus={circleStatus}
+          clipStatus={clipStatus}
           onCaptureNative={captureNative}
           onCaptureBrowser={captureBrowser}
           onCircleMouse={circleMouse}
+          onClipNative={clipNative}
         />
       </div>
     </div>

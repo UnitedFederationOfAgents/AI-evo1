@@ -43,9 +43,29 @@ export interface CircleMouseResultMsg {
   error?: string
 }
 
+// ClipFrame is one sampled frame of a fallback native clip, at_ms after the
+// clip started (see clip.go).
+export interface ClipFrame {
+  image_url: string
+  at_ms: number
+}
+
+// ClipResultMsg is the "clip-result" payload reporting a completed native
+// clip (see clip.go). On success exactly one of video_url (compositor
+// recording) or frames (sampled fallback) is set.
+export interface ClipResultMsg {
+  success: boolean
+  via?: string // which capture path recorded the clip
+  video_url?: string
+  frames?: ClipFrame[]
+  duration_ms?: number
+  error?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
   | { type: 'capture-result'; payload: CaptureResultMsg }
   | { type: 'circle-mouse-result'; payload: CircleMouseResultMsg }
+  | { type: 'clip-result'; payload: ClipResultMsg }

@@ -21,7 +21,8 @@ import (
 // display capture, a pass-through for a browser-side capture, and a
 // native-input "circle mouse" action, each driven by its own WebSocket
 // message (see main.go's handleClientMsg) and reported back over
-// "capture-result" / "circle-mouse-result".
+// "capture-result" / "circle-mouse-result". The "Native Clip" recording
+// lives in clip.go.
 //
 // Native input and capture both go through robotgo
 // (github.com/go-vgo/robotgo). On a Wayland session, where DISPLAY is
@@ -140,26 +141,30 @@ var screenSize = func() (w, h int) {
 	return robotgo.GetScreenSize()
 }
 
-// captureNativeDisplay captures the full native display and returns it as
-// PNG bytes. It tries robotgo first, then the D-Bus compositor screenshot,
-// stopping at the first frame with visible content. If no path produces
-// content but one returned a black frame (e.g. a genuinely blank or locked
-// screen), that frame is returned with a warning rather than an error.
-func captureNativeDisplay() ([]byte, error) {
-	robotMu.Lock()
-	w, h := screenSize()
-	log.Printf("robot: capturing native display, robotgo reports screen size %dx%d", w, h)
+// captureAttempt is one native frame-grab path, named for logs and errors.
+type captureAttempt struct {
+	name string
+	grab func() (image.Image, error)
+}
 
-	attempts := []struct {
-		name string
-		grab func() (image.Image, error)
-	}{
+// nativeCaptureAttempts lists the native frame-grab paths in preference
+// order: robotgo first, then the D-Bus compositor screenshot.
+func nativeCaptureAttempts() []captureAttempt {
+	return []captureAttempt{
 		{"robotgo", captureScreenImg},
 		{"D-Bus compositor screenshot", captureViaPortal},
 	}
+}
 
+// grabNativeFrame tries each attempt in order under robotMu, stopping at the
+// first frame with visible content, and reports which attempt produced it.
+// If no attempt produces content but one returned a black frame (e.g. a
+// genuinely blank or locked screen), that frame is returned with a warning
+// rather than an error.
+func grabNativeFrame(attempts []captureAttempt) (image.Image, string, error) {
+	robotMu.Lock()
 	var img, blank image.Image
-	var blankFrom string
+	var from, blankFrom string
 	var failures []string
 	for _, a := range attempts {
 		got, err := a.grab()
@@ -174,19 +179,34 @@ func captureNativeDisplay() ([]byte, error) {
 			}
 			continue
 		}
-		img = got
+		img, from = got, a.name
 		break
 	}
 	robotMu.Unlock()
 
 	switch {
 	case img != nil:
+		return img, from, nil
 	case blank != nil:
 		log.Printf("robot: WARNING -- no capture path returned screen content; returning the black frame from %s (%s)",
 			blankFrom, strings.Join(failures, "; "))
-		img = blank
+		return blank, blankFrom, nil
 	default:
-		return nil, fmt.Errorf("native capture: every capture path failed: %s", strings.Join(failures, "; "))
+		return nil, "", fmt.Errorf("every capture path failed: %s", strings.Join(failures, "; "))
+	}
+}
+
+// captureNativeDisplay captures the full native display and returns it as
+// PNG bytes, via the first of nativeCaptureAttempts to produce content.
+func captureNativeDisplay() ([]byte, error) {
+	robotMu.Lock()
+	w, h := screenSize()
+	robotMu.Unlock()
+	log.Printf("robot: capturing native display, robotgo reports screen size %dx%d", w, h)
+
+	img, _, err := grabNativeFrame(nativeCaptureAttempts())
+	if err != nil {
+		return nil, fmt.Errorf("native capture: %w", err)
 	}
 
 	var buf bytes.Buffer

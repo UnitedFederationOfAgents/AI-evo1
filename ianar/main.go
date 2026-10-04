@@ -191,6 +191,9 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	case "circle-mouse":
 		s.handleCircleMouse(c)
+
+	case "clip-native":
+		s.handleClipNative(c)
 	}
 }
 

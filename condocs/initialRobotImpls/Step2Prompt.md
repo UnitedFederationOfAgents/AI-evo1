@@ -91,12 +91,16 @@ Things to check on the host:
 
 The new code is in `keyboard.go`, `window.go`, `window_linux.go` and `sequence.go`. I also changed `clip.go`, `screencast_linux.go`, `remotedesktop_linux.go` and `main.go`, plus the frontend's `App.tsx`, `types.ts` and `index.css`.
 
+## Resource 2 -- Sequence Attempt 1
 
-## <REPLACE-Revision|Retry> C
+Failure 1
 
-<REPLACE-PROMPT>
+- [Screenshot_20261004-191311.png](f4f8f159_Screenshot_20261004-191311.png)
 
+## Revision C
 
-## Human-Prompt
+This is a good start, but let's use a visual detection method to identify the window.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We see the roundabout technique is failing, and we also need direct visual inspection capability for future work.
+
+Let's implement this now.

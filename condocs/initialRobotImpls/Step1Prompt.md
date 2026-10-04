@@ -403,3 +403,30 @@ Now that we have fixed the native and browser capture we want to get the mouse c
 Right now we see no evidence of mouse movement.
 
 Let's either fix that or explain in our response why we do not expect to see it, and another simple action we can perform to ensure we have mouse control.
+
+
+prompt: [`9ee3e0a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9ee3e0a77f0df0772779d9165de05c09cd5e9cba) → reply: [`75ff3c2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/75ff3c29a8bcee1f8caa712dfe2f1931b5b92643)
+
+## Reply D
+
+I fixed the mouse circle, but I couldn't build or test it: the sandbox blocked `go vet`, `go test`, `make test` and even `git status`. It still needs a `make test` and a real click on Circle Mouse on the host.
+
+**Why the mouse didn't move:** your desktop is GNOME on Wayland (the logs show `gdm-wayland-session`). There, `DISPLAY=:0` is XWayland, which only runs X11 apps inside the Wayland desktop. robotgo's `Move` changes XWayland's own record of where the pointer is, but GNOME owns the real cursor and ignores that. So every move "succeeds", no error comes back, and nothing moves on screen. It's the same reason robotgo's native capture saw no desktop pixels.
+
+**The fix:**
+- **New file `ianar/remotedesktop_linux.go`:** it moves the pointer through GNOME's own remote-control interface (`org.gnome.Mutter.RemoteDesktop`, the one GNOME Remote Desktop uses). It talks to GNOME over D-Bus (its messaging system), the same way the capture fix does. The circle is sent as small relative moves starting from wherever the cursor is.
+- **`ianar/robot.go`:** `circleMouse` now tries the GNOME path first. If that's unavailable (e.g. an X11 session or a non-GNOME desktop), it falls back to robotgo. If the GNOME path fails after the cursor has started moving, it reports the error rather than starting over with robotgo.
+- **UI:** the result now names the path it used, e.g. "Circle complete (via compositor (org.gnome.Mutter.RemoteDesktop))". If it ever says "via robotgo" on this machine, that explains a cursor that doesn't move.
+- **`ianar/robot_test.go`:** the circle tests now replace the GNOME path with a stand-in so they can't move the real cursor. I added tests for preferring the GNOME path, not falling back to robotgo mid-circle, and the relative moves tracing the same circle.
+
+**A simple check that you have mouse control:** note where the cursor is, click Circle Mouse, and look again. The circle starts and ends 80px to the right of where the cursor was, so even if you miss the motion, the cursor should end up visibly shifted right. While it runs, GNOME may briefly show its remote-control indicator in the top bar. If GNOME refuses the request, the reason is logged as `robot: ... driving the pointer with robotgo instead`.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

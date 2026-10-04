@@ -131,7 +131,12 @@ function useRobotWS() {
             }
           } else if (msg.type === 'circle-mouse-result') {
             const p = msg.payload as CircleMouseResultMsg
-            setCircleStatus(p.success ? { kind: 'success' } : { kind: 'error', message: p.error ?? 'circle-mouse failed' })
+            const via = p.via ? ` (via ${p.via})` : ''
+            setCircleStatus(
+              p.success
+                ? { kind: 'success', message: via }
+                : { kind: 'error', message: (p.error ?? 'circle-mouse failed') + via },
+            )
           }
         } catch {
           // ignore malformed messages
@@ -343,7 +348,7 @@ function RobotPanel({
       {captureStatus.kind === 'pending' && <div className="robot-status">Capturing…</div>}
       {captureStatus.kind === 'error' && <div className="robot-status robot-status-error">{captureStatus.message}</div>}
       {circleStatus.kind === 'running' && <div className="robot-status">Driving the pointer through a circle…</div>}
-      {circleStatus.kind === 'success' && <div className="robot-status">Circle complete.</div>}
+      {circleStatus.kind === 'success' && <div className="robot-status">Circle complete{circleStatus.message}.</div>}
       {circleStatus.kind === 'error' && <div className="robot-status robot-status-error">{circleStatus.message}</div>}
       <div className="robot-preview">
         {captureImage ? (

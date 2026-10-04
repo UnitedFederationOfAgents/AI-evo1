@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -25,7 +26,9 @@ import (
 // Native input and capture both go through robotgo
 // (github.com/go-vgo/robotgo). On a Wayland session, where DISPLAY is
 // rootless XWayland and holds no desktop pixels, native capture falls back
-// to asking the compositor over D-Bus (see portalcapture_linux.go).
+// to asking the compositor over D-Bus (see portalcapture_linux.go). Pointer
+// input goes to the compositor first for the same reason (see
+// remotedesktop_linux.go), with robotgo as the fallback.
 
 // CaptureResultMsg is the "capture-result" WebSocket payload reporting a
 // completed native or browser capture.
@@ -40,6 +43,7 @@ type CaptureResultMsg struct {
 // reporting whether the circle-mouse action completed.
 type CircleMouseResultMsg struct {
 	Success bool   `json:"success"`
+	Via     string `json:"via,omitempty"` // which input path drove the pointer
 	Error   string `json:"error,omitempty"`
 }
 
@@ -73,11 +77,12 @@ func (s *Server) handleCaptureBrowser(c *wsClient, dataURL string) {
 // handleCircleMouse runs circleMouse and reports the result back to the
 // requesting client as a "circle-mouse-result" message.
 func (s *Server) handleCircleMouse(c *wsClient) {
-	if err := circleMouse(); err != nil {
-		s.sendToClient(c, "circle-mouse-result", CircleMouseResultMsg{Success: false, Error: err.Error()})
+	via, err := circleMouse()
+	if err != nil {
+		s.sendToClient(c, "circle-mouse-result", CircleMouseResultMsg{Success: false, Via: via, Error: err.Error()})
 		return
 	}
-	s.sendToClient(c, "circle-mouse-result", CircleMouseResultMsg{Success: true})
+	s.sendToClient(c, "circle-mouse-result", CircleMouseResultMsg{Success: true, Via: via})
 }
 
 // robotMu serializes every call into robotgo. On Linux robotgo's capture
@@ -254,22 +259,64 @@ var moveMouse = func(x, y int) error {
 // actually have to take a second.
 var sleep = time.Sleep
 
+// errCompositorInputUnavailable marks a moveByViaCompositor failure that
+// happened before any pointer motion was sent, so circleMouse can safely fall
+// back to robotgo instead.
+var errCompositorInputUnavailable = errors.New("compositor pointer input unavailable")
+
+// moveByViaCompositor opens a compositor input session and runs drive with a
+// relative-motion function bound to it. Overridden on Linux by
+// remotedesktop_linux.go; unavailable elsewhere and overridable in tests.
+var moveByViaCompositor = func(drive func(moveBy func(dx, dy float64) error) error) error {
+	return errCompositorInputUnavailable
+}
+
 // circleMouse drives the native pointer through a clockwise circle centered
-// on its current position, via robotgo -- "native control" per
-// condocs/InitialRobot.md. Blocks for about circleDur.
+// on its current position -- "native control" per condocs/InitialRobot.md --
+// and reports which input path it used. Blocks for about circleDur.
 //
-// Held under robotMu for its whole ~circleDur run (not just the individual
-// mouseLocation/moveMouse calls) so a capture-native (or another
-// circle-mouse) request can't interleave its own robotgo calls partway
-// through the drive -- see robotMu's doc comment.
-func circleMouse() error {
+// The compositor path is tried first: on a Wayland session robotgo's Move
+// only warps XWayland's pointer, which "succeeds" without the real cursor
+// moving. robotgo is the fallback for X11 sessions and non-GNOME desktops.
+//
+// Held under robotMu for its whole ~circleDur run so a capture-native (or
+// another circle-mouse) request can't interleave its own robotgo calls
+// partway through the drive -- see robotMu's doc comment.
+func circleMouse() (via string, err error) {
 	robotMu.Lock()
 	defer robotMu.Unlock()
+
+	err = moveByViaCompositor(driveCircleRelative)
+	if err == nil {
+		return "compositor (org.gnome.Mutter.RemoteDesktop)", nil
+	}
+	if !errors.Is(err, errCompositorInputUnavailable) {
+		return "compositor (org.gnome.Mutter.RemoteDesktop)", err
+	}
+	log.Printf("robot: %v; driving the pointer with robotgo instead", err)
+
 	cx, cy, err := mouseLocation()
 	if err != nil {
-		return err
+		return "robotgo", err
 	}
-	return driveCircle(cx, cy)
+	return "robotgo", driveCircle(cx, cy)
+}
+
+// driveCircleRelative traces the same circle as driveCircle, but as relative
+// motions from wherever the pointer currently is (treated as the center), for
+// input paths that can't address absolute screen coordinates.
+func driveCircleRelative(moveBy func(dx, dy float64) error) error {
+	pts := circlePoints(0, 0, circleRadius, circleSteps)
+	interval := circleDur / time.Duration(circleSteps)
+	px, py := 0, 0
+	for _, p := range pts {
+		if err := moveBy(float64(p[0]-px), float64(p[1]-py)); err != nil {
+			return fmt.Errorf("compositor move: %w", err)
+		}
+		px, py = p[0], p[1]
+		sleep(interval)
+	}
+	return nil
 }
 
 // driveCircle steps the pointer through circlePoints around (cx, cy), one

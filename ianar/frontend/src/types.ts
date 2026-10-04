@@ -39,6 +39,7 @@ export interface CaptureResultMsg {
 // whether the circle-mouse action completed (see robot.go).
 export interface CircleMouseResultMsg {
   success: boolean
+  via?: string // which input path drove the pointer
   error?: string
 }
 

@@ -204,13 +204,96 @@ func TestCirclePointsClockwise(t *testing.T) {
 
 // ---- circleMouse ----
 
+// stubCompositorInput makes moveByViaCompositor report unavailable (so
+// circleMouse takes the robotgo path) and restores it when the test ends.
+// Keeps a test from opening a real session-bus connection and moving the
+// desktop's actual pointer.
+func stubCompositorInput(t *testing.T) {
+	t.Helper()
+	orig := moveByViaCompositor
+	t.Cleanup(func() { moveByViaCompositor = orig })
+	moveByViaCompositor = func(func(func(dx, dy float64) error) error) error {
+		return errCompositorInputUnavailable
+	}
+}
+
 func TestCircleMousePropagatesLocationError(t *testing.T) {
+	stubCompositorInput(t)
 	orig := mouseLocation
 	defer func() { mouseLocation = orig }()
 	mouseLocation = func() (int, int, error) { return 0, 0, errors.New("boom") }
 
-	if err := circleMouse(); err == nil {
+	if _, err := circleMouse(); err == nil {
 		t.Fatalf("expected an error when mouseLocation fails")
+	}
+}
+
+// TestCircleMousePrefersCompositor verifies robotgo isn't touched when the
+// compositor path works.
+func TestCircleMousePrefersCompositor(t *testing.T) {
+	origComp, origLoc, origSleep := moveByViaCompositor, mouseLocation, sleep
+	defer func() { moveByViaCompositor, mouseLocation, sleep = origComp, origLoc, origSleep }()
+	sleep = func(time.Duration) {}
+	moveByViaCompositor = func(drive func(func(dx, dy float64) error) error) error {
+		return drive(func(dx, dy float64) error { return nil })
+	}
+	mouseLocation = func() (int, int, error) {
+		t.Fatalf("robotgo path used even though the compositor path succeeded")
+		return 0, 0, nil
+	}
+
+	via, err := circleMouse()
+	if err != nil {
+		t.Fatalf("circleMouse: %v", err)
+	}
+	if !strings.Contains(via, "compositor") {
+		t.Errorf("via = %q, want the compositor path", via)
+	}
+}
+
+// TestCircleMouseDoesNotFallBackMidDrive verifies a compositor failure after
+// motion has started is reported rather than retried through robotgo.
+func TestCircleMouseDoesNotFallBackMidDrive(t *testing.T) {
+	origComp, origLoc := moveByViaCompositor, mouseLocation
+	defer func() { moveByViaCompositor, mouseLocation = origComp, origLoc }()
+	moveByViaCompositor = func(func(func(dx, dy float64) error) error) error {
+		return errors.New("NotifyPointerMotionRelative: boom")
+	}
+	mouseLocation = func() (int, int, error) {
+		t.Fatalf("robotgo path used after the compositor drive had started")
+		return 0, 0, nil
+	}
+
+	if _, err := circleMouse(); err == nil {
+		t.Fatalf("expected the compositor drive's error")
+	}
+}
+
+// TestDriveCircleRelative verifies the relative deltas add up to the same
+// waypoints driveCircle visits, relative to the starting position.
+func TestDriveCircleRelative(t *testing.T) {
+	origSleep := sleep
+	defer func() { sleep = origSleep }()
+	sleep = func(time.Duration) {}
+
+	var x, y float64
+	var visited [][2]int
+	err := driveCircleRelative(func(dx, dy float64) error {
+		x, y = x+dx, y+dy
+		visited = append(visited, [2]int{int(x), int(y)})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("driveCircleRelative: %v", err)
+	}
+	want := circlePoints(0, 0, circleRadius, circleSteps)
+	if len(visited) != len(want) {
+		t.Fatalf("len(visited) = %d, want %d", len(visited), len(want))
+	}
+	for i, p := range want {
+		if visited[i] != p {
+			t.Errorf("visited[%d] = %v, want %v", i, visited[i], p)
+		}
 	}
 }
 
@@ -258,6 +341,7 @@ func TestHandleCircleMouseReportsError(t *testing.T) {
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 
+	stubCompositorInput(t)
 	orig := mouseLocation
 	defer func() { mouseLocation = orig }()
 	mouseLocation = func() (int, int, error) { return 0, 0, errors.New("boom") }

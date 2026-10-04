@@ -62,6 +62,54 @@ export interface ClipResultMsg {
   error?: string
 }
 
+// SequenceStepDef is one high-level sequence step and the lower-level
+// instructions it is carried out as (see sequence.go).
+export interface SequenceStepDef {
+  label: string
+  detail: string[]
+}
+
+export interface SequenceDef {
+  id: string
+  name: string
+  steps: SequenceStepDef[]
+}
+
+// SequenceDefsMsg is the "sequence-defs" payload listing the sequences this
+// instance can run -- sent once when the WebSocket connects.
+export interface SequenceDefsMsg {
+  sequences: SequenceDef[]
+}
+
+// SequenceProgressMsg is the "sequence-progress" payload reporting one step
+// starting or finishing.
+export interface SequenceProgressMsg {
+  sequence_id: string
+  step: number
+  status: 'running' | 'success' | 'error'
+  message?: string
+}
+
+export interface SequenceStepResult {
+  status: 'success' | 'error' | 'skipped'
+  message?: string
+  duration_ms: number
+}
+
+// SequenceResultMsg is the "sequence-result" payload reporting a finished
+// run, with its recording. success is the run's own outcome; the recording
+// reports its own success separately.
+export interface SequenceResultMsg {
+  sequence_id: string
+  success: boolean
+  failed_step: number // -1 if no step failed
+  error?: string
+  steps: SequenceStepResult[] | null
+  duration_ms: number
+  keyboard_via?: string
+  recording?: ClipResultMsg
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -69,3 +117,6 @@ export type ServerMsg =
   | { type: 'capture-result'; payload: CaptureResultMsg }
   | { type: 'circle-mouse-result'; payload: CircleMouseResultMsg }
   | { type: 'clip-result'; payload: ClipResultMsg }
+  | { type: 'sequence-defs'; payload: SequenceDefsMsg }
+  | { type: 'sequence-progress'; payload: SequenceProgressMsg }
+  | { type: 'sequence-result'; payload: SequenceResultMsg }

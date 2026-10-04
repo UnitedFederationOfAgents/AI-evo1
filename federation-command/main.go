@@ -1058,6 +1058,11 @@ func longestCommonPrefix(strs []string) string {
 	return prefix
 }
 
+// fcWindowTitle is the terminal window title FC sets at startup, so other
+// tools can find FC's window by title -- e.g. ianar's sequence-v1 "Select the
+// terminal with federation-command" step (see ianar/window.go).
+const fcWindowTitle = "federation-command"
+
 func (m appModel) Init() tea.Cmd {
 	info := strings.Join([]string{
 		sessionStyle.Render("● session: " + m.sessionDir),
@@ -1069,7 +1074,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd()}
+	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd(), tea.SetWindowTitle(fcWindowTitle)}
 	if m.devMode {
 		cmds = append(cmds, tea.Println(devModeStyle.Render(
 			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session")))

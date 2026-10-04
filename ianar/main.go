@@ -39,7 +39,8 @@ type wsClient struct {
 // Server manages WebSocket clients and this IANAR instance's representable
 // link to local-representative, plus the native/browser capture and
 // native-input ("circle mouse") channels described in
-// condocs/InitialRobot.md (see robot.go).
+// condocs/InitialRobot.md (see robot.go), Native Clip (clip.go) and the
+// sequence-v1 runner (sequence.go).
 type Server struct {
 	httpPort string // HTTP port this instance serves on (reported to local-representative)
 	name     string // identifier reported to local-representative -- "robot" by default
@@ -105,6 +106,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
+	go s.sendToClient(c, "sequence-defs", sequenceDefs())
 
 	// Write pump.
 	go func() {
@@ -194,6 +196,14 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	case "clip-native":
 		s.handleClipNative(c)
+
+	// sequence-v1 tab -- see sequence.go.
+	case "run-sequence":
+		var p struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleRunSequence(c, p.ID)
 	}
 }
 

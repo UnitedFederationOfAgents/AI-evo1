@@ -267,7 +267,7 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 0;
+  min-height: 160px; /* the sequence-v1 tab's step list can otherwise squeeze it away */
   border: 1px solid #3c3c3c;
   border-radius: 4px;
   background: #111;
@@ -326,6 +326,142 @@ button:disabled {
   padding: 0 24px;
 }
 
+/* ---- Tabs (simple / sequence-v1) — styled like local-representative's ---- */
+
+.tab-bar {
+  display: flex;
+  align-items: stretch;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  height: 36px;
+  flex-shrink: 0;
+  padding: 0 8px;
+}
+
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: #888;
+  font-size: 13px;
+  padding: 0 16px;
+}
+
+.tab:hover { color: #ccc; }
+
+.tab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+}
+
+/* ---- sequence-v1 tab ---- */
+
+.seq-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.seq-name,
+.seq-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #cccccc;
+}
+
+.seq-select {
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  font-family: inherit;
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+
+.seq-run {
+  flex-shrink: 0;
+  padding: 7px 14px;
+}
+
+.seq-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.seq-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #202020;
+}
+
+.seq-step-icon {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  color: #666;
+}
+
+.seq-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.seq-step-label {
+  color: #cccccc;
+}
+
+.seq-step-detail {
+  margin: 3px 0 0 16px;
+  font-size: 11px;
+  color: #777;
+}
+
+.seq-step-message {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #aaa;
+  overflow-wrap: anywhere;
+}
+
+.seq-step-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #777;
+  font-variant-numeric: tabular-nums;
+}
+
+.seq-step-running { border-color: #d9a800; }
+.seq-step-running .seq-step-icon { color: #d9a800; }
+.seq-step-success .seq-step-icon { color: #4ec94e; }
+.seq-step-error { border-color: #7a3a3a; }
+.seq-step-error .seq-step-icon,
+.seq-step-error .seq-step-message { color: #e07070; }
+.seq-step-skipped { opacity: 0.5; }
+
+.seq-result {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.seq-result-success { background: #16301a; color: #6ec96e; border: 1px solid #2c5a33; }
+.seq-result-error   { background: #2e1818; color: #e07070; border: 1px solid #5a2c2c; }
+
+.seq-result-via {
+  color: #888;
+}
+
 /* ---- Mobile ----
  * On a phone the 260px sidebar left the robot panel ~half the screen: the
  * action row overflowed off the right edge (Circle Mouse / Native Clip were
@@ -381,6 +517,23 @@ button:disabled {
   }
 
   .robot-clip-controls button {
+    min-height: 36px;
+  }
+
+  .tab-bar {
+    height: 44px;
+  }
+
+  .tab {
+    flex: 1;
+  }
+
+  .seq-run {
+    min-height: 44px;
+    font-size: 13px;
+  }
+
+  .seq-select {
     min-height: 36px;
   }
 }

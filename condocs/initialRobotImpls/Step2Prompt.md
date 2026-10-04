@@ -69,3 +69,34 @@ The full sequence should be recorded.
 The execution of the sequence should report success or failure.
 
 Let's implement this now.
+
+
+prompt: [`df296e1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/df296e1011cab654e8ee04819bc5479a567755b2) → reply: [`46f13c8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/46f13c8d001bd66e8363ea2568d1148625144474)
+
+## Reply B
+
+I added the two tabs to IANAR. **simple** holds the existing four controls. **sequence-v1** runs the six-step federation-command "hello world" sequence, records the whole run, and reports success or failure for each step and for the run. None of it has been built or tested: `go test`, `gofmt` and `tsc` all need approval in this sandbox. It needs a `make build` / `make test` on the host, and the new Go tests are in `ianar/sequence_test.go`.
+
+- **What each step does:** it focuses FC's terminal window, presses Right (local control), presses End then Ctrl+U for an empty input line, types `echo "hello world!"`, presses Enter and waits 1s, then presses Left (back to remote control). The tab lists every step with the actions it performs and shows its status live. The run stops at the first failing step and marks the rest as skipped.
+- **Keys:** sent through GNOME's remote-desktop input first, the same path Circle Mouse uses, with robotgo as the fallback.
+- **Finding FC's window:** I made one small change to `federation-command/main.go`: FC now sets its terminal window title to "federation-command". IANAR looks for that title first. If no window has it, IANAR falls back to the window of FC's terminal process.
+  - It skips processes FC shares with IANAR itself (such as local-representative), so it never types into the wrong terminal.
+  - There is no reliable way to focus another app's window on GNOME Wayland. IANAR tries GNOME's `Eval` (only works in unsafe mode), then the "Window Calls" extension if installed, then robotgo on X11. If none is available, step 1 fails with a clear error.
+- **Recording:** I split the screen recorder into start/stop so a run of any length can be recorded. It falls back to sampling about 4 frames a second, capped at 60s. Native Clip behaves as before. The recording's success or failure is reported separately from the run's.
+
+Things to check on the host:
+- **robotgo calls:** I couldn't look at the library source, so the `ActivePid`, `GetTitle`, `KeyTap` and `TypeStr` calls are written from memory and may not compile.
+- **Steps that aren't verified:** steps 2–6 only confirm that the keys were sent, not that FC changed state. IANAR has no way to read FC's control mode.
+- **No window:** if FC is running in a detached tmux session, it has no window and step 1 will fail.
+
+The new code is in `keyboard.go`, `window.go`, `window_linux.go` and `sequence.go`. I also changed `clip.go`, `screencast_linux.go`, `remotedesktop_linux.go` and `main.go`, plus the frontend's `App.tsx`, `types.ts` and `index.css`.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

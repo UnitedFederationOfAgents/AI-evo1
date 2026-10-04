@@ -66,12 +66,24 @@ var clipMu sync.Mutex
 // and then went wrong.
 var errCompositorRecordingUnavailable = errors.New("compositor screen recording unavailable")
 
+// startCompositorRecording starts the compositor's own screen recorder; the
+// returned stop ends the recording and returns the video file's bytes and
+// MIME type. Overridden on Linux by screencast_linux.go; unavailable
+// elsewhere and overridable in tests.
+var startCompositorRecording = func() (func() ([]byte, string, error), error) {
+	return nil, errCompositorRecordingUnavailable
+}
+
 // recordViaCompositor records the screen for d with the compositor's own
 // screen recorder and returns the video file's bytes and MIME type.
-// Overridden on Linux by screencast_linux.go; unavailable elsewhere and
-// overridable in tests.
+// Overridable in tests.
 var recordViaCompositor = func(d time.Duration) (data []byte, mimeType string, err error) {
-	return nil, "", errCompositorRecordingUnavailable
+	stop, err := startCompositorRecording()
+	if err != nil {
+		return nil, "", err
+	}
+	sleep(d)
+	return stop()
 }
 
 // clock is overridden in tests alongside sleep so frame sampling can be
@@ -99,7 +111,7 @@ func recordNativeClip() ClipResultMsg {
 	compositorErr := err
 	log.Printf("robot: %v; sampling frames for the clip instead", compositorErr)
 
-	frames, via, err := sampleNativeFrames(clipDur, clipFrameInterval)
+	frames, via, err := sampleNativeFrames(clipDur, clipFrameInterval, nil)
 	if err != nil {
 		return ClipResultMsg{Error: fmt.Sprintf("native clip: compositor recording: %v; frame sampling: %v", compositorErr, err)}
 	}
@@ -111,13 +123,65 @@ func recordNativeClip() ClipResultMsg {
 	}
 }
 
+// startNativeRecording starts an open-ended recording of the native desktop
+// -- via the compositor if it can, otherwise by sampling a frame every
+// interval for at most maxDur -- for recordings whose length isn't known up
+// front, like a whole sequence run (see sequence.go). The returned stop ends
+// it and returns the result in the same shape as a Native Clip. The caller
+// holds clipMu for the recording's lifetime. Overridable in tests.
+var startNativeRecording = func(maxDur, interval time.Duration) (stop func() ClipResultMsg) {
+	start := clock()
+	stopVideo, err := startCompositorRecording()
+	if err == nil {
+		return func() ClipResultMsg {
+			dur := clock().Sub(start)
+			data, mimeType, err := stopVideo()
+			if err != nil {
+				return ClipResultMsg{Error: fmt.Sprintf("compositor recording: %v", err)}
+			}
+			return ClipResultMsg{
+				Success:    true,
+				Via:        "compositor (org.gnome.Shell.Screencast)",
+				VideoURL:   "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data),
+				DurationMs: dur.Milliseconds(),
+			}
+		}
+	}
+	compositorErr := err
+	log.Printf("robot: %v; sampling frames for the recording instead", compositorErr)
+
+	stopCh := make(chan struct{})
+	done := make(chan ClipResultMsg, 1)
+	go func() {
+		frames, via, err := sampleNativeFrames(maxDur, interval, stopCh)
+		switch {
+		case err != nil:
+			done <- ClipResultMsg{Error: fmt.Sprintf("compositor recording: %v; frame sampling: %v", compositorErr, err)}
+		case len(frames) == 0:
+			done <- ClipResultMsg{Error: fmt.Sprintf("compositor recording: %v; frame sampling: stopped before the first frame", compositorErr)}
+		default:
+			done <- ClipResultMsg{
+				Success:    true,
+				Via:        "sampled frames (" + via + ")",
+				Frames:     frames,
+				DurationMs: frames[len(frames)-1].AtMs + interval.Milliseconds(),
+			}
+		}
+	}()
+	return func() ClipResultMsg {
+		close(stopCh)
+		return <-done
+	}
+}
+
 // sampleNativeFrames grabs a native frame every interval for d and returns
 // them as downscaled JPEG data URLs, along with the capture path used. The
 // first frame decides the path; later frames go straight to it rather than
 // re-trying paths already known to fail (e.g. robotgo's black frame on
 // XWayland) every time. If a grab fails partway through, the frames captured
-// so far are returned as a shorter clip.
-func sampleNativeFrames(d, interval time.Duration) ([]ClipFrame, string, error) {
+// so far are returned as a shorter clip. Sampling also ends early once stop
+// (which may be nil) is closed.
+func sampleNativeFrames(d, interval time.Duration, stop <-chan struct{}) ([]ClipFrame, string, error) {
 	attempts := nativeCaptureAttempts()
 	var frames []ClipFrame
 	var via string
@@ -126,6 +190,11 @@ func sampleNativeFrames(d, interval time.Duration) ([]ClipFrame, string, error) 
 		at := clock().Sub(start)
 		if at >= d {
 			break
+		}
+		select {
+		case <-stop:
+			return frames, via, nil
+		default:
 		}
 		img, from, err := grabNativeFrame(attempts)
 		if err != nil {

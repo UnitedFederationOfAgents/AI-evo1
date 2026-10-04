@@ -8,6 +8,10 @@ import type {
   ReprStatus,
   ReprStatusMsg,
   SelfInfoMsg,
+  SequenceDef,
+  SequenceDefsMsg,
+  SequenceProgressMsg,
+  SequenceResultMsg,
 } from './types'
 
 // ---- WebSocket hook ----
@@ -15,19 +19,42 @@ import type {
 // Wires up the representable connect/disconnect widget, dev-mode banner, and
 // version-mismatch reload check shared by every sub-app in this repo, plus
 // IANAR's own capture-native/capture-browser/circle-mouse/clip-native
-// channels (see condocs/InitialRobot.md, robot.go and clip.go).
+// channels (see condocs/InitialRobot.md, robot.go and clip.go) and the
+// sequence-v1 runner (sequence.go).
 
 type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
 type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
 type ClipStatus = { kind: 'idle' | 'recording' | 'success' | 'error'; message?: string }
 
-// Preview is whatever the preview pane shows: the latest capture or clip,
-// whichever finished last. A compositor-recorded clip is a video; a
-// frame-sampled one (see clip.go's fallback) is played back by FramePlayer.
+// Preview is whatever a preview pane shows: on the simple tab the latest
+// capture or clip, whichever finished last; on the sequence-v1 tab the last
+// run's recording. A compositor recording is a video; a frame-sampled one
+// (see clip.go's fallback) is played back by FramePlayer.
 type Preview =
   | { kind: 'image'; url: string }
   | { kind: 'video'; url: string }
   | { kind: 'frames'; frames: ClipFrame[]; durationMs: number }
+
+// clipPreview turns a successful clip/recording result into a Preview, or
+// null if it has nothing to play.
+function clipPreview(p: ClipResultMsg): Preview | null {
+  if (p.success && p.video_url) return { kind: 'video', url: dataURLToObjectURL(p.video_url) }
+  if (p.success && p.frames?.length) return { kind: 'frames', frames: p.frames, durationMs: p.duration_ms ?? 0 }
+  return null
+}
+
+type StepStatus = 'pending' | 'running' | 'success' | 'error' | 'skipped'
+
+// SeqRun is the sequence-v1 tab's latest run: live per-step status while it
+// runs, then the final result and its recording.
+type SeqRun = {
+  sequenceId: string
+  running: boolean
+  steps: { status: StepStatus; message?: string; durationMs?: number }[]
+  result?: SequenceResultMsg
+  recording?: Preview | null
+  lostConnection?: boolean
+}
 
 // dataURLToObjectURL turns a base64 data: URL into a blob: URL. Video
 // elements seek reliably in a blob: URL, and it avoids holding a
@@ -77,6 +104,8 @@ function useRobotWS() {
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus>({ kind: 'idle' })
   const [circleStatus, setCircleStatus] = useState<CircleStatus>({ kind: 'idle' })
   const [clipStatus, setClipStatus] = useState<ClipStatus>({ kind: 'idle' })
+  const [sequences, setSequences] = useState<SequenceDef[]>([])
+  const [seqRun, setSeqRun] = useState<SeqRun | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -125,6 +154,9 @@ function useRobotWS() {
 
       ws.onclose = () => {
         setConnected(false)
+        // A run in flight reports to the connection that started it, so its
+        // result is lost with that connection.
+        setSeqRun((run) => (run?.running ? { ...run, running: false, lostConnection: true } : run))
         setTimeout(connect, 2000)
       }
 
@@ -171,15 +203,33 @@ function useRobotWS() {
           } else if (msg.type === 'clip-result') {
             const p = msg.payload as ClipResultMsg
             const via = p.via ? ` (via ${p.via})` : ''
-            if (p.success && p.video_url) {
-              setPreview({ kind: 'video', url: dataURLToObjectURL(p.video_url) })
-              setClipStatus({ kind: 'success', message: via })
-            } else if (p.success && p.frames?.length) {
-              setPreview({ kind: 'frames', frames: p.frames, durationMs: p.duration_ms ?? 0 })
+            const clip = clipPreview(p)
+            if (clip) {
+              setPreview(clip)
               setClipStatus({ kind: 'success', message: via })
             } else {
               setClipStatus({ kind: 'error', message: p.error ?? 'native clip failed' })
             }
+          } else if (msg.type === 'sequence-defs') {
+            const p = msg.payload as SequenceDefsMsg
+            setSequences(p.sequences ?? [])
+          } else if (msg.type === 'sequence-progress') {
+            const p = msg.payload as SequenceProgressMsg
+            setSeqRun((run) => {
+              if (!run || run.sequenceId !== p.sequence_id) return run
+              const steps = run.steps.slice()
+              steps[p.step] = { ...steps[p.step], status: p.status, message: p.message }
+              return { ...run, steps }
+            })
+          } else if (msg.type === 'sequence-result') {
+            const p = msg.payload as SequenceResultMsg
+            setSeqRun({
+              sequenceId: p.sequence_id,
+              running: false,
+              steps: (p.steps ?? []).map((s) => ({ status: s.status, message: s.message, durationMs: s.duration_ms })),
+              result: p,
+              recording: p.recording ? clipPreview(p.recording) : null,
+            })
           }
         } catch {
           // ignore malformed messages
@@ -197,6 +247,14 @@ function useRobotWS() {
     const url = preview.url
     return () => URL.revokeObjectURL(url)
   }, [preview])
+
+  // Likewise for the last sequence run's recording.
+  const seqRecording = seqRun?.recording
+  useEffect(() => {
+    if (seqRecording?.kind !== 'video') return
+    const url = seqRecording.url
+    return () => URL.revokeObjectURL(url)
+  }, [seqRecording])
 
   const captureNative = useCallback(() => {
     setCaptureStatus({ kind: 'pending' })
@@ -258,6 +316,18 @@ function useRobotWS() {
     send('clip-native', {})
   }, [send])
 
+  const runSequence = useCallback(
+    (seq: SequenceDef) => {
+      setSeqRun({
+        sequenceId: seq.id,
+        running: true,
+        steps: seq.steps.map(() => ({ status: 'pending' as const })),
+      })
+      send('run-sequence', { id: seq.id })
+    },
+    [send],
+  )
+
   return {
     connected,
     reprStatus,
@@ -278,6 +348,9 @@ function useRobotWS() {
     captureBrowser,
     circleMouse,
     clipNative,
+    sequences,
+    seqRun,
+    runSequence,
   }
 }
 
@@ -417,7 +490,19 @@ function FramePlayer({ frames, durationMs }: FramePlayerProps) {
   )
 }
 
-// ---- Robot panel: capture native / capture browser / circle mouse / native clip ----
+// PreviewView renders a Preview, or placeholder text when there is none.
+function PreviewView({ preview, placeholder }: { preview: Preview | null | undefined; placeholder: string }) {
+  return (
+    <div className="robot-preview">
+      {preview?.kind === 'image' && <img src={preview.url} alt="capture" />}
+      {preview?.kind === 'video' && <video src={preview.url} controls autoPlay loop muted playsInline />}
+      {preview?.kind === 'frames' && <FramePlayer frames={preview.frames} durationMs={preview.durationMs} />}
+      {!preview && <span className="robot-preview-placeholder">{placeholder}</span>}
+    </div>
+  )
+}
+
+// ---- Simple tab: capture native / capture browser / circle mouse / native clip ----
 
 interface RobotPanelProps {
   connected: boolean
@@ -471,19 +556,117 @@ function RobotPanel({
       {clipStatus.kind === 'recording' && <div className="robot-status">Recording a 4 second clip of the desktop…</div>}
       {clipStatus.kind === 'success' && <div className="robot-status">Clip recorded{clipStatus.message}.</div>}
       {clipStatus.kind === 'error' && <div className="robot-status robot-status-error">{clipStatus.message}</div>}
-      <div className="robot-preview">
-        {preview?.kind === 'image' && <img src={preview.url} alt="capture" />}
-        {preview?.kind === 'video' && <video src={preview.url} controls autoPlay loop muted playsInline />}
-        {preview?.kind === 'frames' && <FramePlayer frames={preview.frames} durationMs={preview.durationMs} />}
-        {!preview && (
-          <span className="robot-preview-placeholder">
-            Press "Capture Native", "Capture Browser" or "Native Clip" — the result appears here.
-          </span>
-        )}
-      </div>
+      <PreviewView
+        preview={preview}
+        placeholder={'Press "Capture Native", "Capture Browser" or "Native Clip" — the result appears here.'}
+      />
     </div>
   )
 }
+
+// ---- sequence-v1 tab: run a sequence of high-level actions, recorded ----
+
+const STEP_ICONS: Record<StepStatus, string> = {
+  pending: '○',
+  running: '◌',
+  success: '✓',
+  error: '✗',
+  skipped: '–',
+}
+
+interface SequencePanelProps {
+  connected: boolean
+  sequences: SequenceDef[]
+  run: SeqRun | null
+  onRun: (seq: SequenceDef) => void
+}
+
+function SequencePanel({ connected, sequences, run, onRun }: SequencePanelProps) {
+  const [selectedId, setSelectedId] = useState('')
+  const seq = sequences.find((s) => s.id === selectedId) ?? sequences[0]
+
+  if (!seq) {
+    return (
+      <div className="robot-panel">
+        <div className="empty-state">{connected ? 'No sequences defined.' : 'Connecting…'}</div>
+      </div>
+    )
+  }
+
+  const thisRun = run?.sequenceId === seq.id ? run : null
+  const running = !!run?.running
+  const result = thisRun?.result
+  const rec = result?.recording
+
+  return (
+    <div className="robot-panel">
+      <div className="seq-header">
+        {sequences.length > 1 ? (
+          <select className="seq-select" value={seq.id} disabled={running} onChange={(e) => setSelectedId(e.target.value)}>
+            {sequences.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="seq-name">{seq.name}</span>
+        )}
+        <button className="btn-secondary seq-run" disabled={!connected || running} onClick={() => onRun(seq)}>
+          {running ? 'Running…' : 'Run sequence'}
+        </button>
+      </div>
+      <ol className="seq-steps">
+        {seq.steps.map((st, i) => {
+          const s = thisRun?.steps[i]
+          const status: StepStatus = s?.status ?? 'pending'
+          return (
+            <li key={i} className={`seq-step seq-step-${status}`}>
+              <span className="seq-step-icon">{STEP_ICONS[status]}</span>
+              <div className="seq-step-body">
+                <div className="seq-step-label">
+                  {i + 1}. {st.label}
+                </div>
+                <ul className="seq-step-detail">
+                  {st.detail.map((d, j) => (
+                    <li key={j}>{d}</li>
+                  ))}
+                </ul>
+                {s?.message && <div className="seq-step-message">{s.message}</div>}
+              </div>
+              {s?.durationMs !== undefined && status !== 'skipped' && (
+                <span className="seq-step-time">{(s.durationMs / 1000).toFixed(1)}s</span>
+              )}
+            </li>
+          )
+        })}
+      </ol>
+      {running && <div className="robot-status">Running and recording the sequence…</div>}
+      {thisRun?.lostConnection && (
+        <div className="robot-status robot-status-error">
+          Lost the connection to IANAR mid-run, so this run's result and recording didn't arrive.
+        </div>
+      )}
+      {result && (
+        <div className={`seq-result ${result.success ? 'seq-result-success' : 'seq-result-error'}`}>
+          {result.success
+            ? `✓ Sequence succeeded in ${(result.duration_ms / 1000).toFixed(1)}s`
+            : `✗ Sequence failed: ${result.error ?? 'unknown error'}`}
+          {result.keyboard_via && <span className="seq-result-via"> · keyboard via {result.keyboard_via}</span>}
+        </div>
+      )}
+      {rec && (
+        <div className={`robot-status${rec.success ? '' : ' robot-status-error'}`}>
+          {rec.success ? `Recorded via ${rec.via}.` : `Recording failed: ${rec.error ?? 'unknown error'}`}
+        </div>
+      )}
+      <PreviewView preview={thisRun?.recording} placeholder="Run the sequence — its recording appears here." />
+    </div>
+  )
+}
+
+type Tab = 'simple' | 'sequence-v1'
+const TABS: Tab[] = ['simple', 'sequence-v1']
 
 export default function App() {
   const {
@@ -506,7 +689,11 @@ export default function App() {
     captureBrowser,
     circleMouse,
     clipNative,
+    sequences,
+    seqRun,
+    runSequence,
   } = useRobotWS()
+  const [tab, setTab] = useState<Tab>('simple')
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
@@ -534,17 +721,29 @@ export default function App() {
         </div>
       </div>
       <div className="main-content">
-        <RobotPanel
-          connected={connected}
-          preview={preview}
-          captureStatus={captureStatus}
-          circleStatus={circleStatus}
-          clipStatus={clipStatus}
-          onCaptureNative={captureNative}
-          onCaptureBrowser={captureBrowser}
-          onCircleMouse={circleMouse}
-          onClipNative={clipNative}
-        />
+        <div className="tab-bar">
+          {TABS.map((t) => (
+            <button key={t} className={`tab${tab === t ? ' tab-active' : ''}`} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ))}
+        </div>
+        {tab === 'simple' && (
+          <RobotPanel
+            connected={connected}
+            preview={preview}
+            captureStatus={captureStatus}
+            circleStatus={circleStatus}
+            clipStatus={clipStatus}
+            onCaptureNative={captureNative}
+            onCaptureBrowser={captureBrowser}
+            onCircleMouse={circleMouse}
+            onClipNative={clipNative}
+          />
+        )}
+        {tab === 'sequence-v1' && (
+          <SequencePanel connected={connected} sequences={sequences} run={seqRun} onRun={runSequence} />
+        )}
       </div>
     </div>
   )

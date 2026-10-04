@@ -13,7 +13,7 @@ import (
 
 // This file records the screen with gnome-shell's own screen recorder
 // (org.gnome.Shell.Screencast, the one behind GNOME's built-in screen
-// recording), for clip.go's Native Clip. It records the whole stage -- every
+// recording), for clip.go's Native Clip and sequence.go's run recordings. It records the whole stage -- every
 // monitor -- to a video file gnome-shell writes itself, which works on
 // Wayland where nothing else in-process can see the desktop at video rates.
 // While it runs, GNOME shows its recording indicator in the top bar.
@@ -23,21 +23,27 @@ import (
 // answer is reported as errCompositorRecordingUnavailable so the clip falls
 // back to frame sampling.
 //
-// init() overrides clip.go's recordViaCompositor var, so non-Linux builds
-// keep the "unavailable" stub and tests can substitute their own.
+// The recording is bound to our bus connection -- gnome-shell stops it if the
+// connection closes -- so the connection stays open until stop is called.
+//
+// init() overrides clip.go's startCompositorRecording var, so non-Linux
+// builds keep the "unavailable" stub and tests can substitute their own.
 func init() {
-	recordViaCompositor = func(d time.Duration) ([]byte, string, error) {
+	startCompositorRecording = func() (func() ([]byte, string, error), error) {
 		conn, err := dbus.ConnectSessionBus()
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: connecting to the session bus: %v", errCompositorRecordingUnavailable, err)
+			return nil, fmt.Errorf("%w: connecting to the session bus: %v", errCompositorRecordingUnavailable, err)
 		}
-		defer conn.Close()
 
 		dir, err := os.MkdirTemp("", "ianar-clip-*")
 		if err != nil {
-			return nil, "", fmt.Errorf("creating a temp dir for the recording: %w", err)
+			conn.Close()
+			return nil, fmt.Errorf("creating a temp dir for the recording: %w", err)
 		}
-		defer os.RemoveAll(dir)
+		cleanup := func() {
+			conn.Close()
+			os.RemoveAll(dir)
+		}
 
 		const iface = "org.gnome.Shell.Screencast"
 		obj := conn.Object(iface, dbus.ObjectPath("/org/gnome/Shell/Screencast"))
@@ -52,31 +58,35 @@ func init() {
 			"framerate":   dbus.MakeVariant(int32(30)),
 		}).Store(&ok, &usedPath)
 		if err != nil {
-			return nil, "", fmt.Errorf("%w: %s.Screencast: %v", errCompositorRecordingUnavailable, iface, err)
+			cleanup()
+			return nil, fmt.Errorf("%w: %s.Screencast: %v", errCompositorRecordingUnavailable, iface, err)
 		}
 		if !ok {
-			return nil, "", fmt.Errorf("%w: gnome-shell reported the recording could not start", errCompositorRecordingUnavailable)
-		}
-		if usedPath != "" && filepath.Dir(usedPath) != dir {
-			// gnome-shell chose somewhere other than our temp dir; clean that up too.
-			defer os.Remove(usedPath)
+			cleanup()
+			return nil, fmt.Errorf("%w: gnome-shell reported the recording could not start", errCompositorRecordingUnavailable)
 		}
 
-		sleep(d)
+		return func() ([]byte, string, error) {
+			defer cleanup()
+			if usedPath != "" && filepath.Dir(usedPath) != dir {
+				// gnome-shell chose somewhere other than our temp dir; clean that up too.
+				defer os.Remove(usedPath)
+			}
 
-		if err := obj.Call(iface+".StopScreencast", 0).Err; err != nil {
-			return nil, "", fmt.Errorf("%s.StopScreencast: %w", iface, err)
-		}
+			if err := obj.Call(iface+".StopScreencast", 0).Err; err != nil {
+				return nil, "", fmt.Errorf("%s.StopScreencast: %w", iface, err)
+			}
 
-		path, err := waitForRecording(dir, usedPath)
-		if err != nil {
-			return nil, "", err
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, "", fmt.Errorf("reading the recording: %w", err)
-		}
-		return data, mimeTypeForVideo(path), nil
+			path, err := waitForRecording(dir, usedPath)
+			if err != nil {
+				return nil, "", err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, "", fmt.Errorf("reading the recording: %w", err)
+			}
+			return data, mimeTypeForVideo(path), nil
+		}, nil
 	}
 }
 

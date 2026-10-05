@@ -415,6 +415,9 @@ func sequenceArtifact(def SequenceDef, res SequenceResultMsg) artifact {
 			if res.KeyboardVia != "" {
 				fmt.Fprintf(&b, "keyboard via: %s\n", res.KeyboardVia)
 			}
+			for _, w := range res.Warnings {
+				fmt.Fprintf(&b, "warning: %s\n", w)
+			}
 			for _, o := range res.Outputs {
 				if o.Label != "" {
 					fmt.Fprintf(&b, "printed: %s: %s\n", o.Label, o.Value)

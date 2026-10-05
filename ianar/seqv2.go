@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -325,6 +327,10 @@ var desktopDir = func() string {
 type seqLibDoc struct {
 	Actions   []ActionDef
 	Sequences []SequenceV2
+	// Examples is only in the saved library: for each built-in example it
+	// holds (by exampleKey), the fingerprint of the shipped version it was
+	// last copied from. See upgradeExamples.
+	Examples map[string]string
 }
 
 func encodeSeqLib(doc seqLibDoc) string {
@@ -392,6 +398,17 @@ func encodeSeqLib(doc seqLibDoc) string {
 			}
 		}
 	}
+	if len(doc.Examples) > 0 {
+		w.line(0, "examples:")
+		keys := make([]string, 0, len(doc.Examples))
+		for k := range doc.Examples {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			w.line(2, yamlScalar(k)+": "+yamlScalar(doc.Examples[k]))
+		}
+	}
 	return w.b.String()
 }
 
@@ -406,7 +423,7 @@ func decodeSeqLib(src string) (seqLibDoc, error) {
 	if root.kind != yMap {
 		return doc, fmt.Errorf("line %d: expected the document to be a mapping with actions: and/or sequences:", root.line)
 	}
-	if err := onlyKeys(root, "format", "actions", "sequences"); err != nil {
+	if err := onlyKeys(root, "format", "actions", "sequences", "examples"); err != nil {
 		return doc, err
 	}
 	if f := root.get("format"); f != nil && f.str != seqLibFormat {
@@ -436,6 +453,11 @@ func decodeSeqLib(src string) (seqLibDoc, error) {
 				return doc, err
 			}
 			doc.Sequences = append(doc.Sequences, q)
+		}
+	}
+	if n := root.get("examples"); n != nil {
+		if doc.Examples, err = stringMap(n, "examples"); err != nil {
+			return doc, err
 		}
 	}
 	if len(doc.Actions) == 0 && len(doc.Sequences) == 0 {
@@ -617,14 +639,103 @@ type seqLibrary struct {
 	path      string
 	actions   []ActionDef
 	sequences []SequenceV2
-	note      string // a problem loading the file, shown in the UI
+	examples  map[string]string // see seqLibDoc.Examples
+	note      string            // a problem loading the file, shown in the UI
+}
+
+// Built-in examples change between versions, but the saved library keeps
+// the copies it was first given. Revision K's debug run still used
+// Revision I's "open-file" action, without J's fix, because Restore
+// examples hadn't been pressed. So the library records which shipped
+// version each example was copied from, and on loading replaces any copy
+// that still matches it (wasn't edited) with this build's version.
+
+func exampleKey(kind, id string) string { return kind + "/" + id }
+
+func fingerprint(doc seqLibDoc) string {
+	sum := sha256.Sum256([]byte(encodeSeqLib(doc)))
+	return hex.EncodeToString(sum[:8])
+}
+
+func actionPrint(a ActionDef) string    { return fingerprint(seqLibDoc{Actions: []ActionDef{a}}) }
+func sequencePrint(q SequenceV2) string { return fingerprint(seqLibDoc{Sequences: []SequenceV2{q}}) }
+
+// shippedExamples records every built-in example as this build ships it.
+func shippedExamples() map[string]string {
+	actions, sequences := exampleLibrary()
+	rec := map[string]string{}
+	for _, a := range actions {
+		rec[exampleKey("action", a.ID)] = actionPrint(a)
+	}
+	for _, q := range sequences {
+		rec[exampleKey("sequence", q.ID)] = sequencePrint(q)
+	}
+	return rec
+}
+
+// upgradeExamples replaces each saved copy of a built-in example that still
+// matches the version recorded for it in rec with this build's version. It
+// returns the new lists and record, what it updated, and what differs from
+// this build but was kept: copies edited since, or saved before the record
+// was kept. Examples the library doesn't hold are left out.
+func upgradeExamples(actions []ActionDef, sequences []SequenceV2, rec map[string]string) ([]ActionDef, []SequenceV2, map[string]string, []string, []string) {
+	actions = append([]ActionDef(nil), actions...)
+	sequences = append([]SequenceV2(nil), sequences...)
+	out := map[string]string{}
+	for k, v := range rec {
+		out[k] = v
+	}
+	var updated, kept []string
+	consider := func(key, have, want string, replace func()) {
+		switch {
+		case have == want:
+			out[key] = want
+		case rec[key] == have:
+			replace()
+			out[key] = want
+			updated = append(updated, strings.Replace(key, "/", " ", 1))
+		default:
+			kept = append(kept, strings.Replace(key, "/", " ", 1))
+		}
+	}
+	shippedA, shippedQ := exampleLibrary()
+	for _, a := range shippedA {
+		if i := indexOfAction(actions, a.ID); i >= 0 {
+			consider(exampleKey("action", a.ID), actionPrint(actions[i]), actionPrint(a), func() { actions[i] = a })
+		}
+	}
+	for _, q := range shippedQ {
+		if i := indexOfSequence(sequences, q.ID); i >= 0 {
+			consider(exampleKey("sequence", q.ID), sequencePrint(sequences[i]), sequencePrint(q), func() { sequences[i] = q })
+		}
+	}
+	return actions, sequences, out, updated, kept
+}
+
+// staleExamples lists the library's built-in examples that differ from
+// this build's, as "action open-file". Called with l.mu held.
+func (l *seqLibrary) staleExamples() []string {
+	_, _, _, _, kept := upgradeExamples(l.actions, l.sequences, nil)
+	return kept
+}
+
+func staleNote(stale []string) string {
+	if len(stale) == 0 {
+		return ""
+	}
+	verb := "differ"
+	if len(stale) == 1 {
+		verb = "differs"
+	}
+	return fmt.Sprintf("%s %s from this IANAR's built-in examples (edited, or saved by an older IANAR); press Restore examples to replace them",
+		strings.Join(stale, ", "), verb)
 }
 
 // openSeqLibrary loads the library at path, starting from the examples if
 // there is none yet. A file that can't be read is set aside, not
 // overwritten.
 func openSeqLibrary(path string) *seqLibrary {
-	l := &seqLibrary{path: path}
+	l := &seqLibrary{path: path, examples: shippedExamples()}
 	l.actions, l.sequences = exampleLibrary()
 	if path == "" {
 		return l
@@ -654,8 +765,37 @@ func openSeqLibrary(path string) *seqLibrary {
 		log.Printf("sequence-v2: %s", l.note)
 		return l
 	}
-	l.actions, l.sequences = doc.Actions, doc.Sequences
+	l.actions, l.sequences, l.examples = doc.Actions, doc.Sequences, doc.Examples
+	actions, sequences, rec, updated, _ := upgradeExamples(doc.Actions, doc.Sequences, doc.Examples)
+	if len(updated) > 0 && checkLibrary(actions, sequences) != nil {
+		// An update that doesn't fit with the rest (say, an edited sequence
+		// using an action's old controls) is left for Restore examples.
+		actions, sequences, rec, updated = doc.Actions, doc.Sequences, doc.Examples, nil
+	}
+	if len(updated) > 0 || !sameRecord(rec, doc.Examples) {
+		l.examples = rec
+		if err := l.commit(actions, sequences); err != nil {
+			l.actions, l.sequences = actions, sequences
+			log.Printf("sequence-v2: %v", err)
+		}
+	}
+	if len(updated) > 0 {
+		l.note = "updated to this IANAR's version of the built-in examples (you hadn't edited them): " + strings.Join(updated, ", ")
+		log.Printf("sequence-v2: %s", l.note)
+	}
 	return l
+}
+
+func sameRecord(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 // checkLibrary validates a whole library.
@@ -690,7 +830,7 @@ func (l *seqLibrary) commit(actions []ActionDef, sequences []SequenceV2) error {
 		return err
 	}
 	if l.path != "" {
-		data := encodeSeqLib(seqLibDoc{Actions: actions, Sequences: sequences})
+		data := encodeSeqLib(seqLibDoc{Actions: actions, Sequences: sequences, Examples: l.examples})
 		if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
 			return fmt.Errorf("saving the library: %w", err)
 		}
@@ -949,7 +1089,40 @@ func (l *seqLibrary) export(kind string, ids []string) (yaml, filename string, e
 // replacing any edited copies.
 func (l *seqLibrary) restoreExamples() (string, error) {
 	actions, sequences := exampleLibrary()
+	l.mu.Lock()
+	rec := map[string]string{}
+	for k, v := range l.examples {
+		rec[k] = v
+	}
+	for k, v := range shippedExamples() {
+		rec[k] = v
+	}
+	l.examples = rec // written by merge's commit
+	l.mu.Unlock()
 	return l.merge(seqLibDoc{Actions: actions, Sequences: sequences})
+}
+
+// staleFor lists what sequence id uses -- the sequence and its steps'
+// actions -- that is a built-in example differing from this build's, as
+// warnings for the run's result.
+func (l *seqLibrary) staleFor(id string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	idx := indexOfSequence(l.sequences, id)
+	if idx < 0 {
+		return nil
+	}
+	uses := map[string]bool{"sequence " + id: true}
+	for _, st := range l.sequences[idx].Steps {
+		uses["action "+st.Action] = true
+	}
+	var out []string
+	for _, s := range l.staleExamples() {
+		if uses[s] {
+			out = append(out, staleNote([]string{s}))
+		}
+	}
+	return out
 }
 
 // SeqLibraryMsg is the "seq2-library" WebSocket payload: the whole library,
@@ -966,13 +1139,19 @@ type SeqLibraryMsg struct {
 func (l *seqLibrary) snapshot() SeqLibraryMsg {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	var notes []string
+	for _, n := range []string{l.note, staleNote(l.staleExamples())} {
+		if n != "" {
+			notes = append(notes, n)
+		}
+	}
 	return SeqLibraryMsg{
 		Actions:   append([]ActionDef{}, l.actions...),
 		Sequences: append([]SequenceV2{}, l.sequences...),
 		Ops:       seqOps,
 		Builtins:  builtinList(),
 		Path:      l.path,
-		Note:      l.note,
+		Note:      strings.Join(notes, ". "),
 	}
 }
 
@@ -1250,6 +1429,7 @@ func (s *Server) handleRunSequenceV2(c *wsClient, id string, values map[string]s
 	}
 	s.sendToClient(c, "seq2-started", Seq2StartedMsg{SequenceID: id, Def: q.def()})
 	res := runSequence(q, func(p SequenceProgressMsg) { s.sendToClient(c, "seq2-progress", p) })
+	res.Warnings = s.seqLib.staleFor(id)
 	if res.Recording != nil {
 		res.ArtifactID = s.artifacts.keep(sequenceArtifact(q.def(), res))
 	}

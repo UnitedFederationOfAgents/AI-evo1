@@ -873,6 +873,9 @@ function Runner({
           {result.keyboard_via && <span className="seq-result-via"> · keyboard via {result.keyboard_via}</span>}
         </div>
       )}
+      {result?.warnings?.map((w, i) => (
+        <div key={i} className="robot-status robot-status-error">⚠ {w}</div>
+      ))}
       {rec && (
         <div className={`robot-status${rec.success ? '' : ' robot-status-error'}`}>
           {rec.success ? `Recorded via ${rec.via}.` : `Recording failed: ${rec.error ?? 'unknown error'}`}

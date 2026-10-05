@@ -272,6 +272,105 @@ func TestOpenSeqLibrarySetsABrokenFileAside(t *testing.T) {
 	}
 }
 
+// oldOpenFile is open-file as Revision I shipped it: no show-window.
+func oldOpenFile(actions []ActionDef) ActionDef {
+	a := actions[indexOfAction(actions, "open-file")]
+	var do []Instruction
+	for _, in := range a.Do {
+		if in["op"] != "show-window" {
+			do = append(do, in)
+		}
+	}
+	a.Do = do
+	return a
+}
+
+func TestOpenSeqLibraryUpgradesUneditedExamples(t *testing.T) {
+	actions, sequences := exampleLibrary()
+	old := oldOpenFile(actions)
+	actions[indexOfAction(actions, "open-file")] = old
+	// press-keys was edited after an older IANAR saved it.
+	pk := indexOfAction(actions, "press-keys")
+	edited := actions[pk]
+	edited.Description = "my own description"
+	actions[pk] = edited
+	rec := shippedExamples()
+	rec[exampleKey("action", "open-file")] = actionPrint(old)
+	rec[exampleKey("action", "press-keys")] = "0123456789abcdef"
+
+	path := filepath.Join(t.TempDir(), "lib.yaml")
+	os.WriteFile(path, []byte(encodeSeqLib(seqLibDoc{Actions: actions, Sequences: sequences, Examples: rec})), 0o644)
+	l := openSeqLibrary(path)
+	shipped, _ := exampleLibrary()
+	if got := l.actionMap()["open-file"]; !reflect.DeepEqual(got, shipped[indexOfAction(shipped, "open-file")]) {
+		t.Errorf("open-file wasn't updated: %+v", got)
+	}
+	if got := l.actionMap()["press-keys"]; got.Description != "my own description" {
+		t.Error("the edited press-keys was replaced")
+	}
+	if !strings.Contains(l.note, "updated") || !strings.Contains(l.note, "action open-file") {
+		t.Errorf("note = %q", l.note)
+	}
+	if note := l.snapshot().Note; !strings.Contains(note, "action press-keys differs") {
+		t.Errorf("snapshot note = %q", note)
+	}
+	if w := l.staleFor("desktop-text-file"); len(w) != 1 || !strings.Contains(w[0], "action press-keys") {
+		t.Errorf("staleFor = %q", w)
+	}
+
+	// The update was saved, with its record: reopening changes nothing more.
+	again := openSeqLibrary(path)
+	if again.note != "" || !reflect.DeepEqual(again.actions, l.actions) {
+		t.Errorf("reopened: note %q, same actions %v", again.note, reflect.DeepEqual(again.actions, l.actions))
+	}
+}
+
+func TestOpenSeqLibraryKeepsUnrecordedExamples(t *testing.T) {
+	// A library saved before the record was kept (as on Revision K's host):
+	// its old open-file can't be told from an edited one, so it's kept and
+	// flagged, until Restore examples.
+	actions, sequences := exampleLibrary()
+	actions[indexOfAction(actions, "open-file")] = oldOpenFile(actions)
+	path := filepath.Join(t.TempDir(), "lib.yaml")
+	os.WriteFile(path, []byte(encodeSeqLib(seqLibDoc{Actions: actions, Sequences: sequences})), 0o644)
+	l := openSeqLibrary(path)
+	for _, in := range l.actionMap()["open-file"].Do {
+		if in["op"] == "show-window" {
+			t.Fatal("an unrecorded open-file was replaced")
+		}
+	}
+	w := l.staleFor("desktop-text-file")
+	if len(w) != 1 || !strings.Contains(w[0], "action open-file differs") || !strings.Contains(w[0], "Restore examples") {
+		t.Errorf("staleFor = %q", w)
+	}
+	if w := l.staleFor("fc-hello-world"); len(w) != 0 {
+		t.Errorf("fc-hello-world doesn't use open-file: %q", w)
+	}
+
+	if _, err := l.restoreExamples(); err != nil {
+		t.Fatal(err)
+	}
+	if w := l.staleFor("desktop-text-file"); len(w) != 0 || l.snapshot().Note != "" {
+		t.Errorf("after restoring: staleFor = %q, note = %q", w, l.snapshot().Note)
+	}
+	doc, err := decodeSeqLib(mustRead(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(doc.Examples, shippedExamples()) {
+		t.Errorf("saved record = %v", doc.Examples)
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 // ---- Running ----
 
 // stubScreenLines makes readScreen return, on its nth call, screens(n).

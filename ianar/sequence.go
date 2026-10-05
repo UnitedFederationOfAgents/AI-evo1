@@ -95,6 +95,7 @@ type SequenceResultMsg struct {
 	KeyboardVia string               `json:"keyboard_via,omitempty"`
 	Recording   *ClipResultMsg       `json:"recording,omitempty"`
 	Outputs     []SequenceOutput     `json:"outputs,omitempty"` // what the run printed
+	Warnings    []string             `json:"warnings,omitempty"` // e.g. a step used an out-of-date example action
 	ArtifactID  string               `json:"artifact_id,omitempty"` // names the run for "save-artifact" (see artifacts.go)
 }
 

@@ -245,6 +245,15 @@ func screenShot(sr *screenReading, hits, others []OCRLine) string {
 	return jpegDataURL(marked, inspectMaxWidth)
 }
 
+// wrappedNote mentions text found only wrapped over two lines (see
+// wrappedLines), for a failure message.
+func wrappedNote(wrapped []OCRLine) string {
+	if len(wrapped) == 0 {
+		return ""
+	}
+	return "; it shows only wrapped over two lines (which don't count): " + quoteLines(wrapped)
+}
+
 func quoteLines(ls []OCRLine) string {
 	q := make([]string, len(ls))
 	for i, l := range ls {
@@ -442,8 +451,9 @@ var seqOps = []opSpec{
 			hits := textMatches(sr.lines, a["text"], a["exclude"], exact)
 			if !ok {
 				_, partial := findLines(sr.lines, a["text"])
-				env.shot = screenShot(sr, nil, append(hits, partial...))
-				return "", fmt.Errorf("after %s, %d line(s) on screen show %q -- needed more than %d", timeout, len(hits), a["text"], more)
+				wrapped := wrappedLines(sr.lines, a["text"])
+				env.shot = screenShot(sr, nil, append(append(hits, partial...), wrapped...))
+				return "", fmt.Errorf("after %s, %d line(s) on screen show %q -- needed more than %d%s", timeout, len(hits), a["text"], more, wrappedNote(wrapped))
 			}
 			env.shot = screenShot(sr, hits, nil)
 			return fmt.Sprintf("%d line(s) on screen show %q", len(hits), a["text"]), nil
@@ -501,7 +511,8 @@ var seqOps = []opSpec{
 			hits := matches(sr)
 			if !ok {
 				_, partial := findLines(sr.lines, a["text"])
-				env.shot = screenShot(sr, nil, partial)
+				wrapped := wrappedLines(sr.lines, a["text"])
+				env.shot = screenShot(sr, nil, append(partial, wrapped...))
 				msg := fmt.Sprintf("no line on screen reads %q (read %d lines of text)", a["text"], len(sr.lines))
 				if seen != nil {
 					msg = fmt.Sprintf("no new line on screen reads %q (read %d lines of text; %d seen before don't count)", a["text"], len(sr.lines), len(seen))
@@ -509,7 +520,7 @@ var seqOps = []opSpec{
 				if len(partial) > 0 {
 					msg += "; lines containing it: " + quoteLines(partial)
 				}
-				return "", errors.New(msg)
+				return "", errors.New(msg + wrappedNote(wrapped))
 			}
 			i := 0
 			if a["pick"] == "bottom" {

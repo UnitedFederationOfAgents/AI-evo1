@@ -395,6 +395,38 @@ func findLines(lines []OCRLine, text string) (exact, partial []OCRLine) {
 	return exact, partial
 }
 
+// wrappedLines finds text that reads as text only once a line is joined
+// with the one just below it -- a label wrapped over two lines, as GNOME's
+// desktop icons wrap "ianar-hello-wor" / "ld.txt" -- and returns each pair
+// as one line spanning both. Matching never joins lines, so these show up
+// in failure messages only, to explain a miss.
+func wrappedLines(lines []OCRLine, text string) []OCRLine {
+	want := normalizeText(text)
+	if want == "" {
+		return nil
+	}
+	var out []OCRLine
+	for _, a := range lines {
+		na := normalizeText(a.Text)
+		if na == "" || strings.Contains(na, want) {
+			continue
+		}
+		for _, b := range lines {
+			nb := normalizeText(b.Text)
+			gap := b.Y - (a.Y + a.H)
+			if nb == "" || strings.Contains(nb, want) || gap < -a.H/2 || gap > a.H || b.X >= a.X+a.W || a.X >= b.X+b.W {
+				continue // not just below a, under it
+			}
+			joined := na + nb
+			if strings.Contains(joined, want) || sameText(joined, want) {
+				r := a.rect().Union(b.rect())
+				out = append(out, OCRLine{Text: a.Text + " / " + b.Text, X: r.Min.X, Y: r.Min.Y, W: r.Dx(), H: r.Dy()})
+			}
+		}
+	}
+	return out
+}
+
 // readScreen captures the native display and reads the text on it.
 // Overridable in tests.
 var readScreen = func() (*screenReading, error) {

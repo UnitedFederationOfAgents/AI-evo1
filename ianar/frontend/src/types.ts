@@ -121,6 +121,7 @@ export interface SequenceResultMsg {
   keyboard_via?: string
   recording?: ClipResultMsg
   outputs?: SequenceOutput[] // what the run printed
+  warnings?: string[] // e.g. a step used an example action older than this build's
   artifact_id?: string // names the run for "save-artifact" (see artifacts.go)
 }
 

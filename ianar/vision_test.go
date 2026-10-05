@@ -93,6 +93,25 @@ func TestFindLinesMatchesWholeLinesOnly(t *testing.T) {
 	}
 }
 
+// TestWrappedLinesFindsAWrappedLabel: Revision K's desktop icon label,
+// wrapped by GNOME as "ianar-hello-wor" over "ld.txt".
+func TestWrappedLinesFindsAWrappedLabel(t *testing.T) {
+	lines := []OCRLine{
+		{Text: "ianar-hello-wor", X: 1200, Y: 500, W: 60, H: 12},
+		{Text: "ld.txt", X: 1215, Y: 514, W: 30, H: 12},
+		{Text: "ld.txt", X: 100, Y: 514, W: 30, H: 12},  // not under it
+		{Text: "ld.txt", X: 1215, Y: 600, W: 30, H: 12}, // too far below
+		{Text: "ianar-hello-world.txt", X: 10, Y: 10, W: 90, H: 12},
+	}
+	got := wrappedLines(lines, "ianar-hello-world.txt")
+	if len(got) != 1 || got[0].Text != "ianar-hello-wor / ld.txt" || got[0].rect() != image.Rect(1200, 500, 1260, 526) {
+		t.Errorf("wrappedLines = %+v", got)
+	}
+	if got := wrappedLines(lines[:2], "hello"); got != nil {
+		t.Errorf("text on one line counted as wrapped: %+v", got)
+	}
+}
+
 // TestReadScreenTextReadsBothWaysAndScales checks the capture is read as is
 // and inverted, at 2x, and that word boxes come back in capture pixels.
 func TestReadScreenTextReadsBothWaysAndScales(t *testing.T) {

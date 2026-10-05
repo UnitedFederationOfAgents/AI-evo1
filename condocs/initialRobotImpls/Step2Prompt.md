@@ -346,3 +346,20 @@ Is the text line split?
 Let's try again with 'Debug Sequences 4' resource for context.
 
 Is our issue that the text is split between lines?
+
+
+prompt: [`6a80bbc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6a80bbcb134a9b4e1af0f38588142fa554893f9e) → reply: [`e083b32`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e083b32ae8c3d580ecf494de6c0b23b43550df83)
+
+## Reply K
+
+I made the changes, but nothing is built or tested yet: `go test`, `gofmt` and `tsc` all needed approval here. To answer your question: yes, the desktop icon's label is split over two lines, but that isn't why the run failed. The run used the old "open-file" action without Revision J's `show-window` step, because the saved library kept its old copy (Restore examples wasn't pressed), and the text editor never showed on screen. Now IANAR updates built-in examples you haven't edited when it starts, warns in the UI and the run report when a run uses an out-of-date one, and text-search failures say when the text only shows wrapped over two lines. New tests are in `seqv2_test.go` and `vision_test.go`; it needs a `make build` / `make test` on the host and one last **Restore examples**.
+
+
+## <REPLACE-Revision|Retry> L
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

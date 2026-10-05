@@ -1,19 +1,19 @@
 package main
 
 // This file is the sequence-v2 library IANAR starts with (and restores on
-// "Restore examples"): general-purpose definer actions, and three composer
+// "Restore examples"): general-purpose definer actions, and composer
 // sequences built from them (condocs/initialRobotImpls/Step2Prompt.md,
 // Revision G):
 //
-//   - fc-hello-world: sequence-v1's federation-command "hello world",
-//     rebuilt from generic actions.
+//   - fc-hello-world: the federation-command "hello world" sequence first
+//     written for the (since removed) sequence-v1 tab.
 //   - firefox-weather: opens a private Firefox window from Firefox's icon
 //     in the dock, goes to a weather page for a country (a control,
 //     Portugal by default) and prints the temperature it shows. The page is
 //     wttr.in's one-line plain-text format, which reads reliably by OCR.
-//   - desktop-text-file: creates a text document on the desktop, opens it,
-//     writes "hello world" in it, saves a screenshot to the desktop and
-//     deletes the document.
+//
+// Revision G's third example, desktop-text-file, and its "open-file" action
+// were removed in Revision M; see retiredExamples (seqv2.go).
 
 // tempPattern matches a temperature as OCR reads one: "+22°C", "-3 °F",
 // "21.5°C", with the degree sign possibly misread or dropped.
@@ -121,27 +121,6 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 			Do: []Instruction{{"op": "create-file", "path": "{{path}}", "content": "{{content}}", "overwrite": "{{overwrite}}"}},
 		},
 		{
-			ID: "open-file", Name: "Open a file in its default app",
-			Description: "Close any open menu, open the file in its default app, wait for a new line reading ready_text (its title) -- bringing the window forward if it opened out of sight -- and click it, so the app's window has focus.",
-			Controls: []Control{
-				{Name: "path", Label: "Path"},
-				{Name: "ready_text", Label: "Title showing it's open", Help: "the app's title bar text, exactly -- e.g. the file's name"},
-				{Name: "app", Label: "App", Help: "the app's .desktop name, whose dock icon brings its window forward; empty: the file's default app"},
-			},
-			Do: []Instruction{
-				{"op": "key", "keys": "escape"},
-				{"op": "wait", "duration": "1s"},
-				{"op": "count-text", "text": "{{ready_text}}", "exact": "true", "save_as": "open_before"},
-				{"op": "open", "path": "{{path}}"},
-				// GNOME may open the window behind whatever has focus.
-				{"op": "show-window", "title": "{{ready_text}}", "new_since": "open_before", "app": "{{app}}", "file": "{{path}}", "timeout": "20s"},
-				// GNOME doesn't give focus to a window opened from outside
-				// the shell, so click the new title (not, say, a desktop
-				// icon's label that was already showing).
-				{"op": "click-text", "text": "{{ready_text}}", "new_since": "open_before"},
-			},
-		},
-		{
 			ID: "save-document", Name: "Save the document",
 			Description: "Press the app's save keys and give it a moment to write the file.",
 			Controls:    []Control{{Name: "keys", Label: "Keys", Default: "ctrl+s"}},
@@ -173,7 +152,7 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 	sequences := []SequenceV2{
 		{
 			ID: "fc-hello-world", Name: "federation-command: hello world",
-			Description: "sequence-v1's sequence, built from definer actions.",
+			Description: "Type a command into federation-command and check its output appears.",
 			Steps: []StepRef{
 				{Action: "select-window", Label: "Select the terminal with federation-command", With: map[string]string{"title": "federation-command"}},
 				{Action: "press-keys", Label: "Bring federation-command to local control", With: map[string]string{"keys": "right"}},
@@ -192,25 +171,6 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 				{Action: "open-url", Label: "Go to the weather page for {{country}}", With: map[string]string{"url": "https://wttr.in/{{country|url}}?format=%l:+%t&m"}},
 				{Action: "press-keys", Label: "Zoom in so the page reads clearly", With: map[string]string{"keys": "ctrl+= ctrl+= ctrl+="}},
 				{Action: "read-temperature", Label: "Print the temperature in {{country}}", With: map[string]string{"place": "{{country}}"}},
-			},
-		},
-		{
-			ID: "desktop-text-file", Name: "Desktop text file: hello world",
-			Description: "Create a text document on the desktop, open it, write in it, save a screenshot to the desktop, and delete the document.",
-			Controls: []Control{
-				{Name: "file", Label: "Document", Default: "{{desktop}}/ianar-hello-world.txt"},
-				{Name: "text", Label: "Text to write", Default: "hello world"},
-			},
-			Steps: []StepRef{
-				{Action: "wake-screen"},
-				{Action: "create-file", Label: "Create a new text document on the desktop", With: map[string]string{"path": "{{file}}", "overwrite": "true"}},
-				{Action: "open-file", Label: "Open the text document", With: map[string]string{"path": "{{file}}", "ready_text": "{{file|base}}"}},
-				{Action: "type-text", Label: "Write \"{{text}}\" in it", With: map[string]string{"text": "{{text}}"}},
-				{Action: "save-document"},
-				{Action: "expect-file", Label: "Check the document holds \"{{text}}\"", With: map[string]string{"path": "{{file}}", "contains": "{{text}}"}},
-				{Action: "save-screenshot", Label: "Save a screenshot to the desktop", With: map[string]string{"path": "{{desktop}}/ianar-hello-world-{{timestamp}}.png"}},
-				{Action: "press-keys", Label: "Close the document", With: map[string]string{"keys": "ctrl+w"}},
-				{Action: "delete-file", Label: "Delete the text document", With: map[string]string{"path": "{{file}}"}},
 			},
 		},
 	}

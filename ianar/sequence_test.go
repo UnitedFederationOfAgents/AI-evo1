@@ -32,26 +32,19 @@ func (k *fakeKeyboard) tap(key string, mods ...string) error {
 
 func (k *fakeKeyboard) typeText(text string) error { return k.record("type " + text) }
 
-// stubSequence stubs the keyboard, screen state, window focus, output
-// check, recording and clock/sleep for a sequence run, restoring everything
-// when the test ends. The output check sees one more "hello world!" line
-// each time it reads the screen.
+// stubSequence stubs the keyboard, screen state, federation-command's window
+// focus, recording and clock/sleep for a sequence run, restoring everything
+// when the test ends. It returns the keyboard and a count of the times the
+// recording was stopped.
 func stubSequence(t *testing.T) (*fakeKeyboard, *int) {
 	t.Helper()
 	origKb, origFocus, origRec := openCompositorKeyboard, focusFederationCommand, startNativeRecording
-	origCount := countOutputLines
 	origClock, origSleep := clock, sleep
 	t.Cleanup(func() {
 		openCompositorKeyboard, focusFederationCommand, startNativeRecording = origKb, origFocus, origRec
-		countOutputLines = origCount
 		clock, sleep = origClock, origSleep
 	})
 	stubScreenState(t, false, false)
-	outputs := 0
-	countOutputLines = func(string, string) (int, string, error) {
-		outputs++
-		return outputs, "data:image/jpeg;base64,b3V0", nil
-	}
 	kb := &fakeKeyboard{failAt: -1}
 	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
 	focusFederationCommand = func() (string, string, error) {
@@ -70,69 +63,61 @@ func stubSequence(t *testing.T) (*fakeKeyboard, *int) {
 	return kb, &stops
 }
 
+// fcHelloWorld is the fc-hello-world example, compiled for a run.
 func fcHelloWorld(t *testing.T) sequence {
 	t.Helper()
-	q, ok := findSequence("fc-hello-world")
-	if !ok {
-		t.Fatal("fc-hello-world sequence not defined")
+	q, err := openSeqLibrary("").compile("fc-hello-world", nil, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
 	}
 	return q
 }
 
-func TestFCHelloWorldSequenceSteps(t *testing.T) {
-	want := []string{
-		"Select the terminal with federation-command",
-		"Bring federation-command to local control",
-		"Bring the cursor to the command line input",
-		`Enter: 'echo "hello world!"'`,
-		"Press enter to submit the command",
-		"Bring federation-command back to remote control",
-	}
-	var got []string
-	for _, st := range fcHelloWorld(t).def().Steps {
-		got = append(got, st.Label)
-		if len(st.Detail) == 0 {
-			t.Errorf("step %q lists no detailed instructions", st.Label)
+// testSequence taps a, types b (leaving an image of what it "saw"), then
+// taps c.
+func testSequence() sequence {
+	tap := func(key string) func(*seqEnv) (string, error) {
+		return func(env *seqEnv) (string, error) {
+			sleep(stepSettle)
+			return "", env.kb.tap(key)
 		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("steps = %q, want %q", got, want)
-	}
+	return sequence{id: "test", name: "Test", steps: []seqStep{
+		{SequenceStepDef{Label: "Tap a"}, tap("a")},
+		{SequenceStepDef{Label: "Type b"}, func(env *seqEnv) (string, error) {
+			env.shot = "data:image/jpeg;base64,c2hvdA=="
+			return "typed b", env.kb.typeText("b")
+		}},
+		{SequenceStepDef{Label: "Tap c"}, tap("c")},
+	}}
 }
 
-// TestRunSequenceDrivesFederationCommand checks the keys the fc-hello-world
-// run sends, in order: Right into local control, End + Ctrl+U for an empty
-// command line, the command, Enter, then Left back to remote control.
-func TestRunSequenceDrivesFederationCommand(t *testing.T) {
+func TestRunSequenceRunsEachStep(t *testing.T) {
 	kb, stops := stubSequence(t)
 	var progress []string
-	res := runSequence(fcHelloWorld(t), func(p SequenceProgressMsg) {
+	res := runSequence(testSequence(), func(p SequenceProgressMsg) {
 		progress = append(progress, strconv.Itoa(p.Step)+":"+p.Status)
 	})
 
 	if !res.Success || res.FailedStep != -1 || res.Error != "" {
 		t.Fatalf("unexpected result: %+v", res)
 	}
-	wantKeys := []string{"right", "end", "ctrl+u", `type echo "hello world!"`, "enter", "left"}
-	if !reflect.DeepEqual(kb.calls, wantKeys) {
-		t.Errorf("keyboard calls = %q, want %q", kb.calls, wantKeys)
+	if want := []string{"a", "type b", "c"}; !reflect.DeepEqual(kb.calls, want) {
+		t.Errorf("keyboard calls = %q, want %q", kb.calls, want)
 	}
-	if len(progress) != 12 || progress[0] != "0:running" || progress[11] != "5:success" {
-		t.Errorf("progress = %q", progress)
+	if want := []string{"0:running", "0:success", "1:running", "1:success", "2:running", "2:success"}; !reflect.DeepEqual(progress, want) {
+		t.Errorf("progress = %q, want %q", progress, want)
 	}
 	for i, st := range res.Steps {
 		if st.Status != "success" {
 			t.Errorf("step %d status = %q", i, st.Status)
 		}
 	}
-	if !strings.Contains(res.Steps[0].Message, "federation-command") {
-		t.Errorf("focus step message = %q, want it to name the focused window", res.Steps[0].Message)
+	if res.Steps[1].Message != "typed b" {
+		t.Errorf("step 2 message = %q", res.Steps[1].Message)
 	}
-	if res.Steps[0].ImageURL == "" || res.Steps[1].ImageURL != "" || res.Steps[4].ImageURL == "" {
-		t.Errorf("step images = %q / %q / %q, want only the focus and submit steps'", res.Steps[0].ImageURL, res.Steps[1].ImageURL, res.Steps[4].ImageURL)
-	}
-	if !strings.Contains(res.Steps[4].Message, "appeared on screen") {
-		t.Errorf("submit step message = %q, want it to confirm the output appeared", res.Steps[4].Message)
+	if res.Steps[0].ImageURL != "" || res.Steps[1].ImageURL == "" || res.Steps[2].ImageURL != "" {
+		t.Errorf("step images = %+v, want only step 2's", res.Steps)
 	}
 	if *stops != 1 || res.Recording == nil || !res.Recording.Success {
 		t.Errorf("recording stopped %d times, result %+v", *stops, res.Recording)
@@ -142,134 +127,42 @@ func TestRunSequenceDrivesFederationCommand(t *testing.T) {
 	}
 }
 
-func TestRunSequenceStopsAtFocusFailure(t *testing.T) {
+func TestRunSequenceStopsAtTheFirstFailure(t *testing.T) {
 	kb, stops := stubSequence(t)
-	focusFederationCommand = func() (string, string, error) {
-		return "", "data:image/jpeg;base64,c2NyZWVu", errors.New(`no line on screen reads "federation-command"`)
-	}
+	kb.failAt = 1 // typing b
 
-	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
-	if res.Success || res.FailedStep != 0 || !strings.Contains(res.Error, `no line on screen reads "federation-command"`) {
+	res := runSequence(testSequence(), func(SequenceProgressMsg) {})
+	if res.Success || res.FailedStep != 1 || !strings.Contains(res.Error, "step 2 (Type b): key boom") {
 		t.Fatalf("unexpected result: %+v", res)
 	}
-	if res.Steps[0].ImageURL != "data:image/jpeg;base64,c2NyZWVu" {
-		t.Errorf("failed focus step image = %q, want what visual detection saw", res.Steps[0].ImageURL)
+	if res.Steps[0].Status != "success" || res.Steps[1].Status != "error" || res.Steps[2].Status != "skipped" {
+		t.Errorf("step statuses = %+v", res.Steps)
 	}
-	if len(kb.calls) != 0 {
-		t.Errorf("keys were sent after the focus step failed: %q", kb.calls)
+	if res.Steps[1].ImageURL == "" {
+		t.Error("the failed step's image should be kept")
 	}
-	for i, st := range res.Steps[1:] {
-		if st.Status != "skipped" {
-			t.Errorf("step %d status = %q, want skipped", i+1, st.Status)
-		}
+	if len(kb.calls) != 2 {
+		t.Errorf("keys were sent after the failed step: %q", kb.calls)
 	}
 	if *stops != 1 || res.Recording == nil {
 		t.Errorf("a failed run should still stop and report its recording")
 	}
 }
 
-func TestRunSequenceReportsKeyFailure(t *testing.T) {
-	kb, _ := stubSequence(t)
-	kb.failAt = 3 // the typed command
-
-	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
-	if res.Success || res.FailedStep != 3 || !strings.Contains(res.Error, "key boom") {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if res.Steps[2].Status != "success" || res.Steps[3].Status != "error" || res.Steps[4].Status != "skipped" {
-		t.Errorf("step statuses = %+v", res.Steps)
-	}
-}
-
-// TestRunSequenceFailsWhenOutputNeverAppears covers Revision E's false
-// success: every key is sent without error, but they never reach FC, so no
-// new "hello world!" line shows up.
-func TestRunSequenceFailsWhenOutputNeverAppears(t *testing.T) {
-	kb, _ := stubSequence(t)
-	countOutputLines = func(string, string) (int, string, error) { return 2, "data:image/jpeg;base64,c2FtZQ==", nil }
-
-	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
-	if res.Success || res.FailedStep != 4 || !strings.Contains(res.Error, "no new") {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if res.Steps[4].ImageURL != "data:image/jpeg;base64,c2FtZQ==" {
-		t.Errorf("failed submit step image = %q, want what the check saw", res.Steps[4].ImageURL)
-	}
-	if res.Steps[5].Status != "skipped" || kb.calls[len(kb.calls)-1] != "enter" {
-		t.Errorf("step 6 = %q, keys = %q", res.Steps[5].Status, kb.calls)
-	}
-}
-
-func TestRunSequenceStopsOnLockedScreen(t *testing.T) {
-	kb, _ := stubSequence(t)
-	stubScreenState(t, true, true)
-	focused := false
-	focusFederationCommand = func() (string, string, error) {
-		focused = true
-		return "", "", nil
-	}
-
-	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
-	if res.Success || res.FailedStep != 0 || !strings.Contains(res.Error, "locked") {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if focused || len(kb.calls) != 0 {
-		t.Errorf("acted on a locked screen: focused=%v keys=%q", focused, kb.calls)
-	}
-}
-
-func TestOutputLines(t *testing.T) {
-	// The command itself, its output, output read loosely, IANAR's own step
-	// label, and something else.
-	lines := []OCRLine{
-		{Text: `> echo "hello world!"`},
-		{Text: "hello world!"},
-		{Text: "│ Hello, World"},
-		{Text: `Enter: 'echo "hello world!"'`},
-		{Text: "goodbye world"},
-	}
-	got := outputLines(lines, fcHelloOutput, fcHelloCommand)
-	if len(got) != 2 || got[0].Text != "hello world!" || got[1].Text != "│ Hello, World" {
-		t.Errorf("outputLines = %+v", got)
-	}
-}
-
 func TestRunSequenceRejectsConcurrentRuns(t *testing.T) {
 	stubSequence(t)
 	seqMu.Lock()
-	res := runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
+	res := runSequence(testSequence(), func(SequenceProgressMsg) {})
 	seqMu.Unlock()
 	if res.Success || res.Error == "" {
 		t.Errorf("expected a concurrent run to be rejected, got %+v", res)
 	}
 
 	clipMu.Lock()
-	res = runSequence(fcHelloWorld(t), func(SequenceProgressMsg) {})
+	res = runSequence(testSequence(), func(SequenceProgressMsg) {})
 	clipMu.Unlock()
 	if res.Success || !strings.Contains(res.Error, "clip") {
 		t.Errorf("expected a run during a native clip to be rejected, got %+v", res)
-	}
-}
-
-func TestHandleRunSequenceStreamsProgressThenResult(t *testing.T) {
-	stubSequence(t)
-	s := newServer()
-	c := &wsClient{send: make(chan []byte, 64), done: make(chan struct{})}
-
-	s.handleRunSequence(c, "fc-hello-world")
-	for i := 0; i < 12; i++ {
-		decodeSent(t, c, "sequence-progress", nil)
-	}
-	var res SequenceResultMsg
-	decodeSent(t, c, "sequence-result", &res)
-	if !res.Success {
-		t.Errorf("unexpected result: %+v", res)
-	}
-
-	s.handleRunSequence(c, "no-such-sequence")
-	decodeSent(t, c, "sequence-result", &res)
-	if res.Success || res.Error == "" {
-		t.Errorf("unknown sequence should fail, got %+v", res)
 	}
 }
 

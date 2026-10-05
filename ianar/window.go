@@ -14,9 +14,10 @@ import (
 	"github.com/go-vgo/robotgo"
 )
 
-// This file finds and focuses the terminal window federation-command is
-// running in, for the sequence-v1 tab's "Select the terminal with
-// federation-command" step (see sequence.go).
+// This file finds and focuses windows by title for sequence-v2's
+// focus-window op (see seqv2_ops.go's focusByTitle) -- first written for
+// the terminal window federation-command runs in, which can also be found
+// by process.
 //
 // The window is found by sight first (focusViaVision): federation-command
 // sets its terminal window's title to "federation-command" at startup, so
@@ -193,13 +194,33 @@ func federationCommandTarget() (windowTarget, error) {
 	return windowTarget{title: fcWindowTitle, pids: own}, nil
 }
 
+// focusFederationCommand finds federation-command's terminal window and
+// focuses it: by sight first, then through the window manager. It also
+// returns an image of what visual detection saw, if it got that far.
+// Overridable in tests.
+var focusFederationCommand = func() (string, string, error) {
+	desc, shot, visErr := focusViaVision(fcWindowTitle)
+	if visErr == nil {
+		return desc, shot, nil
+	}
+	log.Printf("robot: visual detection of %s's window failed (%v); trying the window manager", fcProcessName, visErr)
+	t, err := federationCommandTarget()
+	if err == nil {
+		desc, err = focusWindow(t, focusAttempts())
+		if err == nil {
+			return fmt.Sprintf("%s (visual detection failed: %v)", desc, visErr), shot, nil
+		}
+	}
+	return "", shot, fmt.Errorf("visual detection: %v; window-manager fallback: %v", visErr, err)
+}
+
 // focusViaVision finds the window titled title on screen by reading it (see
 // vision.go) and clicks its title to focus it. It reports what it did and a
 // JPEG data: URL showing what it saw: a crop around the title it clicked,
 // boxed, or on failure the whole screen with any near misses boxed.
 //
 // Only a line reading exactly title counts, not one merely containing it --
-// IANAR's own sequence-v1 tab mentions federation-command, as can a browser
+// IANAR's own sequence-v2 tab mentions federation-command, as can a browser
 // tab or terminal output. If several lines match (FC in two terminals, or a
 // tab label as well as the window title), the top-most is clicked.
 func focusViaVision(title string) (desc, shot string, err error) {

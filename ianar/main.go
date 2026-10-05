@@ -40,8 +40,8 @@ type wsClient struct {
 // link to local-representative, plus the native/browser capture and
 // native-input ("circle mouse") channels described in
 // condocs/InitialRobot.md (see robot.go), Native Clip (clip.go), the
-// sequence-v1 runner (sequence.go), the sequence-v2 definer/composer/runner
-// (seqv2.go), and saving any of their results into local-representative's
+// sequence-v2 definer/composer/runner (seqv2.go, running sequences through
+// sequence.go), and saving any of their results into local-representative's
 // files area (artifacts.go).
 type Server struct {
 	httpPort string // HTTP port this instance serves on (reported to local-representative)
@@ -113,7 +113,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
-	go s.sendToClient(c, "sequence-defs", sequenceDefs())
 	go s.sendToClient(c, "seq2-library", s.seqLib.snapshot())
 
 	// Write pump.
@@ -211,14 +210,6 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		}
 		json.Unmarshal(m.Payload, &p)
 		s.handleInspectScreen(c, p.Find)
-
-	// sequence-v1 tab -- see sequence.go.
-	case "run-sequence":
-		var p struct {
-			ID string `json:"id"`
-		}
-		json.Unmarshal(m.Payload, &p)
-		s.handleRunSequence(c, p.ID)
 
 	// sequence-v2 tab -- see seqv2.go.
 	case "seq2-save-action", "seq2-delete-action", "seq2-save-sequence", "seq2-delete-sequence",

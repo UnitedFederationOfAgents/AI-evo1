@@ -19,7 +19,7 @@ import (
 
 // This file is the sequence-v2 tab's primitive operations: what a definer
 // action's instructions can do (see seqv2.go). Each is carried out with the
-// same native capabilities sequence-v1 and the simple tab use -- keyboard
+// same native capabilities the simple tab uses -- keyboard
 // (keyboard.go), pointer (pointer.go), screen reading (vision.go), screen
 // capture (robot.go) -- plus icon finding (icon.go) and a few file
 // operations.
@@ -35,13 +35,6 @@ const (
 	shotThumbWidth     = 960                    // width of a saved screenshot's preview
 	fileExcerptLen     = 200                    // how much of a file an expect-file failure quotes
 	openTimeout        = 15 * time.Second       // for the command that opens a file in its app
-
-	// show-window's pauses while bringing a window forward.
-	overviewSettle = time.Second            // for the Activities overview to open, after Super
-	searchSettle   = 1500 * time.Millisecond // for the Activities search to list the app
-	listSettle     = time.Second            // for the notification list to open, after Super+V
-	raiseWait      = 4 * time.Second        // to look for the window after each attempt
-	raiseRecheck   = 3 * time.Second        // to look after an attempt, even past the timeout
 )
 
 // opArg documents one argument of an op.
@@ -606,20 +599,6 @@ var seqOps = []opSpec{
 		},
 	},
 	{
-		Op:       "show-window",
-		Summary:  "Wait for a window titled title to show; if it doesn't come forward, bring it up -- through the Activities search for its app, then GNOME's \"is ready\" notification, then the app's dock icon.",
-		Describe: `wait for a new line reading "{title}" on screen, bringing its window forward if it opened out of sight (up to {timeout})`,
-		Args: []opArg{
-			{Name: "title", Help: "the window's title, exactly", Required: true},
-			{Name: "new_since", Help: "a count-text's save_as name: only a line that wasn't among those it counted shows the window"},
-			{Name: "app", Help: "the app, as named in its .desktop file, to search Activities for and whose dock icon to click (default: file's default app)"},
-			{Name: "file", Help: "the file the window shows, to find its default app"},
-			{Name: "wait", Help: "how long to wait before bringing it forward", Default: "4s"},
-			{Name: "timeout", Help: "how long to keep trying in all", Default: "20s"},
-		},
-		run: runShowWindow,
-	},
-	{
 		Op:       "create-file",
 		Summary:  "Create a file (on this host, directly).",
 		Describe: "create the file {path}",
@@ -737,8 +716,9 @@ var seqOps = []opSpec{
 }
 
 // focusByTitle focuses the window titled title: by sight, then through the
-// window manager. federation-command's window goes through sequence-v1's
-// focusFederationCommand, whose fallback can also find it by process.
+// window manager. federation-command's window goes through
+// focusFederationCommand (window.go), whose fallback can also find it by
+// process.
 // Overridable in tests.
 var focusByTitle = func(title string) (string, string, error) {
 	if title == fcWindowTitle {
@@ -781,243 +761,6 @@ var openPath = func(p string) (string, error) {
 		errs = append(errs, fmt.Sprintf("%s: %v: %s", c[0], err, strings.TrimSpace(string(out))))
 	}
 	return "", fmt.Errorf("couldn't open %s: %s", p, strings.Join(errs, "; "))
-}
-
-// readyText is how GNOME Shell's notification for a window that was denied
-// focus ends: “<title>” is ready.
-const readyText = "is ready"
-
-// runShowWindow waits for a new line reading title, and brings its window
-// forward if it doesn't show. In Revision J's debug run the editor never
-// appeared on either monitor: GNOME's focus-stealing prevention doesn't
-// raise a window an app maps (or a running app presents) at another
-// process's request, so it opens behind whatever has focus -- there, a
-// maximized Firefox window covering the desktop -- with only an "is ready"
-// notification. Clicking that notification, or the app's dock icon,
-// activates the window as the user would.
-//
-// In Revision K's debug run (Step2Prompt.md, Revision L) neither worked:
-// the dock icon is an SVG, which click-icon can't match, and the
-// notification was clicked on the very last look -- after which the
-// timeout, long since spent on 2x OCR of two monitors, ended the step
-// without looking again. So the Activities search now comes first: Super,
-// the app's name, Enter has GNOME Shell itself activate the running app's
-// window, which focus-stealing prevention doesn't stop, and needs neither
-// OCR nor an icon. And every attempt now gets a fresh look at the screen
-// (raiseRecheck) however much of the timeout is left.
-func runShowWindow(env *seqEnv, a opArgs) (string, error) {
-	wait, err := a.dur("wait")
-	if err != nil {
-		return "", err
-	}
-	timeout, err := a.dur("timeout")
-	if err != nil {
-		return "", err
-	}
-	var seen []image.Rectangle
-	if name := strings.TrimSpace(a["new_since"]); name != "" {
-		var ok bool
-		if seen, ok = env.seen[name]; !ok {
-			return "", fmt.Errorf("new_since: no count-text saved %q earlier in the run", name)
-		}
-	}
-	title := a["title"]
-	shown := func(sr *screenReading) []OCRLine {
-		return notSeen(textMatches(sr.lines, title, "", true), seen)
-	}
-	deadline := clock().Add(timeout)
-	var tried []string
-	// await polls for the title until d passes (or the overall timeout,
-	// but for at least floor), clicking a ready notification if one shows
-	// meanwhile -- and looking again after the click, even past the timeout.
-	await := func(d, floor time.Duration) (*screenReading, bool, error) {
-		if left := deadline.Sub(clock()); d > left {
-			d = left
-		}
-		d = max(d, floor)
-		clicked, unseen := false, false
-		sr, ok, err := pollScreen(d, func(sr *screenReading) bool {
-			unseen = false
-			if len(shown(sr)) > 0 {
-				return true
-			}
-			if !clicked {
-				// (Not the definer's description of this op, which says
-				// "is ready" notification.)
-				if n := textMatches(sr.lines, readyText, "notification", false); len(n) > 0 {
-					at := n[0].center()
-					if via, err := clickPoint(at.X, at.Y, sr.img.Bounds().Dx(), "left", false); err == nil {
-						clicked, unseen = true, true
-						tried = append(tried, fmt.Sprintf("clicked the notification %q via %s", n[0].Text, via))
-						sleep(focusSettle)
-					}
-				}
-			}
-			return false
-		})
-		if err == nil && !ok && unseen {
-			return pollScreen(raiseRecheck, func(sr *screenReading) bool { return len(shown(sr)) > 0 })
-		}
-		return sr, ok, err
-	}
-	done := func(sr *screenReading) (string, error) {
-		hits := shown(sr)
-		env.shot = screenShot(sr, hits[:1], nil)
-		desc := fmt.Sprintf("saw %q at (%d, %d)", hits[0].Text, hits[0].X, hits[0].Y)
-		if len(tried) > 0 {
-			desc += " after bringing it forward: " + strings.Join(tried, "; ")
-		}
-		return desc, nil
-	}
-
-	sr, ok, err := await(wait, 0)
-	if err != nil {
-		return "", err
-	}
-	if ok {
-		return done(sr)
-	}
-	// tap presses each key chord in turn, pausing after each.
-	tap := func(chords ...[]string) error {
-		for _, c := range chords {
-			if err := env.kb.tap(c[0], c[1:]...); err != nil {
-				return err
-			}
-			sleep(stepSettle)
-		}
-		return nil
-	}
-
-	app := strings.TrimSpace(a["app"])
-	if app == "" && strings.TrimSpace(a["file"]) != "" {
-		p, err := a.path("file")
-		if err != nil {
-			return "", err
-		}
-		if app, err = defaultAppFor(p); err != nil {
-			tried = append(tried, "couldn't find the file's default app: "+err.Error())
-		}
-	}
-
-	// First the Activities search: GNOME Shell activates the app's open
-	// window itself.
-	if app != "" {
-		name, err := appDisplayName(app)
-		if err != nil {
-			tried = append(tried, "Activities search: "+err.Error())
-		} else {
-			if err := tap([]string{"super"}); err != nil {
-				return "", err
-			}
-			sleep(overviewSettle)
-			if err := env.kb.typeText(name); err != nil {
-				return "", err
-			}
-			sleep(searchSettle)
-			if err := tap([]string{"enter"}); err != nil {
-				return "", err
-			}
-			sleep(focusSettle)
-			tried = append(tried, fmt.Sprintf("activated %q (%s) from the Activities search", name, app))
-			if sr, ok, err = await(raiseWait, raiseRecheck); err != nil {
-				return "", err
-			}
-			if ok {
-				return done(sr)
-			}
-			// Clear the search and leave the overview, if it's still up.
-			if err := tap([]string{"escape"}, []string{"escape"}); err != nil {
-				return "", err
-			}
-		}
-	}
-
-	// Then the "is ready" notification: the banner may have come and gone,
-	// so look for it in the notification list (Super+V).
-	if err := tap([]string{"v", "super"}); err != nil {
-		return "", err
-	}
-	sleep(listSettle)
-	before := len(tried)
-	if sr, ok, err = await(raiseWait, raiseRecheck); err != nil {
-		return "", err
-	}
-	if ok {
-		return done(sr)
-	}
-	if len(tried) == before {
-		tried = append(tried, "found no \"is ready\" notification in the notification list")
-	}
-	// Close the list, if it's still open.
-	if err := tap([]string{"escape"}); err != nil {
-		return "", err
-	}
-
-	// Last, the app's dock icon, which activates its window.
-	if app != "" {
-		desc, err := runClickIcon(env, opArgs{"app": app, "button": "left", "double": "false", "timeout": "2s"})
-		if err != nil {
-			tried = append(tried, "dock icon: "+err.Error())
-		} else {
-			tried = append(tried, desc)
-		}
-	}
-	if sr, ok, err = await(deadline.Sub(clock()), raiseRecheck); err != nil {
-		return "", err
-	}
-	if ok {
-		return done(sr)
-	}
-	_, partial := findLines(sr.lines, title)
-	env.shot = screenShot(sr, nil, partial)
-	msg := fmt.Sprintf("after %s no new line on screen reads %q -- the window didn't open, or stayed out of sight", timeout, title)
-	if len(tried) > 0 {
-		msg += "; tried: " + strings.Join(tried, "; ")
-	}
-	return "", errors.New(msg)
-}
-
-// defaultAppFor returns the .desktop name of the app that opens p by
-// default (gio, else xdg-mime). Overridable in tests.
-var defaultAppFor = func(p string) (string, error) {
-	query := func(name string, args ...string) (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, name, args...).Output()
-		return string(out), err
-	}
-	var errs []string
-	if out, err := query("gio", "info", "--attributes=standard::content-type", p); err != nil {
-		errs = append(errs, "gio info: "+err.Error())
-	} else if ct := afterColon(out, "standard::content-type:"); ct != "" {
-		if out, err := query("gio", "mime", ct); err != nil {
-			errs = append(errs, "gio mime: "+err.Error())
-		} else if app := afterColon(out, "Default application for"); app != "" {
-			return strings.TrimSuffix(app, ".desktop"), nil
-		}
-	}
-	if ct, err := query("xdg-mime", "query", "filetype", p); err != nil {
-		errs = append(errs, "xdg-mime: "+err.Error())
-	} else if out, err := query("xdg-mime", "query", "default", strings.TrimSpace(ct)); err == nil && strings.TrimSpace(out) != "" {
-		return strings.TrimSuffix(strings.TrimSpace(out), ".desktop"), nil
-	}
-	if len(errs) == 0 {
-		errs = append(errs, "no default app is set")
-	}
-	return "", errors.New(strings.Join(errs, "; "))
-}
-
-// afterColon returns what follows the last ": " on out's first line
-// containing prefix (trimmed), or "".
-func afterColon(out, prefix string) string {
-	for _, l := range strings.Split(out, "\n") {
-		if strings.Contains(l, prefix) {
-			if i := strings.LastIndex(l, ": "); i >= 0 {
-				return strings.TrimSpace(l[i+2:])
-			}
-		}
-	}
-	return ""
 }
 
 // guiEnv is IANAR's environment, plus WAYLAND_DISPLAY if neither it nor

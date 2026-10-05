@@ -174,15 +174,23 @@ func TestSequenceArtifactReportsAFailedRun(t *testing.T) {
 
 func TestHandleRunSequenceKeepsTheRunForSaving(t *testing.T) {
 	stubSequence(t)
+	// Nothing on screen: the output check fails, but a failed run is kept
+	// for saving too.
+	stubScreenLines(t, func(int) []OCRLine { return nil })
 	s := newServer()
 	c := &wsClient{send: make(chan []byte, 64), done: make(chan struct{})}
 
-	s.handleRunSequence(c, "fc-hello-world")
-	for i := 0; i < 12; i++ {
-		decodeSent(t, c, "sequence-progress", nil)
+	s.handleRunSequenceV2(c, "fc-hello-world", nil)
+	decodeSent(t, c, "seq2-started", nil)
+	// Steps 1-4 start and succeed, and step 5 starts and fails.
+	for i := 0; i < 10; i++ {
+		decodeSent(t, c, "seq2-progress", nil)
 	}
 	var res SequenceResultMsg
-	decodeSent(t, c, "sequence-result", &res)
+	decodeSent(t, c, "seq2-result", &res)
+	if res.Success || res.FailedStep != 4 {
+		t.Errorf("unexpected result: %+v", res)
+	}
 	if _, ok := s.artifacts.get(res.ArtifactID); !ok {
 		t.Errorf("the run should be kept for saving, got artifact id %q", res.ArtifactID)
 	}

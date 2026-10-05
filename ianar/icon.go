@@ -123,25 +123,6 @@ func desktopIconName(path string) (string, error) {
 	return icon, nil
 }
 
-// appDisplayName returns app's name as the desktop shows it (the
-// untranslated Name= of its .desktop file), e.g. "Text Editor" for
-// org.gnome.TextEditor. Overridable in tests.
-var appDisplayName = func(app string) (string, error) {
-	app = strings.TrimSuffix(strings.TrimSpace(app), ".desktop")
-	desktop, err := findDesktopFile(app)
-	if err != nil {
-		return "", err
-	}
-	name, err := desktopEntryValue(desktop, "Name")
-	if err != nil {
-		return "", err
-	}
-	if name == "" {
-		return "", fmt.Errorf("%s names no app name", desktop)
-	}
-	return name, nil
-}
-
 // desktopEntryValue reads key= from a .desktop file's [Desktop Entry]; ""
 // if it has none.
 func desktopEntryValue(path, key string) (string, error) {

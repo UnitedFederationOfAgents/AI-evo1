@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -20,9 +19,16 @@ func TestExampleLibraryIsValid(t *testing.T) {
 	if err := checkLibrary(actions, sequences); err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"fc-hello-world", "firefox-weather", "desktop-text-file"} {
+	for _, id := range []string{"fc-hello-world", "firefox-weather"} {
 		if indexOfSequence(sequences, id) < 0 {
 			t.Errorf("no example sequence %q", id)
+		}
+	}
+	// Retired examples aren't shipped any more.
+	shipped := shippedExamples()
+	for _, key := range retiredExamples {
+		if _, ok := shipped[key]; ok {
+			t.Errorf("retired example %s is still shipped", key)
 		}
 	}
 }
@@ -273,49 +279,44 @@ func TestOpenSeqLibrarySetsABrokenFileAside(t *testing.T) {
 	}
 }
 
-// oldOpenFile is open-file as Revision I shipped it: no show-window.
-func oldOpenFile(actions []ActionDef) ActionDef {
-	a := actions[indexOfAction(actions, "open-file")]
-	var do []Instruction
-	for _, in := range a.Do {
-		if in["op"] != "show-window" {
-			do = append(do, in)
-		}
-	}
-	a.Do = do
+// oldOpenURL is open-url as an older IANAR might have shipped it: without
+// selecting the address bar first.
+func oldOpenURL(actions []ActionDef) ActionDef {
+	a := actions[indexOfAction(actions, "open-url")]
+	a.Do = append([]Instruction(nil), a.Do[1:]...)
 	return a
 }
 
 func TestOpenSeqLibraryUpgradesUneditedExamples(t *testing.T) {
 	actions, sequences := exampleLibrary()
-	old := oldOpenFile(actions)
-	actions[indexOfAction(actions, "open-file")] = old
+	old := oldOpenURL(actions)
+	actions[indexOfAction(actions, "open-url")] = old
 	// press-keys was edited after an older IANAR saved it.
 	pk := indexOfAction(actions, "press-keys")
 	edited := actions[pk]
 	edited.Description = "my own description"
 	actions[pk] = edited
 	rec := shippedExamples()
-	rec[exampleKey("action", "open-file")] = actionPrint(old)
+	rec[exampleKey("action", "open-url")] = actionPrint(old)
 	rec[exampleKey("action", "press-keys")] = "0123456789abcdef"
 
 	path := filepath.Join(t.TempDir(), "lib.yaml")
 	os.WriteFile(path, []byte(encodeSeqLib(seqLibDoc{Actions: actions, Sequences: sequences, Examples: rec})), 0o644)
 	l := openSeqLibrary(path)
 	shipped, _ := exampleLibrary()
-	if got := l.actionMap()["open-file"]; !reflect.DeepEqual(got, shipped[indexOfAction(shipped, "open-file")]) {
-		t.Errorf("open-file wasn't updated: %+v", got)
+	if got := l.actionMap()["open-url"]; !reflect.DeepEqual(got, shipped[indexOfAction(shipped, "open-url")]) {
+		t.Errorf("open-url wasn't updated: %+v", got)
 	}
 	if got := l.actionMap()["press-keys"]; got.Description != "my own description" {
 		t.Error("the edited press-keys was replaced")
 	}
-	if !strings.Contains(l.note, "updated") || !strings.Contains(l.note, "action open-file") {
+	if !strings.Contains(l.note, "updated") || !strings.Contains(l.note, "action open-url") {
 		t.Errorf("note = %q", l.note)
 	}
 	if note := l.snapshot().Note; !strings.Contains(note, "action press-keys differs") {
 		t.Errorf("snapshot note = %q", note)
 	}
-	if w := l.staleFor("desktop-text-file"); len(w) != 1 || !strings.Contains(w[0], "action press-keys") {
+	if w := l.staleFor("firefox-weather"); len(w) != 1 || !strings.Contains(w[0], "action press-keys") {
 		t.Errorf("staleFor = %q", w)
 	}
 
@@ -328,30 +329,29 @@ func TestOpenSeqLibraryUpgradesUneditedExamples(t *testing.T) {
 
 func TestOpenSeqLibraryKeepsUnrecordedExamples(t *testing.T) {
 	// A library saved before the record was kept (as on Revision K's host):
-	// its old open-file can't be told from an edited one, so it's kept and
+	// its old open-url can't be told from an edited one, so it's kept and
 	// flagged, until Restore examples.
 	actions, sequences := exampleLibrary()
-	actions[indexOfAction(actions, "open-file")] = oldOpenFile(actions)
+	old := oldOpenURL(actions)
+	actions[indexOfAction(actions, "open-url")] = old
 	path := filepath.Join(t.TempDir(), "lib.yaml")
 	os.WriteFile(path, []byte(encodeSeqLib(seqLibDoc{Actions: actions, Sequences: sequences})), 0o644)
 	l := openSeqLibrary(path)
-	for _, in := range l.actionMap()["open-file"].Do {
-		if in["op"] == "show-window" {
-			t.Fatal("an unrecorded open-file was replaced")
-		}
+	if !reflect.DeepEqual(l.actionMap()["open-url"], old) {
+		t.Fatal("an unrecorded open-url was replaced")
 	}
-	w := l.staleFor("desktop-text-file")
-	if len(w) != 1 || !strings.Contains(w[0], "action open-file differs") || !strings.Contains(w[0], "Restore examples") {
+	w := l.staleFor("firefox-weather")
+	if len(w) != 1 || !strings.Contains(w[0], "action open-url differs") || !strings.Contains(w[0], "Restore examples") {
 		t.Errorf("staleFor = %q", w)
 	}
 	if w := l.staleFor("fc-hello-world"); len(w) != 0 {
-		t.Errorf("fc-hello-world doesn't use open-file: %q", w)
+		t.Errorf("fc-hello-world doesn't use open-url: %q", w)
 	}
 
 	if _, err := l.restoreExamples(); err != nil {
 		t.Fatal(err)
 	}
-	if w := l.staleFor("desktop-text-file"); len(w) != 0 || l.snapshot().Note != "" {
+	if w := l.staleFor("firefox-weather"); len(w) != 0 || l.snapshot().Note != "" {
 		t.Errorf("after restoring: staleFor = %q, note = %q", w, l.snapshot().Note)
 	}
 	doc, err := decodeSeqLib(mustRead(t, path))
@@ -370,6 +370,95 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// retiredOpenFile and retiredTextFile stand in for the examples Revision M
+// removed, as a library an older IANAR saved holds them. open-file uses
+// show-window, an op that's gone.
+func retiredOpenFile() ActionDef {
+	return ActionDef{
+		ID: "open-file", Name: "Open a file in its default app",
+		Controls: []Control{{Name: "path", Label: "Path"}, {Name: "ready_text", Label: "Title showing it's open"}},
+		Do: []Instruction{
+			{"op": "open", "path": "{{path}}"},
+			{"op": "show-window", "title": "{{ready_text}}"},
+		},
+	}
+}
+
+func retiredTextFile() SequenceV2 {
+	return SequenceV2{
+		ID: "desktop-text-file", Name: "Desktop text file: hello world",
+		Steps: []StepRef{{Action: "open-file", With: map[string]string{"path": "{{desktop}}/x.txt", "ready_text": "x.txt"}}},
+	}
+}
+
+func writeLibWithRetired(t *testing.T, open ActionDef, text SequenceV2, rec map[string]string) string {
+	t.Helper()
+	actions, sequences := exampleLibrary()
+	path := filepath.Join(t.TempDir(), "lib.yaml")
+	doc := seqLibDoc{Actions: append(actions, open), Sequences: append(sequences, text), Examples: rec}
+	os.WriteFile(path, []byte(encodeSeqLib(doc)), 0o644)
+	return path
+}
+
+func TestOpenSeqLibraryRetiresUneditedExamples(t *testing.T) {
+	rec := shippedExamples()
+	rec[exampleKey("action", "open-file")] = actionPrint(retiredOpenFile())
+	rec[exampleKey("sequence", "desktop-text-file")] = sequencePrint(retiredTextFile())
+	path := writeLibWithRetired(t, retiredOpenFile(), retiredTextFile(), rec)
+
+	l := openSeqLibrary(path)
+	if _, ok := l.actionMap()["open-file"]; ok || indexOfSequence(l.sequences, "desktop-text-file") >= 0 {
+		t.Error("the retired examples are still in the library")
+	}
+	if !strings.Contains(l.note, "removed") || !strings.Contains(l.note, "sequence desktop-text-file") || !strings.Contains(l.note, "action open-file") {
+		t.Errorf("note = %q", l.note)
+	}
+	// Saved without them (not set aside as broken), so reopening changes
+	// nothing more.
+	doc, err := decodeSeqLib(mustRead(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexOfAction(doc.Actions, "open-file") >= 0 || !reflect.DeepEqual(doc.Examples, shippedExamples()) {
+		t.Errorf("saved: open-file at %d, record %v", indexOfAction(doc.Actions, "open-file"), doc.Examples)
+	}
+	if again := openSeqLibrary(path); again.note != "" {
+		t.Errorf("reopened: note %q", again.note)
+	}
+}
+
+func TestOpenSeqLibraryKeepsEditedRetiredExamples(t *testing.T) {
+	// An edited desktop-text-file is kept, and so is the (unedited) action
+	// it uses -- here one that doesn't use the op that's gone.
+	open := retiredOpenFile()
+	open.Do = open.Do[:1]
+	edited := retiredTextFile()
+	edited.Description = "my own"
+	rec := shippedExamples()
+	rec[exampleKey("action", "open-file")] = actionPrint(open)
+	rec[exampleKey("sequence", "desktop-text-file")] = sequencePrint(retiredTextFile())
+	path := writeLibWithRetired(t, open, edited, rec)
+
+	l := openSeqLibrary(path)
+	if indexOfSequence(l.sequences, "desktop-text-file") < 0 {
+		t.Error("the edited desktop-text-file was removed")
+	}
+	if _, ok := l.actionMap()["open-file"]; !ok {
+		t.Error("open-file was removed, though a sequence kept uses it")
+	}
+	if l.note != "" {
+		t.Errorf("note = %q", l.note)
+	}
+	// They're the user's own now: no longer recorded as examples.
+	doc, err := decodeSeqLib(mustRead(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(doc.Examples, shippedExamples()) {
+		t.Errorf("saved record = %v", doc.Examples)
+	}
 }
 
 // ---- Running ----
@@ -561,314 +650,42 @@ func TestRunFirefoxWeather(t *testing.T) {
 	}
 }
 
-// savingKeyboard is a fakeKeyboard that, like an editor, writes what was
-// typed to file on Ctrl+S.
-type savingKeyboard struct {
-	fakeKeyboard
-	file, typed string
-}
-
-func (k *savingKeyboard) tap(key string, mods ...string) error {
-	if key == "s" && len(mods) == 1 && mods[0] == "ctrl" {
-		os.WriteFile(k.file, []byte(k.typed), 0o644)
-	}
-	return k.fakeKeyboard.tap(key, mods...)
-}
-
-func (k *savingKeyboard) typeText(text string) error {
-	k.typed += text
-	return k.fakeKeyboard.typeText(text)
-}
-
-// stubOpen records files opened instead of opening them.
-func stubOpen(t *testing.T) *[]string {
-	t.Helper()
-	orig := openPath
-	t.Cleanup(func() { openPath = orig })
-	var opened []string
-	openPath = func(p string) (string, error) {
-		opened = append(opened, p)
-		return "test", nil
-	}
-	return &opened
-}
-
-func TestRunDesktopTextFile(t *testing.T) {
-	stubSequence(t)
-	desk := t.TempDir()
-	origDesk := desktopDir
-	t.Cleanup(func() { desktopDir = origDesk })
-	desktopDir = func() string { return desk }
-	file := filepath.Join(desk, "ianar-hello-world.txt")
-	kb := &savingKeyboard{fakeKeyboard: fakeKeyboard{failAt: -1}, file: file}
-	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
-	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	opened := stubOpen(t)
-	clicks := stubClicks(t)
-	// Before opening: the desktop icon's label, and IANAR's step list
-	// (containing the name, but not reading it exactly). After: the
-	// editor's title too.
-	stubScreenLines(t, func(n int) []OCRLine {
-		lines := []OCRLine{
-			{Text: "ianar-hello-world.txt", X: 10, Y: 300, W: 120, H: 12},
-			{Text: "open " + file + " in its default app", X: 900, Y: 500, W: 300, H: 12},
-		}
-		if n > 0 {
-			lines = append(lines, OCRLine{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12})
-		}
-		return lines
-	})
-
-	res := runV2(t, "desktop-text-file", nil)
-	if !res.Success {
-		t.Fatalf("run failed: %s", res.Error)
-	}
-	want := []string{"escape", "type hello world", "ctrl+s", "ctrl+w"}
-	if !reflect.DeepEqual(kb.calls, want) {
-		t.Errorf("keys = %q, want %q", kb.calls, want)
-	}
-	if !reflect.DeepEqual(*opened, []string{file}) {
-		t.Errorf("opened %q, want %q", *opened, file)
-	}
-	// The editor's title, not the desktop label seen before, is clicked.
-	if c := *clicks; len(c) != 1 || c[0] != (click{"left", image.Pt(460, 16)}) {
-		t.Errorf("clicks = %+v, want one left click at (460, 16)", c)
-	}
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		t.Error("the text document should have been deleted")
-	}
-	shots, _ := filepath.Glob(filepath.Join(desk, "ianar-hello-world-2026-10-05T12-00-00.png"))
-	if len(shots) != 1 {
-		entries, _ := os.ReadDir(desk)
-		t.Errorf("no screenshot on the desktop; it holds %v", entries)
-	}
-}
-
-// stubTextFileRun sets up a desktop-text-file run with a saving keyboard,
-// returning it and the document's path.
-func stubTextFileRun(t *testing.T) (*savingKeyboard, string) {
-	t.Helper()
-	stubSequence(t)
-	desk := t.TempDir()
-	origDesk := desktopDir
-	t.Cleanup(func() { desktopDir = origDesk })
-	desktopDir = func() string { return desk }
-	file := filepath.Join(desk, "ianar-hello-world.txt")
-	kb := &savingKeyboard{fakeKeyboard: fakeKeyboard{failAt: -1}, file: file}
-	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
-	stubOpen(t)
-	return kb, file
-}
-
-func stubDefaultApp(t *testing.T, app string) *[]string {
-	t.Helper()
-	orig := defaultAppFor
-	t.Cleanup(func() { defaultAppFor = orig })
-	var asked []string
-	defaultAppFor = func(p string) (string, error) {
-		asked = append(asked, p)
-		return app, nil
-	}
-	return &asked
-}
-
-// stubAppName makes appDisplayName return name, or fail if name is "".
-func stubAppName(t *testing.T, name string) {
-	t.Helper()
-	orig := appDisplayName
-	t.Cleanup(func() { appDisplayName = orig })
-	appDisplayName = func(app string) (string, error) {
-		if name == "" {
-			return "", errors.New("no .desktop file for " + app)
-		}
-		return name, nil
-	}
-}
-
-func pressed(kb *savingKeyboard, key string) bool {
-	for _, c := range kb.calls {
-		if c == key {
-			return true
-		}
-	}
-	return false
-}
-
-// The editor opens out of sight (Revision J's and K's debug runs): the
-// Activities search for its app brings it up, keys only.
-func TestRunDesktopTextFileRaisesTheEditorFromTheActivitiesSearch(t *testing.T) {
-	kb, _ := stubTextFileRun(t)
-	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	stubDefaultApp(t, "org.gnome.TextEditor")
-	stubAppName(t, "Text Editor")
-	clicks := stubClicks(t)
-	stubScreenLines(t, func(int) []OCRLine {
-		if pressed(kb, "enter") {
-			return []OCRLine{{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12}}
-		}
-		return nil
-	})
-	res := runV2(t, "desktop-text-file", nil)
-	if !res.Success {
-		t.Fatalf("run failed: %s", res.Error)
-	}
-	want := []string{"escape", "super", "type Text Editor", "enter", "type hello world", "ctrl+s", "ctrl+w"}
-	if !reflect.DeepEqual(kb.calls, want) {
-		t.Errorf("keys = %q, want %q", kb.calls, want)
-	}
-	if c := *clicks; len(c) != 1 || c[0].at != image.Pt(460, 16) {
-		t.Errorf("clicks = %+v, want just the title at (460, 16)", c)
-	}
-	if d := res.Steps[2].Message; !strings.Contains(d, "Activities search") {
-		t.Errorf("step 3 says %q, want it to mention the Activities search", d)
-	}
-}
-
-// Its "is ready" notification, found in the notification list, brings it
-// up when there's no app to search for.
-func TestRunDesktopTextFileRaisesTheEditorFromItsNotification(t *testing.T) {
-	kb, _ := stubTextFileRun(t)
-	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	stubDefaultApp(t, "org.gnome.TextEditor")
-	stubAppName(t, "")
-	clicks := stubClicks(t)
-	ready := OCRLine{Text: "“ianar-hello-world.txt” is ready", X: 600, Y: 100, W: 200, H: 12}
-	stubScreenLines(t, func(int) []OCRLine {
-		// IANAR's definer may be showing the op's own description.
-		lines := []OCRLine{{Text: `GNOME's "is ready" notification, then the app's dock icon`, X: 900, Y: 600, W: 300, H: 12}}
-		for _, c := range *clicks {
-			if c.at == ready.center() {
-				return append(lines, OCRLine{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12})
-			}
-		}
-		if pressed(kb, "super+v") {
-			lines = append(lines, ready)
-		}
-		return lines
-	})
-	res := runV2(t, "desktop-text-file", nil)
-	if !res.Success {
-		t.Fatalf("run failed: %s", res.Error)
-	}
-	want := []string{"escape", "super+v", "type hello world", "ctrl+s", "ctrl+w"}
-	if !reflect.DeepEqual(kb.calls, want) {
-		t.Errorf("keys = %q, want %q", kb.calls, want)
-	}
-	if c := *clicks; len(c) != 2 || c[0].at != ready.center() || c[1].at != image.Pt(460, 16) {
-		t.Errorf("clicks = %+v, want the notification at %v, then the title at (460, 16)", c, ready.center())
-	}
-	if d := res.Steps[2].Message; !strings.Contains(d, "clicked the notification") {
-		t.Errorf("step 3 says %q, want it to mention the notification", d)
-	}
-}
-
-// Revision K's debug run: the notification is clicked on the last look,
-// after slow looks used up the timeout. The window it brings up is still
-// looked for.
-func TestRunDesktopTextFileLooksAgainAfterALateNotificationClick(t *testing.T) {
-	kb, _ := stubTextFileRun(t)
-	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	stubDefaultApp(t, "")
-	clicks := stubClicks(t)
-	ready := OCRLine{Text: "“ianar-hello-world.txt (~/Desktop) Text Editor” is ready", X: 600, Y: 100, W: 200, H: 12}
-	stubScreenLines(t, func(int) []OCRLine {
-		for _, c := range *clicks {
-			if c.at == ready.center() {
-				return []OCRLine{{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12}}
-			}
-		}
-		if pressed(kb, "super+v") {
-			// Each look takes far longer than OCR at 1x would.
-			sleep(time.Minute)
-			return []OCRLine{ready}
-		}
-		return nil
-	})
-	res := runV2(t, "desktop-text-file", nil)
-	if !res.Success {
-		t.Fatalf("run failed: %s", res.Error)
-	}
-	if c := *clicks; len(c) != 2 || c[0].at != ready.center() {
-		t.Errorf("clicks = %+v, want the notification, then the title", c)
-	}
-}
-
-// With no notification to click, the default app's dock icon brings its
-// window up.
-func TestRunDesktopTextFileRaisesTheEditorFromItsDockIcon(t *testing.T) {
-	kb, file := stubTextFileRun(t)
-	icon := testIcon()
-	stubIconApp(t, icon) // installs it as "firefox"
-	asked := stubDefaultApp(t, "firefox")
-	stubCapture(t, screenWithIcon(icon, image.Pt(10, 300), 48))
-	clicks := stubClicks(t)
-	stubScreenLines(t, func(int) []OCRLine {
-		if len(*clicks) > 0 {
-			return []OCRLine{{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12}}
-		}
-		return nil
-	})
-	res := runV2(t, "desktop-text-file", nil)
-	if !res.Success {
-		t.Fatalf("run failed: %s", res.Error)
-	}
-	// Firefox's Activities search and the notification list come first.
-	want := []string{"escape", "super", "type Firefox", "enter", "escape", "escape", "super+v", "escape", "type hello world", "ctrl+s", "ctrl+w"}
-	if !reflect.DeepEqual(kb.calls, want) {
-		t.Errorf("keys = %q, want %q", kb.calls, want)
-	}
-	if !reflect.DeepEqual(*asked, []string{file}) {
-		t.Errorf("asked for the default app of %q, want %q", *asked, file)
-	}
-	if c := *clicks; len(c) != 2 || abs(c[0].at.X-34) > 3 || abs(c[0].at.Y-324) > 3 || c[1].at != image.Pt(460, 16) {
-		t.Errorf("clicks = %+v, want the dock icon near (34, 324), then the title at (460, 16)", c)
-	}
-}
-
-func TestRunDesktopTextFileReportsAWindowThatNeverShows(t *testing.T) {
-	stubTextFileRun(t)
-	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	stubDefaultApp(t, "")
-	stubClicks(t)
-	stubScreenLines(t, func(int) []OCRLine { return nil })
-	res := runV2(t, "desktop-text-file", nil)
-	if res.Success || res.FailedStep != 2 || !strings.Contains(res.Error, "stayed out of sight") ||
-		!strings.Contains(res.Error, "no \"is ready\" notification") {
-		t.Errorf("result = %+v", res)
-	}
-}
-
-func TestAfterColon(t *testing.T) {
-	if got := afterColon("display name: x\n  standard::content-type: text/plain\n", "standard::content-type:"); got != "text/plain" {
-		t.Errorf("content type = %q", got)
-	}
-	if got := afterColon("Default application for “text/plain”: org.gnome.TextEditor.desktop\nRegistered applications:\n", "Default application for"); got != "org.gnome.TextEditor.desktop" {
-		t.Errorf("default app = %q", got)
-	}
-	if got := afterColon("nothing here\n", "Default application for"); got != "" {
-		t.Errorf("got %q from no match", got)
-	}
-}
-
-func TestRunStopsAtAFileCheck(t *testing.T) {
+// The file actions Revision M's removed desktop-text-file sequence used
+// stay in the definer, for sequences of the user's own.
+func TestRunFileActions(t *testing.T) {
 	stubSequence(t)
 	desk := t.TempDir()
 	origDesk := desktopDir
 	t.Cleanup(func() { desktopDir = origDesk })
 	desktopDir = func() string { return desk }
 	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	stubOpen(t)
-	stubClicks(t)
-	stubScreenLines(t, func(n int) []OCRLine {
-		if n == 0 {
-			return nil
-		}
-		return []OCRLine{{Text: "ianar-hello-world.txt", W: 10, H: 10}}
-	})
-	// The fake keyboard saves nothing, so the document stays empty.
-	res := runV2(t, "desktop-text-file", nil)
-	if res.Success || res.FailedStep != 5 || !strings.Contains(res.Error, `doesn't contain "hello world"`) {
-		t.Errorf("result = %+v", res)
+
+	l := openSeqLibrary("")
+	file := "{{desktop}}/notes.txt"
+	err := l.saveSequence(SequenceV2{ID: "files", Name: "Files", Steps: []StepRef{
+		{Action: "create-file", With: map[string]string{"path": file, "content": "hello world"}},
+		{Action: "expect-file", With: map[string]string{"path": file, "contains": "hello"}},
+		{Action: "save-screenshot", With: map[string]string{"path": "{{desktop}}/shot.png"}},
+		{Action: "delete-file", With: map[string]string{"path": file}},
+		{Action: "expect-file", With: map[string]string{"path": file, "contains": "hello"}},
+	}}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := l.compile("files", nil, time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := runSequence(q, func(SequenceProgressMsg) {})
+	// Everything up to the last check works; that one finds the file gone.
+	if res.Success || res.FailedStep != 4 {
+		t.Fatalf("result = %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(desk, "shot.png")); err != nil {
+		t.Errorf("no screenshot saved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(desk, "notes.txt")); !os.IsNotExist(err) {
+		t.Error("notes.txt should have been deleted")
 	}
 }
 

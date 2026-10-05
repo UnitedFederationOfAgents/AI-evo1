@@ -18,8 +18,8 @@ import (
 )
 
 // This file is IANAR's "sequence-v2" tab (condocs/initialRobotImpls/
-// Step2Prompt.md, Revision G). Where sequence-v1's sequences are written in
-// Go, v2's are data, built in three sub-tabs:
+// Step2Prompt.md, Revision G). Its sequences are data, built in three
+// sub-tabs:
 //
 //   - definer: actions -- named, reusable building blocks that expose
 //     controls (parameters, with defaults) and carry out a list of
@@ -31,8 +31,8 @@ import (
 //     with values for its controls. Sequences can expose controls of their
 //     own (e.g. the weather example's country) for steps to use.
 //   - runner: runs a sequence with chosen control values, reporting each
-//     step and anything the run printed, recorded like a v1 run (it shares
-//     sequence.go's runSequence, so also its recording and Save to file).
+//     step and anything the run printed, recorded from start to finish
+//     (see sequence.go's runSequence) and savable with Save to file.
 //
 // Values may refer to controls and other variables as {{name}}, optionally
 // through a filter: {{name|url}} (URL-encoded) or {{name|base}} (a path's
@@ -712,6 +712,59 @@ func upgradeExamples(actions []ActionDef, sequences []SequenceV2, rec map[string
 	return actions, sequences, out, updated, kept
 }
 
+// retiredExamples are built-in examples this build no longer ships
+// (Step2Prompt.md, Revision M): the desktop-text-file sequence, which never
+// got working, and the open-file action only it used, whose show-window op
+// went with it. Sequences come first, so an action is only checked once the
+// sequences using it are gone.
+var retiredExamples = []string{
+	exampleKey("sequence", "desktop-text-file"),
+	exampleKey("action", "open-file"),
+}
+
+// retireExamples drops the saved library's copies of retiredExamples that
+// still match the version recorded for them (weren't edited), and the
+// record of every retired example. An edited copy, or an action a remaining
+// sequence uses, is kept. It returns the new document and what it dropped.
+func retireExamples(doc seqLibDoc) (seqLibDoc, []string) {
+	rec := map[string]string{}
+	for k, v := range doc.Examples {
+		rec[k] = v
+	}
+	var dropped []string
+	for _, key := range retiredExamples {
+		kind, id, _ := strings.Cut(key, "/")
+		switch kind {
+		case "sequence":
+			if i := indexOfSequence(doc.Sequences, id); i >= 0 && rec[key] == sequencePrint(doc.Sequences[i]) {
+				doc.Sequences = append(doc.Sequences[:i:i], doc.Sequences[i+1:]...)
+				dropped = append(dropped, kind+" "+id)
+			}
+		case "action":
+			if i := indexOfAction(doc.Actions, id); i >= 0 && rec[key] == actionPrint(doc.Actions[i]) && !actionInUse(doc.Sequences, id) {
+				doc.Actions = append(doc.Actions[:i:i], doc.Actions[i+1:]...)
+				dropped = append(dropped, kind+" "+id)
+			}
+		}
+		delete(rec, key)
+	}
+	if doc.Examples != nil {
+		doc.Examples = rec
+	}
+	return doc, dropped
+}
+
+func actionInUse(sequences []SequenceV2, id string) bool {
+	for _, q := range sequences {
+		for _, st := range q.Steps {
+			if st.Action == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // staleExamples lists the library's built-in examples that differ from
 // this build's, as "action open-file". Called with l.mu held.
 func (l *seqLibrary) staleExamples() []string {
@@ -751,7 +804,11 @@ func openSeqLibrary(path string) *seqLibrary {
 		return l
 	}
 	doc, err := decodeSeqLib(string(data))
+	savedRec := doc.Examples
+	var retired []string
 	if err == nil {
+		// Before checking: a retired example may use an op that's gone.
+		doc, retired = retireExamples(doc)
 		err = checkLibrary(doc.Actions, doc.Sequences)
 	}
 	if err != nil {
@@ -772,15 +829,22 @@ func openSeqLibrary(path string) *seqLibrary {
 		// using an action's old controls) is left for Restore examples.
 		actions, sequences, rec, updated = doc.Actions, doc.Sequences, doc.Examples, nil
 	}
-	if len(updated) > 0 || !sameRecord(rec, doc.Examples) {
+	if len(updated) > 0 || !sameRecord(rec, savedRec) {
 		l.examples = rec
 		if err := l.commit(actions, sequences); err != nil {
 			l.actions, l.sequences = actions, sequences
 			log.Printf("sequence-v2: %v", err)
 		}
 	}
+	var notes []string
 	if len(updated) > 0 {
-		l.note = "updated to this IANAR's version of the built-in examples (you hadn't edited them): " + strings.Join(updated, ", ")
+		notes = append(notes, "updated to this IANAR's version of the built-in examples (you hadn't edited them): "+strings.Join(updated, ", "))
+	}
+	if len(retired) > 0 {
+		notes = append(notes, "removed built-in examples this IANAR no longer ships (you hadn't edited them): "+strings.Join(retired, ", "))
+	}
+	if len(notes) > 0 {
+		l.note = strings.Join(notes, "; ")
 		log.Printf("sequence-v2: %s", l.note)
 	}
 	return l

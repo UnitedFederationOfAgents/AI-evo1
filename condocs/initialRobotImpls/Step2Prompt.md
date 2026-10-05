@@ -390,3 +390,20 @@ The changes are in `ianar/seqv2_ops.go` and `ianar/icon.go`. In `seqv2_test.go` 
 Let's remove this sequence for now, as well as the sequence-v1 tab and associated logic.
 
 We'll revisit this later.
+
+
+prompt: [`52314c1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/52314c1df06152a58deaf4792229278e2ec361a5) → reply: [`7948061`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/79480613f61330b81a30459823c2821a53be6955)
+
+## Reply M
+
+You've hit your session limit · resets 12am (UTC)
+
+
+## <REPLACE-Revision|Retry> N
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -333,12 +333,16 @@ If the window still doesn't appear, the step fails and lists what it tried. The 
 
 The dock-icon route assumes clicking an app that isn't in front brings its window forward, which the Ubuntu dock does by default.
 
+## Resource 7 -- Debug Sequences 4
 
-## <REPLACE-Revision|Retry> K
+Still one failure.
 
-<REPLACE-PROMPT>
+Is the text line split?
 
+- [ianar-sequence-desktop-text-file-2026-10-05T21-15-43.zip](22f34039_ianar-sequence-desktop-text-file-2026-10-05T21-15-43.zip)
 
-## Human-Prompt
+## Revision K
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's try again with 'Debug Sequences 4' resource for context.
+
+Is our issue that the text is split between lines?

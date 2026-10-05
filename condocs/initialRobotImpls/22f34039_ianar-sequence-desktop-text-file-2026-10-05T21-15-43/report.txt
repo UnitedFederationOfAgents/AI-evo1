@@ -1,0 +1,43 @@
+IANAR sequence run: Desktop text file: hello world (desktop-text-file)
+result: FAILED after 27.3s: step 3 (Open the text document): instruction 5 (wait-for-text): after 15s, 0 line(s) on screen show "ianar-hello-world.txt" -- needed more than 0
+keyboard via: compositor (org.gnome.Mutter.RemoteDesktop)
+recording: via compositor (org.gnome.Shell.Screencast), 29.8s -- recording/recording.webm
+
+steps:
+
+1. [success] Wake the screen (0.0s)
+     - check the screen is unlocked, and wake it if it has blanked
+   the screen is awake and unlocked
+
+2. [success] Create a new text document on the desktop (0.0s)
+     - create the file /home/jedsall/Desktop/ianar-hello-world.txt
+   created /home/jedsall/Desktop/ianar-hello-world.txt
+
+3. [error] Open the text document (27.2s)
+     - press escape
+     - wait 1s
+     - count the lines on screen containing "ianar-hello-world.txt" (not "") as {{open_before}}
+     - open /home/jedsall/Desktop/ianar-hello-world.txt in its default app
+     - wait up to 15s for more than {{open_before}} line(s) on screen containing "ianar-hello-world.txt"
+     - left-click the line on screen reading "ianar-hello-world.txt" (waiting up to 5s for it)
+   instruction 5 (wait-for-text): after 15s, 0 line(s) on screen show "ianar-hello-world.txt" -- needed more than 0
+   saw: step-3.jpg
+
+4. [skipped] Write "hello world" in it
+     - type "hello world"
+
+5. [skipped] Save the document
+     - press ctrl+s
+     - wait 1s
+
+6. [skipped] Check the document holds "hello world"
+     - check /home/jedsall/Desktop/ianar-hello-world.txt contains "hello world"
+
+7. [skipped] Save a screenshot to the desktop
+     - save a screenshot to /home/jedsall/Desktop/ianar-hello-world-2026-10-05T21-15-12.png
+
+8. [skipped] Close the document
+     - press ctrl+w
+
+9. [skipped] Delete the text document
+     - delete the file /home/jedsall/Desktop/ianar-hello-world.txt

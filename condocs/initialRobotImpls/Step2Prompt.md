@@ -354,12 +354,14 @@ prompt: [`6a80bbc`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6
 
 I made the changes, but nothing is built or tested yet: `go test`, `gofmt` and `tsc` all needed approval here. To answer your question: yes, the desktop icon's label is split over two lines, but that isn't why the run failed. The run used the old "open-file" action without Revision J's `show-window` step, because the saved library kept its old copy (Restore examples wasn't pressed), and the text editor never showed on screen. Now IANAR updates built-in examples you haven't edited when it starts, warns in the UI and the run report when a run uses an out-of-date one, and text-search failures say when the text only shows wrapped over two lines. New tests are in `seqv2_test.go` and `vision_test.go`; it needs a `make build` / `make test` on the host and one last **Restore examples**.
 
+## Resource 8 -- Debug Sequences 5
 
-## <REPLACE-Revision|Retry> L
+New failure mode
 
-<REPLACE-PROMPT>
+- [ianar-sequence-desktop-text-file-2026-10-05T22-10-03.zip](268cca27_ianar-sequence-desktop-text-file-2026-10-05T22-10-03.zip)
 
+## Revision L
 
-## Human-Prompt
+We will take one more shot at this fix with 'Debug Sequences 5' resource context, if that fails we will abandon this effort for now.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix it correctly this time.

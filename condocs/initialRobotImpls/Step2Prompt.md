@@ -203,11 +203,18 @@ I added zip extraction to condoccer's Add Resources. I couldn't build or test it
 Zips already added, such as the sequence failure zip from Revision E, are not unpacked, because I didn't touch condoc files. They'd need to be added again or unzipped once by hand.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+Let's do another iteration - 'sequence-v2'
 
+This iteration we will have three sub-tabs under the new sequence-v2 tab: the definer, the composer, and the runner.
 
-## Human-Prompt
+The definer allows pre-defined actions to be created which expose controls. The composer allows steps to be dragged-and-dropped to create sequences.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Sequences will always be created in the composer with steps defined in the definer. Both the definer and composer constructs may be imported or exported as yaml.
+
+For this new system we will implement the same sequence we had in V1, we will also add sequences which: 
+- opens a new in-private firefox window via the icon, navigates to a weather page, and prints out what the temperature is in Portugal (the country is a control and may be varied).
+- creates a new text document on the desktop, opens the text document, writes hello world in it, saves the screenshot to the desktop, and deletes the text file
+
+We will be able to run any of these three example sequences from the runner tab, we will also be able to re-use the building blocks to create new sequences.

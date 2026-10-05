@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
@@ -538,5 +539,167 @@ func TestSanitizeFilename(t *testing.T) {
 		if got := sanitizeFilename(in); got != want {
 			t.Errorf("sanitizeFilename(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// buildZip returns a zip archive holding the given name -> content entries
+// (a name ending in "/" becomes a directory entry).
+func buildZip(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestExtractZipResource verifies a zip is unpacked into a sibling folder
+// named after it minus the extension, keeping nested paths (Revision F of
+// condocs/initialRobotImpls/Step2Prompt.md).
+func TestExtractZipResource(t *testing.T) {
+	dir := t.TempDir()
+	data := buildZip(t, map[string]string{
+		"report.txt":               "all good",
+		"recording/":               "",
+		"recording/recording.webm": "webm bytes",
+	})
+	if err := os.WriteFile(filepath.Join(dir, "abcd1234_run.ZIP"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZipResource(dir, "abcd1234_run.ZIP"); err != nil {
+		t.Fatalf("extractZipResource: %v", err)
+	}
+	for rel, want := range map[string]string{
+		"report.txt":               "all good",
+		"recording/recording.webm": "webm bytes",
+	} {
+		got, err := os.ReadFile(filepath.Join(dir, "abcd1234_run", filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("expected %s to be extracted: %v", rel, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", rel, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "abcd1234_run.ZIP")); err != nil {
+		t.Errorf("the zip itself should be kept: %v", err)
+	}
+}
+
+// TestExtractZipResourceIgnoresNonZip verifies other files are left alone.
+func TestExtractZipResourceIgnoresNonZip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZipResource(dir, "note.txt"); err != nil {
+		t.Fatalf("extractZipResource: %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("expected only note.txt, got %d entries", len(entries))
+	}
+}
+
+// TestExtractZipResourceRejectsTraversal verifies an entry that would land
+// outside the extraction folder fails the extraction and leaves no folder.
+func TestExtractZipResourceRejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	data := buildZip(t, map[string]string{"../evil.txt": "nope"})
+	if err := os.WriteFile(filepath.Join(dir, "bad.zip"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZipResource(dir, "bad.zip"); err == nil {
+		t.Fatal("expected an error for a path-traversal entry")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "evil.txt")); !os.IsNotExist(err) {
+		t.Error("traversal entry should not have been written")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bad")); !os.IsNotExist(err) {
+		t.Error("partial extraction folder should have been removed")
+	}
+}
+
+// TestExtractZipResourceInvalidZip verifies a corrupt .zip is reported
+// rather than silently skipped.
+func TestExtractZipResourceInvalidZip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "broken.zip"), []byte("not a zip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractZipResource(dir, "broken.zip"); err == nil {
+		t.Fatal("expected an error for an invalid zip")
+	}
+}
+
+// TestHandleUploadResourceExtractsZip verifies the "Upload" source unpacks
+// an uploaded zip beside it in the Impls folder.
+func TestHandleUploadResourceExtractsZip(t *testing.T) {
+	root, mainRelPath, stepPath := newUploadResourceFixture(t)
+	s := newServer(root)
+
+	data := buildZip(t, map[string]string{"report.txt": "from the zip"})
+	req := newUploadResourceRequest(t, mainRelPath, "", "", "run.zip", string(data))
+	rec := httptest.NewRecorder()
+	s.handleUploadResource(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	implDirPath := filepath.Dir(stepPath)
+	entries, err := os.ReadDir(implDirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var folder string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasSuffix(e.Name(), "_run") {
+			folder = e.Name()
+		}
+	}
+	if folder == "" {
+		t.Fatal("expected the uploaded zip to be extracted into a <id>_run folder")
+	}
+	got, err := os.ReadFile(filepath.Join(implDirPath, folder, "report.txt"))
+	if err != nil || string(got) != "from the zip" {
+		t.Errorf("extracted report.txt = %q, %v", got, err)
+	}
+}
+
+// TestFetchHighlightedFilesFromExtractsZip verifies the "Highlighted"
+// source unpacks a zip copied from local-representative.
+func TestFetchHighlightedFilesFromExtractsZip(t *testing.T) {
+	data := buildZip(t, map[string]string{"step-1.jpg": "jpeg bytes"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/files", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"id": "aaa_seq.zip", "name": "seq.zip", "highlighted": true},
+			},
+		})
+	})
+	mux.HandleFunc("/api/files/aaa_seq.zip", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(data)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	destDir := t.TempDir()
+	if _, err := fetchHighlightedFilesFrom(srv.URL, destDir); err != nil {
+		t.Fatalf("fetchHighlightedFilesFrom: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(destDir, "aaa_seq", "step-1.jpg"))
+	if err != nil || string(got) != "jpeg bytes" {
+		t.Errorf("extracted step-1.jpg = %q, %v", got, err)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -189,6 +190,9 @@ func fetchHighlightedFilesFrom(base, destDir string) ([]resourceLink, error) {
 		if err := downloadFile(base, f.ID, destDir); err != nil {
 			return nil, fmt.Errorf("copying %s: %w", f.Name, err)
 		}
+		if err := extractZipResource(destDir, f.ID); err != nil {
+			return nil, fmt.Errorf("extracting %s: %w", f.Name, err)
+		}
 		links = append(links, resourceLink{Name: f.Name, Filename: f.ID})
 	}
 	return links, nil
@@ -292,6 +296,10 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("saving %s: %v", fh.Filename, err), http.StatusInternalServerError)
 			return
 		}
+		if err := extractZipResource(destDir, link.Filename); err != nil {
+			http.Error(w, fmt.Sprintf("extracting %s: %v", fh.Filename, err), http.StatusUnprocessableEntity)
+			return
+		}
 		links = append(links, link)
 	}
 
@@ -328,6 +336,97 @@ func saveUploadedResource(fh *multipart.FileHeader, destDir string) (resourceLin
 		return resourceLink{}, err
 	}
 	return resourceLink{Name: name, Filename: id}, nil
+}
+
+// ---- Zip extraction for Add Resources (Revision F of
+// condocs/initialRobotImpls/Step2Prompt.md) ----
+//
+// Any .zip brought in by either "Add Resources" source is also unpacked into
+// a folder of the same name, minus the extension, beside it in the Impls
+// folder -- e.g. "117e9380_run.zip" -> "117e9380_run/" -- so an agent
+// working the step can read the contents without needing unzip approval.
+
+// maxZipExtractSize caps the total uncompressed bytes extracted from one
+// zip resource, so a zip bomb can't fill the disk.
+const maxZipExtractSize = 1 << 30 // 1GiB
+
+// extractZipResource unpacks filename (already saved in dir) into
+// dir/<filename minus ".zip">/ when it's a zip; any other file is left alone.
+// Entries that would land outside that folder (absolute paths, "..") and
+// symlinks are rejected. On failure the partially-extracted folder is
+// removed, leaving just the zip itself.
+func extractZipResource(dir, filename string) (err error) {
+	ext := filepath.Ext(filename)
+	if !strings.EqualFold(ext, ".zip") || len(filename) == len(ext) {
+		return nil
+	}
+	dest := filepath.Join(dir, strings.TrimSuffix(filename, ext))
+
+	zr, err := zip.OpenReader(filepath.Join(dir, filename))
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			os.RemoveAll(dest)
+		}
+	}()
+
+	var remaining int64 = maxZipExtractSize
+	for _, zf := range zr.File {
+		name := filepath.FromSlash(strings.ReplaceAll(zf.Name, "\\", "/"))
+		target := filepath.Join(dest, name)
+		if filepath.IsAbs(name) || (target != dest && !strings.HasPrefix(target, dest+string(filepath.Separator))) {
+			return fmt.Errorf("zip entry %q escapes the extraction folder", zf.Name)
+		}
+		mode := zf.Mode()
+		switch {
+		case mode.IsDir():
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+			continue
+		case !mode.IsRegular():
+			return fmt.Errorf("zip entry %q is not a regular file", zf.Name)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		n, err := extractZipEntry(zf, target, remaining)
+		if err != nil {
+			return err
+		}
+		remaining -= n
+	}
+	return nil
+}
+
+// extractZipEntry writes one zip entry's bytes to target, failing if it
+// would exceed limit bytes. Returns the number of bytes written.
+func extractZipEntry(zf *zip.File, target string, limit int64) (int64, error) {
+	src, err := zf.Open()
+	if err != nil {
+		return 0, err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer dst.Close()
+	n, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err != nil {
+		return n, err
+	}
+	if n > limit {
+		return n, fmt.Errorf("zip contents exceed %d bytes", int64(maxZipExtractSize))
+	}
+	return n, nil
 }
 
 // sanitizeFilename strips directory components so an upload can't escape the

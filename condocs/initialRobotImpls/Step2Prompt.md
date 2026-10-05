@@ -187,3 +187,27 @@ New tests are in `ianar/screenstate_test.go` and `ianar/sequence_test.go`, but I
 Let's improve the condoccer 'Add Resources' behaviour.
 
 Now whenever a zip file is included in a resource it will also be extracted to a folder of the same name beside the file (minus the zip extension).
+
+
+prompt: [`2696b00`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2696b009b271abe2eaf6a25e7c76681dc8dfef38) → reply: [`3ed82c7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3ed82c71b2edc7eff4e98eab38b53089ea5ede77)
+
+## Reply F
+
+I added zip extraction to condoccer's Add Resources. I couldn't build or test it, because `go test`, `go vet` and `gofmt` all needed approval in this sandbox. It needs a `make build` / `make test` on the host. Any `.zip` added through **Highlighted** or **Upload** is now unpacked into a folder with the same name, minus the `.zip`, beside the file in the Impls folder (`abcd1234_run.zip` → `abcd1234_run/`). The zip itself is kept. If a zip can't be unpacked, the action fails with an error and no resource block is added. The changes are in `condoccer/resources.go`, with new tests in `condoccer/resources_test.go`.
+
+**Extraction guards:**
+- Entries that would land outside the folder are rejected, and so are symlinks.
+- Unpacked contents are capped at 1 GiB in total, so a zip bomb can't fill the disk.
+- If unpacking fails partway, the half-made folder is removed and only the zip stays.
+
+Zips already added, such as the sequence failure zip from Revision E, are not unpacked, because I didn't touch condoc files. They'd need to be added again or unzipped once by hand.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

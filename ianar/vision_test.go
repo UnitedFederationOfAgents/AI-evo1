@@ -179,8 +179,15 @@ func TestFocusViaVisionClicksTheTitle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Home to the top-left, then to the title's center (590, 20) at half scale.
-	want := []string{"move -100000,-100000", "move 295,10", "press", "release", "stop"}
+	// Home to the top-left of the 640x360 pointer space in steps (5 left,
+	// 3 up), then to the title's center (590, 20) at half scale.
+	want := []string{
+		"move 0,-200", "move -200,0",
+		"move 0,-200", "move -200,0",
+		"move 0,-200", "move -200,0",
+		"move -200,0", "move -200,0",
+		"move -100000,-100000", "move 295,10", "press", "release", "stop",
+	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Errorf("pointer calls = %q, want %q", *calls, want)
 	}
@@ -224,6 +231,55 @@ func TestClickAtFallsBackToRobotgo(t *testing.T) {
 	}
 	if at != image.Pt(51, 25) {
 		t.Errorf("clicked at %v, want (51, 25)", at)
+	}
+}
+
+// TestClickAtAcrossMonitors models Mutter's pointer constraint on two
+// side-by-side 1920x1080 monitors: a relative move ending on no monitor is
+// clamped to the monitor the pointer started on. Starting on the right
+// monitor, a click on the left one (Firefox's dock icon) must land there --
+// not a monitor's width to the right, as it did in Revision H's debug runs.
+func TestClickAtAcrossMonitors(t *testing.T) {
+	stubVision(t, nil)
+	screenSize = func() (int, int) { return 3840, 1080 }
+	monitors := []image.Rectangle{image.Rect(0, 0, 1920, 1080), image.Rect(1920, 0, 3840, 1080)}
+	pos := image.Pt(3000, 500)
+	var pressedAt []image.Point
+	openCompositorPointer = func() (compositorPointer, func(), error) {
+		return compositorPointer{
+			moveBy: func(dx, dy float64) error {
+				to := image.Pt(pos.X+int(dx), pos.Y+int(dy))
+				for _, m := range monitors {
+					if to.In(m) {
+						pos = to
+						return nil
+					}
+				}
+				for _, m := range monitors {
+					if pos.In(m) {
+						pos = image.Pt(min(max(to.X, m.Min.X), m.Max.X-1), min(max(to.Y, m.Min.Y), m.Max.Y-1))
+						return nil
+					}
+				}
+				return nil
+			},
+			button: func(_ int32, pressed bool) error {
+				if pressed {
+					pressedAt = append(pressedAt, pos)
+				}
+				return nil
+			},
+		}, func() {}, nil
+	}
+
+	for _, target := range []image.Point{{36, 60}, {2880, 156}} {
+		pressedAt = nil
+		if _, err := clickAtWith(target.X, target.Y, 3840, "right", false); err != nil {
+			t.Fatal(err)
+		}
+		if len(pressedAt) != 1 || pressedAt[0] != target {
+			t.Errorf("click for %v pressed at %v", target, pressedAt)
+		}
 	}
 }
 

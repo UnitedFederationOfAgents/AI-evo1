@@ -445,7 +445,7 @@ func TestRunFirefoxWeather(t *testing.T) {
 		c[1] != (click{"left", image.Pt(140, 236)}) {
 		t.Errorf("clicks = %+v, want a right click near (34, 324), then a left click at (140, 236)", c)
 	}
-	wantKeys := []string{"ctrl+l", "type https://wttr.in/Spain?format=%l:+%t&m", "enter", "ctrl+=", "ctrl+=", "ctrl+="}
+	wantKeys := []string{"escape", "ctrl+l", "type https://wttr.in/Spain?format=%l:+%t&m", "enter", "ctrl+=", "ctrl+=", "ctrl+="}
 	if !reflect.DeepEqual(kb.calls, wantKeys) {
 		t.Errorf("keys = %q, want %q", kb.calls, wantKeys)
 	}
@@ -498,7 +498,7 @@ func TestRunDesktopTextFile(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("run failed: %s", res.Error)
 	}
-	want := []string{"alt+f2", `type xdg-open "` + file + `"`, "enter", "type hello world", "ctrl+s", "ctrl+w"}
+	want := []string{"escape", "alt+f2", `type xdg-open "` + file + `"`, "enter", "type hello world", "ctrl+s", "ctrl+w"}
 	if !reflect.DeepEqual(kb.calls, want) {
 		t.Errorf("keys = %q, want %q", kb.calls, want)
 	}

@@ -78,6 +78,9 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 			},
 			Do: []Instruction{
 				{"op": "ensure-awake"},
+				// A menu left open (e.g. by an earlier failed run) would
+				// swallow the right-click, so close it first.
+				{"op": "key", "keys": "escape"},
 				{"op": "click-icon", "app": "{{app}}", "button": "right"},
 				{"op": "click-text", "text": "{{menu_item}}"},
 				{"op": "wait", "duration": "1500ms"},
@@ -116,19 +119,24 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 		},
 		{
 			ID: "open-file", Name: "Open a file in its default app",
-			Description: "Open the file through GNOME's Run dialog (Alt+F2 → xdg-open), so the app opens in front, and wait for one more line showing ready_text than before.",
+			Description: "Close any open menu, open the file through GNOME's Run dialog (Alt+F2 → xdg-open) so the app opens in front, and wait for one more line showing ready_text than before.",
 			Controls: []Control{
 				{Name: "path", Label: "Path"},
 				{Name: "ready_text", Label: "Text showing it's open", Help: "e.g. the file's name, as the app's title bar shows it"},
 			},
 			Do: []Instruction{
+				// A menu left open holds the keyboard: Alt+F2 and the typed
+				// command went into one in Revision H's debug run.
+				{"op": "key", "keys": "escape"},
 				{"op": "wait", "duration": "1s"},
-				{"op": "count-text", "text": "{{ready_text}}", "save_as": "open_before"},
+				{"op": "count-text", "text": "{{ready_text}}", "exclude": "xdg-open", "save_as": "open_before"},
 				{"op": "key", "keys": "alt+f2"},
 				{"op": "wait", "duration": "1s"},
 				{"op": "type", "text": `xdg-open "{{path}}"`},
 				{"op": "key", "keys": "enter"},
-				{"op": "wait-for-text", "text": "{{ready_text}}", "more_than": "{{open_before}}", "timeout": "15s"},
+				// The Run dialog's own "xdg-open ..." line, still fading out,
+				// isn't the app opening.
+				{"op": "wait-for-text", "text": "{{ready_text}}", "exclude": "xdg-open", "more_than": "{{open_before}}", "timeout": "15s"},
 			},
 		},
 		{

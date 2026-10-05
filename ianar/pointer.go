@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"github.com/go-vgo/robotgo"
@@ -37,8 +38,46 @@ var openCompositorPointer = func() (compositorPointer, func(), error) {
 }
 
 // pointerHome is a relative move far enough to pin the pointer against the
-// top-left corner of any desktop, from wherever it starts.
+// top-left corner of the monitor it is on.
 const pointerHome = -100000
+
+// pointerHomeStep is the size of each relative move homePointer makes:
+// smaller than any monitor, so a move from one monitor lands on the next.
+const pointerHomeStep = 200
+
+// homePointer moves the pointer to the top-left corner of the whole desktop
+// (w by h in pointer coordinates; 0 if unknown).
+//
+// Mutter rejects a relative move whose end is on no monitor by clamping the
+// pointer to the monitor it started on. One huge move therefore only reaches
+// the corner of the current monitor: with two side-by-side monitors and the
+// pointer on the right one it stopped at (1920, 0), and every click landed a
+// monitor's width to the right (Step2Prompt.md, Revision H). Moving up and
+// left in small alternating steps crosses each monitor edge instead.
+func homePointer(moveBy func(dx, dy float64) error, w, h float64) error {
+	if w <= 0 {
+		w = 8192
+	}
+	if h <= 0 {
+		h = 8192
+	}
+	nx := int(math.Ceil(w/pointerHomeStep)) + 1
+	ny := int(math.Ceil(h/pointerHomeStep)) + 1
+	for i := 0; i < nx || i < ny; i++ {
+		if i < ny {
+			if err := moveBy(0, -pointerHomeStep); err != nil {
+				return err
+			}
+		}
+		if i < nx {
+			if err := moveBy(-pointerHomeStep, 0); err != nil {
+				return err
+			}
+		}
+	}
+	// Pin to the corner of the top-left monitor, wherever rounding left it.
+	return moveBy(pointerHome, pointerHome)
+}
 
 // pointerScale is the factor from capture pixels to pointer coordinates.
 // A compositor screenshot is in physical pixels while the pointer moves in
@@ -69,8 +108,9 @@ func clickAt(x, y, captureW int) (string, error) {
 // reports which input path it used.
 //
 // The compositor's absolute pointer motion needs a screencast stream to
-// address, so the compositor path instead pins the pointer to the top-left
-// corner with one large relative move, then moves by (x, y) from there.
+// address, so the compositor path instead homes the pointer to the desktop's
+// top-left corner with relative moves (homePointer), then moves by (x, y)
+// from there in one move -- accepted, as it ends on a monitor.
 func clickAtWith(x, y, captureW int, button string, double bool) (string, error) {
 	code, ok := pointerButtons[button]
 	if !ok {
@@ -86,7 +126,8 @@ func clickAtWith(x, y, captureW int, button string, double bool) (string, error)
 	if err == nil {
 		defer stop()
 		const via = "compositor (org.gnome.Mutter.RemoteDesktop)"
-		if err := p.moveBy(pointerHome, pointerHome); err != nil {
+		w, h := screenSize()
+		if err := homePointer(p.moveBy, float64(w), float64(h)); err != nil {
 			return via, err
 		}
 		sleep(focusSettle / 3)

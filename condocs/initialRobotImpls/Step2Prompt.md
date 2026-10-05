@@ -251,3 +251,33 @@ The new sequence-v2 sequences are on the right track but each has problems.
 The new sequences have some bugs - let's view the resource 'Debug Sequences' for details and use the feedback to debug the sequences.
 
 Let's fix the errors now.
+
+
+prompt: [`cb07f4f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/cb07f4f8e7f2ff1358ce9a525e4d58e08d53f2b2) → reply: [`e7efd2a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e7efd2a79c7b5d013628ddc11cab7e45af0bfcf5)
+
+## Reply H
+
+I fixed both causes behind the three failures, but none of it has been built or tested. `gofmt`, `go vet` and `go test` all needed approval in this sandbox, so it still needs a `make build` / `make test` on the host. Revision F's unpacking worked, so I could read every `report.txt` and step image this time. I couldn't watch the `recording.webm` videos: `ffmpeg` and Python need approval too.
+
+**Main cause: clicks landed one monitor's width to the right.** IANAR moved the pointer to the top-left corner with one huge move before each click. GNOME stops a move that would leave the screen at the edge of the monitor the pointer is on. So on your two monitors, starting from the right-hand one, the pointer stopped at (1920, 0) instead of (0, 0).
+- **Firefox:** the right-click meant for its dock icon hit the right monitor's desktop and opened the desktop menu instead.
+- **federation-command:** the click on its title bar was pushed off the right edge of the screen, so the window never got focus and the typed command never reached it.
+- **The fix:** IANAR now moves the pointer up and left in small alternating steps, so it crosses from one monitor to the next and reaches the real corner. This is `homePointer` in `ianar/pointer.go`. This probably also explains Revision E's "only fails from another node": on the local node, the pointer was usually already on the left monitor.
+
+**Text-file run: a leftover menu took the keys.** The desktop menu from an earlier Firefox attempt was still open, and it was still open when step 3 failed. That suggests Alt+F2 and the typed `xdg-open` command went into the menu rather than opening the Run dialog. I'm inferring that from the screenshot, since I couldn't see the video.
+- **Escape first:** the "open file" and "open Firefox private window" actions now press Escape before doing anything else, to close any leftover menu.
+- **Ignoring the command line:** the check that the file opened now skips the Run dialog's own `xdg-open …` line, so that line can't be mistaken for the file opening.
+
+Your saved library in `~/.config/ianar/sequence-v2.yaml` still has the old versions of those two actions, so press **Restore examples** to get the new ones. The pointer fix needs nothing extra.
+
+I updated the existing tests in `vision_test.go` and `seqv2_test.go`, and added `TestClickAtAcrossMonitors`. It mimics GNOME's edge behaviour on two side-by-side monitors and checks that clicks starting from the right monitor land on the right spot on both. The other changes are in `ianar/pointer.go` and `ianar/seqv2_examples.go`.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

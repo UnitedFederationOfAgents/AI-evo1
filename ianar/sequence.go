@@ -101,12 +101,15 @@ type SequenceResultMsg struct {
 // seqEnv is what a running step can drive. A step that looked at the screen
 // leaves what it saw in shot (a data: URL), to be shown with its result.
 // vars are the run's named values (sequence-v2's controls, built-ins and
-// saved values) and outputs what it has printed.
+// saved values) and outputs what it has printed. seen holds where the lines
+// a count-text counted were, under its save_as name, so a later click-text
+// can pick a line that wasn't there then (new_since).
 type seqEnv struct {
 	kb      keyboard
 	shot    string
 	vars    map[string]string
 	outputs []SequenceOutput
+	seen    map[string][]image.Rectangle
 }
 
 // seqStep is a SequenceStepDef plus the code that carries it out. run
@@ -372,7 +375,7 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 	stopRecording := startNativeRecording(seqMaxRecording, seqFrameInterval)
 	sleep(seqRecordLead)
 
-	env := &seqEnv{kb: kb, vars: map[string]string{}}
+	env := &seqEnv{kb: kb, vars: map[string]string{}, seen: map[string][]image.Rectangle{}}
 	for k, v := range q.vars {
 		env.vars[k] = v
 	}

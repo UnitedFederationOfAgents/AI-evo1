@@ -81,10 +81,13 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 				// A menu left open (e.g. by an earlier failed run) would
 				// swallow the right-click, so close it first.
 				{"op": "key", "keys": "escape"},
+				// ready_text may already show (IANAR's own step list names
+				// "New Private Window"), so wait for one more line of it.
+				{"op": "count-text", "text": "{{ready_text}}", "save_as": "ready_before"},
 				{"op": "click-icon", "app": "{{app}}", "button": "right"},
-				{"op": "click-text", "text": "{{menu_item}}"},
+				{"op": "click-text", "text": "{{menu_item}}", "timeout": "8s"},
 				{"op": "wait", "duration": "1500ms"},
-				{"op": "wait-for-text", "text": "{{ready_text}}", "timeout": "15s"},
+				{"op": "wait-for-text", "text": "{{ready_text}}", "more_than": "{{ready_before}}", "timeout": "15s"},
 			},
 		},
 		{
@@ -119,24 +122,21 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 		},
 		{
 			ID: "open-file", Name: "Open a file in its default app",
-			Description: "Close any open menu, open the file through GNOME's Run dialog (Alt+F2 → xdg-open) so the app opens in front, and wait for one more line showing ready_text than before.",
+			Description: "Close any open menu, open the file in its default app, wait for a new line reading ready_text (its title) and click it, so the app's window has focus.",
 			Controls: []Control{
 				{Name: "path", Label: "Path"},
-				{Name: "ready_text", Label: "Text showing it's open", Help: "e.g. the file's name, as the app's title bar shows it"},
+				{Name: "ready_text", Label: "Title showing it's open", Help: "the app's title bar text, exactly -- e.g. the file's name"},
 			},
 			Do: []Instruction{
-				// A menu left open holds the keyboard: Alt+F2 and the typed
-				// command went into one in Revision H's debug run.
 				{"op": "key", "keys": "escape"},
 				{"op": "wait", "duration": "1s"},
-				{"op": "count-text", "text": "{{ready_text}}", "exclude": "xdg-open", "save_as": "open_before"},
-				{"op": "key", "keys": "alt+f2"},
-				{"op": "wait", "duration": "1s"},
-				{"op": "type", "text": `xdg-open "{{path}}"`},
-				{"op": "key", "keys": "enter"},
-				// The Run dialog's own "xdg-open ..." line, still fading out,
-				// isn't the app opening.
-				{"op": "wait-for-text", "text": "{{ready_text}}", "exclude": "xdg-open", "more_than": "{{open_before}}", "timeout": "15s"},
+				{"op": "count-text", "text": "{{ready_text}}", "exact": "true", "save_as": "open_before"},
+				{"op": "open", "path": "{{path}}"},
+				{"op": "wait-for-text", "text": "{{ready_text}}", "exact": "true", "more_than": "{{open_before}}", "timeout": "15s"},
+				// GNOME doesn't give focus to a window opened from outside
+				// the shell, so click the new title (not, say, a desktop
+				// icon's label that was already showing).
+				{"op": "click-text", "text": "{{ready_text}}", "new_since": "open_before"},
 			},
 		},
 		{

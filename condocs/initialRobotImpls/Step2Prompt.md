@@ -286,3 +286,27 @@ Our last iteration improved things but did not fix everything.
 Let's view 'Debug Sequences 2' resource for context and attempt the remainder of the fixes.
 
 Let's fix these now.
+
+
+prompt: [`6741469`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6741469919baf18d84446d55155b7b73772e3ccd) → reply: [`1678680`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1678680eced2f2ff0054f9e0a2bbc6d00402b9a5)
+
+## Reply I
+
+I've made fixes for both remaining failures, but nothing has been built, tested or tried on screen. `gofmt`, `go vet`, `go test` and `ffmpeg` all needed approval here, so I couldn't watch the recordings and worked only from the two reports and step images. It needs a `make build` / `make test` on the host. After that, press **Restore examples**: your saved library still has the old versions of the two changed actions.
+
+- **Firefox: missed menu item.** The right-click worked and the step image shows "New Private Window" in the menu, but the text reader never picked it up. On your two monitors the screenshot is 3840 px wide, which skipped the 2x enlargement IANAR uses so small text can be read. It now decides by height instead, so your setup gets 2x again. Matching also now allows about one misread letter per 10 in names of 8 letters or more. The final "Private" check now waits for a *new* line, because IANAR's own step list already contains that word.
+- **Text file: Alt+F2 doesn't work.** No menu was open this time and still nothing opened, so the Run dialog approach fails on its own. IANAR now opens the file directly with `gio open` (falling back to `xdg-open`). GNOME doesn't give focus to a window opened that way, so IANAR waits for a new line reading exactly `ianar-hello-world.txt` (the editor's title) and clicks it. It ignores lines that were already on screen before opening, such as the file's icon label on the desktop.
+
+To support this I added an `open` step, a "count only exact matches" option on `count-text`, and a `new_since` option on `click-text`. The changes are in `ianar/vision.go`, `ianar/seqv2_ops.go`, `ianar/seqv2_examples.go` and `ianar/sequence.go`. I updated the Firefox and text-file tests in `seqv2_test.go`, and added tests for the new matching and enlargement rule in `vision_test.go`.
+
+Reading screenshots at 2x on two monitors will make each look at the screen slower. The title click assumes the editor shows just the file name, as GNOME Text Editor does. An editor like gedit, whose title adds more text, won't match.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

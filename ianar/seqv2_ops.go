@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -32,6 +34,7 @@ const (
 	keyChordGap        = 100 * time.Millisecond // between key chords in one "key" instruction
 	shotThumbWidth     = 960                    // width of a saved screenshot's preview
 	fileExcerptLen     = 200                    // how much of a file an expect-file failure quotes
+	openTimeout        = 15 * time.Second       // for the command that opens a file in its app
 )
 
 // opArg documents one argument of an op.
@@ -185,8 +188,9 @@ func pollScreen(timeout time.Duration, done func(*screenReading) bool) (*screenR
 	}
 }
 
-// textMatches returns the lines reading exactly text (exact) or containing
-// it, after normalizeText, other than those containing exclude.
+// textMatches returns the lines reading text (exact, allowing sameText's
+// slack for OCR misreads) or containing it, after normalizeText, other than
+// those containing exclude.
 func textMatches(lines []OCRLine, text, exclude string, exact bool) []OCRLine {
 	want, ex := normalizeText(text), normalizeText(exclude)
 	if want == "" {
@@ -198,7 +202,26 @@ func textMatches(lines []OCRLine, text, exclude string, exact bool) []OCRLine {
 		if ex != "" && strings.Contains(got, ex) {
 			continue
 		}
-		if (exact && got == want) || (!exact && strings.Contains(got, want)) {
+		if (exact && sameText(got, want)) || (!exact && strings.Contains(got, want)) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// notSeen returns the lines that don't overlap any of seen -- the lines
+// that have appeared since seen was recorded.
+func notSeen(lines []OCRLine, seen []image.Rectangle) []OCRLine {
+	var out []OCRLine
+	for _, l := range lines {
+		old := false
+		for _, r := range seen {
+			if overlapFrac(l.rect(), r) > 0.5 {
+				old = true
+				break
+			}
+		}
+		if !old {
 			out = append(out, l)
 		}
 	}
@@ -354,24 +377,36 @@ var seqOps = []opSpec{
 	},
 	{
 		Op:       "count-text",
-		Summary:  "Count the lines on screen containing some text, saving the count -- e.g. to check later that one more appeared.",
+		Summary:  "Count the lines on screen showing some text, saving the count -- e.g. to check later that one more appeared, or (new_since) to click the new one.",
 		Describe: `count the lines on screen containing "{text}" (not "{exclude}") as {{{save_as}}}`,
 		Args: []opArg{
 			{Name: "text", Help: "the text to look for", Required: true},
+			{Name: "exact", Help: "true: count only lines reading exactly this", Default: "false"},
 			{Name: "exclude", Help: "skip lines containing this"},
 			{Name: "save_as", Help: "name to save the count under", Required: true},
 		},
 		run: func(env *seqEnv, a opArgs) (string, error) {
+			exact, err := a.flag("exact")
+			if err != nil {
+				return "", err
+			}
 			sr, err := readScreen()
 			if err != nil {
 				return "", err
 			}
-			hits := textMatches(sr.lines, a["text"], a["exclude"], false)
+			hits := textMatches(sr.lines, a["text"], a["exclude"], exact)
 			env.shot = screenShot(sr, hits, nil)
 			if err := a.saveVar(env, strconv.Itoa(len(hits))); err != nil {
 				return "", err
 			}
-			return fmt.Sprintf("%d line(s) on screen contain %q", len(hits), a["text"]), nil
+			if env.seen != nil {
+				var rs []image.Rectangle
+				for _, l := range hits {
+					rs = append(rs, l.rect())
+				}
+				env.seen[strings.TrimSpace(a["save_as"])] = rs
+			}
+			return fmt.Sprintf("%d line(s) on screen show %q", len(hits), a["text"]), nil
 		},
 	},
 	{
@@ -425,12 +460,23 @@ var seqOps = []opSpec{
 			{Name: "button", Help: "left, right or middle", Default: "left"},
 			{Name: "double", Help: "true for a double click", Default: "false"},
 			{Name: "pick", Help: "top or bottom: which match to click if several", Default: "top"},
+			{Name: "new_since", Help: "a count-text's save_as name: only click a line that wasn't among those it counted"},
 			{Name: "timeout", Help: "how long to keep looking", Default: "5s"},
 		},
 		run: func(env *seqEnv, a opArgs) (string, error) {
 			exact, err := a.flag("exact")
 			if err != nil {
 				return "", err
+			}
+			var seen []image.Rectangle
+			if name := strings.TrimSpace(a["new_since"]); name != "" {
+				var ok bool
+				if seen, ok = env.seen[name]; !ok {
+					return "", fmt.Errorf("new_since: no count-text saved %q earlier in the run", name)
+				}
+			}
+			matches := func(sr *screenReading) []OCRLine {
+				return notSeen(textMatches(sr.lines, a["text"], a["exclude"], exact), seen)
 			}
 			double, err := a.flag("double")
 			if err != nil {
@@ -447,16 +493,19 @@ var seqOps = []opSpec{
 				return "", fmt.Errorf("button should be left, right or middle, not %q", a["button"])
 			}
 			sr, ok, err := pollScreen(timeout, func(sr *screenReading) bool {
-				return len(textMatches(sr.lines, a["text"], a["exclude"], exact)) > 0
+				return len(matches(sr)) > 0
 			})
 			if err != nil {
 				return "", err
 			}
-			hits := textMatches(sr.lines, a["text"], a["exclude"], exact)
+			hits := matches(sr)
 			if !ok {
 				_, partial := findLines(sr.lines, a["text"])
 				env.shot = screenShot(sr, nil, partial)
 				msg := fmt.Sprintf("no line on screen reads %q (read %d lines of text)", a["text"], len(sr.lines))
+				if seen != nil {
+					msg = fmt.Sprintf("no new line on screen reads %q (read %d lines of text; %d seen before don't count)", a["text"], len(sr.lines), len(seen))
+				}
 				if len(partial) > 0 {
 					msg += "; lines containing it: " + quoteLines(partial)
 				}
@@ -519,6 +568,23 @@ var seqOps = []opSpec{
 		run: func(env *seqEnv, a opArgs) (string, error) {
 			env.outputs = append(env.outputs, SequenceOutput{Label: a["label"], Value: a["text"]})
 			return "printed " + strconv.Quote(a["text"]), nil
+		},
+	},
+	{
+		Op:       "open",
+		Summary:  "Open a file in its default app, as double-clicking it would (gio open, else xdg-open). The app may open behind other windows -- follow with a click on its title to focus it.",
+		Describe: "open {path} in its default app",
+		Args:     []opArg{{Name: "path", Help: "absolute path, e.g. {{desktop}}/notes.txt", Required: true}},
+		run: func(env *seqEnv, a opArgs) (string, error) {
+			p, err := a.path("path")
+			if err != nil {
+				return "", err
+			}
+			via, err := openPath(p)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("opened %s via %s", p, via), nil
 		},
 	},
 	{
@@ -655,6 +721,50 @@ var focusByTitle = func(title string) (string, string, error) {
 		return fmt.Sprintf("%s (visual detection failed: %v)", desc, visErr), shot, nil
 	}
 	return "", shot, fmt.Errorf("visual detection: %v; window-manager fallback: %v", visErr, err)
+}
+
+// openPath opens p in its default app and returns the command that did it.
+// It runs the command directly rather than typing it into GNOME's Alt+F2
+// Run dialog: in Revision I's debug run the dialog never took the typed
+// command, with no menu left open to blame. Overridable in tests.
+var openPath = func(p string) (string, error) {
+	var errs []string
+	for _, c := range [][]string{{"gio", "open", p}, {"xdg-open", p}} {
+		bin, err := exec.LookPath(c[0])
+		if err != nil {
+			errs = append(errs, c[0]+" isn't installed")
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), openTimeout)
+		cmd := exec.CommandContext(ctx, bin, c[1:]...)
+		cmd.Env = guiEnv()
+		// The app it starts can inherit the output pipe and hold it open;
+		// don't wait on it once the command itself has exited.
+		cmd.WaitDelay = time.Second
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err == nil || (errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success()) {
+			return c[0], nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v: %s", c[0], err, strings.TrimSpace(string(out))))
+	}
+	return "", fmt.Errorf("couldn't open %s: %s", p, strings.Join(errs, "; "))
+}
+
+// guiEnv is IANAR's environment, plus WAYLAND_DISPLAY if neither it nor
+// DISPLAY is set but the session's Wayland socket exists (IANAR started
+// from a service that didn't inherit them), so apps it opens can show.
+func guiEnv() []string {
+	env := os.Environ()
+	if os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("DISPLAY") != "" {
+		return env
+	}
+	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" {
+		if _, err := os.Stat(filepath.Join(rt, "wayland-0")); err == nil {
+			env = append(env, "WAYLAND_DISPLAY=wayland-0")
+		}
+	}
+	return env
 }
 
 func runReadText(env *seqEnv, a opArgs) (string, error) {

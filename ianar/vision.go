@@ -40,7 +40,7 @@ import (
 // matching is done against.
 
 const (
-	ocrUpscaleBelow = 2600             // captures narrower than this are read at 2x, so small UI text is legible to tesseract
+	ocrUpscaleBelow = 1600             // captures shorter than this are read at 2x, so small UI text is legible to tesseract
 	ocrTimeout      = 45 * time.Second // per tesseract run
 	ocrMinConf      = 30.0             // words read with less confidence (0-100) are dropped
 	inspectMaxWidth = 1280             // inspect-result's image is downscaled to keep the message small
@@ -172,9 +172,14 @@ func prepareForOCR(img image.Image, scale int, invert bool) *image.Gray {
 
 // readScreenText reads the words in img: as is and inverted, in parallel,
 // merged. Coordinates are in img's pixels, relative to its origin.
+//
+// Whether to upscale goes by the capture's height, not its width: two
+// 1080p monitors side by side make a 3840-wide capture whose text is just as
+// small as on one, and read at 1x tesseract missed menu items like Firefox's
+// "New Private Window" (Revision I's debug run).
 func readScreenText(img image.Image) ([]OCRWord, error) {
 	scale := 1
-	if img.Bounds().Dx() < ocrUpscaleBelow {
+	if img.Bounds().Dy() < ocrUpscaleBelow {
 		scale = 2
 	}
 	var wg sync.WaitGroup
@@ -325,9 +330,54 @@ func normalizeText(s string) string {
 	return b.String()
 }
 
-// findLines returns the lines reading exactly text (after normalizeText),
-// top-most first, plus the lines that merely contain it, for reporting near
-// misses.
+// sameText reports whether two normalizeText'd strings read the same,
+// allowing one misread, dropped or extra character per 10 in longer texts
+// (OCR reading "Wlndow" for "Window", say). Texts under 8 characters must
+// match exactly.
+func sameText(got, want string) bool {
+	if got == want {
+		return true
+	}
+	slack := len(want) / 10
+	if len(want) < 8 || slack == 0 {
+		return false
+	}
+	return editDistance(got, want, slack) <= slack
+}
+
+// editDistance is the Levenshtein distance between a and b, or limit+1 if
+// it is more than limit.
+func editDistance(a, b string, limit int) int {
+	if abs(len(a)-len(b)) > limit {
+		return limit + 1
+	}
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur[0] = i
+		rowMin := cur[0]
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+			rowMin = min(rowMin, cur[j])
+		}
+		if rowMin > limit {
+			return limit + 1
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(b)]
+}
+
+// findLines returns the lines reading text (after normalizeText, allowing
+// sameText's slack), top-most first, plus the lines that merely contain it,
+// for reporting near misses.
 func findLines(lines []OCRLine, text string) (exact, partial []OCRLine) {
 	want := normalizeText(text)
 	if want == "" {
@@ -336,7 +386,7 @@ func findLines(lines []OCRLine, text string) (exact, partial []OCRLine) {
 	for _, l := range lines {
 		got := normalizeText(l.Text)
 		switch {
-		case got == want:
+		case sameText(got, want):
 			exact = append(exact, l)
 		case strings.Contains(got, want):
 			partial = append(partial, l)

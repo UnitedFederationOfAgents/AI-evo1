@@ -420,13 +420,20 @@ func TestRunFirefoxWeather(t *testing.T) {
 	stubIconApp(t, icon)
 	stubCapture(t, screenWithIcon(icon, image.Pt(10, 300), 48))
 	clicks := stubClicks(t)
-	// Screens: the dock menu, the private window, then the weather page.
+	// Screens: IANAR's own step list (already naming "private"), the dock
+	// menu (its item misread by one letter), the private window, then the
+	// weather page.
+	ianarLine := OCRLine{Text: "Open a new private Firefox window", X: 900, Y: 400, W: 300, H: 12}
 	stubScreenLines(t, func(n int) []OCRLine {
 		switch n {
 		case 0:
-			return []OCRLine{{Text: "New Window", X: 60, Y: 200, W: 100, H: 12}, {Text: "New Private Window", X: 60, Y: 230, W: 160, H: 12}}
+			return []OCRLine{ianarLine}
 		case 1:
-			return []OCRLine{{Text: "New Private Tab", X: 10, Y: 10, W: 100, H: 12}}
+			return []OCRLine{{Text: "New Window", X: 60, Y: 200, W: 100, H: 12}, {Text: "New Prlvate Window", X: 60, Y: 230, W: 160, H: 12}}
+		case 2:
+			return []OCRLine{ianarLine}
+		case 3:
+			return []OCRLine{ianarLine, {Text: "New Private Tab", X: 10, Y: 10, W: 100, H: 12}}
 		default:
 			return []OCRLine{
 				{Text: "wttr.in/Spain?format=%l:+%t&m", X: 10, Y: 40, W: 300, H: 12},
@@ -469,10 +476,21 @@ func (k *savingKeyboard) tap(key string, mods ...string) error {
 }
 
 func (k *savingKeyboard) typeText(text string) error {
-	if !strings.HasPrefix(text, "xdg-open") {
-		k.typed += text
-	}
+	k.typed += text
 	return k.fakeKeyboard.typeText(text)
+}
+
+// stubOpen records files opened instead of opening them.
+func stubOpen(t *testing.T) *[]string {
+	t.Helper()
+	orig := openPath
+	t.Cleanup(func() { openPath = orig })
+	var opened []string
+	openPath = func(p string) (string, error) {
+		opened = append(opened, p)
+		return "test", nil
+	}
+	return &opened
 }
 
 func TestRunDesktopTextFile(t *testing.T) {
@@ -485,9 +503,16 @@ func TestRunDesktopTextFile(t *testing.T) {
 	kb := &savingKeyboard{fakeKeyboard: fakeKeyboard{failAt: -1}, file: file}
 	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
 	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
-	// Before opening: the desktop icon's label. After: the editor's title too.
+	opened := stubOpen(t)
+	clicks := stubClicks(t)
+	// Before opening: the desktop icon's label, and IANAR's step list
+	// (containing the name, but not reading it exactly). After: the
+	// editor's title too.
 	stubScreenLines(t, func(n int) []OCRLine {
-		lines := []OCRLine{{Text: "ianar-hello-world.txt", X: 10, Y: 300, W: 120, H: 12}}
+		lines := []OCRLine{
+			{Text: "ianar-hello-world.txt", X: 10, Y: 300, W: 120, H: 12},
+			{Text: "open " + file + " in its default app", X: 900, Y: 500, W: 300, H: 12},
+		}
 		if n > 0 {
 			lines = append(lines, OCRLine{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12})
 		}
@@ -498,9 +523,16 @@ func TestRunDesktopTextFile(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("run failed: %s", res.Error)
 	}
-	want := []string{"escape", "alt+f2", `type xdg-open "` + file + `"`, "enter", "type hello world", "ctrl+s", "ctrl+w"}
+	want := []string{"escape", "type hello world", "ctrl+s", "ctrl+w"}
 	if !reflect.DeepEqual(kb.calls, want) {
 		t.Errorf("keys = %q, want %q", kb.calls, want)
+	}
+	if !reflect.DeepEqual(*opened, []string{file}) {
+		t.Errorf("opened %q, want %q", *opened, file)
+	}
+	// The editor's title, not the desktop label seen before, is clicked.
+	if c := *clicks; len(c) != 1 || c[0] != (click{"left", image.Pt(460, 16)}) {
+		t.Errorf("clicks = %+v, want one left click at (460, 16)", c)
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Error("the text document should have been deleted")
@@ -519,6 +551,8 @@ func TestRunStopsAtAFileCheck(t *testing.T) {
 	t.Cleanup(func() { desktopDir = origDesk })
 	desktopDir = func() string { return desk }
 	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
+	stubOpen(t)
+	stubClicks(t)
 	stubScreenLines(t, func(n int) []OCRLine {
 		if n == 0 {
 			return nil

@@ -116,6 +116,43 @@ func TestReadScreenTextReadsBothWaysAndScales(t *testing.T) {
 	}
 }
 
+// TestReadScreenTextScalesWideCaptures checks two 1080p monitors side by
+// side (3840 wide) are still read at 2x: their text is as small as on one.
+func TestReadScreenTextScalesWideCaptures(t *testing.T) {
+	orig := runOCR
+	t.Cleanup(func() { runOCR = orig })
+	runOCR = func(png []byte) ([]OCRWord, error) {
+		return []OCRWord{{Text: "Window", Conf: 90, X: 200, Y: 40, W: 120, H: 24}}, nil
+	}
+	words, err := readScreenText(image.NewGray(image.Rect(0, 0, 3840, 1080)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(words) != 1 || words[0].X != 100 || words[0].H != 12 {
+		t.Errorf("words = %+v, want boxes halved from a 2x reading", words)
+	}
+}
+
+func TestSameTextAllowsOCRSlips(t *testing.T) {
+	for _, c := range []struct {
+		got, want string
+		same      bool
+	}{
+		{"newprivatewindow", "newprivatewindow", true},
+		{"newprlvatewindow", "newprivatewindow", true},  // one misread
+		{"newprivatewndow", "newprivatewindow", true},   // one dropped
+		{"newprivatewindows", "newprivatewindow", true}, // one extra
+		{"nevprlvatewindow", "newprivatewindow", false}, // two slips in 16
+		{"newwindow", "newprivatewindow", false},
+		{"ianarhelloworldtx", "ianarhelloworldtxt", true},
+		{"stop", "step", false}, // short texts must match exactly
+	} {
+		if got := sameText(c.got, c.want); got != c.same {
+			t.Errorf("sameText(%q, %q) = %v, want %v", c.got, c.want, got, c.same)
+		}
+	}
+}
+
 func TestReadScreenTextReportsMissingOCR(t *testing.T) {
 	orig := runOCR
 	t.Cleanup(func() { runOCR = orig })

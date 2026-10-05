@@ -238,12 +238,16 @@ How the two new sequences work, and what to check on the host:
 
 I also added right-click and double-click (in `pointer.go` and `remotedesktop_linux.go`) and more key names (F1–F12, Super, Delete, Page Up/Down) in `keyboard.go`. On the frontend, the preview and Save to file pieces moved from `App.tsx` into `shared.tsx`; the new tab is in `SequenceV2.tsx`.
 
+## Resource 4 -- Debug Sequences
 
-## <REPLACE-Revision|Retry> H
+The new sequence-v2 sequences are on the right track but each has problems.
 
-<REPLACE-PROMPT>
+- [ianar-sequence-firefox-weather-2026-10-05T19-45-58.zip](4bebe3c2_ianar-sequence-firefox-weather-2026-10-05T19-45-58.zip)
+- [ianar-sequence-desktop-text-file-2026-10-05T19-44-08.zip](d48f3d19_ianar-sequence-desktop-text-file-2026-10-05T19-44-08.zip)
+- [ianar-sequence-fc-hello-world-2026-10-05T19-41-12.zip](98fc772d_ianar-sequence-fc-hello-world-2026-10-05T19-41-12.zip)
 
+## Revision H
 
-## Human-Prompt
+The new sequences have some bugs - let's view the resource 'Debug Sequences' for details and use the feedback to debug the sequences.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix the errors now.

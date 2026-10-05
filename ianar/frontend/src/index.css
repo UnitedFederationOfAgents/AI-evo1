@@ -552,6 +552,319 @@ button:disabled {
   color: #888;
 }
 
+/* ---- sequence-v2 tab (see SequenceV2.tsx) ---- */
+
+.seq2-subtabs {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.seq2-subtab {
+  background: none;
+  border-radius: 3px 3px 0 0;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  padding: 6px 14px;
+}
+
+.seq2-subtab:hover { color: #ccc; }
+
+.seq2-subtab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+  background: #252526;
+}
+
+.seq2-editor,
+.seq2-runner {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.seq2-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.seq2-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1b1b1b;
+  min-width: 0;
+}
+
+.seq2-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+}
+
+.seq2-hint {
+  font-size: 11px;
+  color: #777;
+  overflow-wrap: anywhere;
+}
+
+.seq2-ok { color: #6ec96e; }
+
+.seq2-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.seq2-field-name {
+  flex: 0 0 110px;
+  font-size: 11px;
+  color: #999;
+  overflow-wrap: anywhere;
+}
+
+.seq2-input,
+.seq2-textarea {
+  flex: 1;
+  min-width: 0;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #cccccc;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+.seq2-input:disabled { opacity: 0.6; }
+.seq2-input-bad { border-color: #7a3a3a; }
+
+.seq2-textarea {
+  width: 100%;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.seq2-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.seq2-control {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.seq2-input-name { flex: 0 0 100px; }
+
+.seq2-icon-btn {
+  flex-shrink: 0;
+  padding: 3px 8px;
+}
+
+.seq2-add { align-self: flex-start; }
+
+.seq2-num {
+  color: #777;
+  font-variant-numeric: tabular-nums;
+}
+
+.seq2-instrs {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.seq2-instr {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid #333;
+  border-radius: 3px;
+  background: #202020;
+}
+
+.seq2-instr .seq-select,
+.seq2-row .seq-select { flex: 1; min-width: 0; }
+
+.seq2-actions .seq-run { flex-shrink: 0; }
+
+/* Composer: the action palette beside the step list (stacked on phones). */
+.seq2-compose {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.seq2-palette {
+  flex: 0 0 240px;
+  position: sticky;
+  top: 0;
+}
+
+.seq2-steps-wrap {
+  flex: 1;
+}
+
+.seq2-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid #333;
+  border-radius: 3px;
+  background: #232323;
+}
+
+.seq2-palette-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #ccc;
+}
+
+.seq2-handle {
+  flex-shrink: 0;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  color: #888;
+  font-size: 16px;
+  line-height: 1;
+  padding: 4px 6px;
+}
+
+.seq2-handle:active { cursor: grabbing; color: #ccc; }
+
+.seq2-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 48px;
+}
+
+.seq2-steps-dropping {
+  outline: 1px dashed #3c5a7a;
+  outline-offset: 4px;
+}
+
+.seq2-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #202020;
+}
+
+.seq2-step-dragging { opacity: 0.4; }
+
+.seq2-step-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.seq2-step-action {
+  flex: 1;
+  min-width: 0;
+  color: #cccccc;
+}
+
+.seq2-steps-empty {
+  padding: 14px;
+  border: 1px dashed #444;
+  border-radius: 4px;
+  text-align: center;
+  color: #666;
+  font-size: 12px;
+}
+
+.seq2-drop-marker {
+  height: 3px;
+  border-radius: 2px;
+  background: #007acc;
+}
+
+.seq2-ghost {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+  padding: 4px 10px;
+  border-radius: 3px;
+  background: #094771;
+  color: #fff;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.seq2-yaml {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.seq2-yaml-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.seq2-help {
+  font-size: 11px;
+  color: #999;
+}
+
+.seq2-help summary { cursor: pointer; }
+.seq2-help p,
+.seq2-help ul { margin: 6px 0 0 14px; }
+
+.seq2-help code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: #ccc;
+}
+
+.seq2-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding-top: 8px;
+  border-top: 1px solid #333;
+}
+
+.seq2-outputs {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border: 1px solid #2c4a5a;
+  border-radius: 4px;
+  background: #16242e;
+}
+
+.seq2-output { font-size: 14px; overflow-wrap: anywhere; }
+.seq2-output-label { color: #8ab4cc; }
+.seq2-output-value { color: #e6f2fa; font-weight: 600; }
+
 /* ---- Save to file (see artifacts.go) ---- */
 
 .robot-save {
@@ -655,6 +968,54 @@ button:disabled {
   }
 
   .seq-select {
+    min-height: 36px;
+  }
+
+  .seq2-compose {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .seq2-palette {
+    position: static;
+    flex: none;
+  }
+
+  .seq2-handle {
+    font-size: 20px;
+    padding: 8px 10px;
+  }
+
+  .seq2-subtab {
+    flex: 1;
+    min-height: 40px;
+  }
+
+  .seq2-input {
+    min-height: 34px;
+    font-size: 14px; /* under 16px iOS zooms on focus; 14 keeps rows compact */
+  }
+
+  .seq2-field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+
+  .seq2-field-name {
+    flex: none;
+  }
+
+  .seq2-control {
+    flex-wrap: wrap;
+  }
+
+  .seq2-control .seq2-input {
+    flex: 1 1 40%;
+  }
+
+  .seq2-row button,
+  .seq2-icon-btn {
     min-height: 36px;
   }
 }

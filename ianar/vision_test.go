@@ -158,7 +158,7 @@ func stubVision(t *testing.T, lines []OCRLine) *[]string {
 				calls = append(calls, "move "+ftoa(dx)+","+ftoa(dy))
 				return nil
 			},
-			button: func(pressed bool) error {
+			button: func(code int32, pressed bool) error {
 				calls = append(calls, map[bool]string{true: "press", false: "release"}[pressed])
 				return nil
 			},
@@ -216,7 +216,7 @@ func TestClickAtFallsBackToRobotgo(t *testing.T) {
 	origClick := robotClick
 	t.Cleanup(func() { robotClick = origClick })
 	var at image.Point
-	robotClick = func(x, y int) error { at = image.Pt(x, y); return nil }
+	robotClick = func(x, y int, _ string, _ bool) error { at = image.Pt(x, y); return nil }
 
 	via, err := clickAt(101, 50, 1280)
 	if err != nil || via != "robotgo" {

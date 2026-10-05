@@ -21,6 +21,9 @@ import (
 // it stands for. "run-sequence" runs one; progress streams back as
 // "sequence-progress" and the outcome, with the recording, as
 // "sequence-result".
+//
+// runSequence also runs the sequence-v2 tab's sequences (seqv2.go), which
+// are compiled into the same form; those use seqEnv's vars and outputs.
 
 const (
 	seqFrameInterval = 250 * time.Millisecond // fallback recording rate (~4 frames/s)
@@ -59,7 +62,15 @@ type SequenceProgressMsg struct {
 	Step       int    `json:"step"`
 	Status     string `json:"status"` // "running" | "success" | "error"
 	Message    string `json:"message,omitempty"`
-	ImageURL   string `json:"image_url,omitempty"` // what the step saw, if it looked at the screen
+	ImageURL   string           `json:"image_url,omitempty"` // what the step saw, if it looked at the screen
+	Outputs    []SequenceOutput `json:"outputs,omitempty"`   // everything the run has printed so far
+}
+
+// SequenceOutput is a value a run printed (sequence-v2's print and
+// read-text ops), shown with its result.
+type SequenceOutput struct {
+	Label string `json:"label,omitempty"`
+	Value string `json:"value"`
 }
 
 // SequenceStepResult is one step's outcome in a SequenceResultMsg.
@@ -83,14 +94,19 @@ type SequenceResultMsg struct {
 	DurationMs  int64                `json:"duration_ms"`
 	KeyboardVia string               `json:"keyboard_via,omitempty"`
 	Recording   *ClipResultMsg       `json:"recording,omitempty"`
+	Outputs     []SequenceOutput     `json:"outputs,omitempty"` // what the run printed
 	ArtifactID  string               `json:"artifact_id,omitempty"` // names the run for "save-artifact" (see artifacts.go)
 }
 
 // seqEnv is what a running step can drive. A step that looked at the screen
 // leaves what it saw in shot (a data: URL), to be shown with its result.
+// vars are the run's named values (sequence-v2's controls, built-ins and
+// saved values) and outputs what it has printed.
 type seqEnv struct {
-	kb   keyboard
-	shot string
+	kb      keyboard
+	shot    string
+	vars    map[string]string
+	outputs []SequenceOutput
 }
 
 // seqStep is a SequenceStepDef plus the code that carries it out. run
@@ -104,6 +120,7 @@ type sequence struct {
 	id    string
 	name  string
 	steps []seqStep
+	vars  map[string]string // the run's starting values (sequence-v2)
 }
 
 func (q sequence) def() SequenceDef {
@@ -355,7 +372,10 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 	stopRecording := startNativeRecording(seqMaxRecording, seqFrameInterval)
 	sleep(seqRecordLead)
 
-	env := &seqEnv{kb: kb}
+	env := &seqEnv{kb: kb, vars: map[string]string{}}
+	for k, v := range q.vars {
+		env.vars[k] = v
+	}
 	start := clock()
 	for i, st := range q.steps {
 		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "running"})
@@ -367,15 +387,16 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 			res.Steps[i] = SequenceStepResult{Status: "error", Message: err.Error(), DurationMs: took, ImageURL: env.shot}
 			res.FailedStep = i
 			res.Error = fmt.Sprintf("step %d (%s): %v", i+1, st.Label, err)
-			progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "error", Message: err.Error(), ImageURL: env.shot})
+			progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "error", Message: err.Error(), ImageURL: env.shot, Outputs: env.outputs})
 			log.Printf("robot: sequence %q failed at %s", q.id, res.Error)
 			break
 		}
 		res.Steps[i] = SequenceStepResult{Status: "success", Message: note, DurationMs: took, ImageURL: env.shot}
-		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "success", Message: note, ImageURL: env.shot})
+		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "success", Message: note, ImageURL: env.shot, Outputs: env.outputs})
 	}
 	res.DurationMs = clock().Sub(start).Milliseconds()
 	res.Success = res.FailedStep < 0
+	res.Outputs = env.outputs
 
 	sleep(seqRecordTail)
 	rec := stopRecording()

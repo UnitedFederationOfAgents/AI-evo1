@@ -218,3 +218,32 @@ For this new system we will implement the same sequence we had in V1, we will al
 - creates a new text document on the desktop, opens the text document, writes hello world in it, saves the screenshot to the desktop, and deletes the text file
 
 We will be able to run any of these three example sequences from the runner tab, we will also be able to re-use the building blocks to create new sequences.
+
+
+prompt: [`805c2d5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/805c2d551eee5a0ceccd4fae84b270a319919d48) → reply: [`9146e52`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9146e52329cd6e69135e6135cc5fbb1986c485b6)
+
+## Reply G
+
+I added the **sequence-v2** tab to IANAR, with **definer**, **composer** and **runner** sub-tabs. The runner has three ready-made sequences: v1's federation-command "hello world", a Firefox private-window temperature check with the country as a control (Portugal by default), and the desktop text-file sequence. None of it has been built, tested or tried on screen: `go`, `gofmt`, `tsc` and fetching Go module checksums all needed approval in this sandbox, so it needs a `make build` / `make test` on the host. The tests are in `ianar/seqv2_test.go`.
+
+- **Definer:** you build reusable actions from about 15 basic operations: press keys, type, find and click text or an app's icon on screen, wait for text, read a value off the screen, print, and create, check or delete a file. Each action exposes controls with defaults, which instructions use as `{{name}}`.
+- **Composer:** you drag actions into a sequence and fill in their controls. Dragging also works on a phone, and each action has a **+** button too.
+- **Runner:** shows each step's status, prints any values the sequence reads (such as the temperature), records the run, and offers Save to file.
+- **YAML:** actions and sequences import and export as YAML, and an exported sequence includes the actions it uses. I wrote a small YAML reader/writer (`yamlite.go`) instead of adding a library, because I couldn't fetch the checksums `go.sum` would need for a new module.
+- **Where it's saved:** the library is kept in `~/.config/ianar/sequence-v2.yaml`. You can change that with `--sequence-library`, and a "Restore examples" button puts the built-in sequences back.
+
+How the two new sequences work, and what to check on the host:
+- **Firefox weather:** it finds Firefox's dock icon by matching its picture (new code in `icon.go`), right-clicks it and picks "New Private Window". It then opens `wttr.in`'s one-line weather page, which OCR reads reliably, and prints the temperature. The icon matching is new and only checked against a synthetic test image; it also fails if the dock is hidden.
+- **Desktop text file:** IANAR creates the file directly rather than through the desktop. It opens the file through the Alt+F2 Run dialog so the editor comes to the front, then types, saves, checks the file really contains "hello world", saves a screenshot to the desktop, closes the editor and deletes the file. The keys assume an editor that saves on Ctrl+S and closes on Ctrl+W, such as GNOME Text Editor.
+
+I also added right-click and double-click (in `pointer.go` and `remotedesktop_linux.go`) and more key names (F1–F12, Super, Delete, Page Up/Down) in `keyboard.go`. On the frontend, the preview and Save to file pieces moved from `App.tsx` into `shared.tsx`; the new tab is in `SequenceV2.tsx`.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

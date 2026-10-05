@@ -40,8 +40,9 @@ type wsClient struct {
 // link to local-representative, plus the native/browser capture and
 // native-input ("circle mouse") channels described in
 // condocs/InitialRobot.md (see robot.go), Native Clip (clip.go), the
-// sequence-v1 runner (sequence.go), and saving any of their results into
-// local-representative's files area (artifacts.go).
+// sequence-v1 runner (sequence.go), the sequence-v2 definer/composer/runner
+// (seqv2.go), and saving any of their results into local-representative's
+// files area (artifacts.go).
 type Server struct {
 	httpPort string // HTTP port this instance serves on (reported to local-representative)
 	name     string // identifier reported to local-representative -- "robot" by default
@@ -62,6 +63,7 @@ type Server struct {
 	modeMismatchPeer string        // the mismatched LR's disclosed mode ("dev" or "ops")
 
 	artifacts *artifactStore // results kept for "save-artifact" -- see artifacts.go
+	seqLib    *seqLibrary    // sequence-v2's actions and sequences -- see seqv2.go
 }
 
 func newServer() *Server {
@@ -72,6 +74,7 @@ func newServer() *Server {
 		clients:    make(map[*wsClient]bool),
 		reprStatus: "disconnected",
 		artifacts:  newArtifactStore(),
+		seqLib:     openSeqLibrary(""), // in memory until main opens the saved one
 	}
 }
 
@@ -111,6 +114,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
 	go s.sendToClient(c, "sequence-defs", sequenceDefs())
+	go s.sendToClient(c, "seq2-library", s.seqLib.snapshot())
 
 	// Write pump.
 	go func() {
@@ -216,6 +220,11 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		json.Unmarshal(m.Payload, &p)
 		s.handleRunSequence(c, p.ID)
 
+	// sequence-v2 tab -- see seqv2.go.
+	case "seq2-save-action", "seq2-delete-action", "seq2-save-sequence", "seq2-delete-sequence",
+		"seq2-import", "seq2-export", "seq2-restore-examples", "seq2-run":
+		s.handleSeq2(c, m)
+
 	// Save to file -- see artifacts.go.
 	case "save-artifact":
 		var p struct {
@@ -299,9 +308,11 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
+	seqLibPath := flag.String("sequence-library", defaultSeqLibraryPath(), "YAML file the sequence-v2 tab's actions and sequences are kept in (\"\" keeps them in memory only)")
 	flag.Parse()
 
 	s := newServer()
+	s.seqLib = openSeqLibrary(*seqLibPath)
 	s.httpPort = *port
 	s.name = *name
 	s.devMode = *devMode

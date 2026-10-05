@@ -59,11 +59,11 @@ type robotgoKeyboard struct{}
 func (robotgoKeyboard) tap(key string, mods ...string) error {
 	args := make([]interface{}, len(mods))
 	for i, m := range mods {
-		args[i] = m
+		args[i] = robotgoKey(m)
 	}
 	robotMu.Lock()
 	defer robotMu.Unlock()
-	if err := robotgo.KeyTap(key, args...); err != nil {
+	if err := robotgo.KeyTap(robotgoKey(key), args...); err != nil {
 		return fmt.Errorf("robotgo key tap %q: %w", key, err)
 	}
 	return nil
@@ -95,6 +95,35 @@ var keysyms = map[string]uint32{
 	"shift":     0xffe1,
 	"ctrl":      0xffe3,
 	"alt":       0xffe9,
+	"super":     0xffeb,
+	"space":     0x0020,
+	"insert":    0xff63,
+	"delete":    0xffff,
+	"pageup":    0xff55,
+	"pagedown":  0xff56,
+	"f1":        0xffbe,
+	"f2":        0xffbf,
+	"f3":        0xffc0,
+	"f4":        0xffc1,
+	"f5":        0xffc2,
+	"f6":        0xffc3,
+	"f7":        0xffc4,
+	"f8":        0xffc5,
+	"f9":        0xffc6,
+	"f10":       0xffc7,
+	"f11":       0xffc8,
+	"f12":       0xffc9,
+}
+
+// robotgoKeyNames maps the key names above that robotgo calls something
+// else.
+var robotgoKeyNames = map[string]string{"super": "cmd"}
+
+func robotgoKey(k string) string {
+	if r, ok := robotgoKeyNames[k]; ok {
+		return r
+	}
+	return k
 }
 
 // keysymFor maps a key name, or a single character, to its X keysym.

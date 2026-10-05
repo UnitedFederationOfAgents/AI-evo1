@@ -31,7 +31,7 @@ const (
 // read (not GNOME, no session bus), as opposed to one that answered.
 var errScreenStateUnavailable = errors.New("screen state unavailable")
 
-var errScreenLocked = errors.New("the screen is locked: IANAR's virtual input can't unlock it, and keys sent now would go to the lock screen instead of federation-command. Unlock this host (or turn off its automatic screen lock) and run again")
+var errScreenLocked = errors.New("the screen is locked: IANAR's virtual input can't unlock it, and keys sent now would go to the lock screen instead of the window they're meant for. Unlock this host (or turn off its automatic screen lock) and run again")
 
 // screenLocked, screenBlanked and requestScreenWake ask the desktop about
 // and wake its screen. Overridden on Linux by screenstate_linux.go;

@@ -83,14 +83,22 @@ export interface SequenceDefsMsg {
   sequences: SequenceDef[]
 }
 
-// SequenceProgressMsg is the "sequence-progress" payload reporting one step
-// starting or finishing.
+// SequenceOutput is a value a run printed (sequence-v2's print and read-text
+// ops).
+export interface SequenceOutput {
+  label?: string
+  value: string
+}
+
+// SequenceProgressMsg is the "sequence-progress" (v1) / "seq2-progress" (v2)
+// payload reporting one step starting or finishing.
 export interface SequenceProgressMsg {
   sequence_id: string
   step: number
   status: 'running' | 'success' | 'error'
   message?: string
   image_url?: string // what the step saw, if it looked at the screen
+  outputs?: SequenceOutput[] // everything the run has printed so far
 }
 
 export interface SequenceStepResult {
@@ -112,7 +120,94 @@ export interface SequenceResultMsg {
   duration_ms: number
   keyboard_via?: string
   recording?: ClipResultMsg
+  outputs?: SequenceOutput[] // what the run printed
   artifact_id?: string // names the run for "save-artifact" (see artifacts.go)
+}
+
+// ---- sequence-v2 (see seqv2.go) ----
+
+// Control is a parameter a definer action or composer sequence exposes.
+export interface Control {
+  name: string
+  label?: string
+  default?: string
+  help?: string
+}
+
+// Instruction is one primitive operation: op names it, the other keys are
+// its arguments.
+export type Instruction = Record<string, string> & { op: string }
+
+export interface ActionDef {
+  id: string
+  name: string
+  description?: string
+  controls: Control[] | null
+  do: Instruction[]
+}
+
+export interface StepRef {
+  action: string
+  label?: string
+  with?: Record<string, string>
+}
+
+export interface SequenceV2 {
+  id: string
+  name: string
+  description?: string
+  controls: Control[] | null
+  steps: StepRef[]
+}
+
+export interface OpArg {
+  name: string
+  help: string
+  required?: boolean
+  default?: string
+}
+
+// OpSpec is a primitive operation the definer's instructions can use.
+export interface OpSpec {
+  op: string
+  summary: string
+  describe: string
+  args: OpArg[] | null
+}
+
+export interface BuiltinVar {
+  name: string
+  help: string
+  value: string
+}
+
+// SeqLibraryMsg is the "seq2-library" payload: the whole library, sent on
+// connect and after every change.
+export interface SeqLibraryMsg {
+  actions: ActionDef[] | null
+  sequences: SequenceV2[] | null
+  ops: OpSpec[] | null
+  builtins: BuiltinVar[] | null
+  path?: string
+  note?: string
+}
+
+// Seq2ReplyMsg answers a library edit, import or export; req echoes the
+// request's.
+export interface Seq2ReplyMsg {
+  req?: string
+  op: string
+  success: boolean
+  error?: string
+  message?: string
+  yaml?: string
+  filename?: string
+}
+
+// Seq2StartedMsg: a v2 run has begun, with its steps as compiled.
+export interface Seq2StartedMsg {
+  sequence_id: string
+  def: SequenceDef
 }
 
 // OCRLine is a line of text read off the screen, boxed in capture pixels
@@ -166,3 +261,8 @@ export type ServerMsg =
   | { type: 'sequence-result'; payload: SequenceResultMsg }
   | { type: 'inspect-result'; payload: InspectResultMsg }
   | { type: 'save-result'; payload: SaveResultMsg }
+  | { type: 'seq2-library'; payload: SeqLibraryMsg }
+  | { type: 'seq2-reply'; payload: Seq2ReplyMsg }
+  | { type: 'seq2-started'; payload: Seq2StartedMsg }
+  | { type: 'seq2-progress'; payload: SequenceProgressMsg }
+  | { type: 'seq2-result'; payload: SequenceResultMsg }

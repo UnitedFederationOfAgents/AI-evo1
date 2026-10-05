@@ -415,6 +415,13 @@ func sequenceArtifact(def SequenceDef, res SequenceResultMsg) artifact {
 			if res.KeyboardVia != "" {
 				fmt.Fprintf(&b, "keyboard via: %s\n", res.KeyboardVia)
 			}
+			for _, o := range res.Outputs {
+				if o.Label != "" {
+					fmt.Fprintf(&b, "printed: %s: %s\n", o.Label, o.Value)
+				} else {
+					fmt.Fprintf(&b, "printed: %s\n", o.Value)
+				}
+			}
 			switch rec := res.Recording; {
 			case rec == nil:
 				b.WriteString("recording: none\n")

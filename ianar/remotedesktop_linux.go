@@ -87,11 +87,10 @@ func init() {
 				}
 				return nil
 			},
-			button: func(pressed bool) error {
+			button: func(code int32, pressed bool) error {
 				// NotifyPointerButton(in i button, in b state), button as an
 				// evdev code.
-				const btnLeft int32 = 0x110
-				if err := session.Call(rdSessionIface+".NotifyPointerButton", 0, btnLeft, pressed).Err; err != nil {
+				if err := session.Call(rdSessionIface+".NotifyPointerButton", 0, code, pressed).Err; err != nil {
 					return fmt.Errorf("NotifyPointerButton: %w", err)
 				}
 				return nil

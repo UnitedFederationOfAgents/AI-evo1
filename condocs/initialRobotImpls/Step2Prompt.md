@@ -314,3 +314,31 @@ We now have two of the three sequences working.
 The desktop text file sequence remains at-issue.
 
 Let's use the context from 'Debug Sequences 3' to fix that now.
+
+
+prompt: [`c6cf274`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c6cf274df3c2451af47df1c793ffd03f16ca235a) → reply: [`397843d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/397843d0ef9e6f050091ca38015d3698e5f1a809)
+
+## Reply J
+
+I added a fix for the desktop text-file sequence, but none of it has been built or tested: `go test`, `go vet` and `gofmt` all needed approval here, so it needs a `make build` / `make test` on the host. After that, press **Restore examples** so your saved library picks up the changed "Open a file" action.
+
+**What went wrong:** the open command worked, but the editor never showed up on either monitor in `step-3.jpg`. Even the desktop icon's label wasn't visible, because the maximised Firefox window left over from the weather sequence covers the desktop. My best guess is that GNOME opened the editor behind Firefox. GNOME won't bring a window to the front when it is opened from outside the shell, and shows a "“…” is ready" notification instead. That's a guess from the code and the one screenshot, since I couldn't extract frames from the recording.
+
+**The fix:** a new `show-window` step in `ianar/seqv2_ops.go` now runs between opening the file and clicking the editor's title. It waits 4s for the title. If the title doesn't appear, it tries in turn:
+- clicking the "is ready" notification, if it shows on screen;
+- opening the notification list (Super+V) and clicking the notification there;
+- clicking the editor's dock icon. It finds the editor by asking the system which app opens the file (`gio`, falling back to `xdg-mime`), or you can name the app in a new optional **App** field on the action.
+
+If the window still doesn't appear, the step fails and lists what it tried. The action itself is updated in `ianar/seqv2_examples.go`. In `seqv2_test.go` I added tests for the notification route, the dock-icon route, a window that never appears, and reading the `gio` output.
+
+The dock-icon route assumes clicking an app that isn't in front brings its window forward, which the Ubuntu dock does by default.
+
+
+## <REPLACE-Revision|Retry> K
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

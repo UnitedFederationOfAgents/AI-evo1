@@ -122,17 +122,19 @@ func exampleLibrary() ([]ActionDef, []SequenceV2) {
 		},
 		{
 			ID: "open-file", Name: "Open a file in its default app",
-			Description: "Close any open menu, open the file in its default app, wait for a new line reading ready_text (its title) and click it, so the app's window has focus.",
+			Description: "Close any open menu, open the file in its default app, wait for a new line reading ready_text (its title) -- bringing the window forward if it opened out of sight -- and click it, so the app's window has focus.",
 			Controls: []Control{
 				{Name: "path", Label: "Path"},
 				{Name: "ready_text", Label: "Title showing it's open", Help: "the app's title bar text, exactly -- e.g. the file's name"},
+				{Name: "app", Label: "App", Help: "the app's .desktop name, whose dock icon brings its window forward; empty: the file's default app"},
 			},
 			Do: []Instruction{
 				{"op": "key", "keys": "escape"},
 				{"op": "wait", "duration": "1s"},
 				{"op": "count-text", "text": "{{ready_text}}", "exact": "true", "save_as": "open_before"},
 				{"op": "open", "path": "{{path}}"},
-				{"op": "wait-for-text", "text": "{{ready_text}}", "exact": "true", "more_than": "{{open_before}}", "timeout": "15s"},
+				// GNOME may open the window behind whatever has focus.
+				{"op": "show-window", "title": "{{ready_text}}", "new_since": "open_before", "app": "{{app}}", "file": "{{path}}", "timeout": "20s"},
 				// GNOME doesn't give focus to a window opened from outside
 				// the shell, so click the new title (not, say, a desktop
 				// icon's label that was already showing).

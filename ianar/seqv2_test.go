@@ -544,6 +544,136 @@ func TestRunDesktopTextFile(t *testing.T) {
 	}
 }
 
+// stubTextFileRun sets up a desktop-text-file run with a saving keyboard,
+// returning it and the document's path.
+func stubTextFileRun(t *testing.T) (*savingKeyboard, string) {
+	t.Helper()
+	stubSequence(t)
+	desk := t.TempDir()
+	origDesk := desktopDir
+	t.Cleanup(func() { desktopDir = origDesk })
+	desktopDir = func() string { return desk }
+	file := filepath.Join(desk, "ianar-hello-world.txt")
+	kb := &savingKeyboard{fakeKeyboard: fakeKeyboard{failAt: -1}, file: file}
+	openCompositorKeyboard = func() (keyboard, func(), error) { return kb, func() {}, nil }
+	stubOpen(t)
+	return kb, file
+}
+
+func stubDefaultApp(t *testing.T, app string) *[]string {
+	t.Helper()
+	orig := defaultAppFor
+	t.Cleanup(func() { defaultAppFor = orig })
+	var asked []string
+	defaultAppFor = func(p string) (string, error) {
+		asked = append(asked, p)
+		return app, nil
+	}
+	return &asked
+}
+
+func pressed(kb *savingKeyboard, key string) bool {
+	for _, c := range kb.calls {
+		if c == key {
+			return true
+		}
+	}
+	return false
+}
+
+// The editor opens behind a maximized window (Revision J's debug run): its
+// "is ready" notification, found in the notification list, brings it up.
+func TestRunDesktopTextFileRaisesTheEditorFromItsNotification(t *testing.T) {
+	kb, _ := stubTextFileRun(t)
+	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
+	stubDefaultApp(t, "org.gnome.TextEditor")
+	clicks := stubClicks(t)
+	ready := OCRLine{Text: "“ianar-hello-world.txt” is ready", X: 600, Y: 100, W: 200, H: 12}
+	stubScreenLines(t, func(int) []OCRLine {
+		// IANAR's definer may be showing the op's own description.
+		lines := []OCRLine{{Text: `GNOME's "is ready" notification, then the app's dock icon`, X: 900, Y: 600, W: 300, H: 12}}
+		for _, c := range *clicks {
+			if c.at == ready.center() {
+				return append(lines, OCRLine{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12})
+			}
+		}
+		if pressed(kb, "super+v") {
+			lines = append(lines, ready)
+		}
+		return lines
+	})
+	res := runV2(t, "desktop-text-file", nil)
+	if !res.Success {
+		t.Fatalf("run failed: %s", res.Error)
+	}
+	want := []string{"escape", "super+v", "type hello world", "ctrl+s", "ctrl+w"}
+	if !reflect.DeepEqual(kb.calls, want) {
+		t.Errorf("keys = %q, want %q", kb.calls, want)
+	}
+	if c := *clicks; len(c) != 2 || c[0].at != ready.center() || c[1].at != image.Pt(460, 16) {
+		t.Errorf("clicks = %+v, want the notification at %v, then the title at (460, 16)", c, ready.center())
+	}
+	if d := res.Steps[2].Message; !strings.Contains(d, "clicked the notification") {
+		t.Errorf("step 3 says %q, want it to mention the notification", d)
+	}
+}
+
+// With no notification to click, the default app's dock icon brings its
+// window up.
+func TestRunDesktopTextFileRaisesTheEditorFromItsDockIcon(t *testing.T) {
+	kb, file := stubTextFileRun(t)
+	icon := testIcon()
+	stubIconApp(t, icon) // installs it as "firefox"
+	asked := stubDefaultApp(t, "firefox")
+	stubCapture(t, screenWithIcon(icon, image.Pt(10, 300), 48))
+	clicks := stubClicks(t)
+	stubScreenLines(t, func(int) []OCRLine {
+		if len(*clicks) > 0 {
+			return []OCRLine{{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12}}
+		}
+		return nil
+	})
+	res := runV2(t, "desktop-text-file", nil)
+	if !res.Success {
+		t.Fatalf("run failed: %s", res.Error)
+	}
+	want := []string{"escape", "super+v", "escape", "type hello world", "ctrl+s", "ctrl+w"}
+	if !reflect.DeepEqual(kb.calls, want) {
+		t.Errorf("keys = %q, want %q", kb.calls, want)
+	}
+	if !reflect.DeepEqual(*asked, []string{file}) {
+		t.Errorf("asked for the default app of %q, want %q", *asked, file)
+	}
+	if c := *clicks; len(c) != 2 || abs(c[0].at.X-34) > 3 || abs(c[0].at.Y-324) > 3 || c[1].at != image.Pt(460, 16) {
+		t.Errorf("clicks = %+v, want the dock icon near (34, 324), then the title at (460, 16)", c)
+	}
+}
+
+func TestRunDesktopTextFileReportsAWindowThatNeverShows(t *testing.T) {
+	stubTextFileRun(t)
+	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
+	stubDefaultApp(t, "")
+	stubClicks(t)
+	stubScreenLines(t, func(int) []OCRLine { return nil })
+	res := runV2(t, "desktop-text-file", nil)
+	if res.Success || res.FailedStep != 2 || !strings.Contains(res.Error, "stayed out of sight") ||
+		!strings.Contains(res.Error, "no \"is ready\" notification") {
+		t.Errorf("result = %+v", res)
+	}
+}
+
+func TestAfterColon(t *testing.T) {
+	if got := afterColon("display name: x\n  standard::content-type: text/plain\n", "standard::content-type:"); got != "text/plain" {
+		t.Errorf("content type = %q", got)
+	}
+	if got := afterColon("Default application for “text/plain”: org.gnome.TextEditor.desktop\nRegistered applications:\n", "Default application for"); got != "org.gnome.TextEditor.desktop" {
+		t.Errorf("default app = %q", got)
+	}
+	if got := afterColon("nothing here\n", "Default application for"); got != "" {
+		t.Errorf("got %q from no match", got)
+	}
+}
+
 func TestRunStopsAtAFileCheck(t *testing.T) {
 	stubSequence(t)
 	desk := t.TempDir()

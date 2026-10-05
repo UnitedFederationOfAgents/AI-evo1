@@ -301,12 +301,16 @@ To support this I added an `open` step, a "count only exact matches" option on `
 
 Reading screenshots at 2x on two monitors will make each look at the screen slower. The title click assumes the editor shows just the file name, as GNOME Text Editor does. An editor like gedit, whose title adds more text, won't match.
 
+## Resource 6 -- Debug Sequences 3
 
-## <REPLACE-Revision|Retry> J
+One failure remains
 
-<REPLACE-PROMPT>
+- [ianar-sequence-desktop-text-file-2026-10-05T20-28-54.zip](17677896_ianar-sequence-desktop-text-file-2026-10-05T20-28-54.zip)
 
+## Revision J
 
-## Human-Prompt
+We now have two of the three sequences working.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The desktop text file sequence remains at-issue.
+
+Let's use the context from 'Debug Sequences 3' to fix that now.

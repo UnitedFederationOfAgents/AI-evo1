@@ -272,12 +272,17 @@ Your saved library in `~/.config/ianar/sequence-v2.yaml` still has the old versi
 
 I updated the existing tests in `vision_test.go` and `seqv2_test.go`, and added `TestClickAtAcrossMonitors`. It mimics GNOME's edge behaviour on two side-by-side monitors and checks that clicks starting from the right monitor land on the right spot on both. The other changes are in `ianar/pointer.go` and `ianar/seqv2_examples.go`.
 
+## Resource 5 -- Debug Sequences 2
 
-## <REPLACE-Revision|Retry> I
+Improved but not fixed
 
-<REPLACE-PROMPT>
+- [ianar-sequence-desktop-text-file-2026-10-05T20-05-45.zip](cdc6a0c2_ianar-sequence-desktop-text-file-2026-10-05T20-05-45.zip)
+- [ianar-sequence-firefox-weather-2026-10-05T20-04-27.zip](acc4ba56_ianar-sequence-firefox-weather-2026-10-05T20-04-27.zip)
 
+## Revision I
 
-## Human-Prompt
+Our last iteration improved things but did not fix everything.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's view 'Debug Sequences 2' resource for context and attempt the remainder of the fixes.
+
+Let's fix these now.

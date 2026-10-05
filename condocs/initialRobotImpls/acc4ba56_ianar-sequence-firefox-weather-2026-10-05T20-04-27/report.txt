@@ -1,0 +1,27 @@
+IANAR sequence run: Firefox: temperature in a country (firefox-weather)
+result: FAILED after 15.0s: step 1 (Open a new private Firefox window from its icon): instruction 4 (click-text): no line on screen reads "New Private Window" (read 54 lines of text)
+keyboard via: compositor (org.gnome.Mutter.RemoteDesktop)
+recording: via compositor (org.gnome.Shell.Screencast), 17.5s -- recording/recording.webm
+
+steps:
+
+1. [error] Open a new private Firefox window from its icon (15.0s)
+     - check the screen is unlocked, and wake it if it has blanked
+     - press escape
+     - right-click firefox's icon on screen (waiting up to 5s for it)
+     - left-click the line on screen reading "New Private Window" (waiting up to 5s for it)
+     - wait 1500ms
+     - wait up to 15s for more than 0 line(s) on screen containing "Private"
+   instruction 4 (click-text): no line on screen reads "New Private Window" (read 54 lines of text)
+   saw: step-1.jpg
+
+2. [skipped] Go to the weather page for Portugal
+     - press ctrl+l
+     - type "https://wttr.in/Portugal?format=%l:+%t&m"
+     - press enter
+
+3. [skipped] Zoom in so the page reads clearly
+     - press ctrl+= ctrl+= ctrl+=
+
+4. [skipped] Print the temperature in Portugal
+     - read /([+-]?\d+(?:[.,]\d+)?\s*[°º˚*o]?\s*[CF])\b/ off the line on screen containing "Portugal" as {{temperature}}, waiting up to 20s

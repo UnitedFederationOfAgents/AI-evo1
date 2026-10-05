@@ -182,11 +182,8 @@ Likely cause: from the code, a remote trigger differs from a local one only in t
 New tests are in `ianar/screenstate_test.go` and `ianar/sequence_test.go`, but I couldn't run them or `gofmt`, so it needs a `make build` / `make test` on the host. If you approve `unzip` (or extract the zip for me), I can read `report.txt` and `step-1.jpg` to check the diagnosis. The video I can't view either way.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Let's improve the condoccer 'Add Resources' behaviour.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Now whenever a zip file is included in a resource it will also be extracted to a folder of the same name beside the file (minus the zip extension).

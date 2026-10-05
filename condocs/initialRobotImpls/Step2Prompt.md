@@ -365,3 +365,31 @@ New failure mode
 We will take one more shot at this fix with 'Debug Sequences 5' resource context, if that fails we will abandon this effort for now.
 
 Let's fix it correctly this time.
+
+
+prompt: [`612e1da`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/612e1dad214dabdb3aa6e7daa80c415d2623ccc6) → reply: [`f15dcfb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f15dcfb8934e934b09d205b5d469305aa1b9a295)
+
+## Reply L
+
+I rewrote the step that brings the text editor's window to the front. Nothing has been built or tested: `go test` and `gofmt` both needed approval here, so it still needs a `make build` / `make test` on the host. Your saved library doesn't need **Restore examples** this time, because the example sequence itself is unchanged. The new run can still fail; if it does, its report will say which of the three routes it tried.
+
+**Why it failed:** the editor did open (GNOME showed its "is ready" notification), but it never came to the front.
+- **Dock icon:** this route couldn't work. Text Editor's icon is an SVG, and IANAR can only match PNG icons on screen.
+- **Notification:** IANAR did click it, but only on its last look at the screen. Each look reads both monitors' text at 2x, which is slow: the step ran 50s against a 20s limit. The time limit then ended the step without looking again, so the click may well have worked.
+
+**The fix:**
+- **New first route:** IANAR presses Super, types the app's name ("Text Editor", read from its `.desktop` file), then Enter. This uses keys only, with no text reading or icon matching. Starting the app from GNOME's own search should bring its open window forward even though GNOME blocks focus requests from other programs.
+- **Always looks again:** after each attempt to bring the window forward, including a notification click, IANAR now takes at least one more look at the screen, even if the time limit has passed.
+- **Notification list:** it now waits longer for the list to open, and is always closed afterwards.
+
+The changes are in `ianar/seqv2_ops.go` and `ianar/icon.go`. In `seqv2_test.go` I added tests for the search route and for a notification clicked after the time limit, and updated the existing tests for the new order.
+
+
+## <REPLACE-Revision|Retry> M
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

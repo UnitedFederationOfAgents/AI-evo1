@@ -113,6 +113,38 @@ func findDesktopFile(app string) (string, error) {
 
 // desktopIconName reads Icon= from a .desktop file's [Desktop Entry].
 func desktopIconName(path string) (string, error) {
+	icon, err := desktopEntryValue(path, "Icon")
+	if err != nil {
+		return "", err
+	}
+	if icon == "" {
+		return "", fmt.Errorf("%s names no icon", path)
+	}
+	return icon, nil
+}
+
+// appDisplayName returns app's name as the desktop shows it (the
+// untranslated Name= of its .desktop file), e.g. "Text Editor" for
+// org.gnome.TextEditor. Overridable in tests.
+var appDisplayName = func(app string) (string, error) {
+	app = strings.TrimSuffix(strings.TrimSpace(app), ".desktop")
+	desktop, err := findDesktopFile(app)
+	if err != nil {
+		return "", err
+	}
+	name, err := desktopEntryValue(desktop, "Name")
+	if err != nil {
+		return "", err
+	}
+	if name == "" {
+		return "", fmt.Errorf("%s names no app name", desktop)
+	}
+	return name, nil
+}
+
+// desktopEntryValue reads key= from a .desktop file's [Desktop Entry]; ""
+// if it has none.
+func desktopEntryValue(path, key string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -126,11 +158,11 @@ func desktopIconName(path string) (string, error) {
 			inEntry = line == "[Desktop Entry]"
 			continue
 		}
-		if v, ok := strings.CutPrefix(line, "Icon="); ok && inEntry {
+		if v, ok := strings.CutPrefix(line, key+"="); ok && inEntry {
 			return strings.TrimSpace(v), nil
 		}
 	}
-	return "", fmt.Errorf("%s names no icon", path)
+	return "", sc.Err()
 }
 
 // themeIconFile finds the largest PNG for icon name in the hicolor theme

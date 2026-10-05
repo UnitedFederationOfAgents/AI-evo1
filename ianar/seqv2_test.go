@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -671,6 +672,19 @@ func stubDefaultApp(t *testing.T, app string) *[]string {
 	return &asked
 }
 
+// stubAppName makes appDisplayName return name, or fail if name is "".
+func stubAppName(t *testing.T, name string) {
+	t.Helper()
+	orig := appDisplayName
+	t.Cleanup(func() { appDisplayName = orig })
+	appDisplayName = func(app string) (string, error) {
+		if name == "" {
+			return "", errors.New("no .desktop file for " + app)
+		}
+		return name, nil
+	}
+}
+
 func pressed(kb *savingKeyboard, key string) bool {
 	for _, c := range kb.calls {
 		if c == key {
@@ -680,12 +694,43 @@ func pressed(kb *savingKeyboard, key string) bool {
 	return false
 }
 
-// The editor opens behind a maximized window (Revision J's debug run): its
-// "is ready" notification, found in the notification list, brings it up.
+// The editor opens out of sight (Revision J's and K's debug runs): the
+// Activities search for its app brings it up, keys only.
+func TestRunDesktopTextFileRaisesTheEditorFromTheActivitiesSearch(t *testing.T) {
+	kb, _ := stubTextFileRun(t)
+	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
+	stubDefaultApp(t, "org.gnome.TextEditor")
+	stubAppName(t, "Text Editor")
+	clicks := stubClicks(t)
+	stubScreenLines(t, func(int) []OCRLine {
+		if pressed(kb, "enter") {
+			return []OCRLine{{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12}}
+		}
+		return nil
+	})
+	res := runV2(t, "desktop-text-file", nil)
+	if !res.Success {
+		t.Fatalf("run failed: %s", res.Error)
+	}
+	want := []string{"escape", "super", "type Text Editor", "enter", "type hello world", "ctrl+s", "ctrl+w"}
+	if !reflect.DeepEqual(kb.calls, want) {
+		t.Errorf("keys = %q, want %q", kb.calls, want)
+	}
+	if c := *clicks; len(c) != 1 || c[0].at != image.Pt(460, 16) {
+		t.Errorf("clicks = %+v, want just the title at (460, 16)", c)
+	}
+	if d := res.Steps[2].Message; !strings.Contains(d, "Activities search") {
+		t.Errorf("step 3 says %q, want it to mention the Activities search", d)
+	}
+}
+
+// Its "is ready" notification, found in the notification list, brings it
+// up when there's no app to search for.
 func TestRunDesktopTextFileRaisesTheEditorFromItsNotification(t *testing.T) {
 	kb, _ := stubTextFileRun(t)
 	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
 	stubDefaultApp(t, "org.gnome.TextEditor")
+	stubAppName(t, "")
 	clicks := stubClicks(t)
 	ready := OCRLine{Text: "“ianar-hello-world.txt” is ready", X: 600, Y: 100, W: 200, H: 12}
 	stubScreenLines(t, func(int) []OCRLine {
@@ -717,6 +762,37 @@ func TestRunDesktopTextFileRaisesTheEditorFromItsNotification(t *testing.T) {
 	}
 }
 
+// Revision K's debug run: the notification is clicked on the last look,
+// after slow looks used up the timeout. The window it brings up is still
+// looked for.
+func TestRunDesktopTextFileLooksAgainAfterALateNotificationClick(t *testing.T) {
+	kb, _ := stubTextFileRun(t)
+	stubCapture(t, image.NewRGBA(image.Rect(0, 0, 64, 48)))
+	stubDefaultApp(t, "")
+	clicks := stubClicks(t)
+	ready := OCRLine{Text: "“ianar-hello-world.txt (~/Desktop) Text Editor” is ready", X: 600, Y: 100, W: 200, H: 12}
+	stubScreenLines(t, func(int) []OCRLine {
+		for _, c := range *clicks {
+			if c.at == ready.center() {
+				return []OCRLine{{Text: "ianar-hello-world.txt", X: 400, Y: 10, W: 120, H: 12}}
+			}
+		}
+		if pressed(kb, "super+v") {
+			// Each look takes far longer than OCR at 1x would.
+			sleep(time.Minute)
+			return []OCRLine{ready}
+		}
+		return nil
+	})
+	res := runV2(t, "desktop-text-file", nil)
+	if !res.Success {
+		t.Fatalf("run failed: %s", res.Error)
+	}
+	if c := *clicks; len(c) != 2 || c[0].at != ready.center() {
+		t.Errorf("clicks = %+v, want the notification, then the title", c)
+	}
+}
+
 // With no notification to click, the default app's dock icon brings its
 // window up.
 func TestRunDesktopTextFileRaisesTheEditorFromItsDockIcon(t *testing.T) {
@@ -736,7 +812,8 @@ func TestRunDesktopTextFileRaisesTheEditorFromItsDockIcon(t *testing.T) {
 	if !res.Success {
 		t.Fatalf("run failed: %s", res.Error)
 	}
-	want := []string{"escape", "super+v", "escape", "type hello world", "ctrl+s", "ctrl+w"}
+	// Firefox's Activities search and the notification list come first.
+	want := []string{"escape", "super", "type Firefox", "enter", "escape", "escape", "super+v", "escape", "type hello world", "ctrl+s", "ctrl+w"}
 	if !reflect.DeepEqual(kb.calls, want) {
 		t.Errorf("keys = %q, want %q", kb.calls, want)
 	}

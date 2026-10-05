@@ -35,6 +35,13 @@ const (
 	shotThumbWidth     = 960                    // width of a saved screenshot's preview
 	fileExcerptLen     = 200                    // how much of a file an expect-file failure quotes
 	openTimeout        = 15 * time.Second       // for the command that opens a file in its app
+
+	// show-window's pauses while bringing a window forward.
+	overviewSettle = time.Second            // for the Activities overview to open, after Super
+	searchSettle   = 1500 * time.Millisecond // for the Activities search to list the app
+	listSettle     = time.Second            // for the notification list to open, after Super+V
+	raiseWait      = 4 * time.Second        // to look for the window after each attempt
+	raiseRecheck   = 3 * time.Second        // to look after an attempt, even past the timeout
 )
 
 // opArg documents one argument of an op.
@@ -600,12 +607,12 @@ var seqOps = []opSpec{
 	},
 	{
 		Op:       "show-window",
-		Summary:  "Wait for a window titled title to show; if it doesn't come forward, bring it up -- through GNOME's \"is ready\" notification, then the app's dock icon.",
+		Summary:  "Wait for a window titled title to show; if it doesn't come forward, bring it up -- through the Activities search for its app, then GNOME's \"is ready\" notification, then the app's dock icon.",
 		Describe: `wait for a new line reading "{title}" on screen, bringing its window forward if it opened out of sight (up to {timeout})`,
 		Args: []opArg{
 			{Name: "title", Help: "the window's title, exactly", Required: true},
 			{Name: "new_since", Help: "a count-text's save_as name: only a line that wasn't among those it counted shows the window"},
-			{Name: "app", Help: "the app, as named in its .desktop file, whose dock icon to click (default: file's default app)"},
+			{Name: "app", Help: "the app, as named in its .desktop file, to search Activities for and whose dock icon to click (default: file's default app)"},
 			{Name: "file", Help: "the file the window shows, to find its default app"},
 			{Name: "wait", Help: "how long to wait before bringing it forward", Default: "4s"},
 			{Name: "timeout", Help: "how long to keep trying in all", Default: "20s"},
@@ -788,6 +795,16 @@ const readyText = "is ready"
 // maximized Firefox window covering the desktop -- with only an "is ready"
 // notification. Clicking that notification, or the app's dock icon,
 // activates the window as the user would.
+//
+// In Revision K's debug run (Step2Prompt.md, Revision L) neither worked:
+// the dock icon is an SVG, which click-icon can't match, and the
+// notification was clicked on the very last look -- after which the
+// timeout, long since spent on 2x OCR of two monitors, ended the step
+// without looking again. So the Activities search now comes first: Super,
+// the app's name, Enter has GNOME Shell itself activate the running app's
+// window, which focus-stealing prevention doesn't stop, and needs neither
+// OCR nor an icon. And every attempt now gets a fresh look at the screen
+// (raiseRecheck) however much of the timeout is left.
 func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 	wait, err := a.dur("wait")
 	if err != nil {
@@ -810,14 +827,17 @@ func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 	}
 	deadline := clock().Add(timeout)
 	var tried []string
-	// await polls for the title until d passes (or the overall timeout),
-	// clicking a ready notification if one shows meanwhile.
-	await := func(d time.Duration) (*screenReading, bool, error) {
+	// await polls for the title until d passes (or the overall timeout,
+	// but for at least floor), clicking a ready notification if one shows
+	// meanwhile -- and looking again after the click, even past the timeout.
+	await := func(d, floor time.Duration) (*screenReading, bool, error) {
 		if left := deadline.Sub(clock()); d > left {
 			d = left
 		}
-		clicked := false
-		return pollScreen(d, func(sr *screenReading) bool {
+		d = max(d, floor)
+		clicked, unseen := false, false
+		sr, ok, err := pollScreen(d, func(sr *screenReading) bool {
+			unseen = false
 			if len(shown(sr)) > 0 {
 				return true
 			}
@@ -827,7 +847,7 @@ func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 				if n := textMatches(sr.lines, readyText, "notification", false); len(n) > 0 {
 					at := n[0].center()
 					if via, err := clickPoint(at.X, at.Y, sr.img.Bounds().Dx(), "left", false); err == nil {
-						clicked = true
+						clicked, unseen = true, true
 						tried = append(tried, fmt.Sprintf("clicked the notification %q via %s", n[0].Text, via))
 						sleep(focusSettle)
 					}
@@ -835,6 +855,10 @@ func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 			}
 			return false
 		})
+		if err == nil && !ok && unseen {
+			return pollScreen(raiseRecheck, func(sr *screenReading) bool { return len(shown(sr)) > 0 })
+		}
+		return sr, ok, err
 	}
 	done := func(sr *screenReading) (string, error) {
 		hits := shown(sr)
@@ -846,36 +870,24 @@ func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 		return desc, nil
 	}
 
-	sr, ok, err := await(wait)
+	sr, ok, err := await(wait, 0)
 	if err != nil {
 		return "", err
 	}
 	if ok {
 		return done(sr)
 	}
-
-	// The banner may have come and gone: look for it in the notification
-	// list (Super+V).
-	if err := env.kb.tap("v", "super"); err != nil {
-		return "", err
-	}
-	sleep(stepSettle)
-	before := len(tried)
-	if sr, ok, err = await(2 * time.Second); err != nil {
-		return "", err
-	}
-	if ok {
-		return done(sr)
-	}
-	if len(tried) == before {
-		tried = append(tried, "found no \"is ready\" notification in the notification list")
-		if err := env.kb.tap("escape"); err != nil {
-			return "", err
+	// tap presses each key chord in turn, pausing after each.
+	tap := func(chords ...[]string) error {
+		for _, c := range chords {
+			if err := env.kb.tap(c[0], c[1:]...); err != nil {
+				return err
+			}
+			sleep(stepSettle)
 		}
-		sleep(stepSettle)
+		return nil
 	}
 
-	// Then the app's dock icon, which activates its window.
 	app := strings.TrimSpace(a["app"])
 	if app == "" && strings.TrimSpace(a["file"]) != "" {
 		p, err := a.path("file")
@@ -886,6 +898,62 @@ func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 			tried = append(tried, "couldn't find the file's default app: "+err.Error())
 		}
 	}
+
+	// First the Activities search: GNOME Shell activates the app's open
+	// window itself.
+	if app != "" {
+		name, err := appDisplayName(app)
+		if err != nil {
+			tried = append(tried, "Activities search: "+err.Error())
+		} else {
+			if err := tap([]string{"super"}); err != nil {
+				return "", err
+			}
+			sleep(overviewSettle)
+			if err := env.kb.typeText(name); err != nil {
+				return "", err
+			}
+			sleep(searchSettle)
+			if err := tap([]string{"enter"}); err != nil {
+				return "", err
+			}
+			sleep(focusSettle)
+			tried = append(tried, fmt.Sprintf("activated %q (%s) from the Activities search", name, app))
+			if sr, ok, err = await(raiseWait, raiseRecheck); err != nil {
+				return "", err
+			}
+			if ok {
+				return done(sr)
+			}
+			// Clear the search and leave the overview, if it's still up.
+			if err := tap([]string{"escape"}, []string{"escape"}); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	// Then the "is ready" notification: the banner may have come and gone,
+	// so look for it in the notification list (Super+V).
+	if err := tap([]string{"v", "super"}); err != nil {
+		return "", err
+	}
+	sleep(listSettle)
+	before := len(tried)
+	if sr, ok, err = await(raiseWait, raiseRecheck); err != nil {
+		return "", err
+	}
+	if ok {
+		return done(sr)
+	}
+	if len(tried) == before {
+		tried = append(tried, "found no \"is ready\" notification in the notification list")
+	}
+	// Close the list, if it's still open.
+	if err := tap([]string{"escape"}); err != nil {
+		return "", err
+	}
+
+	// Last, the app's dock icon, which activates its window.
 	if app != "" {
 		desc, err := runClickIcon(env, opArgs{"app": app, "button": "left", "double": "false", "timeout": "2s"})
 		if err != nil {
@@ -894,7 +962,7 @@ func runShowWindow(env *seqEnv, a opArgs) (string, error) {
 			tried = append(tried, desc)
 		}
 	}
-	if sr, ok, err = await(deadline.Sub(clock())); err != nil {
+	if sr, ok, err = await(deadline.Sub(clock()), raiseRecheck); err != nil {
 		return "", err
 	}
 	if ok {

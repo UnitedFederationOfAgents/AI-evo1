@@ -385,11 +385,8 @@ I rewrote the step that brings the text editor's window to the front. Nothing ha
 The changes are in `ianar/seqv2_ops.go` and `ianar/icon.go`. In `seqv2_test.go` I added tests for the search route and for a notification clicked after the time limit, and updated the existing tests for the new order.
 
 
-## <REPLACE-Revision|Retry> M
+## Revision M
 
-<REPLACE-PROMPT>
+Let's remove this sequence for now, as well as the sequence-v1 tab and associated logic.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We'll revisit this later.

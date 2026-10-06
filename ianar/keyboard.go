@@ -9,7 +9,7 @@ import (
 	"github.com/go-vgo/robotgo"
 )
 
-// This file is IANAR's native keyboard input, used by the sequence-v1 tab's
+// This file is IANAR's native keyboard input, used by sequence runs'
 // key presses and typing (see sequence.go). Like circle-mouse's pointer
 // input (robot.go), the compositor is tried first -- on a Wayland session
 // robotgo's XTest key events only reach XWayland clients, not a native

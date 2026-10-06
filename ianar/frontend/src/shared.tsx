@@ -10,7 +10,7 @@ import type {
   SequenceResultMsg,
 } from './types'
 
-// Pieces shared by the simple, sequence-v1 and sequence-v2 tabs (App.tsx,
+// Pieces shared by the simple and sequence-v2 tabs (App.tsx,
 // SequenceV2.tsx): result previews, Save to file, and run state.
 
 export type SaveStatus = { kind: 'saving' | 'success' | 'error'; message?: string }

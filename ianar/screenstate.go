@@ -8,7 +8,7 @@ import (
 )
 
 // This file makes sure the desktop is awake and unlocked before the
-// sequence-v1 runner acts on it (condocs/initialRobotImpls/Step2Prompt.md,
+// sequence runner acts on it (condocs/initialRobotImpls/Step2Prompt.md,
 // Revision E). A run started from another node's browser finds the target
 // host as its user left it -- typically idle, so GNOME has blanked the screen
 // and, by default, locked it. Synthetic input then goes to the screen shield

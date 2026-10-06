@@ -24,7 +24,7 @@ import (
 
 // This file is IANAR's visual inspection (condocs/initialRobotImpls/
 // Step2Prompt.md, Revision C): read the text on screen, and where it is,
-// from a native screen capture. The sequence-v1 tab uses it to find
+// from a native screen capture. Sequence-v2's focus-window op uses it to find
 // federation-command's window by its title bar (see window.go's
 // focusViaVision), and the simple tab's "Inspect Screen" exposes it
 // directly ("inspect-screen" -> "inspect-result") so what IANAR sees can be

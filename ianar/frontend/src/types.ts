@@ -77,12 +77,6 @@ export interface SequenceDef {
   steps: SequenceStepDef[]
 }
 
-// SequenceDefsMsg is the "sequence-defs" payload listing the sequences this
-// instance can run -- sent once when the WebSocket connects.
-export interface SequenceDefsMsg {
-  sequences: SequenceDef[]
-}
-
 // SequenceOutput is a value a run printed (sequence-v2's print and read-text
 // ops).
 export interface SequenceOutput {
@@ -90,8 +84,7 @@ export interface SequenceOutput {
   value: string
 }
 
-// SequenceProgressMsg is the "sequence-progress" (v1) / "seq2-progress" (v2)
-// payload reporting one step starting or finishing.
+// SequenceProgressMsg is the "seq2-progress" payload reporting one step starting or finishing.
 export interface SequenceProgressMsg {
   sequence_id: string
   step: number
@@ -108,7 +101,7 @@ export interface SequenceStepResult {
   image_url?: string // what the step saw, if it looked at the screen
 }
 
-// SequenceResultMsg is the "sequence-result" payload reporting a finished
+// SequenceResultMsg is the "seq2-result" payload reporting a finished
 // run, with its recording. success is the run's own outcome; the recording
 // reports its own success separately.
 export interface SequenceResultMsg {
@@ -257,9 +250,6 @@ export type ServerMsg =
   | { type: 'capture-result'; payload: CaptureResultMsg }
   | { type: 'circle-mouse-result'; payload: CircleMouseResultMsg }
   | { type: 'clip-result'; payload: ClipResultMsg }
-  | { type: 'sequence-defs'; payload: SequenceDefsMsg }
-  | { type: 'sequence-progress'; payload: SequenceProgressMsg }
-  | { type: 'sequence-result'; payload: SequenceResultMsg }
   | { type: 'inspect-result'; payload: InspectResultMsg }
   | { type: 'save-result'; payload: SaveResultMsg }
   | { type: 'seq2-library'; payload: SeqLibraryMsg }

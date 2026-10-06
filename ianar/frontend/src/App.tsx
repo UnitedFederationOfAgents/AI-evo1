@@ -12,13 +12,11 @@ import type {
   Seq2ReplyMsg,
   Seq2StartedMsg,
   SeqLibraryMsg,
-  SequenceDef,
-  SequenceDefsMsg,
   SequenceProgressMsg,
   SequenceResultMsg,
 } from './types'
-import { clipPreview, PreviewView, SaveToFile, STEP_ICONS } from './shared'
-import type { Preview, SaveStatus, SeqRun, StepStatus } from './shared'
+import { clipPreview, PreviewView, SaveToFile } from './shared'
+import type { Preview, SaveStatus, SeqRun } from './shared'
 import { SequenceV2Panel } from './SequenceV2'
 
 // ---- WebSocket hook ----
@@ -27,8 +25,8 @@ import { SequenceV2Panel } from './SequenceV2'
 // version-mismatch reload check shared by every sub-app in this repo, plus
 // IANAR's own capture-native/capture-browser/circle-mouse/clip-native/
 // inspect-screen channels (see condocs/InitialRobot.md, robot.go, clip.go and
-// vision.go), the sequence-v1 runner (sequence.go), the sequence-v2
-// library and runner (seqv2.go, SequenceV2.tsx), and saving any of their
+// vision.go), the sequence-v2 library and runner (seqv2.go, sequence.go,
+// SequenceV2.tsx), and saving any of their
 // results into local-representative's files area (artifacts.go).
 
 type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
@@ -73,8 +71,6 @@ function useRobotWS() {
   const [circleStatus, setCircleStatus] = useState<CircleStatus>({ kind: 'idle' })
   const [clipStatus, setClipStatus] = useState<ClipStatus>({ kind: 'idle' })
   const [inspectStatus, setInspectStatus] = useState<InspectStatus>({ kind: 'idle' })
-  const [sequences, setSequences] = useState<SequenceDef[]>([])
-  const [seqRun, setSeqRun] = useState<SeqRun | null>(null)
   const [saves, setSaves] = useState<Record<string, SaveStatus>>({})
   const [seqLib, setSeqLib] = useState<SeqLibraryMsg | null>(null)
   const [seq2Replies, setSeq2Replies] = useState<Record<string, Seq2ReplyMsg>>({})
@@ -130,7 +126,6 @@ function useRobotWS() {
         setConnected(false)
         // A run in flight reports to the connection that started it, so its
         // result is lost with that connection.
-        setSeqRun((run) => (run?.running ? { ...run, running: false, lostConnection: true } : run))
         setSeq2Run((run) => (run?.running ? { ...run, running: false, lostConnection: true } : run))
         setTimeout(connect, 2000)
       }
@@ -185,31 +180,6 @@ function useRobotWS() {
             } else {
               setClipStatus({ kind: 'error', message: p.error ?? 'native clip failed' })
             }
-          } else if (msg.type === 'sequence-defs') {
-            const p = msg.payload as SequenceDefsMsg
-            setSequences(p.sequences ?? [])
-          } else if (msg.type === 'sequence-progress') {
-            const p = msg.payload as SequenceProgressMsg
-            setSeqRun((run) => {
-              if (!run || run.sequenceId !== p.sequence_id) return run
-              const steps = run.steps.slice()
-              steps[p.step] = { ...steps[p.step], status: p.status, message: p.message, imageUrl: p.image_url }
-              return { ...run, steps }
-            })
-          } else if (msg.type === 'sequence-result') {
-            const p = msg.payload as SequenceResultMsg
-            setSeqRun({
-              sequenceId: p.sequence_id,
-              running: false,
-              steps: (p.steps ?? []).map((s) => ({
-                status: s.status,
-                message: s.message,
-                durationMs: s.duration_ms,
-                imageUrl: s.image_url,
-              })),
-              result: p,
-              recording: p.recording ? clipPreview(p.recording) : null,
-            })
           } else if (msg.type === 'inspect-result') {
             const p = msg.payload as InspectResultMsg
             if (p.success) {
@@ -284,13 +254,7 @@ function useRobotWS() {
     return () => URL.revokeObjectURL(url)
   }, [preview])
 
-  // Likewise for the last sequence runs' recordings.
-  const seqRecording = seqRun?.recording
-  useEffect(() => {
-    if (seqRecording?.kind !== 'video') return
-    const url = seqRecording.url
-    return () => URL.revokeObjectURL(url)
-  }, [seqRecording])
+  // Likewise for the last sequence run's recording.
   const seq2Recording = seq2Run?.recording
   useEffect(() => {
     if (seq2Recording?.kind !== 'video') return
@@ -366,18 +330,6 @@ function useRobotWS() {
     [send],
   )
 
-  const runSequence = useCallback(
-    (seq: SequenceDef) => {
-      setSeqRun({
-        sequenceId: seq.id,
-        running: true,
-        steps: seq.steps.map(() => ({ status: 'pending' as const })),
-      })
-      send('run-sequence', { id: seq.id })
-    },
-    [send],
-  )
-
   // seq2Request sends a sequence-v2 library request ("seq2-save-action",
   // "seq2-import", ...) and returns its req id; the "seq2-reply" answering
   // it lands in seq2Replies under that id.
@@ -431,9 +383,6 @@ function useRobotWS() {
     circleMouse,
     clipNative,
     inspectScreen,
-    sequences,
-    seqRun,
-    runSequence,
     saves,
     saveArtifact,
     seqLib,
@@ -637,119 +586,8 @@ function RobotPanel({
   )
 }
 
-// ---- sequence-v1 tab: run a sequence of high-level actions, recorded ----
-
-interface SequencePanelProps {
-  connected: boolean
-  reprStatus: ReprStatus
-  saves: Record<string, SaveStatus>
-  onSave: (id: string) => void
-  sequences: SequenceDef[]
-  run: SeqRun | null
-  onRun: (seq: SequenceDef) => void
-}
-
-function SequencePanel({ connected, reprStatus, saves, onSave, sequences, run, onRun }: SequencePanelProps) {
-  const [selectedId, setSelectedId] = useState('')
-  const seq = sequences.find((s) => s.id === selectedId) ?? sequences[0]
-
-  if (!seq) {
-    return (
-      <div className="robot-panel">
-        <div className="empty-state">{connected ? 'No sequences defined.' : 'Connecting…'}</div>
-      </div>
-    )
-  }
-
-  const thisRun = run?.sequenceId === seq.id ? run : null
-  const running = !!run?.running
-  const result = thisRun?.result
-  const rec = result?.recording
-
-  return (
-    <div className="robot-panel">
-      <div className="seq-header">
-        {sequences.length > 1 ? (
-          <select className="seq-select" value={seq.id} disabled={running} onChange={(e) => setSelectedId(e.target.value)}>
-            {sequences.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span className="seq-name">{seq.name}</span>
-        )}
-        <button className="btn-secondary seq-run" disabled={!connected || running} onClick={() => onRun(seq)}>
-          {running ? 'Running…' : 'Run sequence'}
-        </button>
-      </div>
-      <ol className="seq-steps">
-        {seq.steps.map((st, i) => {
-          const s = thisRun?.steps[i]
-          const status: StepStatus = s?.status ?? 'pending'
-          return (
-            <li key={i} className={`seq-step seq-step-${status}`}>
-              <span className="seq-step-icon">{STEP_ICONS[status]}</span>
-              <div className="seq-step-body">
-                <div className="seq-step-label">
-                  {i + 1}. {st.label}
-                </div>
-                <ul className="seq-step-detail">
-                  {st.detail.map((d, j) => (
-                    <li key={j}>{d}</li>
-                  ))}
-                </ul>
-                {s?.message && <div className="seq-step-message">{s.message}</div>}
-                {s?.imageUrl && (
-                  <a href={s.imageUrl} target="_blank" rel="noreferrer">
-                    <img className="seq-step-shot" src={s.imageUrl} alt={`what step ${i + 1} saw`} />
-                  </a>
-                )}
-              </div>
-              {s?.durationMs !== undefined && status !== 'skipped' && (
-                <span className="seq-step-time">{(s.durationMs / 1000).toFixed(1)}s</span>
-              )}
-            </li>
-          )
-        })}
-      </ol>
-      {running && <div className="robot-status">Running and recording the sequence…</div>}
-      {thisRun?.lostConnection && (
-        <div className="robot-status robot-status-error">
-          Lost the connection to IANAR mid-run, so this run's result and recording didn't arrive.
-        </div>
-      )}
-      {result && (
-        <div className={`seq-result ${result.success ? 'seq-result-success' : 'seq-result-error'}`}>
-          {result.success
-            ? `✓ Sequence succeeded in ${(result.duration_ms / 1000).toFixed(1)}s`
-            : `✗ Sequence failed: ${result.error ?? 'unknown error'}`}
-          {result.keyboard_via && <span className="seq-result-via"> · keyboard via {result.keyboard_via}</span>}
-        </div>
-      )}
-      {rec && (
-        <div className={`robot-status${rec.success ? '' : ' robot-status-error'}`}>
-          {rec.success ? `Recorded via ${rec.via}.` : `Recording failed: ${rec.error ?? 'unknown error'}`}
-        </div>
-      )}
-      {result?.artifact_id && (
-        <SaveToFile
-          artifactId={result.artifact_id}
-          label="Save run to file"
-          connected={connected}
-          reprStatus={reprStatus}
-          status={saves[result.artifact_id]}
-          onSave={onSave}
-        />
-      )}
-      <PreviewView preview={thisRun?.recording} placeholder="Run the sequence — its recording appears here." />
-    </div>
-  )
-}
-
-type Tab = 'simple' | 'sequence-v1' | 'sequence-v2'
-const TABS: Tab[] = ['simple', 'sequence-v1', 'sequence-v2']
+type Tab = 'simple' | 'sequence-v2'
+const TABS: Tab[] = ['simple', 'sequence-v2']
 
 export default function App() {
   const {
@@ -774,9 +612,6 @@ export default function App() {
     circleMouse,
     clipNative,
     inspectScreen,
-    sequences,
-    seqRun,
-    runSequence,
     saves,
     saveArtifact,
     seqLib,
@@ -836,17 +671,6 @@ export default function App() {
             onCircleMouse={circleMouse}
             onClipNative={clipNative}
             onInspectScreen={inspectScreen}
-          />
-        )}
-        {tab === 'sequence-v1' && (
-          <SequencePanel
-            connected={connected}
-            reprStatus={reprStatus}
-            saves={saves}
-            onSave={saveArtifact}
-            sequences={sequences}
-            run={seqRun}
-            onRun={runSequence}
           />
         )}
         {tab === 'sequence-v2' && (

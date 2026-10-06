@@ -267,7 +267,7 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 160px; /* the sequence-v1 tab's step list can otherwise squeeze it away */
+  min-height: 160px; /* the sequence-v2 runner's step list can otherwise squeeze it away */
   border: 1px solid #3c3c3c;
   border-radius: 4px;
   background: #111;
@@ -408,7 +408,7 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- Tabs (simple / sequence-v1) — styled like local-representative's ---- */
+/* ---- Tabs (simple / sequence-v2) — styled like local-representative's ---- */
 
 .tab-bar {
   display: flex;
@@ -437,7 +437,7 @@ button:disabled {
   border-bottom-color: #007acc;
 }
 
-/* ---- sequence-v1 tab ---- */
+/* ---- sequence step lists and run results (sequence-v2's runner) ---- */
 
 .seq-header {
   display: flex;
@@ -446,7 +446,6 @@ button:disabled {
   flex-shrink: 0;
 }
 
-.seq-name,
 .seq-select {
   flex: 1;
   min-width: 0;

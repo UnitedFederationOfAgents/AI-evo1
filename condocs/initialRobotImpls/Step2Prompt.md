@@ -404,3 +404,24 @@ You've hit your session limit · resets 12am (UTC)
 Let's remove the desktop file hello-world sequence for now, as well as the sequence-v1 tab and associated logic.
 
 We'll revisit this later.
+
+
+prompt: [`67d825a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/67d825a690428cac5d3c10d12c25291e3d995741) → reply: [`7697cfe`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7697cfe826a131cd4761d93499eb8fd25f1b3d99)
+
+## Reply N
+
+I finished removing the desktop text-file "hello world" sequence and the sequence-v1 tab, but nothing is built or tested: `go test` and `tsc` both needed approval here, so it needs a `make build` / `make test` on the host. Revision M had already done the backend before it hit the session limit: the sequence and its file actions are gone, along with the `run-sequence` / `sequence-defs` handling and the code only v1 used. Your saved library drops its copy of the sequence on startup unless you've edited it.
+
+What I removed this time is the sequence-v1 tab in the frontend, which was still showing. In `App.tsx` that's its panel, the tab entry and the state and message handling behind it, plus the matching message types in `types.ts`. The `seq-*` styles stay because sequence-v2's runner uses them; I only fixed comments that still mentioned v1 in `index.css`, `shared.tsx`, `keyboard.go`, `vision.go` and `screenstate.go`.
+
+The federation-command "hello world" and Firefox weather sequences are still available in sequence-v2.
+
+
+## <REPLACE-Revision|Retry> O
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

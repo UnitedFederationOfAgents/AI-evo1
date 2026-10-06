@@ -58,11 +58,8 @@ prompt: [`a2bfa2a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a
 I fixed both failure modes and added a screen recording of the robot's machine for the whole sequence; none of it is built or tested yet, because `go` needed approval here. The first failure came from the screen reader dropping the lone "-" in "This is the one - vh4uyx", which split the line in two so it never matched; it now also tries joining pieces of the same line that sit a few characters apart. For the second, a newly launched FC can no longer reuse the name of one still connected, and the sequence now stops with a clear error if the new FC didn't connect under its own name or the marker came back from a different FC. The recording runs from before the first step to after the last, even on failure, and saves a video to the files tab, with the robot's own runs leaving out their separate recordings. Each sequence chooses whether to record. New tests are in `ianar/vision_test.go`, `ianar/lrrecord_test.go`, `local-representative/control_test.go` and `fcinstances_test.go`, so this needs a `make build` / `make test` on the host.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add a few more minor features here:
+- Let's make the recordings available to play back in the same view where we see the sequence executing
+- Let's make the sequence begin by unlocking the screen if it is locked

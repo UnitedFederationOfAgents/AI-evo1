@@ -82,6 +82,17 @@ export interface ControlRunMsg {
   duration_ms?: number
   steps: ControlStepResult[]
   values?: { label: string; value: string }[]
+  recordings?: ControlRecording[]
+}
+
+// A screen recording a run saved into that host's files tab.
+export interface ControlRecording {
+  who: string // whose screen ("robot": that host's)
+  file_id: string // GET /host/<id>/api/files/<file_id>
+  name: string
+  video: boolean // playable in the browser, rather than a .zip of frames
+  duration_ms?: number
+  via?: string
 }
 
 export interface ControlStateMsg {

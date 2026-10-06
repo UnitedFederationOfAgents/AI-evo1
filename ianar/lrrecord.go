@@ -39,6 +39,7 @@ type RobotRecordMsg struct {
 	Via        string `json:"via,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	SavedAs    string `json:"saved_as,omitempty"`
+	SavedID    string `json:"saved_id,omitempty"` // its id in LR's files area, for playing it back
 	SaveError  string `json:"save_error,omitempty"`
 }
 
@@ -127,7 +128,7 @@ func (s *Server) stopLRRecording(req RobotRecordRequest) RobotRecordMsg {
 		if f, err := s.saveArtifact(id); err != nil {
 			out.SaveError = err.Error()
 		} else {
-			out.SavedAs = f.Name
+			out.SavedAs, out.SavedID = f.Name, f.ID
 		}
 	}
 	return out

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,13 @@ import (
 // step to after its last (Revision A): IANAR records on
 // "__robot:record-start" and saves the video into the files tab on
 // "__robot:record-stop" (ianar/lrrecord.go). Which sequences record, and
-// where, is the sequence's own choice (controlSequence.record).
+// where, is the sequence's own choice (controlSequence.record). A saved
+// video is listed on the run (ControlRunMsg.Recordings) so the control tab
+// can play it back beside the steps it shows (Revision B).
+//
+// Sequences begin by unlocking the robot's screen if it is locked (Revision
+// B), before the recording starts: keys sent to a locked screen go to its
+// password field, and there is nothing worth recording until it's unlocked.
 
 const (
 	controlLaunchTimeout = 45 * time.Second // a launched FC connecting in remote control
@@ -88,6 +95,17 @@ type ControlRunMsg struct {
 	DurationMs int64               `json:"duration_ms,omitempty"`
 	Steps      []ControlStepResult `json:"steps"`
 	Values     []ControlValue      `json:"values,omitempty"`
+	Recordings []ControlRecording  `json:"recordings,omitempty"`
+}
+
+// ControlRecording is a screen recording a run saved into the files tab.
+type ControlRecording struct {
+	Who        string `json:"who"`     // whose screen (see controlSequence.record)
+	FileID     string `json:"file_id"` // GET /api/files/<file_id>
+	Name       string `json:"name"`
+	Video      bool   `json:"video"` // a video the browser can play, rather than a .zip of frames
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Via        string `json:"via,omitempty"`
 }
 
 // ControlStateMsg is the payload of "control-state" messages, sent to
@@ -98,10 +116,12 @@ type ControlStateMsg struct {
 }
 
 // controlStep is one step of a control sequence and the code that does it.
-// run returns a short note on what happened.
+// run returns a short note on what happened. Steps marked beforeRecording
+// (leading ones only) run before the sequence's recording starts.
 type controlStep struct {
 	ControlStepInfo
-	run func(r *controlRun) (string, error)
+	run             func(r *controlRun) (string, error)
+	beforeRecording bool
 }
 
 type controlSequence struct {
@@ -174,6 +194,7 @@ func (e *controlEngine) state() ControlStateMsg {
 		cp := *e.run
 		cp.Steps = append([]ControlStepResult(nil), e.run.Steps...)
 		cp.Values = append([]ControlValue(nil), e.run.Values...)
+		cp.Recordings = append([]ControlRecording(nil), e.run.Recordings...)
 		msg.Run = &cp
 	}
 	e.mu.Unlock()
@@ -256,12 +277,16 @@ var errControlCancelled = errors.New("cancelled")
 func (e *controlEngine) execute(q controlSequence, r *controlRun) {
 	start := time.Now()
 	log.Printf("control: running %q", q.id)
-	for _, who := range q.record {
-		r.startRecording(q, who)
-	}
+	recording := false
 	failed := -1
 	var runErr error
 	for i, st := range q.steps {
+		if !recording && !st.beforeRecording {
+			recording = true
+			for _, who := range q.record {
+				r.startRecording(q, who)
+			}
+		}
 		r.step = i
 		e.updateStep(i, func(sr *ControlStepResult) { sr.Status = "running" })
 		t0 := time.Now()
@@ -441,6 +466,7 @@ type RobotRecordMsg struct {
 	Via        string `json:"via,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	SavedAs    string `json:"saved_as,omitempty"`
+	SavedID    string `json:"saved_id,omitempty"`
 	SaveError  string `json:"save_error,omitempty"`
 }
 
@@ -540,9 +566,39 @@ func (r *controlRun) stopRecording() {
 		r.e.setValue(recordingLabel, "failed: "+err.Error())
 	case res.SavedAs != "":
 		r.e.setValue(recordingLabel, fmt.Sprintf("%s (files tab; %s via %s)", res.SavedAs, formatSeconds(res.DurationMs), res.Via))
+		if res.SavedID != "" {
+			r.e.addRecording(ControlRecording{
+				Who:        recordLocalRobot,
+				FileID:     res.SavedID,
+				Name:       res.SavedAs,
+				Video:      isPlayableVideo(res.SavedAs),
+				DurationMs: res.DurationMs,
+				Via:        res.Via,
+			})
+		}
 	default:
 		r.e.setValue(recordingLabel, "recorded but not saved: "+res.SaveError)
 	}
+}
+
+// isPlayableVideo reports whether a saved recording is a video a browser
+// can play -- IANAR saves one where the compositor recorded the screen, and
+// a .zip of sampled frames where only screenshots could be taken.
+func isPlayableVideo(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".webm", ".mp4", ".mkv":
+		return true
+	}
+	return false
+}
+
+func (e *controlEngine) addRecording(rec ControlRecording) {
+	e.mu.Lock()
+	if e.run != nil {
+		e.run.Recordings = append(e.run.Recordings, rec)
+	}
+	e.mu.Unlock()
+	e.broadcast()
 }
 
 func formatSeconds(ms int64) string { return fmt.Sprintf("%.1fs", float64(ms)/1000) }
@@ -681,6 +737,14 @@ func fcRobotHandoffSequence() controlSequence {
 		steps: []controlStep{
 			{
 				ControlStepInfo: ControlStepInfo{
+					Label:  "Unlock the screen if it is locked",
+					Detail: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked -- before the recording starts",
+				},
+				run:             controlRobotUnlock,
+				beforeRecording: true,
+			},
+			{
+				ControlStepInfo: ControlStepInfo{
 					Label:  "Launch a new federation-command instance",
 					Detail: "launch federation-command as the system tab does, then wait for the new instance to connect under its own name, in remote control",
 				},
@@ -716,6 +780,14 @@ func fcRobotHandoffSequence() controlSequence {
 			},
 		},
 	}
+}
+
+// controlRobotUnlock has the robot unlock (and wake) the screen, so its
+// later steps act on the desktop rather than the lock screen.
+func controlRobotUnlock(r *controlRun) (string, error) {
+	return r.robotRun("unlock the screen", []robotStep{
+		{Label: "Unlock the screen if it is locked", Do: []map[string]string{{"op": "unlock-screen"}}},
+	})
 }
 
 // controlLaunchFC launches a new FC and waits for it to connect. It only

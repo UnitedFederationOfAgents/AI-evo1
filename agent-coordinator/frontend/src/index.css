@@ -605,6 +605,10 @@ body {
 .ctl-step-time { font-size: 11px; color: #666; flex-shrink: 0; }
 .ctl-values { font-size: 11px; color: #9c9c9c; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-wrap: anywhere; }
 .ctl-value-label { color: #666; }
+.ctl-recordings { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
+.ctl-recording-head { font-size: 11px; color: #9c9c9c; overflow-wrap: anywhere; }
+.ctl-recording-head a { color: #5bb8ff; }
+.ctl-recording-video { width: 100%; max-height: 480px; background: #000; border: 1px solid #2a2a2a; border-radius: 4px; }
 .ctl-run-error-msg { font-size: 12px; color: #cc4444; overflow-wrap: anywhere; }
 
 /* ---- Ridealong panel ---- */

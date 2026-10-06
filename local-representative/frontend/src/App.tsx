@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg, ControlRecording, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 
 const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -436,7 +436,7 @@ function ControlSequenceCard({
       {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
       {seq.record && seq.record.length > 0 && (
         <div className="ctl-seq-desc">
-          records the screen of: {seq.record.map(w => (w === 'robot' ? "this node (its robot)" : w)).join(', ')} -- saved to the files tab
+          records the screen of: {seq.record.map(w => (w === 'robot' ? "this node (its robot)" : w)).join(', ')} -- saved to the files tab and played back below once the run ends
         </div>
       )}
       <ol className="ctl-steps">
@@ -465,7 +465,33 @@ function ControlSequenceCard({
           ))}
         </div>
       )}
+      {run?.recordings && run.recordings.length > 0 && (
+        <ControlRecordings recordings={run.recordings} fileUrl={fileRawUrl} />
+      )}
       {run?.error && <div className="ctl-run-error-msg">{run.error}</div>}
+    </div>
+  )
+}
+
+// ControlRecordings plays back a run's screen recordings beside its steps
+// (Step3Prompt.md Revision B). Recordings saved as a .zip of frames (no
+// compositor video) only get a link.
+function ControlRecordings({ recordings, fileUrl }: { recordings: ControlRecording[]; fileUrl: (id: string) => string }) {
+  return (
+    <div className="ctl-recordings">
+      {recordings.map(rec => (
+        <div key={rec.file_id} className="ctl-recording">
+          <div className="ctl-recording-head">
+            {rec.who === 'robot' ? "this node's screen" : rec.who}
+            {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
+            {rec.via ? ` · via ${rec.via}` : ''}
+            {' · '}
+            <a href={`${fileUrl(rec.file_id)}?download=1`}>{rec.name}</a>
+            {!rec.video && ' (sampled frames, not a video — download to view)'}
+          </div>
+          {rec.video && <video className="ctl-recording-video" src={fileUrl(rec.file_id)} controls preload="metadata" />}
+        </div>
+      ))}
     </div>
   )
 }

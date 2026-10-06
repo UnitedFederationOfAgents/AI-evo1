@@ -22,21 +22,25 @@ import (
 // one is woken and waited for.
 
 const (
-	screenWakeTimeout = 3 * time.Second        // how long a blanked screen is given to wake
-	screenWakePoll    = 250 * time.Millisecond // how often it is checked while waking
-	screenWakeSettle  = 1 * time.Second        // GNOME fades the desktop back in after waking
+	screenWakeTimeout   = 3 * time.Second        // how long a blanked screen is given to wake
+	screenWakePoll      = 250 * time.Millisecond // how often it is checked while waking (or unlocking)
+	screenWakeSettle    = 1 * time.Second        // GNOME fades the desktop back in after waking
+	screenUnlockTimeout = 5 * time.Second        // how long the lock screen is given to go once logind is asked
 )
 
 // errScreenStateUnavailable marks a desktop whose lock/blank state can't be
 // read (not GNOME, no session bus), as opposed to one that answered.
 var errScreenStateUnavailable = errors.New("screen state unavailable")
 
-var errScreenLocked = errors.New("the screen is locked: IANAR's virtual input can't unlock it, and keys sent now would go to the lock screen instead of the window they're meant for. Unlock this host (or turn off its automatic screen lock) and run again")
+var errScreenLocked = errors.New("the screen is locked: IANAR's virtual input can't unlock it, and keys sent now would go to the lock screen instead of the window they're meant for. Unlock this host (or turn off its automatic screen lock, or begin the sequence with unlock-screen) and run again")
 
-// screenLocked, screenBlanked and requestScreenWake ask the desktop about
-// and wake its screen. Overridden on Linux by screenstate_linux.go;
-// unavailable elsewhere and overridable in tests.
+// screenLocked, screenBlanked, requestScreenWake and requestScreenUnlock ask
+// the desktop about, wake and unlock its screen. Overridden on Linux by
+// screenstate_linux.go; unavailable elsewhere and overridable in tests.
 var (
+	requestScreenUnlock = func() error {
+		return fmt.Errorf("%w: not on this platform", errScreenStateUnavailable)
+	}
 	screenLocked = func() (bool, error) {
 		return false, fmt.Errorf("%w: not on this platform", errScreenStateUnavailable)
 	}
@@ -106,4 +110,48 @@ func ensureScreenAwake() (string, error) {
 	}
 	sleep(screenWakeSettle)
 	return "the screen had blanked; woke it first", nil
+}
+
+// unlockScreen unlocks a locked screen, then makes sure it is awake
+// (Step3Prompt.md Revision B: control sequences begin by unlocking). Virtual
+// input can't type a password, so it asks logind to unlock the session
+// instead -- what "loginctl unlock-session" does, and what gnome-shell takes
+// down its lock screen for. logind allows that for the user's own active
+// session. It returns a note on what it did.
+func unlockScreen() (string, error) {
+	locked, err := screenLocked()
+	if err != nil {
+		log.Printf("robot: can't tell whether the screen is locked (%v); assuming not", err)
+	}
+	if err != nil || !locked {
+		note, err := ensureScreenAwake()
+		if err == nil && note == "" {
+			note = "the screen wasn't locked"
+		}
+		return note, err
+	}
+
+	log.Printf("robot: the screen is locked; asking logind to unlock it")
+	if err := requestScreenUnlock(); err != nil {
+		return "", fmt.Errorf("the screen is locked and asking logind to unlock it failed: %v", err)
+	}
+	deadline := clock().Add(screenUnlockTimeout)
+	for {
+		sleep(screenWakePoll)
+		if l, err := screenLocked(); err == nil && !l {
+			break
+		}
+		if !clock().Before(deadline) {
+			return "", fmt.Errorf("asked logind to unlock the screen, but it was still locked after %s", screenUnlockTimeout)
+		}
+	}
+	note, err := ensureScreenAwake()
+	if err != nil {
+		return "", err
+	}
+	if note == "" {
+		// The shield slides away after the unlock.
+		sleep(screenWakeSettle)
+	}
+	return "the screen was locked; unlocked it", nil
 }

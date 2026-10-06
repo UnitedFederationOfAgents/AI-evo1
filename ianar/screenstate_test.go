@@ -13,9 +13,9 @@ import (
 // returns how many times that was asked.
 func stubScreenState(t *testing.T, locked, blanked bool) *int {
 	t.Helper()
-	origLocked, origBlanked, origWake, origNudge := screenLocked, screenBlanked, requestScreenWake, nudgePointer
+	origLocked, origBlanked, origWake, origUnlock, origNudge := screenLocked, screenBlanked, requestScreenWake, requestScreenUnlock, nudgePointer
 	t.Cleanup(func() {
-		screenLocked, screenBlanked, requestScreenWake, nudgePointer = origLocked, origBlanked, origWake, origNudge
+		screenLocked, screenBlanked, requestScreenWake, requestScreenUnlock, nudgePointer = origLocked, origBlanked, origWake, origUnlock, origNudge
 	})
 	wakes := 0
 	screenLocked = func() (bool, error) { return locked, nil }
@@ -23,6 +23,11 @@ func stubScreenState(t *testing.T, locked, blanked bool) *int {
 	requestScreenWake = func() error {
 		wakes++
 		blanked = false
+		return nil
+	}
+	// Unlocking takes down the shield along with the lock screen.
+	requestScreenUnlock = func() error {
+		locked, blanked = false, false
 		return nil
 	}
 	nudgePointer = func() error { return nil }
@@ -96,6 +101,53 @@ func TestEnsureScreenAwake(t *testing.T) {
 		screenLocked, screenBlanked = unavailable, unavailable
 		if note, err := ensureScreenAwake(); err != nil || note != "" {
 			t.Errorf("ensureScreenAwake() = %q, %v, want to carry on", note, err)
+		}
+	})
+}
+
+func TestUnlockScreen(t *testing.T) {
+	t.Run("not locked", func(t *testing.T) {
+		stubScreenClock(t)
+		stubScreenState(t, false, false)
+		note, err := unlockScreen()
+		if err != nil || !strings.Contains(note, "wasn't locked") {
+			t.Errorf("unlockScreen() = %q, %v", note, err)
+		}
+	})
+
+	t.Run("not locked but blanked wakes", func(t *testing.T) {
+		stubScreenClock(t)
+		wakes := stubScreenState(t, false, true)
+		note, err := unlockScreen()
+		if err != nil || !strings.Contains(note, "woke") || *wakes != 1 {
+			t.Errorf("unlockScreen() = %q, %v (woke %d times)", note, err, *wakes)
+		}
+	})
+
+	t.Run("locked unlocks", func(t *testing.T) {
+		stubScreenClock(t)
+		stubScreenState(t, true, true)
+		note, err := unlockScreen()
+		if err != nil || !strings.Contains(note, "unlocked it") {
+			t.Errorf("unlockScreen() = %q, %v", note, err)
+		}
+	})
+
+	t.Run("unlock refused", func(t *testing.T) {
+		stubScreenClock(t)
+		stubScreenState(t, true, true)
+		requestScreenUnlock = func() error { return errors.New("interactive authentication required") }
+		if _, err := unlockScreen(); err == nil || !strings.Contains(err.Error(), "interactive authentication required") {
+			t.Errorf("err = %v, want logind's refusal", err)
+		}
+	})
+
+	t.Run("stays locked", func(t *testing.T) {
+		stubScreenClock(t)
+		stubScreenState(t, true, true)
+		requestScreenUnlock = func() error { return nil }
+		if _, err := unlockScreen(); err == nil || !strings.Contains(err.Error(), "still locked") {
+			t.Errorf("err = %v, want a timeout", err)
 		}
 	})
 }

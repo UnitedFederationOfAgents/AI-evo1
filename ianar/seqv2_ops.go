@@ -322,6 +322,14 @@ var seqOps = []opSpec{
 		},
 	},
 	{
+		Op:       "unlock-screen",
+		Summary:  "Unlock the screen if it is locked (through logind, no password typed), then wake it if it has blanked.",
+		Describe: "unlock the screen if it is locked, and wake it if it has blanked",
+		run: func(env *seqEnv, a opArgs) (string, error) {
+			return unlockScreen()
+		},
+	},
+	{
 		Op:       "focus-window",
 		Summary:  "Find a window by its title on screen (OCR) and click the title to focus it; falls back to asking the window manager.",
 		Describe: `find the line reading exactly "{title}" on screen (a title bar) and click it; failing that, ask the window manager to focus that window`,

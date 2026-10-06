@@ -19,9 +19,13 @@ import (
 // outside any login session, so the session is looked up through the user
 // (user/self's Display) before falling back to the caller's own session.
 //
-// init() overrides screenstate.go's screenLocked, screenBlanked and
-// requestScreenWake vars, so non-Linux builds keep the "unavailable" stubs
-// and tests can substitute their own.
+// A locked screen is unlocked by calling Unlock on that same session (as
+// "loginctl unlock-session" does); gnome-shell drops its lock screen when
+// logind signals it.
+//
+// init() overrides screenstate.go's screenLocked, screenBlanked,
+// requestScreenWake and requestScreenUnlock vars, so non-Linux builds keep
+// the "unavailable" stubs and tests can substitute their own.
 
 const screenSaverIface = "org.gnome.ScreenSaver"
 
@@ -85,6 +89,19 @@ func init() {
 			return false, fmt.Errorf("%w: %s.GetActive: %v", errScreenStateUnavailable, screenSaverIface, err)
 		}
 		return active, nil
+	}
+
+	requestScreenUnlock = func() error {
+		conn, err := dbus.ConnectSystemBus()
+		if err != nil {
+			return fmt.Errorf("%w: connecting to the system bus: %v", errScreenStateUnavailable, err)
+		}
+		defer conn.Close()
+		path := graphicalSessionPath(conn)
+		if err := conn.Object("org.freedesktop.login1", path).Call("org.freedesktop.login1.Session.Unlock", 0).Err; err != nil {
+			return fmt.Errorf("%s Unlock: %w", path, err)
+		}
+		return nil
 	}
 
 	requestScreenWake = func() error {

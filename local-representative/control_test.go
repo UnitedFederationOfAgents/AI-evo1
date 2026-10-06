@@ -118,6 +118,51 @@ func TestRecordingWithoutRobotIsNotFatal(t *testing.T) {
 	}
 }
 
+// TestHandoffSequenceUnlocksFirst: Revision B -- the sequence begins by
+// unlocking the screen, before the recording starts, and only leading steps
+// run ahead of the recording.
+func TestHandoffSequenceUnlocksFirst(t *testing.T) {
+	q, _ := findControlSequence("fc-robot-handoff")
+	if len(q.steps) == 0 || !q.steps[0].beforeRecording || !strings.Contains(q.steps[0].Label, "Unlock") {
+		t.Fatalf("first step = %+v, want the unlock, before the recording", q.steps[0].ControlStepInfo)
+	}
+	recorded := false
+	for i, st := range q.steps {
+		if !st.beforeRecording {
+			recorded = true
+		} else if recorded {
+			t.Errorf("step %d (%s) is marked beforeRecording after a recorded step", i+1, st.Label)
+		}
+	}
+}
+
+func TestIsPlayableVideo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"ianar-recording-fc-robot-handoff-x.webm", true},
+		{"x.MP4", true},
+		{"x.mkv", true},
+		{"ianar-recording-fc-robot-handoff-x.zip", false}, // sampled frames
+		{"x", false},
+	} {
+		if got := isPlayableVideo(tc.name); got != tc.want {
+			t.Errorf("isPlayableVideo(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestRecordingsInState(t *testing.T) {
+	s := newServer("test-lr")
+	runningEngine(s)
+	s.control.addRecording(ControlRecording{Who: recordLocalRobot, FileID: "abc-x.webm", Name: "x.webm", Video: true})
+	recs := s.control.state().Run.Recordings
+	if len(recs) != 1 || recs[0].FileID != "abc-x.webm" || !recs[0].Video {
+		t.Errorf("recordings = %+v", recs)
+	}
+}
+
 func TestNoteRobotRecordDelivers(t *testing.T) {
 	s := newServer("test-lr")
 	e := s.control

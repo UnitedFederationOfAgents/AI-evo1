@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
-  LRControlMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg,
+  LRControlMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg, ControlRecording,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
@@ -809,8 +809,9 @@ function formatMs(ms?: number): string {
 }
 
 function ControlPanel({
-  state, robotHealthy, onRun, onCancel,
+  hostId, state, robotHealthy, onRun, onCancel,
 }: {
+  hostId: string
   state: ControlStateMsg | null
   robotHealthy: boolean
   onRun: (sequence: string) => void
@@ -842,6 +843,7 @@ function ControlPanel({
             {state.sequences.map(q => (
               <ControlSequenceCard
                 key={q.id}
+                hostId={hostId}
                 seq={q}
                 run={state.run && state.run.sequence === q.id ? state.run : undefined}
                 busy={state.run?.status === 'running'}
@@ -857,8 +859,9 @@ function ControlPanel({
 }
 
 function ControlSequenceCard({
-  seq, run, busy, onRun, onCancel,
+  hostId, seq, run, busy, onRun, onCancel,
 }: {
+  hostId: string
   seq: ControlSequenceInfo
   run?: ControlRunMsg
   busy: boolean
@@ -884,7 +887,7 @@ function ControlSequenceCard({
       {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
       {seq.record && seq.record.length > 0 && (
         <div className="ctl-seq-desc">
-          records the screen of: {seq.record.map(w => (w === 'robot' ? "this host (its robot)" : w)).join(', ')} -- saved to its files tab
+          records the screen of: {seq.record.map(w => (w === 'robot' ? "this host (its robot)" : w)).join(', ')} -- saved to its files tab and played back below once the run ends
         </div>
       )}
       <ol className="ctl-steps">
@@ -913,7 +916,33 @@ function ControlSequenceCard({
           ))}
         </div>
       )}
+      {run?.recordings && run.recordings.length > 0 && (
+        <ControlRecordings recordings={run.recordings} fileUrl={id => fileRawUrl(hostId, id)} />
+      )}
       {run?.error && <div className="ctl-run-error-msg">{run.error}</div>}
+    </div>
+  )
+}
+
+// ControlRecordings plays back a run's screen recordings beside its steps
+// (Step3Prompt.md Revision B), through this host's /host/<id>/* proxy.
+// Recordings saved as a .zip of frames (no compositor video) only get a link.
+function ControlRecordings({ recordings, fileUrl }: { recordings: ControlRecording[]; fileUrl: (id: string) => string }) {
+  return (
+    <div className="ctl-recordings">
+      {recordings.map(rec => (
+        <div key={rec.file_id} className="ctl-recording">
+          <div className="ctl-recording-head">
+            {rec.who === 'robot' ? "this host's screen" : rec.who}
+            {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
+            {rec.via ? ` · via ${rec.via}` : ''}
+            {' · '}
+            <a href={`${fileUrl(rec.file_id)}?download=1`}>{rec.name}</a>
+            {!rec.video && ' (sampled frames, not a video — download to view)'}
+          </div>
+          {rec.video && <video className="ctl-recording-video" src={fileUrl(rec.file_id)} controls preload="metadata" />}
+        </div>
+      ))}
     </div>
   )
 }
@@ -3422,6 +3451,7 @@ function LRView({
                   <div className="service-empty">local-representative on this host is not connected</div>
                 ) : (
                   <ControlPanel
+                    hostId={host.id}
                     state={data.control ?? null}
                     robotHealthy={getServiceStatus('robot') === 'healthy'}
                     onRun={seq => sendLRControlRun(host.id, seq)}

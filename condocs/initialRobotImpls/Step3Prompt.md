@@ -63,3 +63,20 @@ I fixed both failure modes and added a screen recording of the robot's machine f
 Let's add a few more minor features here:
 - Let's make the recordings available to play back in the same view where we see the sequence executing
 - Let's make the sequence begin by unlocking the screen if it is locked
+
+
+prompt: [`d54b7d0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d54b7d0530cec970b7b012780d20f22e77a825e1) → reply: [`9d13034`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9d1303424f451f20cbad856c27fa85cbdcf70a28)
+
+## Reply B
+
+I added both features, but none of it has been built or tested yet: `go` and `tsc` needed approval here, so it needs a `make build` / `make test` on the host. After a run, the control view (in both LR and AC) now shows the saved recording as a video player under the steps, with a download link. If only sampled frames could be saved, it shows just a link to the `.zip`. The sequence now starts with an "Unlock the screen if it is locked" step, which runs before the recording starts. It uses a new robot instruction, `unlock-screen`, that asks the session manager to unlock the user's own session (the same as `loginctl unlock-session`, no password typed) and then wakes the screen. That only works if the system's default permissions still allow a user to unlock their own session; if not, the step stops with the reason. New tests are in `ianar/screenstate_test.go` and `local-representative/control_test.go`.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

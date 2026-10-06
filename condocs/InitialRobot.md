@@ -42,13 +42,28 @@ The Native Clip button will capture a 4 second video clip of the desktop and pre
 ```
 
 
-### Step 3 - <REPLACE-TITLE>
+### Step 3 - Add a 'control' tab to LR and AC
+
+[Step 3 Prompt](initialRobotImpls/Step3Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Next we will add a 'control' tab to LR and AC.
+
+This tab is used for sequencing various actions across all sub-apps.
+
+Everything we create under control will be nested under a 'v1' sub-tab for now.
+
+We will create a sample implementation which:
+- Launches a new FC instance (directing the commands found on the system tab)
+- Uses the channel to FC to echo "This is the one - <random-chars>" through the remote interface
+- Uses the robot to find that FC terminal and bring it to local control (like our robot sequence)
+- Uses the robot to type into FC and echo "found it"
+- Puts the terminal back into remote control
+
+Let's also make the federation-command tab able to recognize and handle the multiple FC instances now, while we are at it.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the third step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the third step.

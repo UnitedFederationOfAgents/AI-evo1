@@ -72,11 +72,11 @@ prompt: [`d54b7d0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d
 I added both features, but none of it has been built or tested yet: `go` and `tsc` needed approval here, so it needs a `make build` / `make test` on the host. After a run, the control view (in both LR and AC) now shows the saved recording as a video player under the steps, with a download link. If only sampled frames could be saved, it shows just a link to the `.zip`. The sequence now starts with an "Unlock the screen if it is locked" step, which runs before the recording starts. It uses a new robot instruction, `unlock-screen`, that asks the session manager to unlock the user's own session (the same as `loginctl unlock-session`, no password typed) and then wakes the screen. That only works if the system's default permissions still allow a user to unlock their own session; if not, the step stops with the reason. New tests are in `ianar/screenstate_test.go` and `local-representative/control_test.go`.
 
 
-## <REPLACE-Revision|Retry> C
+## Substep C - Take a detour to fix a sessions bug
 
-<REPLACE-PROMPT>
+[Step 3 Substep C](Step3SubstepCPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep C is now active. Interact with the substep file (Step3SubstepCPrompt.md).

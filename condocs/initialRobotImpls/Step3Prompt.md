@@ -93,11 +93,10 @@ prompt: [`0e04e0e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0
 You've hit your session limit · resets 2:30pm (UTC)
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Now let's extend the 'control' functionality to make it so that we can define/compose/run these sequences. Similar to what we did for the robot.
 
+We will keep this existing sequence as an example.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will use a yaml notation to allow importing/exporting of sequences.

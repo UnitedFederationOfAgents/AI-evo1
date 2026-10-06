@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg, ControlRecording, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
+import { ControlV1 } from './ControlV1'
+import type { ControlV1Props } from './ControlV1'
 
-const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
+const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -53,6 +55,11 @@ function useStatusWS() {
   const [fcInstances, setFcInstances] = useState<FCInstanceInfo[]>([])
   const [fcLogs, setFcLogs] = useState<Record<string, LogEntry[]>>({})
   const [controlState, setControlState] = useState<ControlStateMsg | null>(null)
+  // The control tab's library and the replies to its requests, by request
+  // id -- see local-representative/controllib.go.
+  const [controlLibrary, setControlLibrary] = useState<ControlLibraryMsg | null>(null)
+  const [controlReplies, setControlReplies] = useState<Record<string, ControlLibReply>>({})
+  const controlReqSeq = useRef(0)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
   const [repoState, setRepoState] = useState<RepoStateMsg>({ watched: false, dirty: false, rebuild_ready: false, building: false, auto_rebuild: false })
@@ -88,10 +95,27 @@ function useStatusWS() {
   }, [])
 
   // Control tab -- see local-representative/control.go.
-  const runControl = useCallback((sequence: string) => {
+  const runControl = useCallback((sequence: string, controls: Record<string, string>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence } }))
+      setControlReplies(prev => {
+        const next = { ...prev }
+        delete next.run
+        return next
+      })
+      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence, controls } }))
     }
+  }, [])
+
+  // requestControl sends a definer/composer request and returns the id its
+  // "control-reply" will carry. Unsent (not connected), it fails at once.
+  const requestControl = useCallback((r: ControlLibRequest): string => {
+    const req = `c${++controlReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-lib', payload: { ...r, req } }))
+    } else {
+      setControlReplies(prev => ({ ...prev, [req]: { req, op: r.op, success: false, error: 'not connected' } }))
+    }
+    return req
   }, [])
 
   const cancelControl = useCallback(() => {
@@ -241,6 +265,14 @@ function useStatusWS() {
           case 'control-state':
             setControlState(msg.payload as ControlStateMsg)
             break
+          case 'control-library':
+            setControlLibrary(msg.payload as ControlLibraryMsg)
+            break
+          case 'control-reply': {
+            const p = msg.payload as ControlLibReply
+            setControlReplies(prev => ({ ...prev, [p.req || p.op]: p }))
+            break
+          }
           case 'ac-state':
             setAcState(msg.payload as ACStateMsg)
             break
@@ -296,8 +328,8 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcInstances, fcLogs, controlState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, runControl, cancelControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
     rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
 }
@@ -340,30 +372,9 @@ function FCInstancePicker({
 const CONTROL_SUBTABS = ['v1'] as const
 type ControlSubTab = typeof CONTROL_SUBTABS[number]
 
-function controlStepIcon(status: string): string {
-  return status === 'success' ? '✓'
-    : status === 'error' ? '✗'
-    : status === 'running' ? '▸'
-    : status === 'skipped' ? '–'
-    : '·'
-}
-
-function formatMs(ms?: number): string {
-  if (!ms) return ''
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
-}
-
-function ControlPanel({
-  state,
-  robotHealthy,
-  onRun,
-  onCancel,
-}: {
-  state: ControlStateMsg | null
-  robotHealthy: boolean
-  onRun: (sequence: string) => void
-  onCancel: () => void
-}) {
+// ControlPanel is the control tab: its v1 sub-tab is ControlV1 (shared with
+// agent-coordinator's frontend), over this LR's own library.
+function ControlPanel(props: Omit<ControlV1Props, 'fileUrl' | 'node'>) {
   const [sub, setSub] = useState<ControlSubTab>('v1')
   return (
     <div className="ctl-panel">
@@ -375,123 +386,15 @@ function ControlPanel({
         ))}
       </div>
       {sub === 'v1' && (
-        !state ? (
-          <div className="ctl-empty">waiting for control state…</div>
-        ) : (
-          <>
-            {!robotHealthy && (
-              <div className="ctl-hint ctl-hint-warn">the robot isn't running on this host — launch it from the system tab first</div>
-            )}
-            <div className="ctl-hint">
-              The robot finds the new terminal by reading the screen: its window has to be visible, not
-              behind another, and no other view of federation-command's output (its tab here or in
-              agent-coordinator) should be showing on that desktop.
-            </div>
-            {state.sequences.map(q => (
-              <ControlSequenceCard
-                key={q.id}
-                seq={q}
-                run={state.run && state.run.sequence === q.id ? state.run : undefined}
-                busy={state.run?.status === 'running'}
-                onRun={() => onRun(q.id)}
-                onCancel={onCancel}
-              />
-            ))}
-          </>
-        )
-      )}
-    </div>
-  )
-}
-
-function ControlSequenceCard({
-  seq,
-  run,
-  busy,
-  onRun,
-  onCancel,
-}: {
-  seq: ControlSequenceInfo
-  run?: ControlRunMsg
-  busy: boolean
-  onRun: () => void
-  onCancel: () => void
-}) {
-  const running = run?.status === 'running'
-  return (
-    <div className="ctl-seq">
-      <div className="ctl-seq-head">
-        <span className="ctl-seq-name">{seq.name}</span>
-        {run && (
-          <span className={`ctl-run-status ctl-run-${run.status}`}>
-            {run.status}{run.duration_ms ? ` · ${formatMs(run.duration_ms)}` : ''}
-          </span>
-        )}
-        {running ? (
-          <button className="sys-btn sys-btn-terminate" onClick={onCancel}>cancel</button>
-        ) : (
-          <button className="sys-btn sys-btn-launch" disabled={busy} onClick={onRun}>run</button>
-        )}
-      </div>
-      {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
-      {seq.record && seq.record.length > 0 && (
-        <div className="ctl-seq-desc">
-          records the screen of: {seq.record.map(w => (w === 'robot' ? "this node (its robot)" : w)).join(', ')} -- saved to the files tab and played back below once the run ends
-        </div>
-      )}
-      <ol className="ctl-steps">
-        {seq.steps.map((st, i) => {
-          const r = run?.steps[i]
-          const status = r?.status ?? 'pending'
-          return (
-            <li key={i} className={`ctl-step ctl-step-${status}`}>
-              <span className="ctl-step-icon">{controlStepIcon(status)}</span>
-              <div className="ctl-step-body">
-                <div className="ctl-step-label">{st.label}</div>
-                {st.detail && <div className="ctl-step-detail">{st.detail}</div>}
-                {r?.message && <div className="ctl-step-msg">{r.message}</div>}
-              </div>
-              <span className="ctl-step-time">{formatMs(r?.duration_ms)}</span>
-            </li>
-          )
-        })}
-      </ol>
-      {run?.values && run.values.length > 0 && (
-        <div className="ctl-values">
-          {run.values.map((v, i) => (
-            <div key={i} className="ctl-value">
-              <span className="ctl-value-label">{v.label}:</span> {v.value}
-            </div>
-          ))}
-        </div>
-      )}
-      {run?.recordings && run.recordings.length > 0 && (
-        <ControlRecordings recordings={run.recordings} fileUrl={fileRawUrl} />
-      )}
-      {run?.error && <div className="ctl-run-error-msg">{run.error}</div>}
-    </div>
-  )
-}
-
-// ControlRecordings plays back a run's screen recordings beside its steps
-// (Step3Prompt.md Revision B). Recordings saved as a .zip of frames (no
-// compositor video) only get a link.
-function ControlRecordings({ recordings, fileUrl }: { recordings: ControlRecording[]; fileUrl: (id: string) => string }) {
-  return (
-    <div className="ctl-recordings">
-      {recordings.map(rec => (
-        <div key={rec.file_id} className="ctl-recording">
-          <div className="ctl-recording-head">
-            {rec.who === 'robot' ? "this node's screen" : rec.who}
-            {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
-            {rec.via ? ` · via ${rec.via}` : ''}
-            {' · '}
-            <a href={`${fileUrl(rec.file_id)}?download=1`}>{rec.name}</a>
-            {!rec.video && ' (sampled frames, not a video — download to view)'}
+        <>
+          <div className="ctl-hint">
+            The robot finds a terminal by reading the screen: its window has to be visible, not behind
+            another, and no other view of federation-command's output (its tab here or in
+            agent-coordinator) should be showing on that desktop.
           </div>
-          {rec.video && <video className="ctl-recording-video" src={fileUrl(rec.file_id)} controls preload="metadata" />}
-        </div>
-      ))}
+          <ControlV1 {...props} fileUrl={fileRawUrl} node="this node" />
+        </>
+      )}
     </div>
   )
 }
@@ -2230,9 +2133,9 @@ export default function App() {
     capture() // in case condoccer already restored a hash before this attached
   }
   const {
-    connected, services, fcInstances, fcLogs, controlState,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
     acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, runControl, cancelControl, connectToAC, disconnectFromAC, setAutoConnectAC,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
     launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
 
@@ -2427,7 +2330,11 @@ export default function App() {
                 />
               ) : activeTab === 'control' ? (
                 <ControlPanel
+                  connected={connected}
                   state={controlState}
+                  lib={controlLibrary}
+                  replies={controlReplies}
+                  request={requestControl}
                   robotHealthy={getStatus('robot') === 'healthy'}
                   onRun={runControl}
                   onCancel={cancelControl}

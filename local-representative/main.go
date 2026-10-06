@@ -587,6 +587,7 @@ func (s *Server) pushStateToAC() {
 	ac.SendData("services", s.currentStatus())
 	s.pushFCStateToAC()
 	ac.SendData("control-state", s.control.state())
+	ac.SendData("control-library", s.control.libraryForAC())
 	ac.SendData("system-state", s.systemState())
 	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
@@ -1058,6 +1059,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.sendToClient(c, "status", s.currentStatus())
 		s.sendToClient(c, "fc-instances", s.fcInstances())
 		s.sendToClient(c, "control-state", s.control.state())
+		s.sendToClient(c, "control-library", s.control.library())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
 		s.sendToClient(c, "repo-state", s.repoState())
@@ -1139,15 +1141,24 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "control-run":
 			var payload struct {
-				Sequence string `json:"sequence"`
+				Sequence string            `json:"sequence"`
+				Controls map[string]string `json:"controls"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
-				if err := s.control.start(payload.Sequence); err != nil {
+				if err := s.control.start(payload.Sequence, payload.Controls); err != nil {
 					log.Printf("control-run %q: %v", payload.Sequence, err)
+					s.sendToClient(c, "control-reply", ControlLibReply{Op: "run", Error: err.Error()})
 				}
 			}
 		case "control-cancel":
 			s.control.cancel()
+		case "control-lib":
+			// The definer's and composer's edits, imports and exports -- see
+			// controllib.go.
+			var req ControlLibRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				s.sendToClient(c, "control-reply", s.control.handleLibRequest(req))
+			}
 		}
 		switch m.Type {
 		case "connect-ac":
@@ -1576,6 +1587,7 @@ func main() {
 	robotPort := flag.String("robot-port", "8087", "HTTP port a managed ianar serves on; its UI is reverse-proxied at /robot/")
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
+	controlLibPath := flag.String("control-library", defaultControlLibraryPath(), "YAML file the control tab's actions and sequences are kept in (see controllib.go); empty keeps them in memory only")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -1636,6 +1648,7 @@ func main() {
 	}
 
 	s := newServer(cfg.name)
+	s.control.lib = openControlLibrary(*controlLibPath)
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
 		// Only worth polling for an on-disk update when a restart could
@@ -1910,6 +1923,15 @@ func main() {
 				var payload RobotRecordMsg
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.control.noteRobotRecord(payload)
+				}
+			case "robot-ops":
+				// The ops the control tab's definer offers as robot.<op> --
+				// see controlops.go.
+				var payload struct {
+					Ops []ControlOpSpec `json:"ops"`
+				}
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.setRobotOps(payload.Ops)
 				}
 			}
 			return

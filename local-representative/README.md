@@ -85,6 +85,7 @@ it back once LR is listening again).
 | `--robot-port` | `robot-port` | `8087` | HTTP port a managed `ianar` serves on; its UI is reverse-proxied at `/robot/` |
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
 | `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
+| `--control-library` | — (command line only) | `~/.config/local-representative/control-v1.yaml` | YAML file the **control** tab's actions and sequences are kept in; empty keeps them in memory only |
 
 ## Configuration files
 
@@ -279,6 +280,32 @@ the watcher makes — checks, the pull, and a rebuild — is serialized through
 one mutex, so the check-and-rebuild process never overlaps itself. See
 [`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" for the full
 detection rules.
+
+## Control tab
+
+The **control** tab sequences actions across this host's sub-apps
+(`control.go`). Its **v1** sub-tab has three views over the control library
+(`controllib.go`), the way the robot's sequence-v2 tab works:
+
+- **runner** — pick a sequence, set its controls, run it, and follow each
+  step; a screen recording, if the sequence makes one, plays back below.
+- **definer** — actions: reusable building blocks that expose controls and
+  carry out a list of instructions. An instruction is one of LR's own ops
+  (`launch-fc`, `fc-send`, `fc-expect-output`, `fc-expect-state`, `random`,
+  `set`, `show`, … — see `controlops.go`) or `robot.<op>`, one of the
+  robot's sequence-v2 ops, which LR hands to IANAR (the robot reports its
+  ops when it connects).
+- **composer** — sequences: actions in order with values for their
+  controls, whether this node's screen is recorded across the run, and which
+  leading steps run before the recording starts.
+
+Values may refer to controls, built-ins and values earlier instructions
+saved as `{{name}}`. Actions and sequences import from and export to YAML
+(`format: lr-control-v1`); an exported sequence carries the actions it uses.
+The library is saved to `--control-library`. The original sample sequence,
+`fc-robot-handoff`, is the built-in example (`controlexamples.go`);
+**restore examples** puts it back. agent-coordinator's control tab shows the
+same views for a chosen host, editing and running that host's library.
 
 ## Files tab
 

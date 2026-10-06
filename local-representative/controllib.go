@@ -1173,14 +1173,14 @@ func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActi
 		if !ok {
 			return controlSequence{}, nil, fmt.Errorf("no action %q", st.Action)
 		}
+		// What the step will do, as far as it can be worked out before the
+		// run: values saved during the run show as {{name}}.
+		static := ctlPreviewScope(a, st, vars)
 		label := st.Label
 		if label == "" {
 			label = a.Name
 		}
-		label, _ = ctlExpand(label, lookup) // a reference it can't fill stays as written
-		// What the step will do, as far as it can be worked out before the
-		// run: values saved during the run show as {{name}}.
-		static := ctlPreviewScope(a, st, vars)
+		label, _ = ctlExpand(label, static)
 		var detail []string
 		for _, in := range a.Do {
 			args := map[string]string{}

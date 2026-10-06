@@ -100,3 +100,30 @@ Now let's extend the 'control' functionality to make it so that we can define/co
 We will keep this existing sequence as an example.
 
 We will use a yaml notation to allow importing/exporting of sequences.
+
+
+prompt: [`2bdc69b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2bdc69bafcfef29259d5d060acf468ca7b6a5d69) → reply: [`16a6aed`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/16a6aedf74c5b0d9d9faf5be42807f110baa7066)
+
+## Reply D
+
+I've finished Revision D: control sequences are now data that you can define, compose, run and import/export as YAML, the same way the robot's sequence-v2 tab works. Nothing has been built or tested, because `go`, `gofmt` and `tsc` all needed approval here. It needs a `make build` / `make test` on the host.
+
+- **Where it is:** the control tab's v1 sub-tab now has three views, in both LR and AC:
+  - **runner:** pick a sequence, fill in its controls, and run it.
+  - **definer:** build actions from LR's own steps (launch FC, send a command, wait for output or control state, and so on) or `robot.<op>` steps. The robot now sends LR its list of ops when it connects.
+  - **composer:** put actions in order, set their values, choose whether to record the screen, and mark which leading steps run before recording.
+- **The example:** the existing hand-off sequence is kept as the built-in example, `fc-robot-handoff`, rebuilt from six actions. A "restore examples" button puts it back.
+- **Saving and import/export:** the library is saved to `~/.config/local-representative/control-v1.yaml` (`--control-library`). Imports and exports use the `lr-control-v1` YAML format, and an exported sequence carries the actions it uses.
+- **Size limit through AC:** the LR–AC link drops a connection on any message over 64 KB. So AC refuses requests over 48 KB, and LR trims (or leaves out) the library it sends AC if it's too large; in both cases the page says to use the host's own control tab.
+
+I continued from the files the interrupted Revision C attempt had left in LR, and added the engine changes, the AC and robot wiring, and one shared `ControlV1.tsx` that both frontends use. New tests are in `local-representative/controllib_test.go`, with updates to `control_test.go`, and in `ianar/repr_test.go`.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

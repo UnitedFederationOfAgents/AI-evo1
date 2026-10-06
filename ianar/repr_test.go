@@ -1,12 +1,52 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"testing"
 	"time"
 
 	"representable"
 )
+
+// TestRobotOpsPayload: "robot-ops" carries every op with the fields LR's
+// control tab reads (local-representative/controlops.go's ControlOpSpec),
+// and fits on one representable line (64 KiB).
+func TestRobotOpsPayload(t *testing.T) {
+	b, err := json.Marshal(RobotOpsMsg{Ops: seqOps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > 48<<10 {
+		t.Errorf("robot-ops is %d bytes; LR relays it to agent-coordinator inside its control library", len(b))
+	}
+	var got struct {
+		Ops []struct {
+			Op       string `json:"op"`
+			Summary  string `json:"summary"`
+			Describe string `json:"describe"`
+			Args     []struct {
+				Name string `json:"name"`
+			} `json:"args"`
+		} `json:"ops"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Ops) != len(seqOps) {
+		t.Fatalf("%d ops, want %d", len(got.Ops), len(seqOps))
+	}
+	for _, o := range got.Ops {
+		if o.Op == "" || o.Describe == "" {
+			t.Errorf("op %+v lacks a name or description", o)
+		}
+	}
+}
+
+// TestSendRobotOpsNoClient: a no-op before LR is connected.
+func TestSendRobotOpsNoClient(t *testing.T) {
+	newServer().sendRobotOps()
+}
 
 // TestPushRobotStateNoClient verifies the state push is a safe no-op before
 // the representable link to local-representative is established.

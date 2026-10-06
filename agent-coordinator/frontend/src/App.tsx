@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
-  LRControlMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg, ControlRecording,
+  LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
+import { ControlV1 } from './ControlV1'
+import type { ControlV1Props } from './ControlV1'
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
@@ -31,6 +33,10 @@ interface HostClientState {
   fcInstances: FCInstanceInfo[]
   fcLogs: Record<string, LogEntry[]>
   control?: ControlStateMsg
+  // The host's control library, and its replies to requests sent from here
+  // (by request id; a run that couldn't start is under "run").
+  controlLib?: ControlLibraryMsg
+  controlReplies?: Record<string, ControlLibReply>
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
@@ -92,8 +98,33 @@ function useCoordinatorWS() {
   }, [])
 
   // A host's control tab -- see local-representative/control.go.
-  const sendLRControlRun = useCallback((hostId: string, sequence: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence } }))
+  const sendLRControlRun = useCallback((hostId: string, sequence: string, controls: Record<string, string>) => {
+    setHostData(prev => {
+      const hs = prev[hostId] ?? emptyHostState()
+      const replies = { ...(hs.controlReplies ?? {}) }
+      delete replies.run
+      return { ...prev, [hostId]: { ...hs, controlReplies: replies } }
+    })
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence, controls } }))
+  }, [])
+
+  // requestLRControl sends a host's definer/composer request and returns the
+  // id its reply will carry. Replies go to every browser, so ids carry this
+  // page's own prefix.
+  const controlReqPrefix = useRef(Math.random().toString(36).slice(2, 8))
+  const controlReqSeq = useRef(0)
+  const requestLRControl = useCallback((hostId: string, r: ControlLibRequest): string => {
+    const req = `${controlReqPrefix.current}-${++controlReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'lr-control-lib', payload: { host_id: hostId, request: { ...r, req } } }))
+    } else {
+      const reply: ControlLibReply = { req, op: r.op, success: false, error: 'not connected' }
+      setHostData(prev => {
+        const hs = prev[hostId] ?? emptyHostState()
+        return { ...prev, [hostId]: { ...hs, controlReplies: { ...(hs.controlReplies ?? {}), [req]: reply } } }
+      })
+    }
+    return req
   }, [])
 
   const sendLRControlCancel = useCallback((hostId: string) => {
@@ -314,6 +345,26 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-control-library': {
+            const p = msg.payload as LRControlLibraryMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), controlLib: p.library ?? undefined },
+            }))
+            break
+          }
+          case 'lr-control-reply': {
+            // Every browser gets every reply: keep this page's own, and runs
+            // that couldn't start.
+            const p = msg.payload as LRControlReplyMsg
+            const key = p.reply.req || p.reply.op
+            if (p.reply.req && !p.reply.req.startsWith(`${controlReqPrefix.current}-`)) break
+            setHostData(prev => {
+              const hs = prev[p.host_id] ?? emptyHostState()
+              return { ...prev, [p.host_id]: { ...hs, controlReplies: { ...(hs.controlReplies ?? {}), [key]: p.reply } } }
+            })
+            break
+          }
           case 'lr-ridealong-state': {
             const p = msg.payload as LRRidealongMsg
             setHostData(prev => ({
@@ -433,7 +484,7 @@ function useCoordinatorWS() {
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
@@ -795,28 +846,10 @@ function FCInstancePicker({
 const CONTROL_SUBTABS = ['v1'] as const
 type ControlSubTab = typeof CONTROL_SUBTABS[number]
 
-function controlStepIcon(status: string): string {
-  return status === 'success' ? '✓'
-    : status === 'error' ? '✗'
-    : status === 'running' ? '▸'
-    : status === 'skipped' ? '–'
-    : '·'
-}
-
-function formatMs(ms?: number): string {
-  if (!ms) return ''
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
-}
-
-function ControlPanel({
-  hostId, state, robotHealthy, onRun, onCancel,
-}: {
-  hostId: string
-  state: ControlStateMsg | null
-  robotHealthy: boolean
-  onRun: (sequence: string) => void
-  onCancel: () => void
-}) {
+// ControlPanel is a host's control tab: its v1 sub-tab is ControlV1 (shared
+// with local-representative's frontend), over that host's library, with
+// recordings played back through the host's /host/<id>/* proxy.
+function ControlPanel({ hostId, ...props }: Omit<ControlV1Props, 'fileUrl' | 'node'> & { hostId: string }) {
   const [sub, setSub] = useState<ControlSubTab>('v1')
   return (
     <div className="ctl-panel">
@@ -828,121 +861,15 @@ function ControlPanel({
         ))}
       </div>
       {sub === 'v1' && (
-        !state ? (
-          <div className="ctl-empty">waiting for control state…</div>
-        ) : (
-          <>
-            {!robotHealthy && (
-              <div className="ctl-hint ctl-hint-warn">the robot isn't running on this host — launch it from the system tab first</div>
-            )}
-            <div className="ctl-hint">
-              The robot finds the new terminal by reading that host's screen: its window has to be visible,
-              not behind another, and no other view of federation-command's output (its tab here or in
-              local-representative) should be showing on that desktop.
-            </div>
-            {state.sequences.map(q => (
-              <ControlSequenceCard
-                key={q.id}
-                hostId={hostId}
-                seq={q}
-                run={state.run && state.run.sequence === q.id ? state.run : undefined}
-                busy={state.run?.status === 'running'}
-                onRun={() => onRun(q.id)}
-                onCancel={onCancel}
-              />
-            ))}
-          </>
-        )
-      )}
-    </div>
-  )
-}
-
-function ControlSequenceCard({
-  hostId, seq, run, busy, onRun, onCancel,
-}: {
-  hostId: string
-  seq: ControlSequenceInfo
-  run?: ControlRunMsg
-  busy: boolean
-  onRun: () => void
-  onCancel: () => void
-}) {
-  const running = run?.status === 'running'
-  return (
-    <div className="ctl-seq">
-      <div className="ctl-seq-head">
-        <span className="ctl-seq-name">{seq.name}</span>
-        {run && (
-          <span className={`ctl-run-status ctl-run-${run.status}`}>
-            {run.status}{run.duration_ms ? ` · ${formatMs(run.duration_ms)}` : ''}
-          </span>
-        )}
-        {running ? (
-          <button className="sys-btn sys-btn-terminate" onClick={onCancel}>cancel</button>
-        ) : (
-          <button className="sys-btn sys-btn-launch" disabled={busy} onClick={onRun}>run</button>
-        )}
-      </div>
-      {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
-      {seq.record && seq.record.length > 0 && (
-        <div className="ctl-seq-desc">
-          records the screen of: {seq.record.map(w => (w === 'robot' ? "this host (its robot)" : w)).join(', ')} -- saved to its files tab and played back below once the run ends
-        </div>
-      )}
-      <ol className="ctl-steps">
-        {seq.steps.map((st, i) => {
-          const r = run?.steps[i]
-          const status = r?.status ?? 'pending'
-          return (
-            <li key={i} className={`ctl-step ctl-step-${status}`}>
-              <span className="ctl-step-icon">{controlStepIcon(status)}</span>
-              <div className="ctl-step-body">
-                <div className="ctl-step-label">{st.label}</div>
-                {st.detail && <div className="ctl-step-detail">{st.detail}</div>}
-                {r?.message && <div className="ctl-step-msg">{r.message}</div>}
-              </div>
-              <span className="ctl-step-time">{formatMs(r?.duration_ms)}</span>
-            </li>
-          )
-        })}
-      </ol>
-      {run?.values && run.values.length > 0 && (
-        <div className="ctl-values">
-          {run.values.map((v, i) => (
-            <div key={i} className="ctl-value">
-              <span className="ctl-value-label">{v.label}:</span> {v.value}
-            </div>
-          ))}
-        </div>
-      )}
-      {run?.recordings && run.recordings.length > 0 && (
-        <ControlRecordings recordings={run.recordings} fileUrl={id => fileRawUrl(hostId, id)} />
-      )}
-      {run?.error && <div className="ctl-run-error-msg">{run.error}</div>}
-    </div>
-  )
-}
-
-// ControlRecordings plays back a run's screen recordings beside its steps
-// (Step3Prompt.md Revision B), through this host's /host/<id>/* proxy.
-// Recordings saved as a .zip of frames (no compositor video) only get a link.
-function ControlRecordings({ recordings, fileUrl }: { recordings: ControlRecording[]; fileUrl: (id: string) => string }) {
-  return (
-    <div className="ctl-recordings">
-      {recordings.map(rec => (
-        <div key={rec.file_id} className="ctl-recording">
-          <div className="ctl-recording-head">
-            {rec.who === 'robot' ? "this host's screen" : rec.who}
-            {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
-            {rec.via ? ` · via ${rec.via}` : ''}
-            {' · '}
-            <a href={`${fileUrl(rec.file_id)}?download=1`}>{rec.name}</a>
-            {!rec.video && ' (sampled frames, not a video — download to view)'}
+        <>
+          <div className="ctl-hint">
+            The robot finds a terminal by reading that host's screen: its window has to be visible,
+            not behind another, and no other view of federation-command's output (its tab here or in
+            local-representative) should be showing on that desktop.
           </div>
-          {rec.video && <video className="ctl-recording-video" src={fileUrl(rec.file_id)} controls preload="metadata" />}
-        </div>
-      ))}
+          <ControlV1 {...props} fileUrl={id => fileRawUrl(hostId, id)} node="this host" />
+        </>
+      )}
     </div>
   )
 }
@@ -3198,7 +3125,7 @@ function GlobalView({
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRLaunchApp, sendLRTerminateApp,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, requestLRControl, sendLRLaunchApp, sendLRTerminateApp,
   sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
@@ -3206,8 +3133,9 @@ function LRView({
   data: HostClientState
   sendLRCommand: (hostId: string, cmd: string, fc?: string) => void
   sendLRRidealongCommand: (hostId: string, action: string, fc?: string) => void
-  sendLRControlRun: (hostId: string, sequence: string) => void
+  sendLRControlRun: (hostId: string, sequence: string, controls: Record<string, string>) => void
   sendLRControlCancel: (hostId: string) => void
+  requestLRControl: (hostId: string, req: ControlLibRequest) => string
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
   sendLRRestartApp: (hostId: string) => void
@@ -3452,9 +3380,13 @@ function LRView({
                 ) : (
                   <ControlPanel
                     hostId={host.id}
+                    connected={active}
                     state={data.control ?? null}
+                    lib={data.controlLib ?? null}
+                    replies={data.controlReplies ?? {}}
+                    request={req => requestLRControl(host.id, req)}
                     robotHealthy={getServiceStatus('robot') === 'healthy'}
-                    onRun={seq => sendLRControlRun(host.id, seq)}
+                    onRun={(seq, controls) => sendLRControlRun(host.id, seq, controls)}
                     onCancel={() => sendLRControlCancel(host.id)}
                   />
                 )
@@ -3752,7 +3684,7 @@ export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
@@ -3935,6 +3867,7 @@ export default function App() {
               sendLRRidealongCommand={sendLRRidealongCommand}
               sendLRControlRun={sendLRControlRun}
               sendLRControlCancel={sendLRControlCancel}
+              requestLRControl={requestLRControl}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
               sendLRRestartApp={sendLRRestartApp}

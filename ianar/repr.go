@@ -228,6 +228,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		})
 		s.pushRobotState()
 		s.sendVersion()
+		s.sendRobotOps()
 
 		<-client.DisconnectCh()
 
@@ -330,6 +331,18 @@ func (s *Server) sendVersion() {
 	client.SendData("version", versionPayload{Version: ufaversion.Version})
 }
 
+// RobotOpsMsg is the "robot-ops" payload: the sequence-v2 ops this IANAR
+// runs, sent once after connecting so LR's control tab definer can offer
+// them as robot.<op> instructions, with their arguments (see
+// local-representative/controlops.go).
+type RobotOpsMsg struct {
+	Ops []opSpec `json:"ops"`
+}
+
+func (s *Server) sendRobotOps() {
+	s.sendToLR("robot-ops", RobotOpsMsg{Ops: seqOps})
+}
+
 // handleReprCommand handles commands local-representative relays down the
 // representable channel (originating from agent-coordinator). IANAR only
 // acts on the "__robot:" namespace, mirroring condoccer's "__condoccer:"
@@ -348,6 +361,7 @@ func (s *Server) handleReprCommand(raw string) {
 	switch verb {
 	case "refresh":
 		s.pushRobotState()
+		s.sendRobotOps()
 	case "run":
 		s.handleRobotRun(arg)
 	case "record-start", "record-stop":

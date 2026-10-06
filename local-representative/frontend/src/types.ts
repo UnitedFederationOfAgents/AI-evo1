@@ -37,54 +37,11 @@ export interface FCInstancesMsg {
   instances: FCInstanceInfo[]
 }
 
-// Control tab -- see local-representative/control.go.
-export interface ControlStepInfo {
-  label: string
-  detail?: string
-}
-
-export interface ControlSequenceInfo {
-  id: string
-  name: string
-  description?: string
-  steps: ControlStepInfo[]
-  record?: string[] // whose screens a run records ("robot": this node's)
-}
-
-export interface ControlStepResult {
-  label: string
-  status: string // "pending" | "running" | "success" | "error" | "skipped"
-  message?: string
-  duration_ms?: number
-}
-
-export interface ControlRunMsg {
-  id: string
-  sequence: string
-  name: string
-  status: string // "running" | "success" | "error" | "cancelled"
-  error?: string
-  started_at: number // unix ms
-  duration_ms?: number
-  steps: ControlStepResult[]
-  values?: { label: string; value: string }[]
-  recordings?: ControlRecording[]
-}
-
-// A screen recording a run saved into the files tab.
-export interface ControlRecording {
-  who: string // whose screen ("robot": this node's)
-  file_id: string // GET /api/files/<file_id>
-  name: string
-  video: boolean // playable in the browser, rather than a .zip of frames
-  duration_ms?: number
-  via?: string
-}
-
-export interface ControlStateMsg {
-  sequences: ControlSequenceInfo[]
-  run?: ControlRunMsg
-}
+// Control tab -- see local-representative/control.go and controlTypes.ts.
+export type {
+  ControlStepInfo, ControlSequenceInfo, ControlStepResult, ControlRunMsg, ControlRecording, ControlStateMsg,
+  ControlLibraryMsg, ControlLibReply, ControlLibRequest,
+} from './controlTypes'
 
 export interface RidealongStateMsg {
   fc?: string

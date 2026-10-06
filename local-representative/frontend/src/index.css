@@ -777,6 +777,47 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* v1's runner / definer / composer (ControlV1.tsx) */
+.ctl-v1 { display: flex; flex-direction: column; gap: 10px; }
+.ctl-v1-views .ctl-subtab { font-size: 11px; padding: 3px 10px; }
+.ctl-v1-view { display: flex; flex-direction: column; gap: 10px; }
+.ctl-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-section { display: flex; flex-direction: column; gap: 6px; border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px 10px; }
+.ctl-section-title { font-size: 11px; font-weight: 600; color: #9c9c9c; text-transform: uppercase; letter-spacing: 0.04em; }
+.ctl-field { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ctl-field-name { width: 130px; flex-shrink: 0; color: #888; overflow-wrap: anywhere; }
+.ctl-field > .ctl-input, .ctl-field > .ctl-row { flex: 1; }
+.ctl-input, .ctl-select, .ctl-textarea {
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 3px 6px; min-width: 0;
+}
+.ctl-input { flex: 1; }
+.ctl-input-name { flex: 0 0 120px; }
+.ctl-input-bad { border-color: #7a2e2e; }
+.ctl-select { max-width: 100%; }
+.ctl-textarea { width: 100%; box-sizing: border-box; font-family: monospace; resize: vertical; }
+.ctl-btn {
+  background: #3c3c3c; border: 1px solid #555; border-radius: 3px; color: #ccc;
+  font-family: inherit; font-size: 11px; padding: 2px 10px; cursor: pointer;
+}
+.ctl-btn:hover:not(:disabled) { background: #4a4a4a; }
+.ctl-btn:disabled { opacity: 0.5; cursor: default; }
+.ctl-icon-btn { padding: 2px 6px; }
+.ctl-controls { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.ctl-controls .ctl-row { align-self: stretch; }
+.ctl-instrs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ctl-instr { display: flex; flex-direction: column; gap: 4px; border-left: 2px solid #3c3c3c; padding-left: 8px; }
+.ctl-num { color: #666; font-size: 12px; min-width: 20px; }
+.ctl-step-action { flex: 1; color: #d4d4d4; font-size: 12px; }
+.ctl-step-do { margin: 2px 0 0; padding-left: 16px; font-size: 11px; color: #777; overflow-wrap: anywhere; }
+.ctl-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9c9c9c; }
+.ctl-ok { font-size: 12px; color: #4ec94e; }
+.ctl-yaml-box { display: flex; flex-direction: column; gap: 6px; }
+.ctl-help { font-size: 11px; color: #888; }
+.ctl-help summary { cursor: pointer; }
+.ctl-help code { color: #c8c8a0; }
+.ctl-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border-top: 1px solid #2a2a2a; padding-top: 8px; }
+
 /* ---- Ridealong panel ---- */
 
 .ra-panel {

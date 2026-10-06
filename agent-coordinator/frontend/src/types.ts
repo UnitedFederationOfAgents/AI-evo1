@@ -1,3 +1,5 @@
+import type { ControlStateMsg, ControlLibraryMsg, ControlLibReply } from './controlTypes'
+
 export interface Host {
   id: string
   label: string
@@ -51,58 +53,28 @@ export interface LRFCInstancesMsg {
   instances: FCInstanceInfo[]
 }
 
-// A host's control tab -- see local-representative/control.go.
-export interface ControlStepInfo {
-  label: string
-  detail?: string
-}
-
-export interface ControlSequenceInfo {
-  id: string
-  name: string
-  description?: string
-  steps: ControlStepInfo[]
-  record?: string[] // whose screens a run records ("robot": the host's own)
-}
-
-export interface ControlStepResult {
-  label: string
-  status: string // "pending" | "running" | "success" | "error" | "skipped"
-  message?: string
-  duration_ms?: number
-}
-
-export interface ControlRunMsg {
-  id: string
-  sequence: string
-  name: string
-  status: string // "running" | "success" | "error" | "cancelled"
-  error?: string
-  started_at: number // unix ms
-  duration_ms?: number
-  steps: ControlStepResult[]
-  values?: { label: string; value: string }[]
-  recordings?: ControlRecording[]
-}
-
-// A screen recording a run saved into that host's files tab.
-export interface ControlRecording {
-  who: string // whose screen ("robot": that host's)
-  file_id: string // GET /host/<id>/api/files/<file_id>
-  name: string
-  video: boolean // playable in the browser, rather than a .zip of frames
-  duration_ms?: number
-  via?: string
-}
-
-export interface ControlStateMsg {
-  sequences: ControlSequenceInfo[]
-  run?: ControlRunMsg
-}
+// A host's control tab -- see local-representative/control.go and
+// controlTypes.ts (shared with local-representative's frontend).
+export type {
+  ControlStepInfo, ControlSequenceInfo, ControlStepResult, ControlRunMsg, ControlRecording, ControlStateMsg,
+  ControlLibraryMsg, ControlLibReply, ControlLibRequest,
+} from './controlTypes'
 
 export interface LRControlMsg {
   host_id: string
   control: ControlStateMsg | null // null once the host disconnects
+}
+
+export interface LRControlLibraryMsg {
+  host_id: string
+  library: ControlLibraryMsg | null // null once the host disconnects
+}
+
+// A host's answer to a library request ("lr-control-lib"), or to a run that
+// couldn't start.
+export interface LRControlReplyMsg {
+  host_id: string
+  reply: ControlLibReply
 }
 
 export interface LRRidealongMsg {

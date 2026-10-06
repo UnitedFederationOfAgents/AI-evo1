@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -393,6 +395,26 @@ type LRControlMsg struct {
 	Control json.RawMessage `json:"control"`
 }
 
+// LRControlLibraryMsg relays a host's "control-library" (its control tab's
+// definer actions and composer sequences -- see
+// local-representative/controllib.go) as-is; null once it disconnects.
+type LRControlLibraryMsg struct {
+	HostID  string          `json:"host_id"`
+	Library json.RawMessage `json:"library"`
+}
+
+// maxControlLibCommand caps a library request relayed to a host: the
+// representable link reads a line at a time, up to 64 KiB.
+const maxControlLibCommand = 48 << 10
+
+// LRControlReplyMsg relays a host's "control-reply", its answer to a
+// library request ("lr-control-lib") or a run that couldn't start. Every
+// browser gets it; the one that asked matches it by the reply's req.
+type LRControlReplyMsg struct {
+	HostID string          `json:"host_id"`
+	Reply  json.RawMessage `json:"reply"`
+}
+
 type LRRidealongMsg struct {
 	HostID       string   `json:"host_id"`
 	Active       bool     `json:"active"`
@@ -573,10 +595,11 @@ type hostState struct {
 	stateboard *StateboardMsg
 	lrHTTPPort string
 
-	// fcInstances and control are relayed to browsers as-is -- see
-	// LRFCInstancesMsg and LRControlMsg.
+	// fcInstances, control and controlLib are relayed to browsers as-is --
+	// see LRFCInstancesMsg, LRControlMsg and LRControlLibraryMsg.
 	fcInstances json.RawMessage
 	control     json.RawMessage
+	controlLib  json.RawMessage
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -822,12 +845,14 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	stateboard := hs.stateboard
 	fcInstances := hs.fcInstances
 	control := hs.control
+	controlLib := hs.controlLib
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
 	s.sendToClient(c, "lr-fc-state", LRFCStateMsg{HostID: name, State: fcState})
 	s.sendToClient(c, "lr-fc-instances", fcInstancesMsg(name, fcInstances))
 	s.sendToClient(c, "lr-control-state", LRControlMsg{HostID: name, Control: control})
+	s.sendToClient(c, "lr-control-library", LRControlLibraryMsg{HostID: name, Library: controlLib})
 	if ridealong != nil {
 		s.sendToClient(c, "lr-ridealong-state", ridealongMsg(name, ridealong))
 	} else {
@@ -1090,12 +1115,46 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case "lr-control-run":
 			// The host's control tab -- see local-representative/control.go.
 			var payload struct {
-				HostID   string `json:"host_id"`
-				Sequence string `json:"sequence"`
+				HostID   string            `json:"host_id"`
+				Sequence string            `json:"sequence"`
+				Controls map[string]string `json:"controls"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
-				payload.HostID != "" && payload.Sequence != "" && s.reprServer != nil {
-				s.reprServer.SendCommand(payload.HostID, "__control:run "+payload.Sequence)
+				payload.HostID != "" && payload.Sequence != "" && !strings.ContainsAny(payload.Sequence, " \n") && s.reprServer != nil {
+				cmd := "__control:run " + payload.Sequence
+				if len(payload.Controls) > 0 {
+					values, _ := json.Marshal(payload.Controls)
+					cmd += " " + string(values)
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
+			}
+		case "lr-control-lib":
+			// The host's control tab definer/composer: the request is passed
+			// on as-is ("__control:lib <json>") and the host's answer comes
+			// back as "control-reply".
+			var payload struct {
+				HostID  string          `json:"host_id"`
+				Request json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && len(payload.Request) > 0 && s.reprServer != nil {
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, payload.Request); err != nil {
+					break
+				}
+				if compact.Len() > maxControlLibCommand {
+					// Representable reads a line at a time, up to 64 KiB; a
+					// longer one would drop the host's connection.
+					var req struct {
+						Req string `json:"req"`
+						Op  string `json:"op"`
+					}
+					_ = json.Unmarshal(payload.Request, &req)
+					reply, _ := json.Marshal(map[string]any{"req": req.Req, "op": req.Op, "success": false,
+						"error": fmt.Sprintf("too large to send to %s through agent-coordinator (%d KiB, the limit is %d KiB) -- import it on that host's own control tab", payload.HostID, compact.Len()>>10, maxControlLibCommand>>10)})
+					s.sendToClient(c, "lr-control-reply", LRControlReplyMsg{HostID: payload.HostID, Reply: reply})
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, "__control:lib "+compact.String())
 			}
 		case "lr-control-cancel":
 			var payload struct {
@@ -1479,12 +1538,14 @@ func main() {
 			hs.lrHTTPPort = ""
 			hs.fcInstances = nil
 			hs.control = nil
+			hs.controlLib = nil
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, State: ""})
 			s.broadcast("lr-fc-instances", fcInstancesMsg(name, nil))
 			s.broadcast("lr-control-state", LRControlMsg{HostID: name})
+			s.broadcast("lr-control-library", LRControlLibraryMsg{HostID: name})
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1566,6 +1627,13 @@ func main() {
 			hs.control = append(json.RawMessage(nil), data...)
 			hs.mu.Unlock()
 			s.broadcast("lr-control-state", LRControlMsg{HostID: name, Control: data})
+		case "control-library":
+			hs.mu.Lock()
+			hs.controlLib = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-control-library", LRControlLibraryMsg{HostID: name, Library: data})
+		case "control-reply":
+			s.broadcast("lr-control-reply", LRControlReplyMsg{HostID: name, Reply: data})
 		case "ridealong-state":
 			var payload RidealongStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

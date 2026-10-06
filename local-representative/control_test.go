@@ -22,8 +22,11 @@ func TestControlStateListsSequences(t *testing.T) {
 	if len(st.Sequences) != 1 || st.Sequences[0].ID != "fc-robot-handoff" {
 		t.Fatalf("sequences = %+v", st.Sequences)
 	}
-	if n := len(st.Sequences[0].Steps); n != 5 {
-		t.Errorf("fc-robot-handoff has %d steps, want 5", n)
+	if n := len(st.Sequences[0].Steps); n != 6 {
+		t.Errorf("fc-robot-handoff has %d steps, want 6", n)
+	}
+	if e := st.Sequences[0].Error; e != "" {
+		t.Errorf("fc-robot-handoff doesn't compile: %s", e)
 	}
 	if st.Run != nil {
 		t.Errorf("run before any started = %+v", st.Run)
@@ -32,16 +35,26 @@ func TestControlStateListsSequences(t *testing.T) {
 
 func TestControlStartUnknownSequence(t *testing.T) {
 	s := newServer("test-lr")
-	if err := s.control.start("no-such-sequence"); err == nil {
+	if err := s.control.start("no-such-sequence", nil); err == nil {
 		t.Error("start of an unknown sequence succeeded")
 	}
+}
+
+// exampleSequence compiles the built-in fc-robot-handoff example.
+func exampleSequence(t *testing.T) controlSequence {
+	t.Helper()
+	q, _, err := newControlLibrary().compile("fc-robot-handoff", nil, nil, time.Now())
+	if err != nil {
+		t.Fatalf("compiling fc-robot-handoff: %v", err)
+	}
+	return q
 }
 
 // runningEngine puts e in the middle of a run without starting any steps.
 func runningEngine(s *Server) *controlRun {
 	e := s.control
 	e.mu.Lock()
-	e.run = &ControlRunMsg{Status: "running", Steps: []ControlStepResult{{Label: "only"}}}
+	e.run = &ControlRunMsg{Status: "running", Steps: []ControlStepResult{{ControlStepInfo: ControlStepInfo{Label: "only"}}}}
 	e.cancelCh = make(chan struct{})
 	cancel := e.cancelCh
 	e.mu.Unlock()
@@ -92,10 +105,7 @@ func TestRobotRunNeedsRobot(t *testing.T) {
 }
 
 func TestHandoffSequenceRecordsTheRobotsScreen(t *testing.T) {
-	q, ok := findControlSequence("fc-robot-handoff")
-	if !ok {
-		t.Fatal("no fc-robot-handoff")
-	}
+	q := exampleSequence(t)
 	if info := q.info(); len(info.Record) != 1 || info.Record[0] != recordLocalRobot {
 		t.Errorf("record = %v, want [%s]", info.Record, recordLocalRobot)
 	}
@@ -106,7 +116,7 @@ func TestHandoffSequenceRecordsTheRobotsScreen(t *testing.T) {
 func TestRecordingWithoutRobotIsNotFatal(t *testing.T) {
 	s := newServer("test-lr")
 	r := runningEngine(s)
-	q, _ := findControlSequence("fc-robot-handoff")
+	q := exampleSequence(t)
 	r.startRecording(q, recordLocalRobot)
 	r.stopRecording() // nothing to stop
 	if r.rec != "" {
@@ -122,7 +132,7 @@ func TestRecordingWithoutRobotIsNotFatal(t *testing.T) {
 // unlocking the screen, before the recording starts, and only leading steps
 // run ahead of the recording.
 func TestHandoffSequenceUnlocksFirst(t *testing.T) {
-	q, _ := findControlSequence("fc-robot-handoff")
+	q := exampleSequence(t)
 	if len(q.steps) == 0 || !q.steps[0].beforeRecording || !strings.Contains(q.steps[0].Label, "Unlock") {
 		t.Fatalf("first step = %+v, want the unlock, before the recording", q.steps[0].ControlStepInfo)
 	}

@@ -77,6 +77,11 @@ I added both features, but none of it has been built or tested yet: `go` and `ts
 [Step 3 Substep C](Step3SubstepCPrompt.md)
 
 
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep C is now active. Interact with the substep file (Step3SubstepCPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

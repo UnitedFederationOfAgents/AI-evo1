@@ -336,15 +336,18 @@ func (s *Server) sendVersion() {
 // convention; the forwarded WebSocket UI carries everything else.
 //
 //	__robot:refresh
+//	__robot:run <json>   (a run for LR's control tab -- see lrrun.go)
 func (s *Server) handleReprCommand(raw string) {
 	if !strings.HasPrefix(raw, "__robot:") {
 		return
 	}
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__robot:"))
-	verb, _, _ := strings.Cut(rest, " ")
+	verb, arg, _ := strings.Cut(rest, " ")
 	switch verb {
 	case "refresh":
 		s.pushRobotState()
+	case "run":
+		s.handleRobotRun(arg)
 	default:
 		log.Printf("repr: ignoring unrecognised command %q", raw)
 	}

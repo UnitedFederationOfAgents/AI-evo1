@@ -7,16 +7,75 @@ export interface StatusMsg {
   services: ServiceStatus[]
 }
 
+// fc on the FC messages below is the federation-command instance they're
+// about -- the name it connected to LR under ("federation-command#2" for one
+// LR launched). See local-representative/fcinstances.go.
 export interface FCStateMsg {
+  fc?: string
   state: string // "remote-control", "local-control", or "" (disconnected)
 }
 
 export interface FCLogMsg {
+  fc?: string
   line: string
   kind?: string // "cmd" or "output"
 }
 
+// FCInstanceInfo is one connected federation-command instance.
+export interface FCInstanceInfo {
+  key: string
+  label: string // "#2", "@fc-ab12"
+  instance_id?: string
+  head?: string
+  state: string
+  session?: string
+  ridealong?: RidealongStateMsg
+  condoc?: CondocStateMsg
+}
+
+export interface FCInstancesMsg {
+  instances: FCInstanceInfo[]
+}
+
+// Control tab -- see local-representative/control.go.
+export interface ControlStepInfo {
+  label: string
+  detail?: string
+}
+
+export interface ControlSequenceInfo {
+  id: string
+  name: string
+  description?: string
+  steps: ControlStepInfo[]
+}
+
+export interface ControlStepResult {
+  label: string
+  status: string // "pending" | "running" | "success" | "error" | "skipped"
+  message?: string
+  duration_ms?: number
+}
+
+export interface ControlRunMsg {
+  id: string
+  sequence: string
+  name: string
+  status: string // "running" | "success" | "error" | "cancelled"
+  error?: string
+  started_at: number // unix ms
+  duration_ms?: number
+  steps: ControlStepResult[]
+  values?: { label: string; value: string }[]
+}
+
+export interface ControlStateMsg {
+  sequences: ControlSequenceInfo[]
+  run?: ControlRunMsg
+}
+
 export interface RidealongStateMsg {
+  fc?: string
   active: boolean
   title?: string
   current_index?: number
@@ -31,6 +90,7 @@ export interface RidealongStateMsg {
 }
 
 export interface CondocStateMsg {
+  fc?: string
   active: boolean
   name?: string
   phase?: string

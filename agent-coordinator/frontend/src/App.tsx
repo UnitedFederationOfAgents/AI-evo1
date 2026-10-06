@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
-  Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
+  Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
+  LRControlMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
@@ -22,8 +23,14 @@ interface LogEntry {
 
 interface HostClientState {
   lrState?: LRStateMsg
+  // fcState/fcLog are for an older LR that doesn't tell its FC instances
+  // apart; fcInstances/fcLogs (keyed by instance) for a current one -- see
+  // local-representative/fcinstances.go.
   fcState: string
   fcLog: LogEntry[]
+  fcInstances: FCInstanceInfo[]
+  fcLogs: Record<string, LogEntry[]>
+  control?: ControlStateMsg
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
@@ -39,7 +46,14 @@ interface HostClientState {
 }
 
 function emptyHostState(): HostClientState {
-  return { fcState: '', fcLog: [] }
+  return { fcState: '', fcLog: [], fcInstances: [], fcLogs: {} }
+}
+
+function fcStateLabel(state: string): string {
+  return state === '' ? '-- disconnected --'
+    : state === 'remote-control' ? '-- remote control --'
+    : state === 'local-control' ? '-- local control --'
+    : `-- ${state} --`
 }
 
 function useCoordinatorWS() {
@@ -68,12 +82,22 @@ function useCoordinatorWS() {
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRefs = useRef<Record<string, string>>({})
 
-  const sendLRCommand = useCallback((hostId: string, cmd: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'lr-command', payload: { host_id: hostId, cmd } }))
+  // fc names the FC instance on that host; without it the host's LR picks.
+  const sendLRCommand = useCallback((hostId: string, cmd: string, fc?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-command', payload: { host_id: hostId, cmd, fc } }))
   }, [])
 
-  const sendLRRidealongCommand = useCallback((hostId: string, action: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'lr-ridealong-command', payload: { host_id: hostId, action } }))
+  const sendLRRidealongCommand = useCallback((hostId: string, action: string, fc?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-ridealong-command', payload: { host_id: hostId, action, fc } }))
+  }, [])
+
+  // A host's control tab -- see local-representative/control.go.
+  const sendLRControlRun = useCallback((hostId: string, sequence: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence } }))
+  }, [])
+
+  const sendLRControlCancel = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-cancel', payload: { host_id: hostId } }))
   }, [])
 
   const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
@@ -222,17 +246,22 @@ function useCoordinatorWS() {
           case 'lr-fc-state': {
             const p = msg.payload as LRFCStateMsg
             const newSt = p.state === 'disconnected' ? '' : p.state
-            const prevSt = fcStateRefs.current[p.host_id] ?? ''
-            fcStateRefs.current[p.host_id] = newSt
-            const stateEntry: LogEntry | null = prevSt !== newSt ? {
-              kind: 'state',
-              text: newSt === '' ? '-- disconnected --'
-                : newSt === 'remote-control' ? '-- remote control --'
-                : newSt === 'local-control' ? '-- local control --'
-                : `-- ${newSt} --`,
-            } : null
+            const refKey = p.fc ? `${p.host_id}\n${p.fc}` : p.host_id
+            const prevSt = fcStateRefs.current[refKey] ?? ''
+            fcStateRefs.current[refKey] = newSt
+            const stateEntry: LogEntry | null = prevSt !== newSt ? { kind: 'state', text: fcStateLabel(newSt) } : null
             setHostData(prev => {
               const cur = prev[p.host_id] ?? emptyHostState()
+              if (p.fc) {
+                // One instance's transition -- its current state comes with
+                // lr-fc-instances.
+                const fc = p.fc
+                if (!stateEntry) return prev
+                return {
+                  ...prev,
+                  [p.host_id]: { ...cur, fcLogs: { ...cur.fcLogs, [fc]: [...(cur.fcLogs[fc] ?? []), stateEntry] } },
+                }
+              }
               return {
                 ...prev,
                 [p.host_id]: {
@@ -252,6 +281,13 @@ function useCoordinatorWS() {
             }
             setHostData(prev => {
               const cur = prev[p.host_id] ?? emptyHostState()
+              if (p.fc) {
+                const fc = p.fc
+                return {
+                  ...prev,
+                  [p.host_id]: { ...cur, fcLogs: { ...cur.fcLogs, [fc]: [...(cur.fcLogs[fc] ?? []).slice(-199), entry] } },
+                }
+              }
               return {
                 ...prev,
                 [p.host_id]: {
@@ -260,6 +296,22 @@ function useCoordinatorWS() {
                 },
               }
             })
+            break
+          }
+          case 'lr-fc-instances': {
+            const p = msg.payload as LRFCInstancesMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), fcInstances: p.instances ?? [] },
+            }))
+            break
+          }
+          case 'lr-control-state': {
+            const p = msg.payload as LRControlMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), control: p.control ?? undefined },
+            }))
             break
           }
           case 'lr-ridealong-state': {
@@ -381,7 +433,7 @@ function useCoordinatorWS() {
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
@@ -435,7 +487,9 @@ const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'ro
 // management and host-cache from the coordinator. Upload on this files tab is
 // relayed through AC's dedicated upload-relay route rather than AC keeping
 // its own copy of the file (see docs/DistributedExchange.md, Path 1).
-const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
+// "control" sequences actions across a host's sub-apps (see
+// local-representative/control.go); it sits between the services and system.
+const LR_TABS = [...LR_SERVICES, 'control', 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -699,6 +753,162 @@ function RidealongPanel({
       {!canControl && (
         <div className="ra-observe-hint">observing — switch to remote control to drive</div>
       )}
+    </div>
+  )
+}
+
+// FCInstancePicker lists every federation-command instance connected to the
+// host's LR; the federation-command tab's panels follow the selected one.
+// Mirrors local-representative/frontend/src/App.tsx's own copy.
+function FCInstancePicker({
+  instances, selected, onSelect,
+}: {
+  instances: FCInstanceInfo[]
+  selected: string | null
+  onSelect: (key: string) => void
+}) {
+  if (instances.length === 0) return null
+  return (
+    <div className="fc-instances">
+      <span className="fc-instances-label">
+        {instances.length} instance{instances.length === 1 ? '' : 's'}
+      </span>
+      {instances.map(inst => (
+        <button
+          key={inst.key}
+          className={`fc-instance fc-instance-${inst.state || 'none'}${inst.key === selected ? ' fc-instance-active' : ''}`}
+          onClick={() => onSelect(inst.key)}
+          title={`${inst.key}${inst.head ? ` (head ${inst.head})` : ''} — ${inst.state || 'no state yet'}`}
+        >
+          <span className="fc-instance-dot" />
+          {inst.label}
+          {inst.session && <span className="fc-instance-session">{inst.session}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Control tab (local-representative/control.go) ----
+// Runs on the selected host's LR; mirrors local-representative's own copy.
+
+const CONTROL_SUBTABS = ['v1'] as const
+type ControlSubTab = typeof CONTROL_SUBTABS[number]
+
+function controlStepIcon(status: string): string {
+  return status === 'success' ? '✓'
+    : status === 'error' ? '✗'
+    : status === 'running' ? '▸'
+    : status === 'skipped' ? '–'
+    : '·'
+}
+
+function formatMs(ms?: number): string {
+  if (!ms) return ''
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+function ControlPanel({
+  state, robotHealthy, onRun, onCancel,
+}: {
+  state: ControlStateMsg | null
+  robotHealthy: boolean
+  onRun: (sequence: string) => void
+  onCancel: () => void
+}) {
+  const [sub, setSub] = useState<ControlSubTab>('v1')
+  return (
+    <div className="ctl-panel">
+      <div className="ctl-subtabs">
+        {CONTROL_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'v1' && (
+        !state ? (
+          <div className="ctl-empty">waiting for control state…</div>
+        ) : (
+          <>
+            {!robotHealthy && (
+              <div className="ctl-hint ctl-hint-warn">the robot isn't running on this host — launch it from the system tab first</div>
+            )}
+            <div className="ctl-hint">
+              The robot finds the new terminal by reading that host's screen: its window has to be visible,
+              not behind another, and no other view of federation-command's output (its tab here or in
+              local-representative) should be showing on that desktop.
+            </div>
+            {state.sequences.map(q => (
+              <ControlSequenceCard
+                key={q.id}
+                seq={q}
+                run={state.run && state.run.sequence === q.id ? state.run : undefined}
+                busy={state.run?.status === 'running'}
+                onRun={() => onRun(q.id)}
+                onCancel={onCancel}
+              />
+            ))}
+          </>
+        )
+      )}
+    </div>
+  )
+}
+
+function ControlSequenceCard({
+  seq, run, busy, onRun, onCancel,
+}: {
+  seq: ControlSequenceInfo
+  run?: ControlRunMsg
+  busy: boolean
+  onRun: () => void
+  onCancel: () => void
+}) {
+  const running = run?.status === 'running'
+  return (
+    <div className="ctl-seq">
+      <div className="ctl-seq-head">
+        <span className="ctl-seq-name">{seq.name}</span>
+        {run && (
+          <span className={`ctl-run-status ctl-run-${run.status}`}>
+            {run.status}{run.duration_ms ? ` · ${formatMs(run.duration_ms)}` : ''}
+          </span>
+        )}
+        {running ? (
+          <button className="sys-btn sys-btn-terminate" onClick={onCancel}>cancel</button>
+        ) : (
+          <button className="sys-btn sys-btn-launch" disabled={busy} onClick={onRun}>run</button>
+        )}
+      </div>
+      {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
+      <ol className="ctl-steps">
+        {seq.steps.map((st, i) => {
+          const r = run?.steps[i]
+          const status = r?.status ?? 'pending'
+          return (
+            <li key={i} className={`ctl-step ctl-step-${status}`}>
+              <span className="ctl-step-icon">{controlStepIcon(status)}</span>
+              <div className="ctl-step-body">
+                <div className="ctl-step-label">{st.label}</div>
+                {st.detail && <div className="ctl-step-detail">{st.detail}</div>}
+                {r?.message && <div className="ctl-step-msg">{r.message}</div>}
+              </div>
+              <span className="ctl-step-time">{formatMs(r?.duration_ms)}</span>
+            </li>
+          )
+        })}
+      </ol>
+      {run?.values && run.values.length > 0 && (
+        <div className="ctl-values">
+          {run.values.map((v, i) => (
+            <div key={i} className="ctl-value">
+              <span className="ctl-value-label">{v.label}:</span> {v.value}
+            </div>
+          ))}
+        </div>
+      )}
+      {run?.error && <div className="ctl-run-error-msg">{run.error}</div>}
     </div>
   )
 }
@@ -1376,12 +1586,13 @@ function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => vo
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
   active: boolean
-  fcState: string
+  fcState: string // an older LR's single FC state -- see HostClientState
+  fcInstances: FCInstanceInfo[]
   repoState: LRRepoStateMsg | undefined
   onLaunch: (hostId: string, name: string) => void
   onTerminate: (hostId: string, id: string) => void
@@ -1415,10 +1626,15 @@ function SystemPanel({
     managed.filter(p => p.name === name && p.status === 'running').length
 
   const fcRunning = runningCount('federation-command') > 0
-  const fcControl =
-    fcState === 'remote-control' ? 'remote'
-    : fcState === 'local-control' ? 'local'
+  const fcControl = (st: string) =>
+    st === 'remote-control' ? 'remote'
+    : st === 'local-control' ? 'local'
     : 'not connected'
+  // One line per connected FC instance (see FCInstancePicker); a single line
+  // for an older LR, or while launched instances have yet to connect.
+  const fcRows = fcInstances.length > 0
+    ? fcInstances.map(inst => ({ key: inst.key, label: `federation-command ${inst.label}`, state: inst.state }))
+    : [{ key: '', label: 'federation-command', state: fcState }]
 
   const selectedProc = selectedKey === null
     ? undefined
@@ -1431,12 +1647,12 @@ function SystemPanel({
         onRebuild={() => onRebuild(hostId)}
         onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
       />
-      {fcRunning && (
-        <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
-          federation-command control: <strong>{fcControl}</strong>
-          {fcControl !== 'remote' && ' — expected remote in a machine-driven chain'}
+      {fcRunning && fcRows.map(row => (
+        <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
+          {row.label} control: <strong>{fcControl(row.state)}</strong>
+          {fcControl(row.state) !== 'remote' && ' — expected remote in a machine-driven chain'}
         </div>
-      )}
+      ))}
       <div className="sys-table">
         <div className="sys-row sys-row-head">
           <span className="sys-col sys-col-name">process</span>
@@ -2948,14 +3164,16 @@ function GlobalView({
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRLaunchApp, sendLRTerminateApp,
   sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
   data: HostClientState
-  sendLRCommand: (hostId: string, cmd: string) => void
-  sendLRRidealongCommand: (hostId: string, action: string) => void
+  sendLRCommand: (hostId: string, cmd: string, fc?: string) => void
+  sendLRRidealongCommand: (hostId: string, action: string, fc?: string) => void
+  sendLRControlRun: (hostId: string, sequence: string) => void
+  sendLRControlCancel: (hostId: string) => void
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
   sendLRRestartApp: (hostId: string) => void
@@ -2991,7 +3209,11 @@ function LRView({
   // lr-system-state (see condocs/initialDistributedSessionsImpls/
   // Step2Prompt.md Revision C). Surfaced on the federation-command tab
   // itself rather than only the system tab's per-row tag.
-  const fcSession = data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+  // The federation-command tab follows one FC instance at a time (see
+  // FCInstancePicker): the one picked on this host, else the first.
+  const [selectedFC, setSelectedFC] = useState<Record<string, string>>({})
+  const fc = data.fcInstances.find(i => i.key === selectedFC[host.id]) ?? data.fcInstances[0] ?? null
+  const fcSession = fc?.session ?? data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
 
   // Consume the global "go to first highlighted file" handoff (Step5SubstepR
   // Revision E) once this is the host it was aimed at -- App() has already
@@ -3161,6 +3383,7 @@ function LRView({
                     state={data.system}
                     active={active}
                     fcState={data.fcState}
+                    fcInstances={data.fcInstances}
                     repoState={data.repo}
                     onLaunch={sendLRLaunchApp}
                     onTerminate={sendLRTerminateApp}
@@ -3189,7 +3412,48 @@ function LRView({
                   onUpload={f => uploadFiles(host.id, f)}
                 />
               )}
-              {activeTab === 'federation-command' && (
+              {activeTab === 'control' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <ControlPanel
+                    state={data.control ?? null}
+                    robotHealthy={getServiceStatus('robot') === 'healthy'}
+                    onRun={seq => sendLRControlRun(host.id, seq)}
+                    onCancel={() => sendLRControlCancel(host.id)}
+                  />
+                )
+              )}
+              {activeTab === 'federation-command' && (fc ? (
+                // A current LR: one instance at a time, picked above.
+                <>
+                  <FCInstancePicker
+                    instances={data.fcInstances}
+                    selected={fc.key}
+                    onSelect={key => setSelectedFC(prev => ({ ...prev, [host.id]: key }))}
+                  />
+                  {fc.ridealong && (
+                    <RidealongPanel
+                      hostId={host.id}
+                      state={{ ...fc.ridealong, host_id: host.id }}
+                      fcState={fc.state}
+                      sendLRRidealongCommand={(hostId, action) => sendLRRidealongCommand(hostId, action, fc.key)}
+                    />
+                  )}
+                  {fc.condoc && !fc.ridealong && (
+                    <CondocPanel state={{ ...fc.condoc, host_id: host.id }} fcState={fc.state} />
+                  )}
+                  <FCCommandPanel
+                    key={fc.key}
+                    hostId={host.id}
+                    fcState={fc.state}
+                    fcLog={data.fcLogs[fc.key] ?? []}
+                    sendLRCommand={(hostId, cmd) => sendLRCommand(hostId, cmd, fc.key)}
+                  />
+                </>
+              ) : (
+                // An older LR that doesn't tell its instances apart (or none
+                // connected yet).
                 <>
                   {data.ridealong && (
                     <RidealongPanel
@@ -3209,7 +3473,7 @@ function LRView({
                     sendLRCommand={sendLRCommand}
                   />
                 </>
-              )}
+              ))}
             </div>
             {selectedFile && (
               <FileDetailPane
@@ -3453,7 +3717,7 @@ export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
@@ -3634,6 +3898,8 @@ export default function App() {
               data={hostData[selectedHost.id] ?? emptyHostState()}
               sendLRCommand={sendLRCommand}
               sendLRRidealongCommand={sendLRRidealongCommand}
+              sendLRControlRun={sendLRControlRun}
+              sendLRControlCancel={sendLRControlCancel}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
               sendLRRestartApp={sendLRRestartApp}

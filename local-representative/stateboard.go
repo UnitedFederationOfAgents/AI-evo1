@@ -125,6 +125,10 @@ func (s *Server) stateboard() StateboardMsg {
 
 	for _, app := range stateboardApps {
 		present := s.reprServer != nil && s.reprServer.IsHealthy(app.clientName)
+		if app.clientName == fcAppName {
+			// Each FC instance connects under its own name -- see fcinstances.go.
+			present = s.anyFCHealthy()
+		}
 		entries = append(entries, StateboardEntry{App: app.label, Key: "present", Value: strconv.FormatBool(present)})
 		hosts := ""
 		if present {

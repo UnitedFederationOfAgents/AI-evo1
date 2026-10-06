@@ -128,13 +128,16 @@ type StatusMsg struct {
 	Services []ServiceStatus `json:"services"`
 }
 
-// FCStateMsg matches the fc-state payload sent from LR.
+// FCStateMsg matches the fc-state payload sent from LR. FC is the FC
+// instance it's about.
 type FCStateMsg struct {
+	FC    string `json:"fc,omitempty"`
 	State string `json:"state"`
 }
 
-// FCLogMsg is the payload of "lr-fc-log" WebSocket messages.
+// FCLogMsg matches the fc-log payload sent from LR.
 type FCLogMsg struct {
+	FC   string `json:"fc,omitempty"`
 	Line string `json:"line"`
 	Kind string `json:"kind,omitempty"`
 }
@@ -363,13 +366,31 @@ type RepoStateMsg struct {
 
 type LRFCStateMsg struct {
 	HostID string `json:"host_id"`
+	FC     string `json:"fc,omitempty"` // the FC instance on that host -- see local-representative/fcinstances.go
 	State  string `json:"state"`
 }
 
 type LRFCLogMsg struct {
 	HostID string `json:"host_id"`
+	FC     string `json:"fc,omitempty"`
 	Line   string `json:"line"`
 	Kind   string `json:"kind,omitempty"`
+}
+
+// LRFCInstancesMsg relays a host's "fc-instances" snapshot (every connected
+// federation-command instance -- see local-representative/fcinstances.go)
+// as-is.
+type LRFCInstancesMsg struct {
+	HostID    string          `json:"host_id"`
+	Instances json.RawMessage `json:"instances"`
+}
+
+// LRControlMsg relays a host's "control-state" (its control tab's sequences
+// and current run -- see local-representative/control.go) as-is. Control is
+// null when the host has disconnected.
+type LRControlMsg struct {
+	HostID  string          `json:"host_id"`
+	Control json.RawMessage `json:"control"`
 }
 
 type LRRidealongMsg struct {
@@ -551,6 +572,11 @@ type hostState struct {
 	chainCall  *ChainCallStateMsg
 	stateboard *StateboardMsg
 	lrHTTPPort string
+
+	// fcInstances and control are relayed to browsers as-is -- see
+	// LRFCInstancesMsg and LRControlMsg.
+	fcInstances json.RawMessage
+	control     json.RawMessage
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -794,10 +820,14 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	debugLog := hs.debugLog
 	chainCall := hs.chainCall
 	stateboard := hs.stateboard
+	fcInstances := hs.fcInstances
+	control := hs.control
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
 	s.sendToClient(c, "lr-fc-state", LRFCStateMsg{HostID: name, State: fcState})
+	s.sendToClient(c, "lr-fc-instances", fcInstancesMsg(name, fcInstances))
+	s.sendToClient(c, "lr-control-state", LRControlMsg{HostID: name, Control: control})
 	if ridealong != nil {
 		s.sendToClient(c, "lr-ridealong-state", ridealongMsg(name, ridealong))
 	} else {
@@ -887,6 +917,15 @@ func robotMsg(hostID string, rb *RobotStateMsg) LRRobotMsg {
 	return LRRobotMsg{HostID: hostID, Available: true}
 }
 
+// fcInstancesMsg builds a host-scoped lr-fc-instances payload; nil means no
+// snapshot yet (or the host disconnected), sent as an empty list.
+func fcInstancesMsg(hostID string, raw json.RawMessage) LRFCInstancesMsg {
+	if len(raw) == 0 || string(raw) == "null" {
+		raw = json.RawMessage("[]")
+	}
+	return LRFCInstancesMsg{HostID: hostID, Instances: raw}
+}
+
 func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
 	return LRRidealongMsg{
 		HostID:       hostID,
@@ -935,6 +974,16 @@ func condocMsg(hostID string, c *CondocStateMsg) LRCondocMsg {
 		StepNum:   c.StepNum,
 		StatusMsg: c.StatusMsg,
 	}
+}
+
+// fcTargeted addresses cmd to one FC instance on a host: LR runs
+// "__fc:<instance> <cmd>" on that instance only, and a bare cmd on its
+// default instance.
+func fcTargeted(fc, cmd string) string {
+	if fc == "" {
+		return cmd
+	}
+	return "__fc:" + fc + " " + cmd
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -1017,22 +1066,43 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				s.sendHostSnapshot(c, payload.HostID)
 			}
 		case "lr-command":
+			// fc picks one FC instance on the host (see
+			// local-representative/fcinstances.go); empty leaves it to LR.
 			var payload struct {
 				HostID string `json:"host_id"`
+				FC     string `json:"fc"`
 				Cmd    string `json:"cmd"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
 				payload.HostID != "" && payload.Cmd != "" && s.reprServer != nil {
-				s.reprServer.SendCommand(payload.HostID, payload.Cmd)
+				s.reprServer.SendCommand(payload.HostID, fcTargeted(payload.FC, payload.Cmd))
 			}
 		case "lr-ridealong-command":
 			var payload struct {
 				HostID string `json:"host_id"`
+				FC     string `json:"fc"`
 				Action string `json:"action"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
 				payload.HostID != "" && payload.Action != "" && s.reprServer != nil {
-				s.reprServer.SendCommand(payload.HostID, "__ridealong:"+payload.Action)
+				s.reprServer.SendCommand(payload.HostID, fcTargeted(payload.FC, "__ridealong:"+payload.Action))
+			}
+		case "lr-control-run":
+			// The host's control tab -- see local-representative/control.go.
+			var payload struct {
+				HostID   string `json:"host_id"`
+				Sequence string `json:"sequence"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Sequence != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__control:run "+payload.Sequence)
+			}
+		case "lr-control-cancel":
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__control:cancel")
 			}
 		case "lr-launch-app":
 			var payload struct {
@@ -1407,10 +1477,14 @@ func main() {
 			hs.chainCall = nil
 			hs.stateboard = nil
 			hs.lrHTTPPort = ""
+			hs.fcInstances = nil
+			hs.control = nil
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, State: ""})
+			s.broadcast("lr-fc-instances", fcInstancesMsg(name, nil))
+			s.broadcast("lr-control-state", LRControlMsg{HostID: name})
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1470,8 +1544,28 @@ func main() {
 				hs.mu.Lock()
 				hs.fcState = payload.State
 				hs.mu.Unlock()
-				s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, State: payload.State})
+				s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, FC: payload.FC, State: payload.State})
 			}
+		case "fc-log":
+			var payload FCLogMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.broadcast("lr-fc-log", LRFCLogMsg{HostID: name, FC: payload.FC, Line: payload.Line, Kind: payload.Kind})
+			}
+		case "fc-instances":
+			var payload struct {
+				Instances json.RawMessage `json:"instances"`
+			}
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.fcInstances = payload.Instances
+				hs.mu.Unlock()
+				s.broadcast("lr-fc-instances", fcInstancesMsg(name, payload.Instances))
+			}
+		case "control-state":
+			hs.mu.Lock()
+			hs.control = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-control-state", LRControlMsg{HostID: name, Control: data})
 		case "ridealong-state":
 			var payload RidealongStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

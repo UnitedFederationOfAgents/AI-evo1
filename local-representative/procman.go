@@ -336,7 +336,11 @@ func (s *Server) systemState() SystemStateMsg {
 		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
 		info.PendingVersion = s.managedPendingVersionFor(p.app)
 		if p.app == "federation-command" {
-			if id, name := s.fcSession(); id != "" {
+			// Each instance's own report first (see fcinstances.go), then the
+			// most recent report from any instance.
+			if sess := s.fcSessionFor(p.instanceID); sess != "" {
+				info.Session = sess
+			} else if id, name := s.fcSession(); id != "" {
 				if name != "" {
 					info.Session = name
 				} else {

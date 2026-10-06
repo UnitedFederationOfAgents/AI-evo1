@@ -91,30 +91,30 @@ type SaveResultMsg struct {
 // handleSaveArtifact uploads artifact id into local-representative's files
 // area and reports the outcome as a "save-result".
 func (s *Server) handleSaveArtifact(c *wsClient, id string) {
-	fail := func(err string) {
-		s.sendToClient(c, "save-result", SaveResultMsg{ArtifactID: id, Error: err})
-	}
-	a, ok := s.artifacts.get(id)
-	if !ok {
-		fail("this result is no longer kept for saving -- only the last " + strconv.Itoa(maxArtifacts) + " are")
-		return
-	}
-	base, err := s.lrBaseURL()
+	uploaded, err := s.saveArtifact(id)
 	if err != nil {
-		fail(err.Error())
-		return
-	}
-	data, err := a.build()
-	if err != nil {
-		fail(fmt.Sprintf("preparing %s: %v", a.name, err))
-		return
-	}
-	uploaded, err := uploadToFiles(base, a.name, data)
-	if err != nil {
-		fail(err.Error())
+		s.sendToClient(c, "save-result", SaveResultMsg{ArtifactID: id, Error: err.Error()})
 		return
 	}
 	s.sendToClient(c, "save-result", SaveResultMsg{ArtifactID: id, Success: true, Name: uploaded.Name, FileID: uploaded.ID})
+}
+
+// saveArtifact builds artifact id and uploads it into local-representative's
+// files area.
+func (s *Server) saveArtifact(id string) (*uploadedFile, error) {
+	a, ok := s.artifacts.get(id)
+	if !ok {
+		return nil, fmt.Errorf("this result is no longer kept for saving -- only the last %d are", maxArtifacts)
+	}
+	base, err := s.lrBaseURL()
+	if err != nil {
+		return nil, err
+	}
+	data, err := a.build()
+	if err != nil {
+		return nil, fmt.Errorf("preparing %s: %v", a.name, err)
+	}
+	return uploadToFiles(base, a.name, data)
 }
 
 // lrBaseURL is local-representative's HTTP base URL, learned over IANAR's

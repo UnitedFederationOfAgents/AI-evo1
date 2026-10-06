@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlSequenceInfo, ControlRunMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 
-const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker', 'system', 'files'] as const
+const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -34,13 +34,25 @@ interface LogEntry {
   text: string
 }
 
+// The FC instance an fc-* message without an fc field is about: an older
+// federation-command connected under the bare app name.
+const FC_DEFAULT_KEY = 'federation-command'
+
+function fcStateLabel(state: string): string {
+  return state === '' ? '-- disconnected --'
+    : state === 'remote-control' ? '-- remote control --'
+    : state === 'local-control' ? '-- local control --'
+    : `-- ${state} --`
+}
+
 function useStatusWS() {
   const [connected, setConnected] = useState(false)
   const [services, setServices] = useState<ServiceStatus[]>([])
-  const [fcState, setFcState] = useState<string>('')
-  const [fcLog, setFcLog] = useState<LogEntry[]>([])
-  const [ridealongState, setRidealongState] = useState<RidealongStateMsg | null>(null)
-  const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
+  // Every connected federation-command instance, and each one's log, keyed
+  // by instance -- see local-representative/fcinstances.go.
+  const [fcInstances, setFcInstances] = useState<FCInstanceInfo[]>([])
+  const [fcLogs, setFcLogs] = useState<Record<string, LogEntry[]>>({})
+  const [controlState, setControlState] = useState<ControlStateMsg | null>(null)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
   const [repoState, setRepoState] = useState<RepoStateMsg>({ watched: false, dirty: false, rebuild_ready: false, building: false, auto_rebuild: false })
@@ -54,23 +66,37 @@ function useStatusWS() {
   const [tcAvailable, setTCAvailable] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const fcStateRef = useRef<string>('')
+  const fcStateRef = useRef<Record<string, string>>({})
 
-  const sendCommand = useCallback((cmd: string) => {
+  // fc names the instance to send to; LR picks its default one without it.
+  const sendCommand = useCallback((cmd: string, fc?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'command',
-        payload: { cmd },
+        payload: { cmd, fc },
       }))
     }
   }, [])
 
-  const sendRidealongCommand = useCallback((action: string) => {
+  const sendRidealongCommand = useCallback((action: string, fc?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'ridealong-command',
-        payload: { action },
+        payload: { action, fc },
       }))
+    }
+  }, [])
+
+  // Control tab -- see local-representative/control.go.
+  const runControl = useCallback((sequence: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence } }))
+    }
+  }, [])
+
+  const cancelControl = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-cancel', payload: {} }))
     }
   }, [])
 
@@ -189,42 +215,32 @@ function useStatusWS() {
             setServices((msg.payload as StatusMsg).services)
             break
           case 'fc-state': {
-            const raw = (msg.payload as FCStateMsg).state
-            const newSt = raw === 'disconnected' ? '' : raw
-            const prevSt = fcStateRef.current
-            fcStateRef.current = newSt
-            setFcState(newSt)
+            // Only marks transitions in that instance's log -- its current
+            // state comes with fc-instances.
+            const p = msg.payload as FCStateMsg
+            const key = p.fc || FC_DEFAULT_KEY
+            const newSt = p.state === 'disconnected' ? '' : p.state
+            const prevSt = fcStateRef.current[key] ?? ''
+            fcStateRef.current[key] = newSt
             if (prevSt !== newSt) {
-              const label =
-                newSt === '' ? '-- disconnected --'
-                : newSt === 'remote-control' ? '-- remote control --'
-                : newSt === 'local-control' ? '-- local control --'
-                : `-- ${newSt} --`
-              setFcLog(prev => [...prev, { kind: 'state', text: label }])
+              setFcLogs(prev => ({ ...prev, [key]: [...(prev[key] ?? []), { kind: 'state', text: fcStateLabel(newSt) }] }))
             }
             break
           }
           case 'fc-log': {
-            const logPayload = msg.payload as FCLogMsg
-            setFcLog(prev => [
-              ...prev.slice(-199),
-              {
-                kind: logPayload.kind === 'output' ? 'output' : 'cmd',
-                text: logPayload.line,
-              },
-            ])
+            const p = msg.payload as FCLogMsg
+            const key = p.fc || FC_DEFAULT_KEY
+            const entry: LogEntry = { kind: p.kind === 'output' ? 'output' : 'cmd', text: p.line }
+            setFcLogs(prev => ({ ...prev, [key]: [...(prev[key] ?? []).slice(-199), entry] }))
             break
           }
-          case 'ridealong-state': {
-            const payload = msg.payload as RidealongStateMsg
-            setRidealongState(payload.active ? payload : null)
+          case 'fc-instances':
+            // Ridealong and condoc state arrive per instance in here too.
+            setFcInstances((msg.payload as FCInstancesMsg).instances ?? [])
             break
-          }
-          case 'condoc-state': {
-            const payload = msg.payload as CondocStateMsg
-            setCondocState(payload.active ? payload : null)
+          case 'control-state':
+            setControlState(msg.payload as ControlStateMsg)
             break
-          }
           case 'ac-state':
             setAcState(msg.payload as ACStateMsg)
             break
@@ -280,10 +296,173 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
+    connected, services, fcInstances, fcLogs, controlState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
     rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
+}
+
+// FCInstancePicker lists every connected federation-command instance on the
+// federation-command tab; the panels below it follow the selected one.
+function FCInstancePicker({
+  instances,
+  selected,
+  onSelect,
+}: {
+  instances: FCInstanceInfo[]
+  selected: string | null
+  onSelect: (key: string) => void
+}) {
+  if (instances.length === 0) return null
+  return (
+    <div className="fc-instances">
+      <span className="fc-instances-label">
+        {instances.length} instance{instances.length === 1 ? '' : 's'}
+      </span>
+      {instances.map(inst => (
+        <button
+          key={inst.key}
+          className={`fc-instance fc-instance-${inst.state || 'none'}${inst.key === selected ? ' fc-instance-active' : ''}`}
+          onClick={() => onSelect(inst.key)}
+          title={`${inst.key}${inst.head ? ` (head ${inst.head})` : ''} — ${inst.state || 'no state yet'}`}
+        >
+          <span className="fc-instance-dot" />
+          {inst.label}
+          {inst.session && <span className="fc-instance-session">{inst.session}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Control tab (local-representative/control.go) ----
+
+const CONTROL_SUBTABS = ['v1'] as const
+type ControlSubTab = typeof CONTROL_SUBTABS[number]
+
+function controlStepIcon(status: string): string {
+  return status === 'success' ? '✓'
+    : status === 'error' ? '✗'
+    : status === 'running' ? '▸'
+    : status === 'skipped' ? '–'
+    : '·'
+}
+
+function formatMs(ms?: number): string {
+  if (!ms) return ''
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
+function ControlPanel({
+  state,
+  robotHealthy,
+  onRun,
+  onCancel,
+}: {
+  state: ControlStateMsg | null
+  robotHealthy: boolean
+  onRun: (sequence: string) => void
+  onCancel: () => void
+}) {
+  const [sub, setSub] = useState<ControlSubTab>('v1')
+  return (
+    <div className="ctl-panel">
+      <div className="ctl-subtabs">
+        {CONTROL_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'v1' && (
+        !state ? (
+          <div className="ctl-empty">waiting for control state…</div>
+        ) : (
+          <>
+            {!robotHealthy && (
+              <div className="ctl-hint ctl-hint-warn">the robot isn't running on this host — launch it from the system tab first</div>
+            )}
+            <div className="ctl-hint">
+              The robot finds the new terminal by reading the screen: its window has to be visible, not
+              behind another, and no other view of federation-command's output (its tab here or in
+              agent-coordinator) should be showing on that desktop.
+            </div>
+            {state.sequences.map(q => (
+              <ControlSequenceCard
+                key={q.id}
+                seq={q}
+                run={state.run && state.run.sequence === q.id ? state.run : undefined}
+                busy={state.run?.status === 'running'}
+                onRun={() => onRun(q.id)}
+                onCancel={onCancel}
+              />
+            ))}
+          </>
+        )
+      )}
+    </div>
+  )
+}
+
+function ControlSequenceCard({
+  seq,
+  run,
+  busy,
+  onRun,
+  onCancel,
+}: {
+  seq: ControlSequenceInfo
+  run?: ControlRunMsg
+  busy: boolean
+  onRun: () => void
+  onCancel: () => void
+}) {
+  const running = run?.status === 'running'
+  return (
+    <div className="ctl-seq">
+      <div className="ctl-seq-head">
+        <span className="ctl-seq-name">{seq.name}</span>
+        {run && (
+          <span className={`ctl-run-status ctl-run-${run.status}`}>
+            {run.status}{run.duration_ms ? ` · ${formatMs(run.duration_ms)}` : ''}
+          </span>
+        )}
+        {running ? (
+          <button className="sys-btn sys-btn-terminate" onClick={onCancel}>cancel</button>
+        ) : (
+          <button className="sys-btn sys-btn-launch" disabled={busy} onClick={onRun}>run</button>
+        )}
+      </div>
+      {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
+      <ol className="ctl-steps">
+        {seq.steps.map((st, i) => {
+          const r = run?.steps[i]
+          const status = r?.status ?? 'pending'
+          return (
+            <li key={i} className={`ctl-step ctl-step-${status}`}>
+              <span className="ctl-step-icon">{controlStepIcon(status)}</span>
+              <div className="ctl-step-body">
+                <div className="ctl-step-label">{st.label}</div>
+                {st.detail && <div className="ctl-step-detail">{st.detail}</div>}
+                {r?.message && <div className="ctl-step-msg">{r.message}</div>}
+              </div>
+              <span className="ctl-step-time">{formatMs(r?.duration_ms)}</span>
+            </li>
+          )
+        })}
+      </ol>
+      {run?.values && run.values.length > 0 && (
+        <div className="ctl-values">
+          {run.values.map((v, i) => (
+            <div key={i} className="ctl-value">
+              <span className="ctl-value-label">{v.label}:</span> {v.value}
+            </div>
+          ))}
+        </div>
+      )}
+      {run?.error && <div className="ctl-run-error-msg">{run.error}</div>}
+    </div>
+  )
 }
 
 function FCCommandPanel({
@@ -823,7 +1002,7 @@ function RepoWatchPanel({
 
 function SystemPanel({
   state,
-  fcState,
+  fcInstances,
   repoState,
   onLaunch,
   onTerminate,
@@ -833,7 +1012,7 @@ function SystemPanel({
   onSetAutoUpdate,
 }: {
   state: SystemStateMsg | null
-  fcState: string
+  fcInstances: FCInstanceInfo[]
   repoState: RepoStateMsg
   onLaunch: (name: string) => void
   onTerminate: (id: string) => void
@@ -858,20 +1037,25 @@ function SystemPanel({
     state.managed.filter(p => p.name === name && p.status === 'running').length
 
   const fcRunning = runningCount('federation-command') > 0
-  const fcControl =
-    fcState === 'remote-control' ? 'remote'
-    : fcState === 'local-control' ? 'local'
+  const fcControl = (st: string) =>
+    st === 'remote-control' ? 'remote'
+    : st === 'local-control' ? 'local'
     : 'not connected'
+  // One line per connected instance; a single "not connected" line while
+  // launched instances have yet to connect.
+  const fcRows = fcInstances.length > 0
+    ? fcInstances.map(inst => ({ key: inst.key, label: `federation-command ${inst.label}`, state: inst.state }))
+    : [{ key: '', label: 'federation-command', state: '' }]
 
   return (
     <div className="sys-panel">
       <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} />
-      {fcRunning && (
-        <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
-          federation-command control: <strong>{fcControl}</strong>
-          {fcControl !== 'remote' && ' — expected remote in a machine-driven chain'}
+      {fcRunning && fcRows.map(row => (
+        <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
+          {row.label} control: <strong>{fcControl(row.state)}</strong>
+          {fcControl(row.state) !== 'remote' && ' — expected remote in a machine-driven chain'}
         </div>
-      )}
+      ))}
       <div className="sys-table">
         <div className="sys-row sys-row-head">
           <span className="sys-col sys-col-name">process</span>
@@ -2015,11 +2199,20 @@ export default function App() {
     capture() // in case condoccer already restored a hash before this attached
   }
   const {
-    connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
+    connected, services, fcInstances, fcLogs, controlState,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, connectToAC, disconnectFromAC, setAutoConnectAC,
     launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
+
+  // The federation-command tab follows one instance at a time: the one
+  // picked (kept per browser tab), else the first.
+  const [selectedFC, setSelectedFC] = useState<string | null>(() => sessionStorage.getItem('lr-selected-fc'))
+  const fc = fcInstances.find(i => i.key === selectedFC) ?? fcInstances[0] ?? null
+  const selectFC = (key: string) => {
+    setSelectedFC(key)
+    sessionStorage.setItem('lr-selected-fc', key)
+  }
 
   // Drives every MicButton in the tree (Step2Prompt.md Revision J) via
   // TCCaptureContext, below -- see useTCCapture's doc comment.
@@ -2037,7 +2230,8 @@ export default function App() {
   // right on the federation-command tab itself, next to its health
   // indicator, so "what session is FC on" doesn't require a trip to system.
   // See condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
-  const fcSession = systemState?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+  // With several instances it's the selected one's own session.
+  const fcSession = fc?.session ?? systemState?.managed.find(p => p.name === 'federation-command' && p.session)?.session
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -2177,7 +2371,7 @@ export default function App() {
               {activeTab === 'system' ? (
                 <SystemPanel
                   state={systemState}
-                  fcState={fcState}
+                  fcInstances={fcInstances}
                   repoState={repoState}
                   onLaunch={launchApp}
                   onTerminate={terminateApp}
@@ -2200,6 +2394,13 @@ export default function App() {
                   onEnter={setViewerFileId}
                   onUpload={uploadFiles}
                 />
+              ) : activeTab === 'control' ? (
+                <ControlPanel
+                  state={controlState}
+                  robotHealthy={getStatus('robot') === 'healthy'}
+                  onRun={runControl}
+                  onCancel={cancelControl}
+                />
               ) : (
                 <>
                   <div className={`health-indicator health-${getStatus(activeTab)}`}>
@@ -2211,23 +2412,25 @@ export default function App() {
                   </div>
                   {activeTab === 'federation-command' && (
                     <>
-                      {ridealongState && (
+                      <FCInstancePicker instances={fcInstances} selected={fc?.key ?? null} onSelect={selectFC} />
+                      {fc?.ridealong && (
                         <RidealongPanel
-                          state={ridealongState}
-                          fcState={fcState}
-                          sendRidealongCommand={sendRidealongCommand}
+                          state={fc.ridealong}
+                          fcState={fc.state}
+                          sendRidealongCommand={action => sendRidealongCommand(action, fc.key)}
                         />
                       )}
-                      {condocState && !ridealongState && (
+                      {fc?.condoc && !fc.ridealong && (
                         <CondocPanel
-                          state={condocState}
-                          fcState={fcState}
+                          state={fc.condoc}
+                          fcState={fc.state}
                         />
                       )}
                       <FCCommandPanel
-                        fcState={fcState}
-                        fcLog={fcLog}
-                        sendCommand={sendCommand}
+                        key={fc?.key ?? ''}
+                        fcState={fc?.state ?? ''}
+                        fcLog={fc ? fcLogs[fc.key] ?? [] : []}
+                        sendCommand={cmd => sendCommand(cmd, fc?.key)}
                       />
                     </>
                   )}

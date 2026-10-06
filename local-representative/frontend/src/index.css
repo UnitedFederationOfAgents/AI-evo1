@@ -547,6 +547,212 @@ body {
 
 .fc-cmd-send:hover { background: #2e5c8a; }
 
+/* FC instance picker (condocs/initialRobotImpls/Step3Prompt.md) -- one pill
+   per connected instance, its dot coloured by control state. */
+
+.fc-instances {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.fc-instances-label {
+  font-size: 11px;
+  color: #666;
+  margin-right: 4px;
+}
+
+.fc-instance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 12px;
+  color: #bbb;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.fc-instance:hover { border-color: #555; }
+
+.fc-instance-active {
+  border-color: #2e5c8a;
+  background: #1a2a3a;
+  color: #d4d4d4;
+}
+
+.fc-instance-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #555;
+}
+
+.fc-instance-remote-control .fc-instance-dot { background: #4ec94e; }
+.fc-instance-local-control .fc-instance-dot { background: #d1c48f; }
+
+.fc-instance-session {
+  font-size: 10px;
+  color: #777;
+}
+
+/* ---- Control tab (local-representative/control.go) ---- */
+
+.ctl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+}
+
+.ctl-subtabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.ctl-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.ctl-subtab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+}
+
+.ctl-empty {
+  color: #888;
+  font-style: italic;
+}
+
+.ctl-hint {
+  font-size: 11px;
+  color: #777;
+}
+
+.ctl-hint-warn {
+  color: #e0a83e;
+}
+
+.ctl-seq {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ctl-seq-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ctl-seq-name {
+  font-weight: 600;
+  color: #d4d4d4;
+  flex: 1;
+}
+
+.ctl-seq-desc {
+  font-size: 12px;
+  color: #888;
+}
+
+.ctl-run-status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ctl-run-running { color: #5bb8ff; }
+.ctl-run-success { color: #4ec94e; }
+.ctl-run-error { color: #cc4444; }
+.ctl-run-cancelled { color: #9c9c9c; }
+
+.ctl-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ctl-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ctl-step-icon {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  color: #555;
+}
+
+.ctl-step-running .ctl-step-icon { color: #5bb8ff; }
+.ctl-step-success .ctl-step-icon { color: #4ec94e; }
+.ctl-step-error .ctl-step-icon { color: #cc4444; }
+
+.ctl-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.ctl-step-label { color: #d4d4d4; }
+.ctl-step-skipped .ctl-step-label,
+.ctl-step-pending .ctl-step-label { color: #888; }
+
+.ctl-step-detail {
+  font-size: 11px;
+  color: #666;
+}
+
+.ctl-step-msg {
+  font-size: 11px;
+  color: #9c9c9c;
+  overflow-wrap: anywhere;
+}
+
+.ctl-step-error .ctl-step-msg { color: #c96e6e; }
+
+.ctl-step-time {
+  font-size: 11px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.ctl-values {
+  font-size: 11px;
+  color: #9c9c9c;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.ctl-value-label { color: #666; }
+
+.ctl-run-error-msg {
+  font-size: 12px;
+  color: #cc4444;
+  overflow-wrap: anywhere;
+}
+
 /* ---- Ridealong panel ---- */
 
 .ra-panel {

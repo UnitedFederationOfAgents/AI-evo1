@@ -56,13 +56,16 @@ type StatusMsg struct {
 	Services []ServiceStatus `json:"services"`
 }
 
-// FCStateMsg is the payload of "fc-state" WebSocket messages.
+// FCStateMsg is the payload of "fc-state" WebSocket messages. FC is the
+// instance it's about (see fcinstances.go).
 type FCStateMsg struct {
+	FC    string `json:"fc,omitempty"`
 	State string `json:"state"` // "remote-control", "local-control", or "" (disconnected)
 }
 
 // FCLogMsg is the payload of "fc-log" WebSocket messages.
 type FCLogMsg struct {
+	FC   string `json:"fc,omitempty"`
 	Line string `json:"line"`
 	Kind string `json:"kind,omitempty"` // "cmd" or "output"
 }
@@ -90,6 +93,7 @@ type FCSessionMsg struct {
 
 // RidealongStateMsg is the payload of "ridealong-state" WebSocket messages.
 type RidealongStateMsg struct {
+	FC           string   `json:"fc,omitempty"` // the FC instance it's about -- set by LR
 	Active       bool     `json:"active"`
 	Title        string   `json:"title,omitempty"`
 	CurrentIndex int      `json:"current_index,omitempty"`
@@ -105,6 +109,7 @@ type RidealongStateMsg struct {
 
 // CondocStateMsg is the payload of "condoc-state" WebSocket messages.
 type CondocStateMsg struct {
+	FC        string `json:"fc,omitempty"` // the FC instance it's about -- set by LR
 	Active    bool   `json:"active"`
 	Name      string `json:"name,omitempty"`
 	Phase     string `json:"phase,omitempty"`
@@ -210,14 +215,13 @@ type Server struct {
 	modeMu         sync.RWMutex
 	modeMismatches map[string]ModeMismatchMsg // peer name -> current mismatch disclosure, mismatched entries only
 
-	fcMu    sync.RWMutex
-	fcState string // "remote-control", "local-control", or "" (disconnected)
+	// fcInst holds every connected federation-command instance, keyed by the
+	// name it connected under -- see fcinstances.go.
+	fcMu   sync.RWMutex
+	fcInst map[string]*fcInstance
 
-	ridealongMu    sync.RWMutex
-	ridealongState *RidealongStateMsg
-
-	condocMu    sync.RWMutex
-	condocState *CondocStateMsg
+	// control runs the control tab's sequences -- see control.go.
+	control *controlEngine
 
 	acMu                sync.RWMutex
 	acClient            *representable.Client
@@ -394,7 +398,7 @@ type Server struct {
 }
 
 func newServer(lrName string) *Server {
-	return &Server{
+	s := &Server{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -410,7 +414,10 @@ func newServer(lrName string) *Server {
 		managedPendingVersion:  make(map[string]string),
 		stateboardCustom:       make(map[string]map[string]string),
 		fcHeads:                make(map[string]string),
+		fcInst:                 make(map[string]*fcInstance),
 	}
+	s.control = newControlEngine(s)
+	return s
 }
 
 // ModeMismatchMsg is the "mode-mismatch" WebSocket payload disclosing that a
@@ -481,7 +488,7 @@ func (s *Server) broadcast(typ string, payload interface{}) {
 // currentStatus returns service statuses; federation-command reflects live heartbeat health.
 func (s *Server) currentStatus() StatusMsg {
 	fcStatus := "unhealthy"
-	if s.reprServer != nil && s.reprServer.IsHealthy("federation-command") {
+	if s.anyFCHealthy() {
 		fcStatus = "healthy"
 	}
 	condoccerStatus := "unhealthy"
@@ -510,43 +517,6 @@ func (s *Server) currentStatus() StatusMsg {
 			{Name: "worker", Status: "healthy"},
 		},
 	}
-}
-
-func (s *Server) getFCState() string {
-	s.fcMu.RLock()
-	defer s.fcMu.RUnlock()
-	return s.fcState
-}
-
-func (s *Server) setFCState(state string) {
-	s.fcMu.Lock()
-	s.fcState = state
-	s.fcMu.Unlock()
-	s.broadcast("fc-state", FCStateMsg{State: state})
-	s.acMu.RLock()
-	ac := s.acClient
-	s.acMu.RUnlock()
-	if ac != nil {
-		ac.SendData("fc-state", FCStateMsg{State: state})
-	}
-}
-
-func (s *Server) getRidealongState() RidealongStateMsg {
-	s.ridealongMu.RLock()
-	defer s.ridealongMu.RUnlock()
-	if s.ridealongState == nil {
-		return RidealongStateMsg{Active: false}
-	}
-	return *s.ridealongState
-}
-
-func (s *Server) getCondocState() CondocStateMsg {
-	s.condocMu.RLock()
-	defer s.condocMu.RUnlock()
-	if s.condocState == nil {
-		return CondocStateMsg{Active: false}
-	}
-	return *s.condocState
 }
 
 func (s *Server) getCondoccerState() *CondoccerStateMsg {
@@ -615,9 +585,8 @@ func (s *Server) pushStateToAC() {
 		return
 	}
 	ac.SendData("services", s.currentStatus())
-	ac.SendData("fc-state", FCStateMsg{State: s.getFCState()})
-	ac.SendData("ridealong-state", s.getRidealongState())
-	ac.SendData("condoc-state", s.getCondocState())
+	s.pushFCStateToAC()
+	ac.SendData("control-state", s.control.state())
 	ac.SendData("system-state", s.systemState())
 	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
@@ -846,7 +815,10 @@ func (s *Server) connectAC(host, port string) {
 	s.acMu.Unlock()
 
 	// Commands from AC: "__system:" commands drive this LR's own system tab
-	// (launch/terminate managed apps); everything else is forwarded to FC.
+	// (launch/terminate managed apps), "__control:" its control tab (see
+	// control.go), and "__fc:<instance> <cmd>" goes to one FC instance (see
+	// fcinstances.go); everything else is forwarded to the default FC
+	// instance.
 	client.SetCommandHandler(func(cmd string) {
 		if strings.HasPrefix(cmd, "__system:") {
 			s.handleSystemCommand(cmd)
@@ -856,9 +828,18 @@ func (s *Server) connectAC(host, port string) {
 			s.handleTCAvailabilityCommand(cmd)
 			return
 		}
-		if s.reprServer != nil {
-			s.reprServer.SendCommand("federation-command", cmd)
+		if strings.HasPrefix(cmd, "__control:") {
+			s.control.handleCommand(cmd)
+			return
 		}
+		if rest, ok := strings.CutPrefix(cmd, "__fc:"); ok {
+			key, fcCmd, _ := strings.Cut(rest, " ")
+			if isFCName(key) && fcCmd != "" {
+				s.sendFCCommand(key, fcCmd)
+			}
+			return
+		}
+		s.sendFCCommand("", cmd)
 	})
 	client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
 		s.setModeMismatch("agent-coordinator", mismatched, peerMode)
@@ -1075,9 +1056,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial status and FC state.
 	go func() {
 		s.sendToClient(c, "status", s.currentStatus())
-		s.sendToClient(c, "fc-state", FCStateMsg{State: s.getFCState()})
-		s.sendToClient(c, "ridealong-state", s.getRidealongState())
-		s.sendToClient(c, "condoc-state", s.getCondocState())
+		s.sendToClient(c, "fc-instances", s.fcInstances())
+		s.sendToClient(c, "control-state", s.control.state())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
 		s.sendToClient(c, "repo-state", s.repoState())
@@ -1138,23 +1118,36 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		if s.reprServer != nil {
-			switch m.Type {
-			case "command":
-				var payload struct {
-					Cmd string `json:"cmd"`
-				}
-				if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
-					s.reprServer.SendCommand("federation-command", payload.Cmd)
-				}
-			case "ridealong-command":
-				var payload struct {
-					Action string `json:"action"`
-				}
-				if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Action != "" {
-					s.reprServer.SendCommand("federation-command", "__ridealong:"+payload.Action)
+		switch m.Type {
+		case "command":
+			// fc names the instance to run it on (see fcinstances.go); empty
+			// sends it to the default instance.
+			var payload struct {
+				Cmd string `json:"cmd"`
+				FC  string `json:"fc"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
+				s.sendFCCommand(payload.FC, payload.Cmd)
+			}
+		case "ridealong-command":
+			var payload struct {
+				Action string `json:"action"`
+				FC     string `json:"fc"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Action != "" {
+				s.sendFCCommand(payload.FC, "__ridealong:"+payload.Action)
+			}
+		case "control-run":
+			var payload struct {
+				Sequence string `json:"sequence"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				if err := s.control.start(payload.Sequence); err != nil {
+					log.Printf("control-run %q: %v", payload.Sequence, err)
 				}
 			}
+		case "control-cancel":
+			s.control.cancel()
 		}
 		switch m.Type {
 		case "connect-ac":
@@ -1776,34 +1769,10 @@ func main() {
 			}
 			return
 		}
-		if name == "federation-command" {
-			s.setFCState(state)
-			if state == "disconnected" {
-				s.ridealongMu.Lock()
-				s.ridealongState = nil
-				s.ridealongMu.Unlock()
-				s.broadcast("ridealong-state", RidealongStateMsg{Active: false})
-				s.condocMu.Lock()
-				s.condocState = nil
-				s.condocMu.Unlock()
-				s.broadcast("condoc-state", CondocStateMsg{Active: false})
-				if ac := s.getACClient(); ac != nil {
-					ac.SendData("ridealong-state", RidealongStateMsg{Active: false})
-					ac.SendData("condoc-state", CondocStateMsg{Active: false})
-				}
-				s.setModeMismatch("federation-command", false, "")
-				// Every federation-command instance shares this one
-				// representable connection identity (see versionMu's
-				// comment above), so a disconnect means none are reachable
-				// any more -- drop every self-reported head rather than let
-				// a stale one linger on the stateboard (also refreshes
-				// "federation-command: present"/"hosts", which read
-				// reprServer.IsHealthy live but only on the next broadcast).
-				s.stateboardMu.Lock()
-				s.fcHeads = make(map[string]string)
-				s.stateboardMu.Unlock()
-				s.broadcastStateboard()
-			}
+		if isFCName(name) {
+			// Each FC instance connects under its own name, so this is one
+			// instance's state change or disconnect -- see fcinstances.go.
+			s.setFCInstanceState(name, state)
 		}
 	})
 
@@ -1815,15 +1784,8 @@ func main() {
 	})
 
 	reprSrv.SetLogHandler(func(name, line, kind string) {
-		if name == "federation-command" {
-			s.broadcast("fc-log", FCLogMsg{Line: line, Kind: kind})
-			if ac := s.getACClient(); ac != nil {
-				if kind == "output" {
-					ac.SendOutput(line)
-				} else {
-					ac.SendLog(line)
-				}
-			}
+		if isFCName(name) {
+			s.handleFCLog(name, line, kind)
 		}
 	})
 
@@ -1856,7 +1818,11 @@ func main() {
 			// per-app-name dispatch below.
 			var payload VersionMsg
 			if err := json.Unmarshal(data, &payload); err == nil && payload.Version != "" {
-				s.setManagedVersion(name, payload.Version)
+				app := name
+				if isFCName(name) {
+					app = fcAppName // versions are tracked per app, not per instance
+				}
+				s.setManagedVersion(app, payload.Version)
 			}
 			if name == "condoccer" {
 				// condoccer has never received a tc-availability command
@@ -1921,7 +1887,8 @@ func main() {
 			return
 		}
 		if name == "robot" {
-			if dataType == "robot-state" {
+			switch dataType {
+			case "robot-state":
 				var payload RobotStateMsg
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.robotMu.Lock()
@@ -1932,40 +1899,35 @@ func main() {
 						ac.SendData("robot-state", payload)
 					}
 				}
+			case "robot-run-progress", "robot-run-result":
+				// A run the control tab asked for -- see control.go.
+				var payload RobotRunMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.noteRobotRun(dataType == "robot-run-result", payload)
+				}
 			}
 			return
 		}
-		if name != "federation-command" {
+		if !isFCName(name) {
 			return
 		}
 		switch dataType {
 		case "ridealong-state":
 			var payload RidealongStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
-				s.ridealongMu.Lock()
-				s.ridealongState = &payload
-				s.ridealongMu.Unlock()
-				s.broadcast("ridealong-state", payload)
-				if ac := s.getACClient(); ac != nil {
-					ac.SendData("ridealong-state", payload)
-				}
+				s.setFCInstanceRidealong(name, payload)
 			}
 		case "condoc-state":
 			var payload CondocStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
-				s.condocMu.Lock()
-				s.condocState = &payload
-				s.condocMu.Unlock()
-				s.broadcast("condoc-state", payload)
-				if ac := s.getACClient(); ac != nil {
-					ac.SendData("condoc-state", payload)
-				}
+				s.setFCInstanceCondoc(name, payload)
 			}
 		case "fc-session":
 			var payload FCSessionMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
 				s.setFCSessionState(payload.ID, payload.Name)
 				s.setFCHead(payload.InstanceID, payload.Head)
+				s.setFCInstanceSession(name, payload)
 			}
 		}
 	})

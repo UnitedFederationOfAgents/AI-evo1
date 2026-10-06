@@ -89,6 +89,20 @@ var fcHostID string
 // the same way such an instance is absent from the system tab's managed list.
 var fcInstanceID string
 
+// fcReprName is the name this instance connects to local-representative
+// under. Representable tracks one connection per name, so every FC instance
+// needs its own for LR to tell them apart (condocs/initialRobotImpls/
+// Step3Prompt.md): the LR-assigned instance id ("federation-command#2") when
+// LR launched it, otherwise "federation-command@<head>". LR recognises all
+// three forms, the bare "federation-command" included (see
+// local-representative/fcinstances.go's isFCName).
+func fcReprName() string {
+	if fcInstanceID != "" {
+		return fcInstanceID
+	}
+	return "federation-command@" + fcHeadID
+}
+
 // Available agents (must match ambiguous-agent configurations)
 var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
 
@@ -725,7 +739,7 @@ func (m appModel) sendCondocState() {
 // attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
 func attemptConnectCmd(addr string, devMode bool) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(addr, "federation-command", representable.Mode(devMode), 3*time.Second)
+		client, err := representable.Connect(addr, fcReprName(), representable.Mode(devMode), 3*time.Second)
 		if err != nil {
 			return reprConnectFailedMsg{}
 		}
@@ -765,7 +779,7 @@ type autoConnectResultMsg struct{ client *representable.Client }
 // It never blocks the UI: the dial runs inside the returned tea.Cmd goroutine.
 func autoConnectDialCmd(addr string, devMode bool) tea.Cmd {
 	return func() tea.Msg {
-		client, err := representable.Connect(addr, "federation-command", representable.Mode(devMode), autoConnectDialTimeout)
+		client, err := representable.Connect(addr, fcReprName(), representable.Mode(devMode), autoConnectDialTimeout)
 		if err != nil {
 			return autoConnectResultMsg{}
 		}

@@ -19,15 +19,78 @@ export interface LRStateMsg {
   services?: ServiceStatus[]
 }
 
+// fc is the federation-command instance on that host the message is about --
+// see local-representative/fcinstances.go. Absent from an older LR.
 export interface LRFCStateMsg {
   host_id: string
+  fc?: string
   state: string // "remote-control", "local-control", or ""
 }
 
 export interface LRFCLogMsg {
   host_id: string
+  fc?: string
   line: string
   kind?: string // "cmd" or "output"
+}
+
+// FCInstanceInfo is one federation-command instance connected to a host's LR.
+export interface FCInstanceInfo {
+  key: string
+  label: string // "#2", "@fc-ab12"
+  instance_id?: string
+  head?: string
+  state: string
+  session?: string
+  ridealong?: Omit<LRRidealongMsg, 'host_id'>
+  condoc?: Omit<LRCondocMsg, 'host_id'>
+}
+
+export interface LRFCInstancesMsg {
+  host_id: string
+  instances: FCInstanceInfo[]
+}
+
+// A host's control tab -- see local-representative/control.go.
+export interface ControlStepInfo {
+  label: string
+  detail?: string
+}
+
+export interface ControlSequenceInfo {
+  id: string
+  name: string
+  description?: string
+  steps: ControlStepInfo[]
+}
+
+export interface ControlStepResult {
+  label: string
+  status: string // "pending" | "running" | "success" | "error" | "skipped"
+  message?: string
+  duration_ms?: number
+}
+
+export interface ControlRunMsg {
+  id: string
+  sequence: string
+  name: string
+  status: string // "running" | "success" | "error" | "cancelled"
+  error?: string
+  started_at: number // unix ms
+  duration_ms?: number
+  steps: ControlStepResult[]
+  values?: { label: string; value: string }[]
+}
+
+export interface ControlStateMsg {
+  sequences: ControlSequenceInfo[]
+  run?: ControlRunMsg
+}
+
+export interface LRControlMsg {
+  host_id: string
+  control: ControlStateMsg | null // null once the host disconnects
 }
 
 export interface LRRidealongMsg {

@@ -377,13 +377,14 @@ func editDistance(a, b string, limit int) int {
 
 // findLines returns the lines reading text (after normalizeText, allowing
 // sameText's slack), top-most first, plus the lines that merely contain it,
-// for reporting near misses.
+// for reporting near misses. Lines a short gap split are matched joined too
+// (see bridgedLines).
 func findLines(lines []OCRLine, text string) (exact, partial []OCRLine) {
 	want := normalizeText(text)
 	if want == "" {
 		return nil, nil
 	}
-	for _, l := range lines {
+	for _, l := range bridgedLines(lines) {
 		got := normalizeText(l.Text)
 		switch {
 		case sameText(got, want):
@@ -392,7 +393,95 @@ func findLines(lines []OCRLine, text string) (exact, partial []OCRLine) {
 			partial = append(partial, l)
 		}
 	}
-	return exact, partial
+	exact = innermost(exact, nil)
+	return exact, innermost(partial, exact)
+}
+
+// bridgeChars is the widest gap, in characters, that bridgedLines joins
+// across, and bridgeMaxParts the most lines it joins into one.
+const (
+	bridgeChars    = 4
+	bridgeMaxParts = 4
+)
+
+// bridgedLines returns lines plus, for each run of lines on one row split by
+// a gap of no more than a few characters, that run joined into one line.
+// groupLines splits at gaps wider than a word height or so, to keep side by
+// side windows apart, but a terminal line can hold such a gap too: in
+// "This is the one - vh4uyx" OCR drops the lone "-" (mergeWords keeps only
+// words with letters or digits), leaving three blank characters between
+// "one" and "vh4uyx", wider than the word height of "one" (Revision A's
+// failed hand-off). The joined lines are only candidates for matching; a
+// match is reported as the smallest line that holds it (see innermost).
+func bridgedLines(lines []OCRLine) []OCRLine {
+	next := make([]int, len(lines))
+	for i, a := range lines {
+		next[i] = -1
+		if len(a.Words) == 0 {
+			continue
+		}
+		last := a.Words[len(a.Words)-1]
+		cw := last.W / max(1, len([]rune(last.Text)))
+		best := 0
+		for j, b := range lines {
+			if j == i {
+				continue
+			}
+			h := max(a.H, b.H)
+			gap := b.X - (a.X + a.W)
+			if gap < 0 || gap > max(bridgeChars*cw, h*6/5) || abs(a.Y+a.H/2-(b.Y+b.H/2))*2 > h {
+				continue
+			}
+			if next[i] < 0 || gap < best {
+				next[i], best = j, gap
+			}
+		}
+	}
+	out := append([]OCRLine{}, lines...)
+	for i := range lines {
+		joined := lines[i]
+		for n, j := 1, next[i]; n < bridgeMaxParts && j >= 0 && j != i; n, j = n+1, next[j] {
+			b := lines[j]
+			r := joined.rect().Union(b.rect())
+			joined = OCRLine{
+				Text:  joined.Text + " " + b.Text,
+				X:     r.Min.X,
+				Y:     r.Min.Y,
+				W:     r.Dx(),
+				H:     r.Dy(),
+				Words: append(append([]OCRWord{}, joined.Words...), b.Words...),
+			}
+			out = append(out, joined)
+		}
+	}
+	return out
+}
+
+// innermost drops the lines in hits that enclose another of hits or one of
+// also -- a joined line from bridgedLines matching only because one of its
+// parts does -- and orders the rest top to bottom, then left to right.
+func innermost(hits, also []OCRLine) []OCRLine {
+	all := append(append([]OCRLine{}, hits...), also...)
+	var out []OCRLine
+	for _, h := range hits {
+		encloses := false
+		for _, o := range all {
+			if r := o.rect(); !r.Empty() && r != h.rect() && r.In(h.rect()) {
+				encloses = true
+				break
+			}
+		}
+		if !encloses {
+			out = append(out, h)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Y != out[j].Y {
+			return out[i].Y < out[j].Y
+		}
+		return out[i].X < out[j].X
+	})
+	return out
 }
 
 // wrappedLines finds text that reads as text only once a line is joined

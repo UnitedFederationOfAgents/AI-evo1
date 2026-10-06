@@ -32,6 +32,9 @@ type RobotRunRequest struct {
 	Name  string         `json:"name,omitempty"` // shown in the recording's report
 	Steps []RobotRunStep `json:"steps"`
 	Save  bool           `json:"save,omitempty"` // upload the run's zip to LR's files area
+	// NoRecord leaves the screen recording out of the run: LR is already
+	// recording the whole control sequence (see lrrecord.go).
+	NoRecord bool `json:"no_record,omitempty"`
 }
 
 // RobotRunStepResult is one step's outcome in a "robot-run-result".
@@ -83,7 +86,9 @@ func compileRobotRun(req RobotRunRequest) (sequence, error) {
 		actions[id] = ActionDef{ID: id, Name: st.Label, Do: st.Do}
 		q.Steps = append(q.Steps, StepRef{Action: id, Label: st.Label})
 	}
-	return compileSequence(q, actions, nil, clock())
+	seq, err := compileSequence(q, actions, nil, clock())
+	seq.noRecord = req.NoRecord
+	return seq, err
 }
 
 // handleRobotRun starts the run in raw ("__robot:run <json>") in the
@@ -137,14 +142,14 @@ func (s *Server) runForLR(req RobotRunRequest) {
 		}
 		out.Steps = append(out.Steps, RobotRunStepResult{Label: label, Status: st.Status, Message: st.Message, DurationMs: st.DurationMs})
 	}
-	if res.Recording != nil {
-		id := s.artifacts.keep(sequenceArtifact(q.def(), res))
-		if req.Save {
-			if f, err := s.saveArtifact(id); err != nil {
-				out.SaveError = err.Error()
-			} else {
-				out.SavedAs = f.Name
-			}
+	// Saved with or without a recording: what each step saw is worth keeping
+	// on its own, a failed step's most of all.
+	id := s.artifacts.keep(sequenceArtifact(q.def(), res))
+	if req.Save {
+		if f, err := s.saveArtifact(id); err != nil {
+			out.SaveError = err.Error()
+		} else {
+			out.SavedAs = f.Name
 		}
 	}
 	s.sendToLR("robot-run-result", out)

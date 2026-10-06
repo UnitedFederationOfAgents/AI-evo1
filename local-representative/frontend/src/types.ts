@@ -48,6 +48,7 @@ export interface ControlSequenceInfo {
   name: string
   description?: string
   steps: ControlStepInfo[]
+  record?: string[] // whose screens a run records ("robot": this node's)
 }
 
 export interface ControlStepResult {

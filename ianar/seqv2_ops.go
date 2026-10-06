@@ -190,14 +190,15 @@ func pollScreen(timeout time.Duration, done func(*screenReading) bool) (*screenR
 
 // textMatches returns the lines reading text (exact, allowing sameText's
 // slack for OCR misreads) or containing it, after normalizeText, other than
-// those containing exclude.
+// those containing exclude. Lines a short gap split are matched joined too
+// (see bridgedLines).
 func textMatches(lines []OCRLine, text, exclude string, exact bool) []OCRLine {
 	want, ex := normalizeText(text), normalizeText(exclude)
 	if want == "" {
 		return nil
 	}
 	var out []OCRLine
-	for _, l := range lines {
+	for _, l := range bridgedLines(lines) {
 		got := normalizeText(l.Text)
 		if ex != "" && strings.Contains(got, ex) {
 			continue
@@ -206,7 +207,7 @@ func textMatches(lines []OCRLine, text, exclude string, exact bool) []OCRLine {
 			out = append(out, l)
 		}
 	}
-	return out
+	return innermost(out, nil)
 }
 
 // notSeen returns the lines that don't overlap any of seen -- the lines

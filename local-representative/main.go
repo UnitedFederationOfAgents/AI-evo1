@@ -1905,6 +1905,12 @@ func main() {
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.control.noteRobotRun(dataType == "robot-run-result", payload)
 				}
+			case "robot-record-result":
+				// A control sequence's screen recording -- see control.go.
+				var payload RobotRecordMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.noteRobotRecord(payload)
+				}
 			}
 			return
 		}

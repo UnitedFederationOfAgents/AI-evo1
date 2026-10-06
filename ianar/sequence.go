@@ -113,6 +113,10 @@ type sequence struct {
 	name  string
 	steps []seqStep
 	vars  map[string]string // the run's starting values
+	// noRecord skips the run's own recording: something else is already
+	// recording the screen around it (an LR control sequence -- see
+	// lrrecord.go).
+	noRecord bool
 }
 
 func (q sequence) def() SequenceDef {
@@ -141,11 +145,13 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 	defer seqMu.Unlock()
 	// The run's recording shares the one-recording-at-a-time lock with
 	// Native Clip.
-	if !clipMu.TryLock() {
-		res.Error = "a native clip is recording; try again once it finishes"
-		return res
+	if !q.noRecord {
+		if !clipMu.TryLock() {
+			res.Error = "a native clip is recording; try again once it finishes"
+			return res
+		}
+		defer clipMu.Unlock()
 	}
-	defer clipMu.Unlock()
 
 	kb, via, closeKb, err := openKeyboard()
 	if err != nil {
@@ -156,8 +162,11 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 	res.KeyboardVia = via
 
 	log.Printf("robot: running sequence %q (keyboard via %s)", q.id, via)
-	stopRecording := startNativeRecording(seqMaxRecording, seqFrameInterval)
-	sleep(seqRecordLead)
+	var stopRecording func() ClipResultMsg
+	if !q.noRecord {
+		stopRecording = startNativeRecording(seqMaxRecording, seqFrameInterval)
+		sleep(seqRecordLead)
+	}
 
 	env := &seqEnv{kb: kb, vars: map[string]string{}, seen: map[string][]image.Rectangle{}}
 	for k, v := range q.vars {
@@ -185,8 +194,10 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 	res.Success = res.FailedStep < 0
 	res.Outputs = env.outputs
 
-	sleep(seqRecordTail)
-	rec := stopRecording()
-	res.Recording = &rec
+	if stopRecording != nil {
+		sleep(seqRecordTail)
+		rec := stopRecording()
+		res.Recording = &rec
+	}
 	return res
 }

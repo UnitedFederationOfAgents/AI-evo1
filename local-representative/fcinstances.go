@@ -167,6 +167,23 @@ func (s *Server) fcKeyForInstanceID(instanceID string) string {
 	return ""
 }
 
+// fcInstanceIDClaimed reports whether a connected instance goes by
+// instanceID, as its key or its reported instance id.
+func (s *Server) fcInstanceIDClaimed(instanceID string) bool {
+	return s.fcKeyForInstanceID(instanceID) != ""
+}
+
+// fcKeys returns the keys of every connected instance.
+func (s *Server) fcKeys() map[string]bool {
+	s.fcMu.RLock()
+	defer s.fcMu.RUnlock()
+	keys := make(map[string]bool, len(s.fcInst))
+	for k := range s.fcInst {
+		keys[k] = true
+	}
+	return keys
+}
+
 // anyFCHealthy reports whether at least one FC instance is connected and
 // heartbeating -- the federation-command service status.
 func (s *Server) anyFCHealthy() bool {

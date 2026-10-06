@@ -739,9 +739,20 @@ func (s *Server) handleSystemCommand(raw string) {
 // nextInstanceLocked allocates the next per-app ordinal and its instance id.
 // Callers must hold procMu.
 func (s *Server) nextInstanceLocked(app string) (int, string) {
-	s.instanceSeq[app]++
-	n := s.instanceSeq[app]
-	return n, fmt.Sprintf("%s#%d", app, n)
+	for {
+		s.instanceSeq[app]++
+		n := s.instanceSeq[app]
+		id := fmt.Sprintf("%s#%d", app, n)
+		// A federation-command still connected under this id -- one a
+		// previous run of this LR launched, which outlived it in its own
+		// terminal -- would share the new instance's representable name, and
+		// with it its commands (Step3Prompt.md Revision A). Skip past it.
+		if app == fcAppName && s.fcInstanceIDClaimed(id) {
+			log.Printf("procman: %s is still connected from before; skipping that instance id", id)
+			continue
+		}
+		return n, id
+	}
 }
 
 // runningCountLocked reports how many instances of app are currently running.

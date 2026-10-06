@@ -91,6 +91,76 @@ func TestRobotRunNeedsRobot(t *testing.T) {
 	}
 }
 
+func TestHandoffSequenceRecordsTheRobotsScreen(t *testing.T) {
+	q, ok := findControlSequence("fc-robot-handoff")
+	if !ok {
+		t.Fatal("no fc-robot-handoff")
+	}
+	if info := q.info(); len(info.Record) != 1 || info.Record[0] != recordLocalRobot {
+		t.Errorf("record = %v, want [%s]", info.Record, recordLocalRobot)
+	}
+}
+
+// TestRecordingWithoutRobotIsNotFatal: the run goes on, noting why there's
+// no recording.
+func TestRecordingWithoutRobotIsNotFatal(t *testing.T) {
+	s := newServer("test-lr")
+	r := runningEngine(s)
+	q, _ := findControlSequence("fc-robot-handoff")
+	r.startRecording(q, recordLocalRobot)
+	r.stopRecording() // nothing to stop
+	if r.rec != "" {
+		t.Errorf("rec = %q", r.rec)
+	}
+	vals := s.control.state().Run.Values
+	if len(vals) != 1 || vals[0].Label != recordingLabel || !strings.Contains(vals[0].Value, "not recording") {
+		t.Errorf("values = %+v", vals)
+	}
+}
+
+func TestNoteRobotRecordDelivers(t *testing.T) {
+	s := newServer("test-lr")
+	e := s.control
+	ch := make(chan RobotRecordMsg, 1)
+	e.mu.Lock()
+	e.recs["k1"] = ch
+	e.mu.Unlock()
+	e.noteRobotRecord(RobotRecordMsg{Rec: "other", Status: "saved"})
+	e.noteRobotRecord(RobotRecordMsg{Rec: "k1", Status: "saved", SavedAs: "ianar-recording-x.webm"})
+	e.noteRobotRecord(RobotRecordMsg{Rec: "k1", Status: "saved"}) // a duplicate doesn't block
+	if got := <-ch; got.SavedAs != "ianar-recording-x.webm" {
+		t.Errorf("delivered %+v", got)
+	}
+}
+
+func TestSetValueReplaces(t *testing.T) {
+	s := newServer("test-lr")
+	runningEngine(s)
+	s.control.addValue("a", "1")
+	s.control.setValue(recordingLabel, "recording…")
+	s.control.setValue(recordingLabel, "x.webm")
+	vals := s.control.state().Run.Values
+	if len(vals) != 2 || vals[1].Value != "x.webm" {
+		t.Errorf("values = %+v", vals)
+	}
+}
+
+// TestMarkerPrintedBy: Revision A's second failure, the echo reaching an
+// instance other than the one launched.
+func TestMarkerPrintedBy(t *testing.T) {
+	logs := []fcLogEvent{
+		{fc: "federation-command#2", line: `echo "This is the one - abc"`, kind: "cmd"},
+		{fc: "federation-command#2", line: "This is the one - abc", kind: "output"},
+	}
+	if got := markerPrintedBy(logs, "This is the one - abc", "federation-command#2"); got != "" {
+		t.Errorf("got %q for the right instance", got)
+	}
+	logs = append(logs, fcLogEvent{fc: "federation-command#1", line: " This is the one - abc ", kind: "output"})
+	if got := markerPrintedBy(logs, "This is the one - abc", "federation-command#2"); got != "federation-command#1" {
+		t.Errorf("got %q, want federation-command#1", got)
+	}
+}
+
 func TestNoteRobotRunDeliversResult(t *testing.T) {
 	s := newServer("test-lr")
 	e := s.control

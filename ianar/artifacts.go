@@ -296,7 +296,12 @@ func captureArtifact(source, dataURL string) artifact {
 // clipArtifact is a successful Native Clip: a compositor recording as-is,
 // or a .zip of its sampled frames.
 func clipArtifact(clip ClipResultMsg) artifact {
-	base := "ianar-clip-" + stamp()
+	return namedClipArtifact("ianar-clip-"+stamp(), clip)
+}
+
+// namedClipArtifact is clipArtifact under the file name base (plus its
+// extension).
+func namedClipArtifact(base string, clip ClipResultMsg) artifact {
 	if clip.VideoURL != "" {
 		return singleFile(base, clip.VideoURL)
 	}

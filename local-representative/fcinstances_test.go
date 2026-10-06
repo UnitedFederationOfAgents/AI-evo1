@@ -80,6 +80,28 @@ func TestDefaultFCKeyPrefersRemoteControl(t *testing.T) {
 	}
 }
 
+// TestNextInstanceSkipsConnectedIDs: an FC still connected under an id from
+// before (it outlived the LR that launched it) mustn't share its name with
+// a new launch (Step3Prompt.md Revision A).
+func TestNextInstanceSkipsConnectedIDs(t *testing.T) {
+	s := newServer("test-lr")
+	s.setFCInstanceState("federation-command#1", "remote-control")
+	// An older build connecting under the bare name, reporting #2.
+	s.setFCInstanceState("federation-command", "remote-control")
+	s.setFCInstanceSession("federation-command", FCSessionMsg{ID: "sess-1", InstanceID: "federation-command#2"})
+
+	s.procMu.Lock()
+	n, id := s.nextInstanceLocked(fcAppName)
+	_, other := s.nextInstanceLocked("condoccer")
+	s.procMu.Unlock()
+	if n != 3 || id != "federation-command#3" {
+		t.Errorf("next FC instance = %d %q, want 3 federation-command#3", n, id)
+	}
+	if other != "condoccer#1" {
+		t.Errorf("next condoccer instance = %q", other)
+	}
+}
+
 func TestFCInstanceSessionAndRidealong(t *testing.T) {
 	s := newServer("test-lr")
 	s.setFCInstanceState("federation-command@fc-ab12", "remote-control")

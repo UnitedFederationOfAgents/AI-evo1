@@ -93,6 +93,56 @@ func TestFindLinesMatchesWholeLinesOnly(t *testing.T) {
 	}
 }
 
+// TestFindLinesBridgesADroppedDash: Step3Prompt.md Revision A's failed
+// hand-off. A terminal line "This is the one - vh4uyx" (10px characters)
+// read with the lone "-" dropped leaves a three-character gap after "one",
+// wider than that short word's height, so groupLines splits the line in two;
+// the marker must still match it -- but not the command line that echoed it.
+func TestFindLinesBridgesADroppedDash(t *testing.T) {
+	row := func(y int, texts ...string) []OCRWord {
+		var ws []OCRWord
+		x := 67
+		for _, s := range texts {
+			if s == "-" {
+				x += 20 // the dash and the space after it, not read
+				continue
+			}
+			h := 10
+			if strings.ContainsAny(s, "Thy4\"") {
+				h = 15 // ascenders and descenders
+			}
+			ws = append(ws, OCRWord{Text: s, Conf: 90, X: x, Y: y + 15 - h, W: 10 * len(s), H: h})
+			x += 10*len(s) + 10
+		}
+		return ws
+	}
+	words := append(row(487, "echo", `"This`, "is", "the", "one", "-", `vh4uyx"`), row(509, "This", "is", "the", "one", "-", "vh4uyx")...)
+	lines := groupLines(words)
+	if len(lines) != 4 {
+		t.Fatalf("expected each row split in two at the gap, got lines %q", quoteLines(lines))
+	}
+	exact, _ := findLines(lines, "This is the one - vh4uyx")
+	if len(exact) != 1 || exact[0].Y != 509 || exact[0].Text != "This is the one vh4uyx" {
+		t.Fatalf("exact = %+v", exact)
+	}
+	if c := exact[0].center(); c.X != 67+240/2 {
+		t.Errorf("the click lands at x=%d, not the middle of the whole line", c.X)
+	}
+	if hits := textMatches(lines, "This is the one - vh4uyx", "", true); len(hits) != 1 || hits[0].Y != 509 {
+		t.Errorf("click-text's exact matches = %+v", hits)
+	}
+	// A contains-match reports the smallest line holding the text, not
+	// every join around it.
+	if hits := textMatches(lines, "one", "", false); len(hits) != 2 || hits[0].Text != `echo "This is the one` || hits[1].Text != "This is the one" {
+		t.Errorf("contains matches = %q", quoteLines(hits))
+	}
+	// Far apart, as two windows side by side are, rows aren't joined.
+	far := append(row(100, "This", "is", "the", "one"), OCRWord{Text: "vh4uyx", Conf: 90, X: 900, Y: 100, W: 60, H: 15})
+	if exact, _ := findLines(groupLines(far), "This is the one vh4uyx"); len(exact) != 0 {
+		t.Errorf("joined text across a wide gap: %+v", exact)
+	}
+}
+
 // TestWrappedLinesFindsAWrappedLabel: Revision K's desktop icon label,
 // wrapped by GNOME as "ianar-hello-wor" over "ld.txt".
 func TestWrappedLinesFindsAWrappedLabel(t *testing.T) {

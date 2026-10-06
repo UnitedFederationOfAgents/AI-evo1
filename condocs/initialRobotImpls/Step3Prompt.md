@@ -49,3 +49,20 @@ We also encountered a failure mode where another FC instance was already running
 Let's fix this failure mode as well.
 
 Let's also instrument the sequence with the recording of a video on the targeted node. This is not a mandatory thing which will always happen, but in this case we will add it to this sequence. (In some later cases we may not record, or we may record multiple nodes, etc)
+
+
+prompt: [`a2bfa2a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a2bfa2af59837200369cb583a2bb4b4415edcbf2) → reply: [`b09c4a3`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b09c4a3766987bda474010c7804927d55c30de78)
+
+## Reply A
+
+I fixed both failure modes and added a screen recording of the robot's machine for the whole sequence; none of it is built or tested yet, because `go` needed approval here. The first failure came from the screen reader dropping the lone "-" in "This is the one - vh4uyx", which split the line in two so it never matched; it now also tries joining pieces of the same line that sit a few characters apart. For the second, a newly launched FC can no longer reuse the name of one still connected, and the sequence now stops with a clear error if the new FC didn't connect under its own name or the marker came back from a different FC. The recording runs from before the first step to after the last, even on failure, and saves a video to the files tab, with the robot's own runs leaving out their separate recordings. Each sequence chooses whether to record. New tests are in `ianar/vision_test.go`, `ianar/lrrecord_test.go`, `local-representative/control_test.go` and `fcinstances_test.go`, so this needs a `make build` / `make test` on the host.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -434,6 +434,11 @@ function ControlSequenceCard({
         )}
       </div>
       {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
+      {seq.record && seq.record.length > 0 && (
+        <div className="ctl-seq-desc">
+          records the screen of: {seq.record.map(w => (w === 'robot' ? "this node (its robot)" : w)).join(', ')} -- saved to the files tab
+        </div>
+      )}
       <ol className="ctl-steps">
         {seq.steps.map((st, i) => {
           const r = run?.steps[i]

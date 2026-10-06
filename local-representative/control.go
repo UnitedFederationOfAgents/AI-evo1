@@ -23,15 +23,29 @@ import (
 // Steps that need the robot hand a short list of sequence-v2 instructions
 // to IANAR ("__robot:run <json>", see ianar/lrrun.go) and wait for its
 // "robot-run-result".
+//
+// A sequence can also have a node's screen recorded from before its first
+// step to after its last (Revision A): IANAR records on
+// "__robot:record-start" and saves the video into the files tab on
+// "__robot:record-stop" (ianar/lrrecord.go). Which sequences record, and
+// where, is the sequence's own choice (controlSequence.record).
 
 const (
 	controlLaunchTimeout = 45 * time.Second // a launched FC connecting in remote control
 	controlOutputTimeout = 15 * time.Second // a command's output reaching LR
 	controlStateTimeout  = 6 * time.Second  // an FC control-state change after a key press
 	controlRobotTimeout  = 2 * time.Minute  // one robot run, recording included
+	controlRecordStart   = 15 * time.Second // the robot starting a recording
+	controlRecordSave    = 3 * time.Minute  // the robot stopping and uploading a recording
+	controlRecordLead    = 1 * time.Second  // recorded before the first step
+	controlRecordTail    = 2 * time.Second  // recorded after the last step
 	controlPoll          = 100 * time.Millisecond
 	controlMaxLogs       = 500 // FC log lines kept for the current run
 )
+
+// recordLocalRobot names, in controlSequence.record, the screen of the node
+// this LR runs on, recorded by its own IANAR -- the only one for now.
+const recordLocalRobot = "robot"
 
 // ControlStepInfo describes one step of a control sequence.
 type ControlStepInfo struct {
@@ -45,6 +59,7 @@ type ControlSequenceInfo struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description,omitempty"`
 	Steps       []ControlStepInfo `json:"steps"`
+	Record      []string          `json:"record,omitempty"` // whose screens a run records (see controlSequence.record)
 }
 
 // ControlStepResult is one step's live status in a ControlRunMsg.
@@ -92,10 +107,14 @@ type controlStep struct {
 type controlSequence struct {
 	id, name, description string
 	steps                 []controlStep
+	// record lists the screens recorded across a run, none for no
+	// recording. recordLocalRobot is the only one so far; recording other
+	// nodes (through agent-coordinator) would add names here.
+	record []string
 }
 
 func (q controlSequence) info() ControlSequenceInfo {
-	info := ControlSequenceInfo{ID: q.id, Name: q.name, Description: q.description}
+	info := ControlSequenceInfo{ID: q.id, Name: q.name, Description: q.description, Record: q.record}
 	for _, st := range q.steps {
 		info.Steps = append(info.Steps, st.ControlStepInfo)
 	}
@@ -118,6 +137,7 @@ type controlEngine struct {
 	logBase  int // count of lines dropped from the front of logs
 	robot    map[string]chan RobotRunMsg
 	progress map[string]func(RobotRunMsg)
+	recs     map[string]chan RobotRecordMsg
 }
 
 func newControlEngine(s *Server) *controlEngine {
@@ -125,6 +145,7 @@ func newControlEngine(s *Server) *controlEngine {
 		s:        s,
 		robot:    make(map[string]chan RobotRunMsg),
 		progress: make(map[string]func(RobotRunMsg)),
+		recs:     make(map[string]chan RobotRecordMsg),
 	}
 }
 
@@ -235,6 +256,9 @@ var errControlCancelled = errors.New("cancelled")
 func (e *controlEngine) execute(q controlSequence, r *controlRun) {
 	start := time.Now()
 	log.Printf("control: running %q", q.id)
+	for _, who := range q.record {
+		r.startRecording(q, who)
+	}
 	failed := -1
 	var runErr error
 	for i, st := range q.steps {
@@ -254,6 +278,9 @@ func (e *controlEngine) execute(q controlSequence, r *controlRun) {
 			sr.Status, sr.Message, sr.DurationMs = "success", note, took
 		})
 	}
+	// However the steps ended -- a failure's recording is the one most
+	// worth watching.
+	r.stopRecording()
 
 	e.mu.Lock()
 	run := e.run
@@ -293,6 +320,24 @@ func (e *controlEngine) addValue(label, value string) {
 	e.mu.Lock()
 	if e.run != nil {
 		e.run.Values = append(e.run.Values, ControlValue{Label: label, Value: value})
+	}
+	e.mu.Unlock()
+	e.broadcast()
+}
+
+// setValue replaces the value under label, adding it if there's none.
+func (e *controlEngine) setValue(label, value string) {
+	e.mu.Lock()
+	if e.run != nil {
+		found := false
+		for i := range e.run.Values {
+			if e.run.Values[i].Label == label {
+				e.run.Values[i].Value, found = value, true
+			}
+		}
+		if !found {
+			e.run.Values = append(e.run.Values, ControlValue{Label: label, Value: value})
+		}
 	}
 	e.mu.Unlock()
 	e.broadcast()
@@ -387,6 +432,32 @@ func (e *controlEngine) noteRobotRun(final bool, msg RobotRunMsg) {
 	}
 }
 
+// RobotRecordMsg mirrors ianar's "robot-record-result" payload
+// (ianar/lrrecord.go).
+type RobotRecordMsg struct {
+	Rec        string `json:"rec"`
+	Status     string `json:"status"` // "recording" | "saved" | "error"
+	Error      string `json:"error,omitempty"`
+	Via        string `json:"via,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	SavedAs    string `json:"saved_as,omitempty"`
+	SaveError  string `json:"save_error,omitempty"`
+}
+
+// noteRobotRecord delivers a recording's start or stop result to the run
+// waiting on it.
+func (e *controlEngine) noteRobotRecord(msg RobotRecordMsg) {
+	e.mu.Lock()
+	ch := e.recs[msg.Rec]
+	e.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- msg:
+		default: // nobody waiting any more
+		}
+	}
+}
+
 // controlRun is what a running step can drive.
 type controlRun struct {
 	e      *controlEngine
@@ -394,7 +465,87 @@ type controlRun struct {
 	cancel chan struct{}
 	step   int
 	vars   map[string]string
+	rec    string // the robot recording under way across the run, "" if none
 }
+
+// recordingLabel is the run value naming the screen recording.
+const recordingLabel = "screen recording"
+
+// robotRecord sends IANAR a record-start or record-stop for rec and waits
+// for its answer.
+func (r *controlRun) robotRecord(verb, rec, name string, timeout time.Duration) (RobotRecordMsg, error) {
+	s := r.s
+	if s.reprServer == nil || !s.reprServer.IsHealthy("robot") {
+		return RobotRecordMsg{}, errors.New("the robot (ianar) isn't connected to this local-representative")
+	}
+	req, err := json.Marshal(struct {
+		Rec  string `json:"rec"`
+		Name string `json:"name,omitempty"`
+		Save bool   `json:"save,omitempty"`
+	}{rec, name, verb == "record-stop"})
+	if err != nil {
+		return RobotRecordMsg{}, err
+	}
+	ch := make(chan RobotRecordMsg, 1)
+	r.e.mu.Lock()
+	r.e.recs[rec] = ch
+	r.e.mu.Unlock()
+	defer func() {
+		r.e.mu.Lock()
+		delete(r.e.recs, rec)
+		r.e.mu.Unlock()
+	}()
+	s.reprServer.SendCommand("robot", "__robot:"+verb+" "+string(req))
+	select {
+	case res := <-ch:
+		if res.Status == "error" {
+			return res, errors.New(res.Error)
+		}
+		return res, nil
+	case <-time.After(timeout):
+		return RobotRecordMsg{}, fmt.Errorf("the robot didn't answer within %s", timeout)
+	}
+}
+
+// startRecording starts recording who's screen for the run. A recording
+// that can't start is noted, not fatal: the sequence runs regardless.
+func (r *controlRun) startRecording(q controlSequence, who string) {
+	if who != recordLocalRobot {
+		r.e.addValue(recordingLabel, fmt.Sprintf("not recording %q: only this node's robot can record so far", who))
+		return
+	}
+	rec := randomToken(8)
+	if _, err := r.robotRecord("record-start", rec, q.id, controlRecordStart); err != nil {
+		r.e.setValue(recordingLabel, "not recording: "+err.Error())
+		return
+	}
+	r.rec = rec
+	r.e.setValue(recordingLabel, "recording this node's screen…")
+	time.Sleep(controlRecordLead)
+}
+
+// stopRecording stops the run's recording, if any, and notes where it was
+// saved.
+func (r *controlRun) stopRecording() {
+	if r.rec == "" {
+		return
+	}
+	rec := r.rec
+	r.rec = ""
+	time.Sleep(controlRecordTail)
+	r.e.setValue(recordingLabel, "saving the recording…")
+	res, err := r.robotRecord("record-stop", rec, "", controlRecordSave)
+	switch {
+	case err != nil:
+		r.e.setValue(recordingLabel, "failed: "+err.Error())
+	case res.SavedAs != "":
+		r.e.setValue(recordingLabel, fmt.Sprintf("%s (files tab; %s via %s)", res.SavedAs, formatSeconds(res.DurationMs), res.Via))
+	default:
+		r.e.setValue(recordingLabel, "recorded but not saved: "+res.SaveError)
+	}
+}
+
+func formatSeconds(ms int64) string { return fmt.Sprintf("%.1fs", float64(ms)/1000) }
 
 // note shows progress on the current step while it runs.
 func (r *controlRun) note(msg string) {
@@ -442,11 +593,12 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 	}
 	runID := randomToken(8)
 	req, err := json.Marshal(struct {
-		Run   string      `json:"run"`
-		Name  string      `json:"name"`
-		Steps []robotStep `json:"steps"`
-		Save  bool        `json:"save"`
-	}{runID, name, steps, true})
+		Run      string      `json:"run"`
+		Name     string      `json:"name"`
+		Steps    []robotStep `json:"steps"`
+		Save     bool        `json:"save"`
+		NoRecord bool        `json:"no_record,omitempty"` // the run's own recording is already under way
+	}{runID, name, steps, true, r.rec != ""})
 	if err != nil {
 		return "", err
 	}
@@ -477,9 +629,9 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 		return "", errControlCancelled
 	}
 	if res.SavedAs != "" {
-		r.e.addValue("robot recording", res.SavedAs+" (files tab)")
+		r.e.addValue("robot run", res.SavedAs+" (files tab)")
 	} else if res.SaveError != "" {
-		r.e.addValue("robot recording", "not saved: "+res.SaveError)
+		r.e.addValue("robot run", "not saved: "+res.SaveError)
 	}
 	if !res.Success {
 		msg := res.Error
@@ -525,18 +677,19 @@ func fcRobotHandoffSequence() controlSequence {
 		id:          "fc-robot-handoff",
 		name:        "federation-command: robot hand-off",
 		description: "Launch a new federation-command, mark it over the remote interface, then have the robot find it, take local control, type into it and hand it back.",
+		record:      []string{recordLocalRobot},
 		steps: []controlStep{
 			{
 				ControlStepInfo: ControlStepInfo{
 					Label:  "Launch a new federation-command instance",
-					Detail: "launch federation-command as the system tab does, then wait for the new instance to connect in remote control",
+					Detail: "launch federation-command as the system tab does, then wait for the new instance to connect under its own name, in remote control",
 				},
 				run: controlLaunchFC,
 			},
 			{
 				ControlStepInfo: ControlStepInfo{
 					Label:  `Echo "This is the one - <random-chars>" through the remote interface`,
-					Detail: "send the echo to that instance only, and wait for its output to come back",
+					Detail: "send the echo to that instance only, and wait for its output to come back -- from it and no other instance",
 				},
 				run: controlEchoMarker,
 			},
@@ -565,28 +718,46 @@ func fcRobotHandoffSequence() controlSequence {
 	}
 }
 
+// controlLaunchFC launches a new FC and waits for it to connect. It only
+// accepts a connection under the new instance's own name, made since the
+// launch: commands are routed by that name, so an instance sharing it -- an
+// older federation-command build connecting as the bare
+// "federation-command", or one already running when the sequence started --
+// would take the marker meant for the new one, leaving the robot nothing to
+// find on the new terminal (Step3Prompt.md Revision A).
 func controlLaunchFC(r *controlRun) (string, error) {
+	before := r.s.fcKeys()
 	id, err := r.s.launchManaged(fcAppName)
 	if err != nil {
 		return "", fmt.Errorf("launching federation-command: %v", err)
 	}
 	r.vars["instance"] = id
 	r.e.addValue("federation-command instance", id)
-	r.note(fmt.Sprintf("launched %s; waiting for it to connect…", id))
+	if others := len(before); others > 0 {
+		r.note(fmt.Sprintf("launched %s (%d other instance(s) already connected); waiting for it to connect…", id, others))
+	} else {
+		r.note(fmt.Sprintf("launched %s; waiting for it to connect…", id))
+	}
 
 	var key string
 	ok, err := r.waitFor(controlLaunchTimeout, func() bool {
 		key = r.s.fcKeyForInstanceID(id)
-		return key != "" && r.s.fcState(key) == "remote-control"
+		return key == id && !before[key] && r.s.fcState(key) == "remote-control"
 	})
 	if err != nil {
 		return "", err
 	}
 	if !ok {
-		if key != "" {
+		switch {
+		case key == "":
+			return "", fmt.Errorf("%s didn't connect to this local-representative within %s", id, controlLaunchTimeout)
+		case key != id:
+			return "", fmt.Errorf("%s connected as %q rather than under its own name, so commands for it can reach another instance -- its federation-command binary predates per-instance names; rebuild it", id, key)
+		case before[key]:
+			return "", fmt.Errorf("an instance calling itself %s was connected before the launch, so the new one can't be told apart from it", id)
+		default:
 			return "", fmt.Errorf("%s connected but is in %s, not remote control", id, orNone(r.s.fcState(key)))
 		}
-		return "", fmt.Errorf("%s didn't connect to this local-representative within %s", id, controlLaunchTimeout)
 	}
 	r.vars["fc"] = key
 	note := fmt.Sprintf("%s is connected in remote control", key)
@@ -612,9 +783,26 @@ func controlEchoMarker(r *controlRun) (string, error) {
 		return "", err
 	}
 	if !ok {
+		if other := markerPrintedBy(r.e.logsSince(mark), marker, fc); other != "" {
+			return "", fmt.Errorf("the marker came back from %s, not %s -- the echo reached the wrong instance", other, fc)
+		}
 		return "", fmt.Errorf("%s didn't print the marker within %s", fc, controlOutputTimeout)
 	}
+	if other := markerPrintedBy(r.e.logsSince(mark), marker, fc); other != "" {
+		return "", fmt.Errorf("%s printed the marker, but so did %s -- the robot can't tell their terminals apart", fc, other)
+	}
 	return fmt.Sprintf("%s printed the marker", fc), nil
+}
+
+// markerPrintedBy returns an instance other than fc that printed marker in
+// logs, "" if none did.
+func markerPrintedBy(logs []fcLogEvent, marker, fc string) string {
+	for _, ev := range logs {
+		if ev.fc != fc && ev.kind == "output" && strings.TrimSpace(ev.line) == marker {
+			return ev.fc
+		}
+	}
+	return ""
 }
 
 func controlRobotTakeLocal(r *controlRun) (string, error) {

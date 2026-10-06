@@ -79,6 +79,26 @@ var fcHeadID string
 // fcHostID is the stable per-host identifier, resolved once in main() via ufahostid.
 var fcHostID string
 
+// fallbackDefaultSessionID mirrors clauditable's defaultSessionIDFor
+// (YYYY-MM-DD-<host>-default) for when clauditable get-default-session is
+// unavailable, so each host still lands on its own daily default session.
+func fallbackDefaultSessionID(day time.Time, hostID string) string {
+	var b strings.Builder
+	for _, r := range hostID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	host := strings.Trim(b.String(), ".-")
+	if host == "" {
+		host = "unknown"
+	}
+	return day.Format("2006-01-02") + "-" + host + "-default"
+}
+
 // fcInstanceID is the LR-assigned instance id this FC instance was launched
 // with (FC_INSTANCE_ID -- set by local-representative's managedApps
 // ["federation-command"].buildEnv, see local-representative/procman.go),
@@ -5447,7 +5467,7 @@ func main() {
 		}
 		if sessionID == "" || sessionID == "default" {
 			// Fallback when clauditable is unavailable
-			sessionID = now.Format("2006-01-02") + "-default"
+			sessionID = fallbackDefaultSessionID(now, fcHostID)
 		}
 	}
 	sessionDir := filepath.Join(recordsPath, sessionID)

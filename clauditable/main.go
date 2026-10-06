@@ -465,7 +465,8 @@ func expectedRawRecordPath(recordsPath, session string, timestamp int64) string 
 }
 
 // getSession returns the session identifier.
-// If AGENT_SESSION is unset or "default", uses today's default session (YYYY-MM-DD-default).
+// If AGENT_SESSION is unset or "default", uses today's default session for this
+// host (YYYY-MM-DD-<host>-default).
 func getSession() string {
 	if session := os.Getenv(EnvAgentSession); session != "" && session != "default" {
 		return session
@@ -484,14 +485,41 @@ func defaultSessionName() string {
 	return time.Now().Format("2006-01-02") + " Default " + ufahostid.GetHostID()
 }
 
-// defaultSessionID returns today's default session identifier (YYYY-MM-DD-default).
-// This is day-granular, not per-invocation, so that every instance started on
-// the same day — local or distributed — resolves to the one session already
-// created for that day instead of piling up a fresh one each time. Concurrent
-// first-creators of the day all compute this same ID and converge on it via
-// ensureSession/writeSessionYAMLIfAbsent's create-if-absent semantics.
+// defaultSessionID returns today's default session identifier for this host
+// (YYYY-MM-DD-<host>-default). This is day-granular, not per-invocation, so
+// that every instance started on the same day on the same host resolves to the
+// one session already created for that day instead of piling up a fresh one
+// each time. Concurrent first-creators of the day all compute this same ID and
+// converge on it via ensureSession/writeSessionYAMLIfAbsent's create-if-absent
+// semantics. The host is part of the ID (not just the name) so that hosts whose
+// records are synced together each land on their own default session
+// (condocs/initialRobotImpls/Step3SubstepCPrompt.md). The "-default" suffix is
+// kept last since it is what marks the ID as a reserved daily default.
 func defaultSessionID() string {
-	return time.Now().Format("2006-01-02") + "-default"
+	return defaultSessionIDFor(time.Now(), ufahostid.GetHostID())
+}
+
+// defaultSessionIDFor builds the default session ID for the given day and host.
+func defaultSessionIDFor(day time.Time, hostID string) string {
+	return day.Format("2006-01-02") + "-" + sanitizeHostIDForSession(hostID) + "-default"
+}
+
+// sanitizeHostIDForSession makes a host ID safe to embed in a session ID (which
+// is also a directory name): anything outside [A-Za-z0-9._-] becomes '-'.
+func sanitizeHostIDForSession(hostID string) string {
+	var b strings.Builder
+	for _, r := range hostID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	if s := strings.Trim(b.String(), ".-"); s != "" {
+		return s
+	}
+	return "unknown"
 }
 
 // parseMetadata parses the UFA_METADATA environment variable

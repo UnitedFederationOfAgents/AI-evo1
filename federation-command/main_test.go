@@ -7,11 +7,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"representable"
 	ufaconfig "ufa-configurable"
 	ufaversion "ufa-version"
 )
+
+func TestFallbackDefaultSessionIDIncludesHost(t *testing.T) {
+	day := time.Date(2026, 10, 6, 12, 0, 0, 0, time.Local)
+	if got, want := fallbackDefaultSessionID(day, "box-a1b2"), "2026-10-06-box-a1b2-default"; got != want {
+		t.Errorf("fallbackDefaultSessionID = %q, want %q", got, want)
+	}
+	if got, want := fallbackDefaultSessionID(day, "a/b c"), "2026-10-06-a-b-c-default"; got != want {
+		t.Errorf("fallbackDefaultSessionID(unsafe host) = %q, want %q", got, want)
+	}
+	if got, want := fallbackDefaultSessionID(day, ""), "2026-10-06-unknown-default"; got != want {
+		t.Errorf("fallbackDefaultSessionID(\"\") = %q, want %q", got, want)
+	}
+}
 
 // writeConfigFile is a test helper for laying down ufa-configurable YAML files.
 func writeConfigFile(t *testing.T, path, content string) {

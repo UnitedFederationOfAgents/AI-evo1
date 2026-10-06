@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"clauditable/pkg/records"
 	ufahostid "ufa-hostid"
@@ -22,14 +23,17 @@ func TestGetSession(t *testing.T) {
 		}
 	})
 
-	// Test without environment variable (should use YYYY-MM-DD-default format)
+	// Test without environment variable (should use YYYY-MM-DD-<host>-default format)
 	t.Run("without AGENT_SESSION", func(t *testing.T) {
 		os.Unsetenv(EnvAgentSession)
 
 		session := getSession()
-		// Should match YYYY-MM-DD-default
-		if !strings.HasSuffix(session, "-default") || len(session) != 18 || session[4] != '-' || session[7] != '-' {
-			t.Errorf("expected YYYY-MM-DD-default format, got '%s'", session)
+		want := defaultSessionIDFor(time.Now(), ufahostid.GetHostID())
+		if session != want {
+			t.Errorf("expected %q, got %q", want, session)
+		}
+		if !strings.HasSuffix(session, "-default") || session[4] != '-' || session[7] != '-' {
+			t.Errorf("expected YYYY-MM-DD-<host>-default format, got '%s'", session)
 		}
 	})
 
@@ -43,6 +47,25 @@ func TestGetSession(t *testing.T) {
 			t.Errorf("expected '-default' suffix for AGENT_SESSION=default, got '%s'", session)
 		}
 	})
+}
+
+func TestDefaultSessionIDIncludesHost(t *testing.T) {
+	day := time.Date(2026, 10, 6, 12, 0, 0, 0, time.Local)
+
+	if got, want := defaultSessionIDFor(day, "box-a1b2"), "2026-10-06-box-a1b2-default"; got != want {
+		t.Errorf("defaultSessionIDFor = %q, want %q", got, want)
+	}
+	// Different hosts on the same day must get different default sessions.
+	if defaultSessionIDFor(day, "host-a") == defaultSessionIDFor(day, "host-b") {
+		t.Error("expected distinct default session IDs for distinct hosts")
+	}
+	// Host IDs are sanitized so the ID stays a single safe directory name.
+	if got, want := defaultSessionIDFor(day, "a/b c"), "2026-10-06-a-b-c-default"; got != want {
+		t.Errorf("defaultSessionIDFor(unsafe host) = %q, want %q", got, want)
+	}
+	if got, want := defaultSessionIDFor(day, ".."), "2026-10-06-unknown-default"; got != want {
+		t.Errorf("defaultSessionIDFor(\"..\") = %q, want %q", got, want)
+	}
 }
 
 func TestCheckIsPrimary(t *testing.T) {

@@ -77,11 +77,10 @@ I added both features, but none of it has been built or tested yet: `go` and `ts
 [Step 3 Substep C](Step3SubstepCPrompt.md)
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Now let's extend the 'control' functionality to make it so that we can define/compose/run these sequences. Similar to what we did for the robot.
 
+We will keep this existing sequence as an example.
 
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will use a yaml notation to allow importing/exporting of sequences.

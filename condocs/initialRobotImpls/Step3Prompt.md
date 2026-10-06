@@ -84,3 +84,20 @@ Now let's extend the 'control' functionality to make it so that we can define/co
 We will keep this existing sequence as an example.
 
 We will use a yaml notation to allow importing/exporting of sequences.
+
+
+prompt: [`0e04e0e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0e04e0e26a37a4a1b5d3b0223976b5835a8d27f9) → reply: [`3aabbf4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/3aabbf414111661c0dc824e0ff1a19ed78dbe290)
+
+## Reply C
+
+You've hit your session limit · resets 2:30pm (UTC)
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

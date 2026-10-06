@@ -399,11 +399,8 @@ prompt: [`52314c1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5
 You've hit your session limit · resets 12am (UTC)
 
 
-## <REPLACE-Revision|Retry> N
+## Revision N
 
-<REPLACE-PROMPT>
+Let's remove the desktop file hello-world sequence for now, as well as the sequence-v1 tab and associated logic.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We'll revisit this later.

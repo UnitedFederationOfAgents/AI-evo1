@@ -40,12 +40,13 @@ export interface ControlRunMsg {
   recordings?: ControlRecording[]
 }
 
-// A screen recording a run saved into the node's files tab.
+// A screen recording, or a screenshot, a run saved into the node's files tab.
 export interface ControlRecording {
-  who: string // whose screen ("robot": the node's own)
+  who: string // whose screen ("robot": the node's own; else a node's name)
   file_id: string // <files api>/<file_id>
   name: string
   video: boolean // playable in the browser, rather than a .zip of frames
+  image?: boolean // a screenshot (node-capture), rather than a recording
   duration_ms?: number
   via?: string
 }
@@ -53,6 +54,8 @@ export interface ControlRecording {
 export interface ControlStateMsg {
   sequences: ControlSequenceInfo[]
   run?: ControlRunMsg
+  node?: string // the node's own name
+  nodes?: string[] // the nodes connected to agent-coordinator: what a "node" control can choose
 }
 
 // ---- The library: definer actions and composer sequences ----
@@ -60,6 +63,7 @@ export interface ControlStateMsg {
 export interface ControlParam {
   name: string
   label?: string
+  type?: string // "" for text, "node" for a node connected to agent-coordinator
   default?: string
   help?: string
 }

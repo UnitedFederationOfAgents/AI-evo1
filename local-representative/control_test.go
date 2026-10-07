@@ -19,14 +19,19 @@ func TestRandomTokenAvoidsLookalikes(t *testing.T) {
 func TestControlStateListsSequences(t *testing.T) {
 	s := newServer("test-lr")
 	st := s.control.state()
-	if len(st.Sequences) != 1 || st.Sequences[0].ID != "fc-robot-handoff" {
+	if len(st.Sequences) != 2 || st.Sequences[0].ID != "fc-robot-handoff" || st.Sequences[1].ID != "capture-two-nodes" {
 		t.Fatalf("sequences = %+v", st.Sequences)
 	}
 	if n := len(st.Sequences[0].Steps); n != 6 {
 		t.Errorf("fc-robot-handoff has %d steps, want 6", n)
 	}
-	if e := st.Sequences[0].Error; e != "" {
-		t.Errorf("fc-robot-handoff doesn't compile: %s", e)
+	for _, q := range st.Sequences {
+		if q.Error != "" {
+			t.Errorf("%s doesn't compile: %s", q.ID, q.Error)
+		}
+	}
+	if st.Node != "test-lr" || len(st.Nodes) != 0 {
+		t.Errorf("node %q, nodes %v before agent-coordinator said any", st.Node, st.Nodes)
 	}
 	if st.Run != nil {
 		t.Errorf("run before any started = %+v", st.Run)

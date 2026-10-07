@@ -241,6 +241,17 @@ var lrControlOps = []ControlOpSpec{
 		Args:     []ControlOpArg{fcArg},
 		run:      opFCRequireWindow,
 	},
+	{
+		Op:       "node-capture",
+		Summary:  "Have a node's robot take a native capture of its screen and save it as a screenshot in the files tab. Another node's is asked for through agent-coordinator, saved in that node's files tab and copied into this one's.",
+		Describe: "screenshot {node} with its robot",
+		Args: []ControlOpArg{
+			{Name: "node", Help: "the node, as agent-coordinator names it -- usually a node control's {{name}}", Required: true},
+			{Name: "name", Help: "part of the screenshot's file name; empty for the node's name"},
+			{Name: "timeout", Help: "how long to wait for the node's robot", Default: controlCaptureTimeout.String()},
+		},
+		run: opNodeCapture,
+	},
 }
 
 // fcFrom returns the fc argument, which must name an instance.

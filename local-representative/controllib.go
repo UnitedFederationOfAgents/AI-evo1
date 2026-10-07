@@ -41,15 +41,19 @@ import (
 // agent-coordinator on connect and after each change ("control-library").
 // Actions and sequences export to and import from YAML (yamlite.go); an
 // exported sequence carries the actions it uses. The sample sequence the
-// control tab started with, fc-robot-handoff, is the built-in example
-// (exampleControlLibrary).
+// control tab started with, fc-robot-handoff, and capture-two-nodes are the
+// built-in examples (exampleControlLibrary).
 
 const controlLibFormat = "lr-control-v1"
 
-// ControlParam is a control an action or sequence exposes.
+// ControlParam is a control an action or sequence exposes. Type is "" for
+// free text, or controlTypeNode for a node connected to agent-coordinator:
+// the runner offers only those, and a run checks its value is one of them
+// (see controlnodes.go).
 type ControlParam struct {
 	Name    string `json:"name"`
 	Label   string `json:"label,omitempty"`
+	Type    string `json:"type,omitempty"`
 	Default string `json:"default,omitempty"`
 	Help    string `json:"help,omitempty"`
 }
@@ -171,6 +175,9 @@ func ctlValidateControls(cs []ControlParam) error {
 			return fmt.Errorf("control %q would hide the built-in {{%s}}; pick another name", c.Name, c.Name)
 		}
 		seen[c.Name] = true
+		if c.Type != "" && c.Type != controlTypeNode {
+			return fmt.Errorf("control %q: there's no type %q (leave it empty for text, or use %q)", c.Name, c.Type, controlTypeNode)
+		}
 		if err := ctlCheckTemplate(c.Default); err != nil {
 			return fmt.Errorf("control %q's default: %v", c.Name, err)
 		}
@@ -345,6 +352,7 @@ func encodeControlLib(doc controlLibDoc) string {
 		for _, c := range cs {
 			w.line(ind+2, "- name: "+yamlScalar(c.Name))
 			w.field(ind+4, "label", c.Label)
+			w.field(ind+4, "type", c.Type)
 			w.field(ind+4, "default", c.Default)
 			w.field(ind+4, "help", c.Help)
 		}
@@ -565,10 +573,10 @@ func decodeControlParams(n *yNode) ([]ControlParam, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := ctlOnlyKeys(it, "name", "label", "default", "help"); err != nil {
+		if err := ctlOnlyKeys(it, "name", "label", "type", "default", "help"); err != nil {
 			return nil, err
 		}
-		out = append(out, ControlParam{Name: m["name"], Label: m["label"], Default: m["default"], Help: m["help"]})
+		out = append(out, ControlParam{Name: m["name"], Label: m["label"], Type: m["type"], Default: m["default"], Help: m["help"]})
 	}
 	return out, nil
 }
@@ -718,8 +726,10 @@ func shippedControlExamples() map[string]string {
 
 // upgradeControlExamples replaces each copy of a built-in example that
 // still matches the version recorded for it in rec (wasn't edited) with
-// this build's version, returning the new lists and record and what it
-// updated.
+// this build's version, and adds the examples this build ships that rec has
+// never recorded (new since the library was saved; a deleted example stays
+// recorded, so it stays deleted), returning the new lists and record and
+// what it updated or added.
 func upgradeControlExamples(actions []ControlActionDef, sequences []ControlSequenceDef, rec map[string]string) ([]ControlActionDef, []ControlSequenceDef, map[string]string, []string) {
 	actions = append([]ControlActionDef(nil), actions...)
 	sequences = append([]ControlSequenceDef(nil), sequences...)
@@ -740,6 +750,10 @@ func upgradeControlExamples(actions []ControlActionDef, sequences []ControlSeque
 			if have == want || rec[key] == have {
 				out[key] = want
 			}
+		} else if _, known := rec[key]; !known {
+			actions = append(actions, a)
+			out[key] = ctlActionPrint(a)
+			updated = append(updated, "added action "+a.ID)
 		}
 	}
 	for _, q := range shippedQ {
@@ -753,6 +767,10 @@ func upgradeControlExamples(actions []ControlActionDef, sequences []ControlSeque
 			if have == want || rec[key] == have {
 				out[key] = want
 			}
+		} else if _, known := rec[key]; !known {
+			sequences = append(sequences, q)
+			out[key] = ctlSequencePrint(q)
+			updated = append(updated, "added sequence "+q.ID)
 		}
 	}
 	return actions, sequences, out, updated
@@ -813,7 +831,7 @@ func openControlLibrary(path string) *controlLibrary {
 		}
 	}
 	if len(updated) > 0 {
-		l.note = "updated to this local-representative's version of the built-in examples (you hadn't edited them): " + strings.Join(updated, ", ")
+		l.note = "brought the built-in examples up to this local-representative's version (leaving any you had edited): " + strings.Join(updated, ", ")
 		log.Printf("control: %s", l.note)
 	}
 	return l
@@ -1167,7 +1185,7 @@ func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActi
 		}
 		vars[c.Name] = v
 	}
-	seq := controlSequence{id: q.ID, name: q.Name, description: q.Description, record: q.Record}
+	seq := controlSequence{id: q.ID, name: q.Name, description: q.Description, record: q.Record, controls: q.Controls}
 	for _, st := range q.Steps {
 		a, ok := actions[st.Action]
 		if !ok {

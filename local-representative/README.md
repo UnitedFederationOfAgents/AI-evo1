@@ -302,10 +302,22 @@ The **control** tab sequences actions across this host's sub-apps
 Values may refer to controls, built-ins and values earlier instructions
 saved as `{{name}}`. Actions and sequences import from and export to YAML
 (`format: lr-control-v1`); an exported sequence carries the actions it uses.
-The library is saved to `--control-library`. The original sample sequence,
-`fc-robot-handoff`, is the built-in example (`controlexamples.go`);
-**restore examples** puts it back. agent-coordinator's control tab shows the
-same views for a chosen host, editing and running that host's library.
+The library is saved to `--control-library`. The built-in examples
+(`controlexamples.go`) are the original sample sequence, `fc-robot-handoff`,
+and `capture-two-nodes`; **restore examples** puts them back. A library saved
+before an example was added gains it when LR starts. agent-coordinator's
+control tab shows the same views for a chosen host, editing and running that
+host's library.
+
+A control can be of type `node`: the runner then offers only the nodes
+connected to agent-coordinator (which tells every LR when one comes or goes),
+and a run won't start if the control names any other. The `node-capture` op
+has a node's robot take a native capture into the files tab as a screenshot.
+Another node's robot is asked through agent-coordinator, and the screenshot is
+then copied from that node's files tab into this one's, through
+agent-coordinator's `/host/<id>/*` proxy (`controlnodes.go`). The runner
+shows a run's screenshots under its steps. `capture-two-nodes` does this for
+two nodes that you choose.
 
 ## Files tab
 

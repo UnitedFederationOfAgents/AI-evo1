@@ -352,6 +352,7 @@ func (s *Server) sendRobotOps() {
 //	__robot:run <json>   (a run for LR's control tab -- see lrrun.go)
 //	__robot:record-start <json> / __robot:record-stop <json>
 //	                     (a recording across a control sequence -- see lrrecord.go)
+//	__robot:capture <json> (a screenshot into LR's files -- see lrcapture.go)
 func (s *Server) handleReprCommand(raw string) {
 	if !strings.HasPrefix(raw, "__robot:") {
 		return
@@ -366,6 +367,8 @@ func (s *Server) handleReprCommand(raw string) {
 		s.handleRobotRun(arg)
 	case "record-start", "record-stop":
 		s.handleRobotRecord(verb, arg)
+	case "capture":
+		s.handleRobotCapture(arg)
 	default:
 		log.Printf("repr: ignoring unrecognised command %q", raw)
 	}

@@ -188,3 +188,29 @@ I haven't built or tested it, because `go`/`gofmt` needed approval here. Please 
 Let's add a second example sequence where we use the robot to take native captures from two nodes and then upload them to 'files' as screenshots.
 
 The sequence will expose inputs which allow the selection of nodes for this action - the node selections are constrained to ones which are presently connected to AC.
+
+
+prompt: [`c9e76bb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c9e76bbaed68fd27388e0e66ae0d98e78788351b) → reply: [`c3f18e2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c3f18e2d95ed3301d80805d8a739e256485855e4)
+
+## Reply F
+
+I added a second built-in control sequence, `capture-two-nodes` ("Robots: screenshot two nodes"), but none of it has been built or tested. `go` and `tsc` needed approval here, so it needs a `make build` / `make test` on the host.
+
+- **Choosing nodes:** the sequence has two controls of a new `node` type. In the runner they are drop-downs that list only the nodes connected to AC. AC tells every LR which nodes are connected whenever one comes or goes, and a run won't start if a control names a node that isn't connected.
+- **Taking the screenshots:** a new `node-capture` op has a node's robot take a native capture and save it as `ianar-capture-native-<node>-<time>.png`. For another node, the request goes through AC to that node's LR and robot, and the screenshot is copied back through AC's read-only `/host/<node>/*` proxy. For this node, its own robot is used directly.
+- **Where they end up:** both screenshots land in the files tab of the LR that ran the sequence, and the control view shows them as images under the steps, in LR and AC. Another node's screenshot also stays in that node's own files tab.
+- **Existing libraries:** a library saved before this change picks up the new example when LR starts. An example you deleted stays deleted.
+
+One behaviour to know: a run fails at a node whose robot isn't running, with the reason shown. It doesn't unlock a locked screen first, so a locked node gives a screenshot of its lock screen.
+
+The main new code is in `local-representative/controlnodes.go`, `agent-coordinator/controlnodes.go` and `ianar/lrcapture.go`, and the shared `ControlV1.tsx` / `controlTypes.ts` are copied to AC. New tests are `controlnodes_test.go` in LR and AC and `ianar/lrcapture_test.go`, plus additions to `controllib_test.go`. I also updated the existing tests that counted one example sequence, and the control-tab section of the LR README.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

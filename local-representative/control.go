@@ -41,6 +41,12 @@ import (
 // can play it back beside the steps it shows (Revision B). Leading steps
 // marked before_recording -- the example's screen unlock -- run before the
 // recording starts.
+//
+// Steps can reach other nodes' robots too (Revision F): the node-capture op
+// has a node's robot take a native capture into the files tab, relayed
+// through agent-coordinator for a node other than this one, and controls of
+// type "node" choose among the nodes connected to agent-coordinator (see
+// controlnodes.go). The capture-two-nodes example does that for two of them.
 
 const (
 	controlLaunchTimeout = 45 * time.Second // a launched FC connecting in remote control
@@ -111,21 +117,27 @@ type ControlRunMsg struct {
 	Recordings []ControlRecording  `json:"recordings,omitempty"`
 }
 
-// ControlRecording is a screen recording a run saved into the files tab.
+// ControlRecording is a screen recording, or a screenshot, a run saved into
+// the files tab.
 type ControlRecording struct {
-	Who        string `json:"who"`     // whose screen (see recordLocalRobot)
+	Who        string `json:"who"`     // whose screen (recordLocalRobot, or a node's name)
 	FileID     string `json:"file_id"` // GET /api/files/<file_id>
 	Name       string `json:"name"`
-	Video      bool   `json:"video"` // a video the browser can play, rather than a .zip of frames
+	Video      bool   `json:"video"`           // a video the browser can play, rather than a .zip of frames
+	Image      bool   `json:"image,omitempty"` // a screenshot (node-capture), rather than a recording
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Via        string `json:"via,omitempty"`
 }
 
 // ControlStateMsg is the payload of "control-state" messages, sent to
-// browser clients and agent-coordinator.
+// browser clients and agent-coordinator. Nodes are the ones a "node"
+// control can choose: those connected to agent-coordinator, none while this
+// LR isn't.
 type ControlStateMsg struct {
 	Sequences []ControlSequenceInfo `json:"sequences"`
 	Run       *ControlRunMsg        `json:"run,omitempty"`
+	Node      string                `json:"node"`  // this LR's own node
+	Nodes     []string              `json:"nodes"` // connected to agent-coordinator
 }
 
 // controlStep is one step of a compiled control sequence and the code that
@@ -146,6 +158,9 @@ type controlSequence struct {
 	// recording. recordLocalRobot is the only one so far; recording other
 	// nodes (through agent-coordinator) would add names here.
 	record []string
+	// controls are the sequence's own, so a run can check its node
+	// controls' values (checkNodeControls).
+	controls []ControlParam
 }
 
 func (q controlSequence) info() ControlSequenceInfo {
@@ -177,6 +192,13 @@ type controlEngine struct {
 	// robotOps are IANAR's ops as robot.<op> specs (see controlops.go), nil
 	// until it has reported them.
 	robotOps []ControlOpSpec
+	// nodes are those connected to agent-coordinator, as it last said
+	// (nil while this LR isn't connected); caps and nodeCaps are captures
+	// under way, by this node's robot and through agent-coordinator (see
+	// controlnodes.go).
+	nodes    []string
+	caps     map[string]chan RobotCaptureMsg
+	nodeCaps map[string]chan NodeCaptureResult
 }
 
 // newControlEngine starts with the built-in examples in memory; main
@@ -188,6 +210,8 @@ func newControlEngine(s *Server) *controlEngine {
 		robot:    make(map[string]chan RobotRunMsg),
 		progress: make(map[string]func(RobotRunMsg)),
 		recs:     make(map[string]chan RobotRecordMsg),
+		caps:     make(map[string]chan RobotCaptureMsg),
+		nodeCaps: make(map[string]chan NodeCaptureResult),
 	}
 }
 
@@ -269,8 +293,9 @@ func (e *controlEngine) sequenceInfos() []ControlSequenceInfo {
 
 // state returns the current control-state snapshot.
 func (e *controlEngine) state() ControlStateMsg {
-	msg := ControlStateMsg{Sequences: e.sequenceInfos()}
+	msg := ControlStateMsg{Sequences: e.sequenceInfos(), Node: e.s.lrName}
 	e.mu.Lock()
+	msg.Nodes = append([]string{}, e.nodes...)
 	if e.run != nil {
 		cp := *e.run
 		cp.Steps = append([]ControlStepResult(nil), e.run.Steps...)
@@ -421,6 +446,8 @@ func (e *controlEngine) handleCommand(raw string) {
 	case "refresh":
 		e.broadcastLibrary()
 		e.broadcast()
+	case "nodes", "node-capture", "node-capture-result":
+		e.handleNodeCommand(verb, arg) // see controlnodes.go
 	default:
 		log.Printf("control: ignoring unrecognised command %q", raw)
 	}
@@ -432,6 +459,9 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 	startedAt := time.Now()
 	q, vars, err := e.lib.compile(id, values, e.getRobotOps(), startedAt)
 	if err != nil {
+		return err
+	}
+	if err := e.checkNodeControls(q.controls, vars); err != nil {
 		return err
 	}
 	e.mu.Lock()

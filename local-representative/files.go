@@ -536,8 +536,15 @@ func (s *Server) saveUploadedFile(fh *multipart.FileHeader) (FileInfo, error) {
 		return FileInfo{}, err
 	}
 	defer src.Close()
+	return s.saveFileFrom(fh.Filename, src)
+}
 
-	name := sanitizeFilename(fh.Filename)
+// saveFileFrom writes filename's content from src into the host-cache, as
+// saveUploadedFile does for an upload -- also used for a control run's copy
+// of another node's screenshot (controlnodes.go). The caller broadcasts the
+// files tab.
+func (s *Server) saveFileFrom(filename string, src io.Reader) (FileInfo, error) {
+	name := sanitizeFilename(filename)
 	if strings.HasPrefix(name, manifestPrefix) {
 		return FileInfo{}, fmt.Errorf("upload rejected: filenames starting with %q are reserved for host-cache manifests", manifestPrefix)
 	}

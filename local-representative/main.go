@@ -588,6 +588,8 @@ func (s *Server) pushStateToAC() {
 	s.pushFCStateToAC()
 	ac.SendData("control-state", s.control.state())
 	ac.SendData("control-library", s.control.libraryForAC())
+	// Which nodes a control sequence can reach -- see controlnodes.go.
+	ac.SendData("control-nodes-request", struct{}{})
 	ac.SendData("system-state", s.systemState())
 	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
@@ -883,6 +885,7 @@ func (s *Server) connectAC(host, port string) {
 	}
 
 	log.Printf("disconnected from agent-coordinator at %s", addr)
+	s.control.setNodes(nil) // no nodes to choose among until it reconnects
 	s.broadcast("ac-state", s.acStateMsg(false, host, port))
 	s.setModeMismatch("agent-coordinator", false, "")
 
@@ -1923,6 +1926,13 @@ func main() {
 				var payload RobotRecordMsg
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.control.noteRobotRecord(payload)
+				}
+			case "robot-capture-result":
+				// A control sequence's screenshot of this node -- see
+				// controlnodes.go.
+				var payload RobotCaptureMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.noteRobotCapture(payload)
 				}
 			case "robot-ops":
 				// The ops the control tab's definer offers as robot.<op> --

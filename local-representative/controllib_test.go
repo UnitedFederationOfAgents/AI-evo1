@@ -265,7 +265,7 @@ func TestExportImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dst.actions) != len(src.actions) || len(dst.sequences) != 1 || !strings.Contains(msg, "added") {
+	if len(dst.actions) != 6 || len(dst.sequences) != 1 || !strings.Contains(msg, "added") {
 		t.Errorf("imported %d actions, %d sequences (%s)", len(dst.actions), len(dst.sequences), msg)
 	}
 	if _, _, err := src.export("sequences", []string{"nope"}); err == nil {
@@ -290,7 +290,7 @@ func TestLibraryPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	broken := openControlLibrary(path)
-	if !strings.Contains(broken.note, "moved it to") || len(broken.sequences) != 1 {
+	if !strings.Contains(broken.note, "moved it to") || len(broken.sequences) != 2 {
 		t.Errorf("broken file: note %q, %d sequences", broken.note, len(broken.sequences))
 	}
 }
@@ -314,6 +314,56 @@ func TestUpgradeControlExamples(t *testing.T) {
 	got, _, _, updated = upgradeControlExamples(append([]ControlActionDef{edited}, actions[1:]...), sequences, rec)
 	if got[0].Description != "my own wording" || len(updated) != 0 {
 		t.Errorf("edited copy replaced: %q, updated %v", got[0].Description, updated)
+	}
+}
+
+// TestUpgradeAddsNewExamples: a library saved before this build's
+// capture-two-nodes example gains it (and its action); one that deleted it
+// doesn't get it back.
+func TestUpgradeAddsNewExamples(t *testing.T) {
+	actions, sequences := exampleControlLibrary()
+	rec := shippedControlExamples()
+	delete(rec, ctlExampleKey("sequence", "capture-two-nodes"))
+	delete(rec, ctlExampleKey("action", "node-screenshot"))
+	older := []ControlActionDef{}
+	for _, a := range actions {
+		if a.ID != "node-screenshot" {
+			older = append(older, a)
+		}
+	}
+	gotA, gotQ, out, updated := upgradeControlExamples(older, sequences[:1], rec)
+	if len(gotA) != len(actions) || len(gotQ) != 2 || len(updated) != 2 {
+		t.Fatalf("got %d actions, %d sequences, updated %v", len(gotA), len(gotQ), updated)
+	}
+	if err := checkControlLibrary(gotA, gotQ); err != nil {
+		t.Errorf("upgraded library isn't valid: %v", err)
+	}
+	if _, ok := out[ctlExampleKey("sequence", "capture-two-nodes")]; !ok {
+		t.Error("the added example isn't recorded")
+	}
+
+	// Deleted after it was recorded: stays deleted.
+	_, gotQ, _, updated = upgradeControlExamples(actions, sequences[:1], shippedControlExamples())
+	if len(gotQ) != 1 || len(updated) != 0 {
+		t.Errorf("deleted example came back: %d sequences, updated %v", len(gotQ), updated)
+	}
+}
+
+func TestNodeControlType(t *testing.T) {
+	if err := ctlValidateControls([]ControlParam{{Name: "n", Type: controlTypeNode}}); err != nil {
+		t.Errorf("node control: %v", err)
+	}
+	if err := ctlValidateControls([]ControlParam{{Name: "n", Type: "colour"}}); err == nil {
+		t.Error("an unknown control type was accepted")
+	}
+	src := encodeControlLib(controlLibDoc{Sequences: []ControlSequenceDef{{ID: "q", Name: "Q",
+		Controls: []ControlParam{{Name: "n", Type: controlTypeNode}}, Steps: []ControlStepRef{{Action: "a"}}}}})
+	if !strings.Contains(src, "type: node") {
+		t.Errorf("type not written:\n%s", src)
+	}
+	doc, err := decodeControlLib(src)
+	if err != nil || doc.Sequences[0].Controls[0].Type != controlTypeNode {
+		t.Errorf("type not read back: %+v, %v", doc, err)
 	}
 }
 

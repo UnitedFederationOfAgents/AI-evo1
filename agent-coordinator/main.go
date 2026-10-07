@@ -1560,6 +1560,7 @@ func main() {
 			s.broadcast("lr-stateboard-state", LRStateboardMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 			s.broadcastTCAvailability()
+			s.broadcastControlNodes()
 		}
 	})
 
@@ -1588,6 +1589,9 @@ func main() {
 			// even if the aggregate hasn't changed (broadcastTCAvailability
 			// below only re-pushes to hosts on a change).
 			s.sendTCAvailabilityTo(name)
+			// Every host's control tab offers the connected nodes, this one
+			// now among them.
+			s.broadcastControlNodes()
 		}
 
 		switch dataType {
@@ -1634,6 +1638,14 @@ func main() {
 			s.broadcast("lr-control-library", LRControlLibraryMsg{HostID: name, Library: data})
 		case "control-reply":
 			s.broadcast("lr-control-reply", LRControlReplyMsg{HostID: name, Reply: data})
+		case "node-capture":
+			// A control sequence on this host wants another node's
+			// screenshot -- see controlnodes.go.
+			s.relayNodeCapture(name, data)
+		case "node-capture-result":
+			s.relayNodeCaptureResult(name, data)
+		case "control-nodes-request":
+			s.sendControlNodes(name, s.connectedHostNames())
 		case "ridealong-state":
 			var payload RidealongStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

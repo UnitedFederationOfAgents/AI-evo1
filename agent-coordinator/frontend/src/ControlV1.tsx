@@ -100,6 +100,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel, fileUrl, node }: ControlV1Props) {
   const sequences = state?.sequences ?? []
+  const nodes = state?.nodes ?? []
   const [selectedId, setSelectedId] = useState('')
   const [values, setValues] = useState<Record<string, Record<string, string>>>({})
   const run = state?.run
@@ -160,17 +161,30 @@ function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel,
       {runError && !running && <div className="ctl-run-error-msg">{runError}</div>}
       {controls.length > 0 && (
         <div className="ctl-section">
-          {controls.map(c => (
-            <Field key={c.name} label={c.label || c.name}>
-              <input
-                className="ctl-input"
-                value={valueOf(c)}
-                title={c.help}
-                disabled={running}
-                onChange={e => setValues(v => ({ ...v, [seq.id]: { ...(v[seq.id] ?? {}), [c.name]: e.target.value } }))}
-              />
-            </Field>
-          ))}
+          {controls.some(c => c.type === 'node') && nodes.length === 0 && (
+            <div className="ctl-hint ctl-hint-warn">{node} isn't connected to agent-coordinator, so there are no nodes to choose</div>
+          )}
+          {controls.map(c => {
+            const set = (value: string) => setValues(v => ({ ...v, [seq.id]: { ...(v[seq.id] ?? {}), [c.name]: value } }))
+            return (
+              <Field key={c.name} label={c.label || c.name}>
+                {c.type === 'node' ? (
+                  // Only nodes connected to agent-coordinator (Step3Prompt.md Revision F).
+                  <select className="ctl-select" value={valueOf(c)} title={c.help} disabled={running} onChange={e => set(e.target.value)}>
+                    <option value="">— choose a node —</option>
+                    {valueOf(c) !== '' && !nodes.includes(valueOf(c)) && (
+                      <option value={valueOf(c)} disabled>{valueOf(c)} (not connected)</option>
+                    )}
+                    {nodes.map(n => (
+                      <option key={n} value={n}>{n}{n === state?.node ? ` (${node})` : ''}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input className="ctl-input" value={valueOf(c)} title={c.help} disabled={running} onChange={e => set(e.target.value)} />
+                )}
+              </Field>
+            )
+          })}
         </div>
       )}
       <ol className="ctl-steps">
@@ -212,22 +226,28 @@ function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel,
 }
 
 // Recordings plays back a run's screen recordings beside its steps
-// (Step3Prompt.md Revision B). Recordings saved as a .zip of frames (no
-// compositor video) only get a link.
+// (Step3Prompt.md Revision B), and shows its screenshots (Revision F).
+// Recordings saved as a .zip of frames (no compositor video) only get a link.
 function Recordings({ recordings, fileUrl, node }: { recordings: ControlRecording[]; fileUrl: (id: string) => string; node: string }) {
   return (
     <div className="ctl-recordings">
       {recordings.map(rec => (
         <div key={rec.file_id} className="ctl-recording">
           <div className="ctl-recording-head">
-            {rec.who === 'robot' ? `${node}'s screen` : rec.who}
+            {rec.who === 'robot' ? `${node}'s screen` : `${rec.who}'s screen`}
+            {rec.image ? ' · screenshot' : ''}
             {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
             {rec.via ? ` · via ${rec.via}` : ''}
             {' · '}
             <a href={`${fileUrl(rec.file_id)}?download=1`}>{rec.name}</a>
-            {!rec.video && ' (sampled frames, not a video — download to view)'}
+            {!rec.video && !rec.image && ' (sampled frames, not a video — download to view)'}
           </div>
           {rec.video && <video className="ctl-recording-video" src={fileUrl(rec.file_id)} controls preload="metadata" />}
+          {rec.image && (
+            <a href={fileUrl(rec.file_id)} target="_blank" rel="noreferrer">
+              <img className="ctl-recording-video" src={fileUrl(rec.file_id)} alt={rec.name} />
+            </a>
+          )}
         </div>
       ))}
     </div>
@@ -237,7 +257,8 @@ function Recordings({ recordings, fileUrl, node }: { recordings: ControlRecordin
 // ---- Shared editors ----
 
 // ControlsEditor edits a list of controls: name (as used in {{name}}),
-// label, default and help.
+// label, type, default and help. A "node" control is chosen in the runner
+// from the nodes connected to agent-coordinator.
 function ControlsEditor({ controls, onChange }: { controls: ControlParam[]; onChange: (c: ControlParam[]) => void }) {
   const set = (i: number, patch: Partial<ControlParam>) => onChange(controls.map((c, j) => (j === i ? { ...c, ...patch } : c)))
   return (
@@ -246,6 +267,15 @@ function ControlsEditor({ controls, onChange }: { controls: ControlParam[]; onCh
         <div className="ctl-row" key={i}>
           <input className="ctl-input ctl-input-name" placeholder="name" value={c.name} onChange={e => set(i, { name: e.target.value })} />
           <input className="ctl-input" placeholder="label" value={c.label ?? ''} onChange={e => set(i, { label: e.target.value })} />
+          <select
+            className="ctl-select"
+            value={c.type ?? ''}
+            title="text, or a node connected to agent-coordinator (the runner offers only those)"
+            onChange={e => set(i, { type: e.target.value || undefined })}
+          >
+            <option value="">text</option>
+            <option value="node">node</option>
+          </select>
           <input className="ctl-input" placeholder="default" value={c.default ?? ''} onChange={e => set(i, { default: e.target.value })} />
           <input className="ctl-input" placeholder="help" value={c.help ?? ''} onChange={e => set(i, { help: e.target.value })} />
           <button className="ctl-btn ctl-icon-btn" title="remove this control" onClick={() => onChange(controls.filter((_, j) => j !== i))}>✕</button>
@@ -641,12 +671,13 @@ function Definer({ lib, request, replies, connected }: {
 
 const blankSequence = (): ControlSequenceDef => ({ id: '', name: '', description: '', controls: [], record: [], steps: [] })
 
-function Composer({ lib, request, replies, connected, node }: {
+function Composer({ lib, request, replies, connected, node, nodes }: {
   lib: ControlLibraryMsg
   request: ControlRequest
   replies: Record<string, ControlLibReply>
   connected: boolean
   node: string
+  nodes: string[] // connected to agent-coordinator
 }) {
   const sequences = lib.sequences ?? []
   const actions = lib.actions ?? []
@@ -757,6 +788,9 @@ function Composer({ lib, request, replies, connected, node }: {
                   <Field key={c.name} label={c.label || c.name}>
                     <input
                       className="ctl-input"
+                      // A node control's value is usually a sequence node control's {{name}}; the
+                      // connected nodes are offered too.
+                      list={c.type === 'node' ? 'ctl-node-list' : undefined}
                       value={st.with?.[c.name] ?? ''}
                       placeholder={c.default ? `${c.default} (default)` : c.help ?? ''}
                       title={c.help}
@@ -775,6 +809,10 @@ function Composer({ lib, request, replies, connected, node }: {
           })}
           {d.steps.length === 0 && <li className="ctl-empty">No steps yet — add actions below.</li>}
         </ol>
+        <datalist id="ctl-node-list">
+          {(d.controls ?? []).filter(c => c.type === 'node' && c.name).map(c => <option key={c.name} value={`{{${c.name}}}`} />)}
+          {nodes.map(n => <option key={n} value={n} />)}
+        </datalist>
         <div className="ctl-row">
           <select className="ctl-select" value={chosen} onChange={e => setAddAction(e.target.value)}>
             {actions.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
@@ -823,7 +861,9 @@ export function ControlV1(props: ControlV1Props) {
       {view === 'runner' && <Runner {...props} />}
       {view !== 'runner' && !lib && <div className="ctl-empty">{connected ? 'loading the library…' : 'connecting…'}</div>}
       {lib && view === 'definer' && <Definer lib={lib} request={request} replies={replies} connected={connected} />}
-      {lib && view === 'composer' && <Composer lib={lib} request={request} replies={replies} connected={connected} node={node} />}
+      {lib && view === 'composer' && (
+        <Composer lib={lib} request={request} replies={replies} connected={connected} node={node} nodes={props.state?.nodes ?? []} />
+      )}
       {lib && view !== 'runner' && (
         <div className="ctl-footer">
           <span className="ctl-hint">{lib.path ? `saved in ${lib.path} on ${node}` : 'kept in memory only (not saved to disk)'}</span>

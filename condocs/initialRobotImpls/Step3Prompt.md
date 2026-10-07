@@ -183,11 +183,8 @@ I fixed the build error by breaking the initialization cycle in `local-represent
 I haven't built or tested it, because `go`/`gofmt` needed approval here. Please re-run `make build` / `make test` on the host to confirm.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Let's add a second example sequence where we use the robot to take native captures from two nodes and then upload them to 'files' as screenshots.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The sequence will expose inputs which allow the selection of nodes for this action - the node selections are constrained to ones which are presently connected to AC.

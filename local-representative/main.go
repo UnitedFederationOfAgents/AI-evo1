@@ -1155,6 +1155,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "control-cancel":
 			s.control.cancel()
+		case "control-continue":
+			// The continue button on a step waiting for the user (ask-user).
+			var payload struct {
+				Run string `json:"run"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				if err := s.control.continueRun(payload.Run); err != nil {
+					log.Printf("control-continue: %v", err)
+				}
+			}
 		case "control-lib":
 			// The definer's and composer's edits, imports and exports -- see
 			// controllib.go.

@@ -252,6 +252,38 @@ var lrControlOps = []ControlOpSpec{
 		},
 		run: opNodeCapture,
 	},
+	{
+		Op:       "ask-user",
+		Summary:  "Show a message in the control tab with a continue button, and wait until someone presses it (or the run is cancelled).",
+		Describe: "ask: {message} -- then wait for continue",
+		Args: []ControlOpArg{
+			{Name: "message", Help: "what the person running the sequence should do before pressing continue", Required: true},
+			{Name: "timeout", Help: "how long to wait for continue", Default: controlAskTimeout.String()},
+		},
+		run: opAskUser,
+	},
+	{
+		Op:       "fc-capture-echo",
+		Summary:  "Find the last echo command typed into a federation-command instance (in local control) since this step started, and save the phrase it printed.",
+		Describe: "save the phrase last echoed in {fc} as {{{save_as}}}",
+		Args: []ControlOpArg{
+			fcArg,
+			{Name: "save_as", Help: "name to save the phrase under", Default: "phrase"},
+			{Name: "timeout", Help: "how long to wait for the echo and its output to arrive", Default: controlEchoTimeout.String()},
+			hintArg,
+		},
+		run: opFCCaptureEcho,
+	},
+	{
+		Op:       "output",
+		Summary:  "Show a value as the run's output, under its steps, ahead of the other values.",
+		Describe: "output {label}: {value}",
+		Args: []ControlOpArg{
+			{Name: "label", Help: "what it is", Required: true},
+			{Name: "value", Help: "the value"},
+		},
+		run: opOutput,
+	},
 }
 
 // fcFrom returns the fc argument, which must name an instance.
@@ -414,6 +446,121 @@ func opFCExpectState(r *controlRun, a opArgs) (string, error) {
 		return "", fmt.Errorf("%s is still in %s, not %s, after %s", fc, orNone(r.s.fcState(fc)), want, timeout)
 	}
 	return fmt.Sprintf("%s is in %s", fc, want), nil
+}
+
+// opAskUser hands the run to the person following it (Step3Prompt.md
+// Revision G): the control tab shows the message with a continue button
+// (ControlRunMsg.Prompt) until it's pressed.
+func opAskUser(r *controlRun, a opArgs) (string, error) {
+	timeout, err := a.duration("timeout")
+	if err != nil {
+		return "", err
+	}
+	ch := r.e.setPrompt(r.step, strings.TrimSpace(a["message"]))
+	defer r.e.clearPrompt()
+	r.note("waiting for continue…")
+	select {
+	case <-ch:
+		return "continued", nil
+	case <-r.cancel:
+		return "", errControlCancelled
+	case <-time.After(timeout):
+		return "", fmt.Errorf("nobody pressed continue within %s", timeout)
+	}
+}
+
+// opFCCaptureEcho saves what the last echo typed into fc since the step
+// started printed. It waits for output matching the echo's own argument; if
+// something else came back (a $VAR, say), the first line of that is taken
+// once the timeout passes.
+func opFCCaptureEcho(r *controlRun, a opArgs) (string, error) {
+	fc, err := fcFrom(a)
+	if err != nil {
+		return "", err
+	}
+	timeout, err := a.duration("timeout")
+	if err != nil {
+		return "", err
+	}
+	var echo lastEcho
+	ok, err := r.waitFor(timeout, func() bool {
+		echo = lastEchoIn(r.e.logsSince(r.stepMark), fc)
+		return echo.cmd != "" && (echo.arg == "" || echo.printed())
+	})
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case echo.cmd == "":
+		return "", fmt.Errorf("no echo command was entered in %s", fc)
+	case echo.arg == "":
+		return "", fmt.Errorf("%s ran %s, which echoes nothing", fc, echo.cmd)
+	case ok:
+		return fmt.Sprintf("%s echoed %q", fc, echo.arg), r.save(a["save_as"], echo.arg)
+	case len(echo.output) > 0:
+		return fmt.Sprintf("%s ran %s and printed %q", fc, echo.cmd, echo.output[0]), r.save(a["save_as"], echo.output[0])
+	}
+	return "", fmt.Errorf("%s ran %s but printed nothing back within %s", fc, echo.cmd, timeout)
+}
+
+// lastEcho is the last echo command an instance ran, what it should print
+// and what it did print.
+type lastEcho struct {
+	cmd, arg string
+	output   []string // trimmed, non-empty
+}
+
+func (e lastEcho) printed() bool {
+	for _, line := range e.output {
+		if line == e.arg {
+			return true
+		}
+	}
+	return false
+}
+
+var echoCmdRe = regexp.MustCompile(`^\s*echo(\s+(.*))?$`)
+
+// lastEchoIn finds fc's last echo command in logs (typed in local control,
+// so logged as "cmd") and the output after it.
+func lastEchoIn(logs []fcLogEvent, fc string) lastEcho {
+	var e lastEcho
+	for _, ev := range logs {
+		if ev.fc != fc {
+			continue
+		}
+		switch ev.kind {
+		case "cmd":
+			if m := echoCmdRe.FindStringSubmatch(ev.line); m != nil {
+				e = lastEcho{cmd: strings.TrimSpace(ev.line), arg: echoArgument(m[2])}
+			}
+		case "output":
+			if line := strings.TrimSpace(ev.line); e.cmd != "" && line != "" {
+				e.output = append(e.output, line)
+			}
+		}
+	}
+	return e
+}
+
+// echoArgument is roughly what a shell's echo prints for args: one quoted
+// argument unquoted (trimmed, as output lines are compared), otherwise the
+// words joined by single spaces with their quotes dropped.
+func echoArgument(args string) string {
+	args = strings.TrimSpace(args)
+	n := len(args)
+	if n >= 2 && args[0] == '\'' && args[n-1] == '\'' && !strings.Contains(args[1:n-1], "'") {
+		return strings.TrimSpace(args[1 : n-1])
+	}
+	if n >= 2 && args[0] == '"' && args[n-1] == '"' && !strings.Contains(strings.ReplaceAll(args[1:n-1], `\"`, ""), `"`) {
+		return strings.TrimSpace(strings.NewReplacer(`\"`, `"`, `\\`, `\`).Replace(args[1 : n-1]))
+	}
+	return strings.Join(strings.Fields(strings.NewReplacer(`"`, "", `'`, "").Replace(args)), " ")
+}
+
+func opOutput(r *controlRun, a opArgs) (string, error) {
+	r.e.addOutput(a["label"], a["value"])
+	return "", nil
 }
 
 func opFCRequireWindow(r *controlRun, a opArgs) (string, error) {

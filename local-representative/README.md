@@ -304,7 +304,7 @@ saved as `{{name}}`. Actions and sequences import from and export to YAML
 (`format: lr-control-v1`); an exported sequence carries the actions it uses.
 The library is saved to `--control-library`. The built-in examples
 (`controlexamples.go`) are the original sample sequence, `fc-robot-handoff`,
-and `capture-two-nodes`; **restore examples** puts them back. A library saved
+`capture-two-nodes` and `you-tell-me`; **restore examples** puts them back. A library saved
 before an example was added gains it when LR starts. agent-coordinator's
 control tab shows the same views for a chosen host, editing and running that
 host's library.
@@ -318,6 +318,19 @@ then copied from that node's files tab into this one's, through
 agent-coordinator's `/host/<id>/*` proxy (`controlnodes.go`). The runner
 shows a run's screenshots under its steps. `capture-two-nodes` does this for
 two nodes that you choose.
+
+A step can wait for the person running the sequence. The `ask-user` op shows
+a message with a **continue** button on that step (in LR and in
+agent-coordinator) and waits until someone presses it. `fc-capture-echo` takes
+the phrase that the last `echo` typed into an FC instance in local control
+printed, and `output` shows a value as the run's output under its steps.
+`you-tell-me` starts like the hand-off: it echoes
+`<random-chars> Enter a phrase to capture!` over the remote interface. The
+robot then takes local control and leaves `echo ""` on the command line, with
+the cursor between the quotes. You type a phrase, press Enter in the terminal
+and then press continue, and the phrase comes back as the run's output. The
+terminal is left in local control, because by then the keyboard focus is in
+the browser.
 
 ## Files tab
 

@@ -217,3 +217,38 @@ Then in the sequence dialog we have a step explaining to the user that they shou
 When the user presses continue the sequence collects the phrase that the user has echoed and brings it back to the output of the sequence dialog.
 
 Let's implement this now.
+
+
+prompt: [`4644dfb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4644dfbd84c5cc08b464beec8688cf489bdfb85e) → reply: [`ebf618f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ebf618f86faae7e66eac2032123b6a9f30eadcaf)
+
+## Reply G
+
+I added the third example sequence, `you-tell-me` ("federation-command: you tell me"), to the LR and AC control tabs. None of it has been built or tested: `go` and `tsc` needed approval here, so it needs a `make build` / `make test` on the host.
+
+**What the sequence does:**
+1. Unlocks the screen if it is locked.
+2. Launches a new FC instance.
+3. Echoes `<random-chars> Enter a phrase to capture!` to it in remote mode.
+4. Has the robot find that terminal and take local control, as the hand-off does.
+5. Has the robot type `echo ""` and press ← once, so the cursor sits between the quotes. It leaves the command unrun.
+6. Shows a message on that step asking you to type a phrase, press Enter in the terminal, then press **continue**. The continue button appears in both LR and AC. Once you press it, the sequence finds the last `echo` you typed into that FC and puts the phrase it printed in a new **output** box on the run.
+
+**New building blocks:** this is built from three new ops (`ask-user`, `fc-capture-echo`, `output`) and three new actions, so other sequences can reuse them. The changes are mainly in `controlops.go`, `control.go` and `controlexamples.go`. The shared `ControlV1.tsx` / `controlTypes.ts` are copied to AC again.
+
+**Things to know:**
+- **The terminal stays in local control at the end.** By the time you press continue, the keyboard focus is on the browser, so the robot's ← wouldn't reach the terminal.
+- **This sequence doesn't record the screen.** The wait for you to press continue has no fixed length (it gives up after 30 minutes).
+- **If the phrase is missing, the step fails with the reason.** That covers not having pressed Enter before continue, or leaving `echo ""` empty.
+- **If the output doesn't match what you typed** (for example `$HOME`), it takes the first line the echo actually printed.
+
+New tests are in `local-representative/controlask_test.go`. I updated the existing tests that counted two example sequences, and added the new sequence to the LR README.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -605,6 +605,11 @@ body {
 .ctl-step-time { font-size: 11px; color: #666; flex-shrink: 0; }
 .ctl-values { font-size: 11px; color: #9c9c9c; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-wrap: anywhere; }
 .ctl-value-label { color: #666; }
+.ctl-prompt { display: flex; align-items: center; gap: 8px; margin-top: 4px; padding: 6px 8px; border: 1px solid #5a7fa8; border-radius: 4px; background: #1c2530; }
+.ctl-prompt-msg { flex: 1; font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.ctl-output { font-size: 12px; color: #d4d4d4; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-wrap: anywhere; }
+.ctl-output-head { font-size: 11px; color: #666; text-transform: uppercase; }
+.ctl-output-value { color: #8fc98f; font-family: monospace; }
 .ctl-recordings { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
 .ctl-recording-head { font-size: 11px; color: #9c9c9c; overflow-wrap: anywhere; }
 .ctl-recording-head a { color: #5bb8ff; }

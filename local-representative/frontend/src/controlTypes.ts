@@ -38,6 +38,15 @@ export interface ControlRunMsg {
   steps: ControlStepResult[]
   values?: { label: string; value: string }[]
   recordings?: ControlRecording[]
+  output?: { label: string; value: string }[] // what the run brings back (the output op)
+  prompt?: ControlPrompt // set while a step waits for continue
+}
+
+// A step waiting for the person following the run (the ask-user op): shown
+// with a continue button.
+export interface ControlPrompt {
+  step: number
+  message: string
 }
 
 // A screen recording, or a screenshot, a run saved into the node's files tab.

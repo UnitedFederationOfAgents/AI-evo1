@@ -47,6 +47,12 @@ import (
 // through agent-coordinator for a node other than this one, and controls of
 // type "node" choose among the nodes connected to agent-coordinator (see
 // controlnodes.go). The capture-two-nodes example does that for two of them.
+//
+// And a step can hand the run to the person following it (Revision G): the
+// ask-user op shows a message with a continue button and waits for it
+// (ControlRunMsg.Prompt), and the output op adds to what the run brings back
+// (ControlRunMsg.Output). The you-tell-me example uses them to capture a
+// phrase someone echoes into the terminal the robot left ready for them.
 
 const (
 	controlLaunchTimeout = 45 * time.Second // a launched FC connecting in remote control
@@ -57,6 +63,8 @@ const (
 	controlRecordSave    = 3 * time.Minute  // the robot stopping and uploading a recording
 	controlRecordLead    = 1 * time.Second  // recorded before the first step
 	controlRecordTail    = 2 * time.Second  // recorded after the last step
+	controlAskTimeout    = 30 * time.Minute // someone pressing continue (ask-user)
+	controlEchoTimeout   = 5 * time.Second  // an echo typed in local control, and its output, reaching LR
 	controlPoll          = 100 * time.Millisecond
 	controlMaxLogs       = 500 // FC log lines kept for the current run
 )
@@ -115,6 +123,16 @@ type ControlRunMsg struct {
 	Steps      []ControlStepResult `json:"steps"`
 	Values     []ControlValue      `json:"values,omitempty"`
 	Recordings []ControlRecording  `json:"recordings,omitempty"`
+	Output     []ControlValue      `json:"output,omitempty"` // what the run brings back (the output op)
+	Prompt     *ControlPrompt      `json:"prompt,omitempty"` // set while a step waits for continue
+}
+
+// ControlPrompt is a step waiting for the person following the run
+// (ask-user): the control tab shows Message with a continue button, which
+// sends "control-continue" (or agent-coordinator's "__control:continue").
+type ControlPrompt struct {
+	Step    int    `json:"step"`
+	Message string `json:"message"`
 }
 
 // ControlRecording is a screen recording, or a screenshot, a run saved into
@@ -199,6 +217,9 @@ type controlEngine struct {
 	nodes    []string
 	caps     map[string]chan RobotCaptureMsg
 	nodeCaps map[string]chan NodeCaptureResult
+	// promptCh is closed when someone presses continue on the run's
+	// prompt, nil while nothing waits for it.
+	promptCh chan struct{}
 }
 
 // newControlEngine starts with the built-in examples in memory; main
@@ -301,6 +322,11 @@ func (e *controlEngine) state() ControlStateMsg {
 		cp.Steps = append([]ControlStepResult(nil), e.run.Steps...)
 		cp.Values = append([]ControlValue(nil), e.run.Values...)
 		cp.Recordings = append([]ControlRecording(nil), e.run.Recordings...)
+		cp.Output = append([]ControlValue(nil), e.run.Output...)
+		if e.run.Prompt != nil {
+			p := *e.run.Prompt
+			cp.Prompt = &p
+		}
 		msg.Run = &cp
 	}
 	e.mu.Unlock()
@@ -406,6 +432,7 @@ func (e *controlEngine) handleLibRequest(req ControlLibRequest) ControlLibReply 
 //
 //	__control:run <sequence id> [<json control values>]
 //	__control:cancel
+//	__control:continue [<run id>]
 //	__control:lib <json ControlLibRequest>
 //
 // Replies to lib (and runs that can't start) go back as "control-reply".
@@ -436,6 +463,10 @@ func (e *controlEngine) handleCommand(raw string) {
 		}
 	case "cancel":
 		e.cancel()
+	case "continue":
+		if err := e.continueRun(strings.TrimSpace(arg)); err != nil {
+			log.Printf("control: remote continue: %v", err)
+		}
 	case "lib":
 		var req ControlLibRequest
 		if err := json.Unmarshal([]byte(arg), &req); err != nil {
@@ -504,6 +535,46 @@ func (e *controlEngine) cancel() {
 }
 
 var errControlCancelled = errors.New("cancelled")
+
+// setPrompt shows message as the run's prompt and returns the channel
+// continueRun closes.
+func (e *controlEngine) setPrompt(step int, message string) <-chan struct{} {
+	ch := make(chan struct{})
+	e.mu.Lock()
+	e.promptCh = ch
+	if e.run != nil {
+		e.run.Prompt = &ControlPrompt{Step: step, Message: message}
+	}
+	e.mu.Unlock()
+	e.broadcast()
+	return ch
+}
+
+func (e *controlEngine) clearPrompt() {
+	e.mu.Lock()
+	e.promptCh = nil
+	if e.run != nil {
+		e.run.Prompt = nil
+	}
+	e.mu.Unlock()
+	e.broadcast()
+}
+
+// continueRun answers the run's prompt (someone pressed continue). runID,
+// if given, must be the run's, so a stale page can't continue a later run.
+func (e *controlEngine) continueRun(runID string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch {
+	case e.run == nil || e.promptCh == nil:
+		return errors.New("no control sequence is waiting for continue")
+	case runID != "" && runID != e.run.ID:
+		return fmt.Errorf("run %s isn't the one waiting for continue", runID)
+	}
+	close(e.promptCh)
+	e.promptCh = nil
+	return nil
+}
 
 func (e *controlEngine) execute(q controlSequence, r *controlRun) {
 	start := time.Now()
@@ -577,6 +648,16 @@ func (e *controlEngine) addValue(label, value string) {
 	e.mu.Lock()
 	if e.run != nil {
 		e.run.Values = append(e.run.Values, ControlValue{Label: label, Value: value})
+	}
+	e.mu.Unlock()
+	e.broadcast()
+}
+
+// addOutput adds to what the run brings back, shown under its steps.
+func (e *controlEngine) addOutput(label, value string) {
+	e.mu.Lock()
+	if e.run != nil {
+		e.run.Output = append(e.run.Output, ControlValue{Label: label, Value: value})
 	}
 	e.mu.Unlock()
 	e.broadcast()

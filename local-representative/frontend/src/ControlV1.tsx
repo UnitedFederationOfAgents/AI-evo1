@@ -46,6 +46,7 @@ export interface ControlV1Props {
   robotHealthy: boolean
   onRun: (sequence: string, controls: Record<string, string>) => void
   onCancel: () => void
+  onContinue: (run: string) => void // answers a step waiting for continue
   fileUrl: (id: string) => string // a saved recording's URL
   node: string // how to refer to the node: "this node", "this host"
 }
@@ -98,7 +99,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 // ---- Runner ----
 
-function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel, fileUrl, node }: ControlV1Props) {
+function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel, onContinue, fileUrl, node }: ControlV1Props) {
   const sequences = state?.sequences ?? []
   const nodes = state?.nodes ?? []
   const [selectedId, setSelectedId] = useState('')
@@ -202,12 +203,29 @@ function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel,
                   </ul>
                 )}
                 {st.message && <div className="ctl-step-msg">{st.message}</div>}
+                {running && thisRun?.prompt?.step === i && (
+                  // A step waiting for the user (ask-user, Step3Prompt.md Revision G).
+                  <div className="ctl-prompt">
+                    <div className="ctl-prompt-msg">{thisRun.prompt.message}</div>
+                    <button className="sys-btn sys-btn-launch" disabled={!connected} onClick={() => onContinue(thisRun.id)}>continue</button>
+                  </div>
+                )}
               </div>
               <span className="ctl-step-time">{status !== 'skipped' ? formatMs(st.duration_ms) : ''}</span>
             </li>
           )
         })}
       </ol>
+      {thisRun?.output && thisRun.output.length > 0 && (
+        <div className="ctl-output">
+          <div className="ctl-output-head">output</div>
+          {thisRun.output.map((v, i) => (
+            <div key={i} className="ctl-value">
+              <span className="ctl-value-label">{v.label}:</span> <span className="ctl-output-value">{v.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {thisRun?.values && thisRun.values.length > 0 && (
         <div className="ctl-values">
           {thisRun.values.map((v, i) => (

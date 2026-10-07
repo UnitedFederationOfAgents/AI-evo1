@@ -1163,6 +1163,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__control:cancel")
 			}
+		case "lr-control-continue":
+			// The continue button on a host's step waiting for the user.
+			var payload struct {
+				HostID string `json:"host_id"`
+				Run    string `json:"run"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" &&
+				!strings.ContainsAny(payload.Run, " \n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, strings.TrimSpace("__control:continue "+payload.Run))
+			}
 		case "lr-launch-app":
 			var payload struct {
 				HostID string `json:"host_id"`

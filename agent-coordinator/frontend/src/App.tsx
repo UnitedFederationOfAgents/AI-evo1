@@ -131,6 +131,10 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-control-cancel', payload: { host_id: hostId } }))
   }, [])
 
+  const sendLRControlContinue = useCallback((hostId: string, run: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-continue', payload: { host_id: hostId, run } }))
+  }, [])
+
   const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-launch-app', payload: { host_id: hostId, name } }))
   }, [])
@@ -3388,6 +3392,7 @@ function LRView({
                     robotHealthy={getServiceStatus('robot') === 'healthy'}
                     onRun={(seq, controls) => sendLRControlRun(host.id, seq, controls)}
                     onCancel={() => sendLRControlCancel(host.id)}
+                    onContinue={run => sendLRControlContinue(host.id, run)}
                   />
                 )
               )}

@@ -19,11 +19,14 @@ func TestRandomTokenAvoidsLookalikes(t *testing.T) {
 func TestControlStateListsSequences(t *testing.T) {
 	s := newServer("test-lr")
 	st := s.control.state()
-	if len(st.Sequences) != 2 || st.Sequences[0].ID != "fc-robot-handoff" || st.Sequences[1].ID != "capture-two-nodes" {
+	if len(st.Sequences) != 3 || st.Sequences[0].ID != "fc-robot-handoff" || st.Sequences[1].ID != "capture-two-nodes" || st.Sequences[2].ID != "you-tell-me" {
 		t.Fatalf("sequences = %+v", st.Sequences)
 	}
 	if n := len(st.Sequences[0].Steps); n != 6 {
 		t.Errorf("fc-robot-handoff has %d steps, want 6", n)
+	}
+	if n := len(st.Sequences[2].Steps); n != 6 {
+		t.Errorf("you-tell-me has %d steps, want 6", n)
 	}
 	for _, q := range st.Sequences {
 		if q.Error != "" {

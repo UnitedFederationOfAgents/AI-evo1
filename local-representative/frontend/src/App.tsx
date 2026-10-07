@@ -124,6 +124,12 @@ function useStatusWS() {
     }
   }, [])
 
+  const continueControl = useCallback((run: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-continue', payload: { run } }))
+    }
+  }, [])
+
   const connectToAC = useCallback((host: string, port: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -2338,6 +2344,7 @@ export default function App() {
                   robotHealthy={getStatus('robot') === 'healthy'}
                   onRun={runControl}
                   onCancel={cancelControl}
+                  onContinue={continueControl}
                 />
               ) : (
                 <>

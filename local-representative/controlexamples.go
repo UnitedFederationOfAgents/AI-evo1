@@ -18,6 +18,14 @@ package main
 // And a second (Revision F), capture-two-nodes: have the robots of two nodes
 // connected to agent-coordinator, chosen in the runner, each take a native
 // capture, saved as screenshots in the files tab (see controlnodes.go).
+//
+// And a third (Revision G), you-tell-me: begin as the hand-off does, echoing
+// "<random-chars> Enter a phrase to capture!" in remote control; have the
+// robot take local control and leave echo "" on the command line; then wait
+// for the person running it to echo a phrase there and press continue, and
+// bring that phrase back as the run's output. The terminal is left in local
+// control: by then the keyboard focus is on the browser, so the robot's ←
+// wouldn't reach it.
 
 func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 	fcControl := ControlParam{Name: "instance", Label: "federation-command instance", Default: "{{fc}}", Help: "the instance, as launch-fc saved it"}
@@ -95,6 +103,48 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 			Controls:    []ControlParam{{Name: "node", Label: "Node", Type: controlTypeNode, Help: "a node connected to agent-coordinator"}},
 			Do:          []ControlInstruction{{"op": "node-capture", "node": "{{node}}"}},
 		},
+		{
+			ID: "echo-prompt-marker", Name: "Echo a prompt marker through the remote interface",
+			Description: "send an echo of random characters followed by a prompt to that instance only, and wait for its output to come back -- from it and no other instance; saved as {{marker}}",
+			Controls: []ControlParam{
+				fcControl,
+				{Name: "text", Label: "Prompt", Default: "Enter a phrase to capture!", Help: "the marker is random characters, a space and this"},
+			},
+			Do: []ControlInstruction{
+				{"op": "random", "save_as": "marker_token", "length": "6"},
+				{"op": "set", "save_as": "marker", "value": "{{marker_token}} {{text}}"},
+				{"op": "show", "label": "marker command", "value": `echo "{{marker}}"`},
+				{"op": "fc-send", "fc": "{{instance}}", "command": `echo "{{marker}}"`, "expect": "{{marker}}"},
+			},
+		},
+		{
+			ID: "robot-type-leave", Name: "Type onto a terminal's command line with the robot, without running it",
+			Description: "robot: clear the command line, type the text and press the keys after it, leaving it for someone to finish; then check the instance is still in local control",
+			Controls: []ControlParam{
+				fcControl,
+				{Name: "text", Label: "Text", Default: `echo ""`},
+				{Name: "keys", Label: "Keys after it", Default: "left", Help: "pressed after typing; ← puts the cursor between the quotes"},
+			},
+			Do: []ControlInstruction{
+				{"op": "robot.key", "keys": "end ctrl+u"},
+				{"op": "robot.type", "text": "{{text}}"},
+				{"op": "robot.key", "keys": "{{keys}}"},
+				{"op": "fc-expect-state", "fc": "{{instance}}", "state": "local-control", "hint": "the robot's keys left local control"},
+			},
+		},
+		{
+			ID: "capture-user-echo", Name: "Wait for someone to echo a phrase, then capture it",
+			Description: "show a message with a continue button; once it's pressed, take the phrase the last echo typed into the instance printed, as the run's output",
+			Controls: []ControlParam{
+				fcControl,
+				{Name: "message", Label: "Message", Default: `Type a phrase between the quotes of the echo "" the robot left on federation-command's command line, press Enter there, then press continue here.`},
+			},
+			Do: []ControlInstruction{
+				{"op": "ask-user", "message": "{{message}}"},
+				{"op": "fc-capture-echo", "fc": "{{instance}}", "save_as": "phrase", "hint": "type the phrase into the terminal and press Enter there before pressing continue"},
+				{"op": "output", "label": "captured phrase", "value": "{{phrase}}"},
+			},
+		},
 	}
 	sequences := []ControlSequenceDef{
 		{
@@ -122,6 +172,19 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 			Steps: []ControlStepRef{
 				{Action: "node-screenshot", Label: "Screenshot the first node with its robot", With: map[string]string{"node": "{{first_node}}"}},
 				{Action: "node-screenshot", Label: "Screenshot the second node with its robot", With: map[string]string{"node": "{{second_node}}"}},
+			},
+		},
+		{
+			ID:          "you-tell-me",
+			Name:        "federation-command: you tell me",
+			Description: "Launch a new federation-command and mark it over the remote interface, have the robot take local control and leave echo \"\" on its command line, then wait for you to echo a phrase and press continue, and bring that phrase back as the output.",
+			Steps: []ControlStepRef{
+				{Action: "unlock-screen"},
+				{Action: "launch-fc"},
+				{Action: "echo-prompt-marker", Label: `Echo "<random-chars> Enter a phrase to capture!" through the remote interface`},
+				{Action: "robot-take-local", Label: "Find that terminal with the robot and bring it to local control"},
+				{Action: "robot-type-leave", Label: `Type echo "" with the robot and leave it on the command line`},
+				{Action: "capture-user-echo", Label: "Wait for you to echo a phrase and press continue, then capture it"},
 			},
 		},
 	}

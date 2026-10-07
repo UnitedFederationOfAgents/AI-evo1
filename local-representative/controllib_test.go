@@ -290,7 +290,7 @@ func TestLibraryPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	broken := openControlLibrary(path)
-	if !strings.Contains(broken.note, "moved it to") || len(broken.sequences) != 2 {
+	if !strings.Contains(broken.note, "moved it to") || len(broken.sequences) != 3 {
 		t.Errorf("broken file: note %q, %d sequences", broken.note, len(broken.sequences))
 	}
 }

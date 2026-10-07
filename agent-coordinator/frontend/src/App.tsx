@@ -488,7 +488,7 @@ function useCoordinatorWS() {
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
@@ -3129,7 +3129,7 @@ function GlobalView({
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, requestLRControl, sendLRLaunchApp, sendLRTerminateApp,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp,
   sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
@@ -3139,6 +3139,7 @@ function LRView({
   sendLRRidealongCommand: (hostId: string, action: string, fc?: string) => void
   sendLRControlRun: (hostId: string, sequence: string, controls: Record<string, string>) => void
   sendLRControlCancel: (hostId: string) => void
+  sendLRControlContinue: (hostId: string, run: string) => void
   requestLRControl: (hostId: string, req: ControlLibRequest) => string
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
@@ -3689,7 +3690,7 @@ export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
@@ -3872,6 +3873,7 @@ export default function App() {
               sendLRRidealongCommand={sendLRRidealongCommand}
               sendLRControlRun={sendLRControlRun}
               sendLRControlCancel={sendLRControlCancel}
+              sendLRControlContinue={sendLRControlContinue}
               requestLRControl={requestLRControl}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}

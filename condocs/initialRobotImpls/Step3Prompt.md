@@ -244,11 +244,55 @@ I added the third example sequence, `you-tell-me` ("federation-command: you tell
 New tests are in `local-representative/controlask_test.go`. I updated the existing tests that counted two example sequences, and added the new sequence to the LR README.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+We have another build error:
+
+CGO_ENABLED=1 go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-26ae3e6" -o ianar .
+cp ianar /AI-evo1-dev/bin.new/ianar
+ianar deployed to /AI-evo1-dev/bin.new
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/ianar'
+
+=== Building local-representative ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/local-representative'
+cd frontend && npm install && npm run build
+
+up to date, audited 69 packages in 1s
+
+7 packages are looking for funding
+  run `npm fund` for details
+
+3 vulnerabilities (1 moderate, 2 high)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+
+> local-representative-frontend@1.0.0 build
+> tsc && vite build
+
+src/App.tsx:127:9 - error TS6133: 'continueControl' is declared but its value is never read.
+
+127   const continueControl = useCallback((run: string) => {
+            ~~~~~~~~~~~~~~~
+
+src/App.tsx:2347:31 - error TS2304: Cannot find name 'continueControl'.
+
+2347                   onContinue={continueControl}
+                                   ~~~~~~~~~~~~~~~
 
 
-## Human-Prompt
+Found 2 errors in the same file, starting at: src/App.tsx:127
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+make[1]: *** [Makefile:17: build-frontend] Error 2
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/local-representative'
+
+=== Build failed -- leaving /AI-evo1-dev/bin untouched ===
+make: *** [Makefile:77: deploy-dev-binaries] Error 1
+
+
+Let's fix it.

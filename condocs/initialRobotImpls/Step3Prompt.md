@@ -342,11 +342,10 @@ prompt: [`c169a0c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c
 I added a **save results to files** button to the control runner, in both LR and AC. Once a run ends, it uploads a `lr-control-<sequence>-<time>.zip` to the files tab. The zip holds `report.txt` (controls, each step's result, values and output), `run.json`, and a copy of every recording, screenshot and fetched file from the run, and the run then shows a download link to it. Nothing is built or tested, because `go`/`gofmt` needed approval here: please run `make build` / `make test` on the host, which includes the new tests in `local-representative/controlsave_test.go`. The upload code is the new `local-representative/controlsave.go`, run as a `save-run` request through the existing request path, so AC's Go side didn't change. The shared `ControlV1.tsx` / `controlTypes.ts` are copied to AC, and the LR README's control-tab section is updated.
 
 
-## <REPLACE-Revision|Retry> K
+## Revision K
 
-<REPLACE-PROMPT>
+Let's take a brief detour to fix the addition of highlighted file resources to condoccer.
 
+When we create a new resource with 'highlighted' as the source, this should include all highlighted files from all LR instances and AC files (AC files are not yet implemented, we will do that later).
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix that now.

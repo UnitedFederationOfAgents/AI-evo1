@@ -614,6 +614,8 @@ body {
 .ctl-recording-head { font-size: 11px; color: #9c9c9c; overflow-wrap: anywhere; }
 .ctl-recording-head a { color: #5bb8ff; }
 .ctl-recording-video { width: 100%; max-height: 480px; background: #000; border: 1px solid #2a2a2a; border-radius: 4px; }
+.ctl-save { border-top: 1px solid #2a2a2a; padding-top: 6px; }
+.ctl-save-link { font-size: 11px; color: #5bb8ff; overflow-wrap: anywhere; }
 .ctl-run-error-msg { font-size: 12px; color: #cc4444; overflow-wrap: anywhere; }
 /* v1's runner / definer / composer (ControlV1.tsx, shared with local-representative) */
 .ctl-v1 { display: flex; flex-direction: column; gap: 10px; }

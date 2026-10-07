@@ -132,6 +132,7 @@ type ControlRunMsg struct {
 	Recordings []ControlRecording  `json:"recordings,omitempty"`
 	Output     []ControlValue      `json:"output,omitempty"` // what the run brings back (the output op)
 	Prompt     *ControlPrompt      `json:"prompt,omitempty"` // set while a step waits for continue
+	Saved      []ControlSavedRun   `json:"saved,omitempty"`  // where the run was saved to the files tab (controlsave.go)
 }
 
 // ControlPrompt is a step waiting for the person following the run
@@ -338,20 +339,29 @@ func (e *controlEngine) state() ControlStateMsg {
 	msg := ControlStateMsg{Sequences: e.sequenceInfos(), Node: e.s.lrName}
 	e.mu.Lock()
 	msg.Nodes = append([]string{}, e.nodes...)
-	if e.run != nil {
-		cp := *e.run
-		cp.Steps = append([]ControlStepResult(nil), e.run.Steps...)
-		cp.Values = append([]ControlValue(nil), e.run.Values...)
-		cp.Recordings = append([]ControlRecording(nil), e.run.Recordings...)
-		cp.Output = append([]ControlValue(nil), e.run.Output...)
-		if e.run.Prompt != nil {
-			p := *e.run.Prompt
-			cp.Prompt = &p
-		}
-		msg.Run = &cp
-	}
 	e.mu.Unlock()
+	msg.Run = e.runCopy()
 	return msg
+}
+
+// runCopy returns a copy of the current (or most recent) run, nil if none.
+func (e *controlEngine) runCopy() *ControlRunMsg {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.run == nil {
+		return nil
+	}
+	cp := *e.run
+	cp.Steps = append([]ControlStepResult(nil), e.run.Steps...)
+	cp.Values = append([]ControlValue(nil), e.run.Values...)
+	cp.Recordings = append([]ControlRecording(nil), e.run.Recordings...)
+	cp.Output = append([]ControlValue(nil), e.run.Output...)
+	cp.Saved = append([]ControlSavedRun(nil), e.run.Saved...)
+	if e.run.Prompt != nil {
+		p := *e.run.Prompt
+		cp.Prompt = &p
+	}
+	return &cp
 }
 
 func (e *controlEngine) broadcast() {
@@ -366,7 +376,7 @@ func (e *controlEngine) broadcast() {
 // browser, "__control:lib <json>" from agent-coordinator).
 type ControlLibRequest struct {
 	Req      string              `json:"req"` // the requester's id for it, echoed in the reply
-	Op       string              `json:"op"`  // save-action | delete-action | save-sequence | delete-sequence | import | export | restore-examples
+	Op       string              `json:"op"`  // save-action | delete-action | save-sequence | delete-sequence | import | export | restore-examples | save-run
 	ID       string              `json:"id,omitempty"`
 	PrevID   string              `json:"previous_id,omitempty"`
 	Action   *ControlActionDef   `json:"action,omitempty"`
@@ -433,6 +443,14 @@ func (e *controlEngine) handleLibRequest(req ControlLibRequest) ControlLibReply 
 		reply.Message, err = e.lib.restoreExamples()
 		if err == nil {
 			reply.Message = "restored the examples: " + reply.Message
+		}
+	case "save-run":
+		// Not a library change: saveRun broadcasts the run (and files) itself.
+		changed = false
+		var info FileInfo
+		if info, err = e.saveRun(req.ID); err == nil {
+			reply.Message = "saved to the files tab as " + info.Name
+			reply.Filename = info.Name
 		}
 	default:
 		err = fmt.Errorf("unknown library request %q", req.Op)

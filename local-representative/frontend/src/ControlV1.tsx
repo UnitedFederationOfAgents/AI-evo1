@@ -99,17 +99,22 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 // ---- Runner ----
 
-function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel, onContinue, fileUrl, node }: ControlV1Props) {
+function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, onCancel, onContinue, fileUrl, node }: ControlV1Props) {
   const sequences = state?.sequences ?? []
   const nodes = state?.nodes ?? []
   const [selectedId, setSelectedId] = useState('')
   const [values, setValues] = useState<Record<string, Record<string, string>>>({})
+  const saveRun = useRequest(request, replies)
   const run = state?.run
   const running = run?.status === 'running'
   // Follow a run started elsewhere (agent-coordinator, another tab).
   useEffect(() => {
     if (running && run) setSelectedId(run.sequence)
   }, [running, run?.sequence]) // eslint-disable-line react-hooks/exhaustive-deps
+  // A save's failure belongs to the run it was for.
+  useEffect(() => {
+    saveRun.clear()
+  }, [run?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const seq = sequences.find(q => q.id === selectedId) ?? sequences[0]
   if (!seq) {
@@ -239,6 +244,26 @@ function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel,
         <Recordings recordings={thisRun.recordings} fileUrl={fileUrl} node={node} />
       )}
       {thisRun?.error && <div className="ctl-run-error-msg">{thisRun.error}</div>}
+      {thisRun && !running && (
+        // Save the finished run into the files tab, like the robot's
+        // sequence runs (Step3Prompt.md Revision J; controlsave.go).
+        <div className="ctl-save">
+          <div className="ctl-row">
+            <button
+              className="sys-btn"
+              disabled={!connected || saveRun.pending}
+              title={`upload a .zip of this run (report, steps, values, output and its files) into ${node}'s files tab`}
+              onClick={() => saveRun.send({ op: 'save-run', id: thisRun.id })}
+            >
+              {saveRun.pending ? 'saving…' : 'save results to files'}
+            </button>
+            {(thisRun.saved ?? []).map(f => (
+              <a key={f.file_id} className="ctl-save-link" href={`${fileUrl(f.file_id)}?download=1`}>{f.name}</a>
+            ))}
+          </div>
+          {saveRun.reply && !saveRun.reply.success && <div className="ctl-run-error-msg">{saveRun.reply.error}</div>}
+        </div>
+      )}
     </div>
   )
 }

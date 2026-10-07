@@ -40,6 +40,14 @@ export interface ControlRunMsg {
   recordings?: ControlRecording[]
   output?: { label: string; value: string }[] // what the run brings back (the output op)
   prompt?: ControlPrompt // set while a step waits for continue
+  saved?: ControlSavedRun[] // where the run was saved to the files tab ("save-run")
+}
+
+// A .zip of a finished run (report, run.json and its files) saved into the
+// node's files tab.
+export interface ControlSavedRun {
+  file_id: string // <files api>/<file_id>
+  name: string
 }
 
 // A step waiting for the person following the run (the ask-user op): shown
@@ -139,7 +147,7 @@ export interface ControlLibraryMsg {
 
 // A definer/composer request; req is filled in by whoever sends it.
 export interface ControlLibRequest {
-  op: 'save-action' | 'delete-action' | 'save-sequence' | 'delete-sequence' | 'import' | 'export' | 'restore-examples'
+  op: 'save-action' | 'delete-action' | 'save-sequence' | 'delete-sequence' | 'import' | 'export' | 'restore-examples' | 'save-run'
   id?: string
   previous_id?: string
   action?: ControlActionDef

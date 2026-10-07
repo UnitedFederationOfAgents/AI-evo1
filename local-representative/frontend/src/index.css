@@ -805,6 +805,17 @@ body {
   border-radius: 4px;
 }
 
+.ctl-save {
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+}
+
+.ctl-save-link {
+  font-size: 11px;
+  color: #5bb8ff;
+  overflow-wrap: anywhere;
+}
+
 .ctl-run-error-msg {
   font-size: 12px;
   color: #cc4444;

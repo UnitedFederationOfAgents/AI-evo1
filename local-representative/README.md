@@ -289,6 +289,12 @@ The **control** tab sequences actions across this host's sub-apps
 
 - **runner** — pick a sequence, set its controls, run it, and follow each
   step; a screen recording, if the sequence makes one, plays back below.
+  Once a run ends, **save results to files** uploads it into the files tab
+  as `lr-control-<sequence>-<time>.zip` (`controlsave.go`), like the
+  robot's "Save to file". The zip holds `report.txt` (the controls, each
+  step's result, the values and output), `run.json`, and a copy of each
+  recording, screenshot and fetched file from the run under `files/`. Only
+  the most recent run is kept, so only that run can be saved.
 - **definer** — actions: reusable building blocks that expose controls and
   carry out a list of instructions. An instruction is one of LR's own ops
   (`launch-fc`, `fc-send`, `fc-expect-output`, `fc-expect-state`, `random`,

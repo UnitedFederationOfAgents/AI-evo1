@@ -333,3 +333,20 @@ The test `TestHandoffSequenceFetchesAndDeletesFoundIt` in `control_test.go` cove
 Let's add a function to the control runner to allow the upload of the results of a sequence run to the files tab.
 
 (Similar to the robot sequences)
+
+
+prompt: [`c169a0c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c169a0c0d2ae5f249281d379ec424fd38c0eef6e) → reply: [`918b759`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/918b759b651f082888a70e8ded27c8ef8e00204c)
+
+## Reply J
+
+I added a **save results to files** button to the control runner, in both LR and AC. Once a run ends, it uploads a `lr-control-<sequence>-<time>.zip` to the files tab. The zip holds `report.txt` (controls, each step's result, values and output), `run.json`, and a copy of every recording, screenshot and fetched file from the run, and the run then shows a download link to it. Nothing is built or tested, because `go`/`gofmt` needed approval here: please run `make build` / `make test` on the host, which includes the new tests in `local-representative/controlsave_test.go`. The upload code is the new `local-representative/controlsave.go`, run as a `save-run` request through the existing request path, so AC's Go side didn't change. The shared `ControlV1.tsx` / `controlTypes.ts` are copied to AC, and the LR README's control-tab section is updated.
+
+
+## <REPLACE-Revision|Retry> K
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -206,11 +206,14 @@ One behaviour to know: a run fails at a node whose robot isn't running, with the
 The main new code is in `local-representative/controlnodes.go`, `agent-coordinator/controlnodes.go` and `ianar/lrcapture.go`, and the shared `ControlV1.tsx` / `controlTypes.ts` are copied to AC. New tests are `controlnodes_test.go` in LR and AC and `ianar/lrcapture_test.go`, plus additions to `controllib_test.go`. I also updated the existing tests that counted one example sequence, and the control-tab section of the LR README.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+Let's add a third example sequence - "you tell me" - in this sequence we begin the same way as the robot handoff, but the phrase we first echo in the terminal is "<random chars> Enter a phrase to capture!" in remote mode.
 
+Then we switch to local mode, and we type 'echo ""' and leave it on the commandline.
 
-## Human-Prompt
+Then in the sequence dialog we have a step explaining to the user that they should enter text and enter the command and then press continue. The sequence dialog presentation has a 'continue' button.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When the user presses continue the sequence collects the phrase that the user has echoed and brings it back to the output of the sequence dialog.
+
+Let's implement this now.

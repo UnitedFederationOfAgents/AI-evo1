@@ -139,11 +139,11 @@ func TestCompileControlSequence(t *testing.T) {
 	q := ControlSequenceDef{ID: "greet", Name: "Greet", Controls: []ControlParam{{Name: "target", Default: "world"}},
 		Steps: []ControlStepRef{{Action: "hello"}, {Action: "hello", Label: "Again", With: map[string]string{"who": "you"}}}}
 
-	seq, vars, err := compileControlSequence(q, actions, map[string]string{"target": "everyone"}, nil, time.Now())
+	seq, vars, err := compileControlSequence(q, actions, map[string]string{"target": "everyone"}, nil, time.Now(), "test-lr")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if vars["target"] != "everyone" || vars["timestamp"] == "" {
+	if vars["target"] != "everyone" || vars["timestamp"] == "" || vars["this_node"] != "test-lr" {
 		t.Errorf("vars = %v", vars)
 	}
 	if got := seq.steps[0].Label; got != "Say hello to everyone" {
@@ -156,7 +156,7 @@ func TestCompileControlSequence(t *testing.T) {
 		t.Errorf("step 2 do = %q", got)
 	}
 
-	if _, _, err := compileControlSequence(q, actions, map[string]string{"target": "{{nope}}"}, nil, time.Now()); err == nil {
+	if _, _, err := compileControlSequence(q, actions, map[string]string{"target": "{{nope}}"}, nil, time.Now(), "test-lr"); err == nil {
 		t.Error("a control value referring to nothing compiled")
 	}
 }

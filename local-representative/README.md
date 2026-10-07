@@ -299,13 +299,23 @@ The **control** tab sequences actions across this host's sub-apps
   controls, whether this node's screen is recorded across the run, and which
   leading steps run before the recording starts.
 
-Values may refer to controls, built-ins and values earlier instructions
-saved as `{{name}}`. Actions and sequences import from and export to YAML
+Values may refer to controls, built-ins (`{{timestamp}}`, when the run
+started, and `{{this_node}}`, the node running it) and values earlier
+instructions saved as `{{name}}`. Actions and sequences import from and export to YAML
 (`format: lr-control-v1`); an exported sequence carries the actions it uses.
 The library is saved to `--control-library`. The built-in examples
 (`controlexamples.go`) are the original sample sequence, `fc-robot-handoff`,
-`capture-two-nodes` and `you-tell-me`; **restore examples** puts them back. A library saved
-before an example was added gains it when LR starts. agent-coordinator's
+`capture-two-nodes` and `you-tell-me`; **restore examples** puts them back.
+In `fc-robot-handoff` the robot types `echo "found it" | tee <file>`, into
+a new file on the desktop (the **Desktop file** control, by default
+`~/Desktop/found-it-{{timestamp}}.txt`). Once the terminal is back in remote
+control, `node-fetch-file` uploads that file from this node to the files
+tab, and an `rm` sent over the remote interface deletes it. The fetch needs
+this node's `control-fetch-allow` to allow the file, for example
+`~/Desktop/found-it-*.txt`. Without that, the run stops at the fetch and the
+file stays on the desktop. A library saved before an example was added
+gains it when LR starts, and an example you haven't edited is updated to
+this build's version. agent-coordinator's
 control tab shows the same views for a chosen host, editing and running that
 host's library.
 

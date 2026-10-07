@@ -22,8 +22,8 @@ func TestControlStateListsSequences(t *testing.T) {
 	if len(st.Sequences) != 3 || st.Sequences[0].ID != "fc-robot-handoff" || st.Sequences[1].ID != "capture-two-nodes" || st.Sequences[2].ID != "you-tell-me" {
 		t.Fatalf("sequences = %+v", st.Sequences)
 	}
-	if n := len(st.Sequences[0].Steps); n != 6 {
-		t.Errorf("fc-robot-handoff has %d steps, want 6", n)
+	if n := len(st.Sequences[0].Steps); n != 8 {
+		t.Errorf("fc-robot-handoff has %d steps, want 8", n)
 	}
 	if n := len(st.Sequences[2].Steps); n != 6 {
 		t.Errorf("you-tell-me has %d steps, want 6", n)
@@ -51,7 +51,7 @@ func TestControlStartUnknownSequence(t *testing.T) {
 // exampleSequence compiles the built-in fc-robot-handoff example.
 func exampleSequence(t *testing.T) controlSequence {
 	t.Helper()
-	q, _, err := newControlLibrary().compile("fc-robot-handoff", nil, nil, time.Now())
+	q, _, err := newControlLibrary().compile("fc-robot-handoff", nil, nil, time.Now(), "test-lr")
 	if err != nil {
 		t.Fatalf("compiling fc-robot-handoff: %v", err)
 	}
@@ -175,6 +175,33 @@ func TestHandoffSequenceRecordsTheRobotsScreen(t *testing.T) {
 	q := exampleSequence(t)
 	if info := q.info(); len(info.Record) != 1 || info.Record[0] != recordLocalRobot {
 		t.Errorf("record = %v, want [%s]", info.Record, recordLocalRobot)
+	}
+}
+
+// TestHandoffSequenceFetchesAndDeletesFoundIt: Revision I -- the robot
+// echoes "found it" into a new file on the desktop, which node-fetch-file
+// then uploads from this node and the remote interface deletes.
+func TestHandoffSequenceFetchesAndDeletesFoundIt(t *testing.T) {
+	start := time.Date(2026, 10, 7, 9, 30, 0, 0, time.UTC)
+	q, vars, err := newControlLibrary().compile("fc-robot-handoff", nil, nil, start, "test-lr")
+	if err != nil {
+		t.Fatalf("compiling fc-robot-handoff: %v", err)
+	}
+	file := "~/Desktop/found-it-2026-10-07T09-30-00.txt"
+	if vars["found_file"] != file {
+		t.Fatalf("found_file = %q, want %q", vars["found_file"], file)
+	}
+	if len(q.steps) != 8 {
+		t.Fatalf("%d steps, want 8", len(q.steps))
+	}
+	if d := strings.Join(q.steps[4].Do, "\n"); !strings.Contains(d, "| tee "+file) {
+		t.Errorf("type step does %q, want the echo into %s", d, file)
+	}
+	if d := q.steps[6].Do; len(d) != 1 || d[0] != "fetch "+file+" from test-lr" {
+		t.Errorf("fetch step does %q", d)
+	}
+	if d := strings.Join(q.steps[7].Do, "\n"); !strings.Contains(d, "rm -- "+file+";") {
+		t.Errorf("delete step does %q", d)
 	}
 }
 

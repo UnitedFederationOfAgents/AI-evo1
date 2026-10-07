@@ -274,7 +274,7 @@ func (e *controlEngine) setRobotOps(ops []ControlOpSpec) {
 
 // library returns the "control-library" snapshot.
 func (e *controlEngine) library() ControlLibraryMsg {
-	return e.lib.snapshot(e.getRobotOps())
+	return e.lib.snapshot(e.getRobotOps(), e.s.lrName)
 }
 
 // maxRelayedLibrary caps the library sent to agent-coordinator: the
@@ -315,14 +315,14 @@ func (e *controlEngine) broadcastLibrary() {
 // controls' defaults.
 func (e *controlEngine) sequenceInfos() []ControlSequenceInfo {
 	robotOps := e.getRobotOps()
-	snap := e.lib.snapshot(robotOps)
+	snap := e.lib.snapshot(robotOps, e.s.lrName)
 	actions := map[string]ControlActionDef{}
 	for _, a := range snap.Actions {
 		actions[a.ID] = a
 	}
 	var out []ControlSequenceInfo
 	for _, def := range snap.Sequences {
-		q, _, err := compileControlSequence(def, actions, nil, robotOps, time.Now())
+		q, _, err := compileControlSequence(def, actions, nil, robotOps, time.Now(), e.s.lrName)
 		info := q.info()
 		if err != nil {
 			info = ControlSequenceInfo{ID: def.ID, Name: def.Name, Description: def.Description, Record: def.Record, Error: err.Error()}
@@ -509,7 +509,7 @@ func (e *controlEngine) handleCommand(raw string) {
 // ones take their defaults), in the background.
 func (e *controlEngine) start(id string, values map[string]string) error {
 	startedAt := time.Now()
-	q, vars, err := e.lib.compile(id, values, e.getRobotOps(), startedAt)
+	q, vars, err := e.lib.compile(id, values, e.getRobotOps(), startedAt, e.s.lrName)
 	if err != nil {
 		return err
 	}

@@ -100,12 +100,15 @@ var (
 	ctlTmplRe = regexp.MustCompile(`\{\{(.*?)\}\}`)
 )
 
-// ctlBuiltins are the variables every value can refer to.
+// ctlBuiltins are the variables every value can refer to, from when the run
+// started and the node (this LR's name, as agent-coordinator knows it)
+// running it.
 var ctlBuiltins = map[string]struct {
 	help  string
-	value func(start time.Time) string
+	value func(start time.Time, node string) string
 }{
-	"timestamp": {"when the run started, as 2006-01-02T15-04-05 (safe in file names)", func(t time.Time) string { return t.Format("2006-01-02T15-04-05") }},
+	"timestamp": {"when the run started, as 2006-01-02T15-04-05 (safe in file names)", func(t time.Time, _ string) string { return t.Format("2006-01-02T15-04-05") }},
+	"this_node": {"the node running the sequence, as agent-coordinator names it -- for a node op's node", func(_ time.Time, node string) string { return node }},
 }
 
 // ControlBuiltin describes a built-in for the frontend.
@@ -115,10 +118,10 @@ type ControlBuiltin struct {
 	Value string `json:"value"`
 }
 
-func ctlBuiltinList(now time.Time) []ControlBuiltin {
+func ctlBuiltinList(now time.Time, node string) []ControlBuiltin {
 	var out []ControlBuiltin
 	for name, b := range ctlBuiltins {
-		out = append(out, ControlBuiltin{Name: name, Help: b.help, Value: b.value(now)})
+		out = append(out, ControlBuiltin{Name: name, Help: b.help, Value: b.value(now, node)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -1136,7 +1139,7 @@ type ControlLibraryMsg struct {
 	Note     string           `json:"note,omitempty"`
 }
 
-func (l *controlLibrary) snapshot(robotOps []ControlOpSpec) ControlLibraryMsg {
+func (l *controlLibrary) snapshot(robotOps []ControlOpSpec, node string) ControlLibraryMsg {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return ControlLibraryMsg{
@@ -1144,7 +1147,7 @@ func (l *controlLibrary) snapshot(robotOps []ControlOpSpec) ControlLibraryMsg {
 		Sequences: append([]ControlSequenceDef{}, l.sequences...),
 		Ops:       append(append([]ControlOpSpec{}, controlOps...), robotOps...),
 		RobotOps:  robotOps != nil,
-		Builtins:  ctlBuiltinList(time.Now()),
+		Builtins:  ctlBuiltinList(time.Now(), node),
 		Path:      l.path,
 		Note:      l.note,
 	}
@@ -1155,7 +1158,8 @@ func (l *controlLibrary) snapshot(robotOps []ControlOpSpec) ControlLibraryMsg {
 // compile turns sequence id into a runnable controlSequence, with values
 // for its controls (missing ones take their defaults). It also returns the
 // run's starting variables: the built-ins and the sequence's controls.
-func (l *controlLibrary) compile(id string, values map[string]string, robotOps []ControlOpSpec, start time.Time) (controlSequence, map[string]string, error) {
+// node is the node running it ({{this_node}}).
+func (l *controlLibrary) compile(id string, values map[string]string, robotOps []ControlOpSpec, start time.Time, node string) (controlSequence, map[string]string, error) {
 	l.mu.Lock()
 	idx := indexOfControlSequence(l.sequences, id)
 	if idx < 0 {
@@ -1165,13 +1169,13 @@ func (l *controlLibrary) compile(id string, values map[string]string, robotOps [
 	q := l.sequences[idx]
 	actions := l.actionMap()
 	l.mu.Unlock()
-	return compileControlSequence(q, actions, values, robotOps, start)
+	return compileControlSequence(q, actions, values, robotOps, start, node)
 }
 
-func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActionDef, values map[string]string, robotOps []ControlOpSpec, start time.Time) (controlSequence, map[string]string, error) {
+func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActionDef, values map[string]string, robotOps []ControlOpSpec, start time.Time, node string) (controlSequence, map[string]string, error) {
 	vars := map[string]string{}
 	for name, b := range ctlBuiltins {
-		vars[name] = b.value(start)
+		vars[name] = b.value(start, node)
 	}
 	lookup := func(k string) (string, bool) { v, ok := vars[k]; return v, ok }
 	for _, c := range q.Controls {

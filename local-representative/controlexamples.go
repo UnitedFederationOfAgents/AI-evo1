@@ -10,10 +10,15 @@ package main
 //   - launch a new federation-command instance
 //   - echo "This is the one - <random-chars>" through the remote interface
 //   - have the robot find that terminal by the marker and take local control
-//   - have the robot type into it: echo "found it"
+//   - have the robot type into it: echo "found it", into a new file on the
+//     desktop (Revision I)
 //   - put the terminal back into remote control
+//   - upload that file to the files tab with node-fetch-file
+//   - delete the file, through the remote interface
 //
-// with this node's screen recorded across the run.
+// with this node's screen recorded across the run. node-fetch-file only
+// takes the file if this node's control-fetch-allow setting allows it
+// (~/Desktop/found-it-*.txt, say).
 //
 // And a second (Revision F), capture-two-nodes: have the robots of two nodes
 // connected to agent-coordinator, chosen in the runner, each take a native
@@ -98,6 +103,30 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 			},
 		},
 		{
+			ID: "fetch-node-file", Name: "Upload a file from a node to the files tab",
+			Description: "node-fetch-file: copy a file from a node into this node's files tab, if that node's control-fetch-allow setting allows it",
+			Controls: []ControlParam{
+				{Name: "node", Label: "Node", Type: controlTypeNode, Default: "{{this_node}}", Help: "the node the file is on"},
+				{Name: "path", Label: "File", Help: "an absolute path or glob; ~ is the node user's home"},
+			},
+			Do: []ControlInstruction{
+				{"op": "node-fetch-file", "node": "{{node}}", "path": "{{path}}", "hint": "the node's control-fetch-allow setting has to allow the file"},
+			},
+		},
+		{
+			ID: "fc-remove-file", Name: "Delete a file through the remote interface",
+			Description: "send rm for the file to that instance, and wait for it to report rm's exit status -- failing unless it's 0",
+			Controls: []ControlParam{
+				fcControl,
+				{Name: "path", Label: "File", Help: "the file to delete, as the shell takes it (~ is expanded; no spaces)"},
+			},
+			Do: []ControlInstruction{
+				{"op": "random", "save_as": "rm_token", "length": "6"},
+				{"op": "fc-send", "fc": "{{instance}}", "command": `rm -- {{path}}; echo "{{rm_token}} exit=$?"`},
+				{"op": "fc-expect-output", "fc": "{{instance}}", "text": "{{rm_token}} exit=0", "fail_text": "{{rm_token}} exit=", "hint": "rm couldn't delete the file"},
+			},
+		},
+		{
 			ID: "node-screenshot", Name: "Screenshot a node with its robot",
 			Description: "robot: take a native capture of a node's screen and save it as a screenshot in the files tab (another node's through agent-coordinator, copied here)",
 			Controls:    []ControlParam{{Name: "node", Label: "Node", Type: controlTypeNode, Help: "a node connected to agent-coordinator"}},
@@ -150,15 +179,21 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 		{
 			ID:          "fc-robot-handoff",
 			Name:        "federation-command: robot hand-off",
-			Description: "Launch a new federation-command, mark it over the remote interface, then have the robot find it, take local control, type into it and hand it back.",
+			Description: "Launch a new federation-command, mark it over the remote interface, then have the robot find it, take local control, echo \"found it\" into a new file on the desktop and hand it back; then upload that file to the files tab and delete it.",
 			Record:      []string{recordLocalRobot},
+			Controls: []ControlParam{
+				{Name: "found_file", Label: "Desktop file", Default: "~/Desktop/found-it-{{timestamp}}.txt", Help: "the new file \"found it\" is echoed into (~ is expanded; no spaces) -- this node's control-fetch-allow must allow it, e.g. ~/Desktop/found-it-*.txt"},
+			},
 			Steps: []ControlStepRef{
 				{Action: "unlock-screen", BeforeRecording: true},
 				{Action: "launch-fc"},
 				{Action: "echo-marker", Label: `Echo "This is the one - <random-chars>" through the remote interface`},
 				{Action: "robot-take-local", Label: "Find that terminal with the robot and bring it to local control"},
-				{Action: "robot-type-command", Label: `Type into it with the robot: echo "found it"`},
+				{Action: "robot-type-command", Label: `Type into it with the robot: echo "found it" into a new file on the desktop`,
+					With: map[string]string{"command": `echo "found it" | tee {{found_file}}`}},
 				{Action: "robot-give-back", Label: "Put the terminal back into remote control"},
+				{Action: "fetch-node-file", Label: "Upload that file to the files tab", With: map[string]string{"node": "{{this_node}}", "path": "{{found_file}}"}},
+				{Action: "fc-remove-file", Label: "Delete the file", With: map[string]string{"path": "{{found_file}}"}},
 			},
 		},
 		{

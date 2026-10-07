@@ -310,3 +310,29 @@ I fixed the LR build error: in `local-representative/frontend/src/App.tsx`, `con
 We've added some functionality as an aside. The node-fetch-file op should now be worked in to the robot hand-off - we will make it so that the "found it" line is echoed to a new file on the desktop.
 
 The 'node-fetch-file' will then be used to upload the file, then the file should be deleted.
+
+
+prompt: [`b3efeaa`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b3efeaa670364890323b9c83cdcf2afc32a1d555) → reply: [`9e5b0fe`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9e5b0fec53fdef4ed3b102671eeb59de8fe53dbd)
+
+## Reply I
+
+I reworked the robot hand-off example (`fc-robot-handoff`) so the robot echoes "found it" into a new file on the desktop. `node-fetch-file` then uploads that file to the files tab, and the file is deleted. Nothing is built or tested: `go` and `gofmt` needed approval here, so please run `make build` / `make test` on the host.
+
+- **What the sequence does now:** the robot types `echo "found it" | tee ~/Desktop/found-it-{{timestamp}}.txt`. The file name is a new **Desktop file** control on the sequence, so you can change it. After the terminal goes back to remote control, two new steps run:
+  - **Upload the file:** a `fetch-node-file` step uses `node-fetch-file` to copy the file from this node into the files tab.
+  - **Delete it:** an `fc-remove-file` step sends `rm` over the remote interface and fails unless `rm` exits with 0.
+- **New `{{this_node}}` built-in:** I added this so the upload step can name the node running the sequence. It meant passing the node's name into `compile` and `snapshot` in `controllib.go`, and I updated their callers and tests.
+- **Setting you need on the host:** the upload only works if this node's `control-fetch-allow` setting includes the file, for example `~/Desktop/found-it-*.txt`. With no setting, the run stops at the upload and the file stays on the desktop.
+- **Saved libraries:** a library saved earlier switches to the new version of the example on its own, as long as you haven't edited it.
+
+The test `TestHandoffSequenceFetchesAndDeletesFoundIt` in `control_test.go` covers the new steps, and I changed the hand-off's expected step count from 6 to 8. I also updated the LR README's control-tab section.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

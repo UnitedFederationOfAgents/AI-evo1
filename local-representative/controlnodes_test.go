@@ -67,7 +67,7 @@ func TestCaptureTwoNodesNeedsConnectedNodes(t *testing.T) {
 }
 
 func TestCaptureTwoNodesExample(t *testing.T) {
-	q, _, err := newControlLibrary().compile("capture-two-nodes", map[string]string{"first_node": "lr-a", "second_node": "lr-b"}, nil, time.Now())
+	q, _, err := newControlLibrary().compile("capture-two-nodes", map[string]string{"first_node": "lr-a", "second_node": "lr-b"}, nil, time.Now(), "lr-a")
 	if err != nil {
 		t.Fatal(err)
 	}

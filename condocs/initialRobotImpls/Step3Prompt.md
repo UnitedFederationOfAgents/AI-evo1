@@ -328,11 +328,8 @@ I reworked the robot hand-off example (`fc-robot-handoff`) so the robot echoes "
 The test `TestHandoffSequenceFetchesAndDeletesFoundIt` in `control_test.go` covers the new steps, and I changed the hand-off's expected step count from 6 to 8. I also updated the LR README's control-tab section.
 
 
-## <REPLACE-Revision|Retry> J
+## Revision J
 
-<REPLACE-PROMPT>
+Let's add a function to the control runner to allow the upload of the results of a sequence run to the files tab.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+(Similar to the robot sequences)

@@ -428,3 +428,30 @@ FAIL	agent-coordinator	0.019s
 FAIL
 
 Let's correct these tests.
+
+
+prompt: [`4dadf38`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4dadf384dd4751aaa3d745de44e6ee20657fefe6) → reply: [`b20f128`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b20f12805a9a87a5f4679fcafb9a91559e3d725f)
+
+## Reply M
+
+I've made the fixes for Revision M, but none of it is built or tested: `go` and `gofmt` needed approval here. Please run `make build` / `make test` on the host.
+
+- **LR tests not compiling:** `procman_test.go` and `reststate_test.go` now call `buildArgs` and `buildEnv` with the new instance-id argument. The `buildArgs` functions they define now take it too. The compiler stopped at "too many errors", so I couldn't confirm whether anything else is still broken.
+- **AC test failure:** this was a real bug, not just a bad test. With auto-update on, every 5-second check fired the restart again for as long as a newer version stayed on disk. Now the check restarts only once per new version (`restartedFor` in `selfversion.go`). LR's `selfversion.go` had the same bug and the same test, which would have failed next once LR's tests compiled, so I fixed it there too.
+- **Cancelling a control sequence now cancels the robot's run:**
+  - When you cancel during a robot step, LR tells the robot to cancel its run, using a new `__robot:cancel` instruction. LR then waits up to 20 seconds for the robot to report back before the control run ends, so the keyboard and screen are free again.
+  - The robot stops before its next instruction. Any wait it is in, such as a pause or looking for text or an icon on screen, ends straight away.
+  - It reports the run as `cancelled`, and still saves the run's zip to the files tab.
+  - The main changes are in `ianar/sequence.go`, `seqv2.go`, `seqv2_ops.go` and `lrrun.go`, and in `local-representative/control.go`.
+
+New tests are in `ianar/lrcancel_test.go`. Robot runs started from the robot's own runner tab, not from a control sequence, still can't be cancelled. There's no LR-side test for the cancel message, because LR's tests have no stand-in for the robot's connection.
+
+
+## <REPLACE-Revision|Retry> N
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

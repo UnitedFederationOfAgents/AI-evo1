@@ -148,7 +148,7 @@ func TestFederationCommandBuildEnv(t *testing.T) {
 	s := newServer("test-lr")
 	s.heartbeatPort = "8082"
 	got := map[string]string{}
-	for _, kv := range spec.buildEnv(s) {
+	for _, kv := range spec.buildEnv(s, "federation-command#1") {
 		if k, v, found := strings.Cut(kv, "="); found {
 			got[k] = v
 		}
@@ -176,11 +176,11 @@ func TestFederationCommandDevModeCascades(t *testing.T) {
 	s.heartbeatPort = "8082"
 	s.devMode = true
 
-	if args := strings.Join(spec.buildArgs(s), " "); !strings.Contains(args, "--dev-mode") {
+	if args := strings.Join(spec.buildArgs(s, "federation-command#1"), " "); !strings.Contains(args, "--dev-mode") {
 		t.Errorf("federation-command buildArgs should include --dev-mode when the LR is in dev mode: %q", args)
 	}
 	env := map[string]string{}
-	for _, kv := range spec.buildEnv(s) {
+	for _, kv := range spec.buildEnv(s, "federation-command#1") {
 		if k, v, found := strings.Cut(kv, "="); found {
 			env[k] = v
 		}
@@ -247,7 +247,7 @@ func TestCondoccerDevModeCascades(t *testing.T) {
 	s.condoccerPort = "8080"
 	s.devMode = true
 
-	if args := strings.Join(spec.buildArgs(s), " "); !strings.Contains(args, "--dev-mode") {
+	if args := strings.Join(spec.buildArgs(s, "condoccer"), " "); !strings.Contains(args, "--dev-mode") {
 		t.Errorf("condoccer buildArgs should include --dev-mode when the LR is in dev mode: %q", args)
 	}
 }
@@ -270,7 +270,7 @@ func TestCondoccerManagedSpec(t *testing.T) {
 	s := newServer("test-lr")
 	s.heartbeatPort = "8082"
 	s.condoccerPort = "8080"
-	args := strings.Join(spec.buildArgs(s), " ")
+	args := strings.Join(spec.buildArgs(s, "condoccer"), " ")
 	for _, want := range []string{"--auto-connect", "--lr-port 8082", "--port 8080", "--name condoccer"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("condoccer buildArgs %q missing %q", args, want)
@@ -280,7 +280,7 @@ func TestCondoccerManagedSpec(t *testing.T) {
 		t.Errorf("condoccer buildArgs should omit --root when condoccerRoot is unset: %q", args)
 	}
 	s.condoccerRoot = "/repo"
-	if a := strings.Join(spec.buildArgs(s), " "); !strings.Contains(a, "--root /repo") {
+	if a := strings.Join(spec.buildArgs(s, "condoccer"), " "); !strings.Contains(a, "--root /repo") {
 		t.Errorf("condoccer buildArgs should pass --root when set: %q", a)
 	}
 }
@@ -539,7 +539,7 @@ func TestLaunchNInstancesAndTerminate(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: false, // N-per-host, like federation-command
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 
@@ -620,7 +620,7 @@ func TestHandleSystemCommand(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: false,
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 
@@ -666,7 +666,7 @@ func TestRestartManaged(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: true,
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 
@@ -722,7 +722,7 @@ func TestHandleSystemCommandRestartManaged(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: true,
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 
@@ -762,7 +762,7 @@ func TestLaunchManagedSingleton(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: true,
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 
@@ -783,7 +783,7 @@ func TestRecordLaunchFailure(t *testing.T) {
 	const app = "test-missing"
 	managedApps[app] = launchSpec{
 		binName:   "this-binary-does-not-exist-anywhere",
-		buildArgs: func(s *Server) []string { return nil },
+		buildArgs: func(s *Server, instanceID string) []string { return nil },
 	}
 	defer delete(managedApps, app)
 
@@ -814,7 +814,7 @@ func TestRunningManagedTokens(t *testing.T) {
 		managedApps[app] = launchSpec{
 			binName:   "sleep",
 			singleton: false,
-			buildArgs: func(s *Server) []string { return []string{"30"} },
+			buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 		}
 	}
 	defer delete(managedApps, single)
@@ -884,7 +884,7 @@ func TestTerminateManagedForRestart(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: false,
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 

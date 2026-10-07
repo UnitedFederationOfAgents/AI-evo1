@@ -350,6 +350,7 @@ func (s *Server) sendRobotOps() {
 //
 //	__robot:refresh
 //	__robot:run <json>   (a run for LR's control tab -- see lrrun.go)
+//	__robot:cancel <json> (cancels one of those runs -- see lrrun.go)
 //	__robot:record-start <json> / __robot:record-stop <json>
 //	                     (a recording across a control sequence -- see lrrecord.go)
 //	__robot:capture <json> (a screenshot into LR's files -- see lrcapture.go)
@@ -365,6 +366,8 @@ func (s *Server) handleReprCommand(raw string) {
 		s.sendRobotOps()
 	case "run":
 		s.handleRobotRun(arg)
+	case "cancel":
+		s.handleRobotCancel(arg)
 	case "record-start", "record-stop":
 		s.handleRobotRecord(verb, arg)
 	case "capture":

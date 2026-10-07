@@ -18,7 +18,9 @@ import (
 // "robot-run-result" data messages. Those carry no images or recording --
 // representable lines are capped well below a screenshot's size -- so with
 // save set the run's zip (report, step images, recording) is uploaded into
-// LR's files area instead and the result names it.
+// LR's files area instead and the result names it. LR cancelling its control
+// sequence sends "__robot:cancel {"run": "<id>"}", which stops the run before
+// its next instruction (or ends a wait it is in) and reports it cancelled.
 
 // RobotRunStep is one step of a run LR asked for.
 type RobotRunStep struct {
@@ -54,6 +56,7 @@ type RobotRunMsg struct {
 	Message     string               `json:"message,omitempty"`
 	Success     bool                 `json:"success"`
 	Error       string               `json:"error,omitempty"`
+	Cancelled   bool                 `json:"cancelled,omitempty"` // stopped by "__robot:cancel"
 	Steps       []RobotRunStepResult `json:"steps,omitempty"`
 	DurationMs  int64                `json:"duration_ms,omitempty"`
 	KeyboardVia string               `json:"keyboard_via,omitempty"`
@@ -93,13 +96,60 @@ func compileRobotRun(req RobotRunRequest) (sequence, error) {
 
 // handleRobotRun starts the run in raw ("__robot:run <json>") in the
 // background, so the representable read loop it was called from keeps going.
+// The run is registered before that, so a cancel right behind it finds it.
 func (s *Server) handleRobotRun(arg string) {
 	var req RobotRunRequest
 	if err := json.Unmarshal([]byte(arg), &req); err != nil {
 		log.Printf("repr: bad run request: %v", err)
 		return
 	}
-	go s.runForLR(req)
+	cancel := make(chan struct{})
+	s.lrRunsMu.Lock()
+	if s.lrRuns == nil {
+		s.lrRuns = make(map[string]chan struct{})
+	}
+	s.lrRuns[req.Run] = cancel
+	s.lrRunsMu.Unlock()
+	go func() {
+		defer func() {
+			s.lrRunsMu.Lock()
+			delete(s.lrRuns, req.Run)
+			s.lrRunsMu.Unlock()
+		}()
+		s.runForLR(req, cancel)
+	}()
+}
+
+// RobotCancelRequest is the JSON after "__robot:cancel ".
+type RobotCancelRequest struct {
+	Run string `json:"run"` // the id LR's "__robot:run" gave
+}
+
+// handleRobotCancel cancels the LR run named in raw ("__robot:cancel
+// <json>"), if it is still going.
+func (s *Server) handleRobotCancel(arg string) {
+	var req RobotCancelRequest
+	if err := json.Unmarshal([]byte(arg), &req); err != nil {
+		log.Printf("repr: bad cancel request: %v", err)
+		return
+	}
+	if !s.cancelLRRun(req.Run) {
+		log.Printf("robot: no run %s for local-representative to cancel", req.Run)
+	}
+}
+
+// cancelLRRun cancels LR's run id, reporting whether it was still going.
+func (s *Server) cancelLRRun(id string) bool {
+	s.lrRunsMu.Lock()
+	defer s.lrRunsMu.Unlock()
+	ch, ok := s.lrRuns[id]
+	if !ok {
+		return false
+	}
+	delete(s.lrRuns, id) // so a second cancel doesn't close it again
+	close(ch)
+	log.Printf("robot: local-representative cancelled run %s", id)
+	return true
 }
 
 // sendToLR sends a data message to local-representative, if connected.
@@ -112,12 +162,14 @@ func (s *Server) sendToLR(dataType string, payload interface{}) {
 	}
 }
 
-func (s *Server) runForLR(req RobotRunRequest) {
+// runForLR carries out req; closing cancel stops it (see cancelLRRun).
+func (s *Server) runForLR(req RobotRunRequest, cancel <-chan struct{}) {
 	q, err := compileRobotRun(req)
 	if err != nil {
 		s.sendToLR("robot-run-result", RobotRunMsg{Run: req.Run, Step: -1, Status: "error", Error: err.Error()})
 		return
 	}
+	q.cancel = cancel
 	log.Printf("robot: running %d step(s) for local-representative (run %s)", len(q.steps), req.Run)
 	res := runSequence(q, func(p SequenceProgressMsg) {
 		s.sendToLR("robot-run-progress", RobotRunMsg{Run: req.Run, Step: p.Step, Status: p.Status, Message: p.Message})
@@ -128,11 +180,15 @@ func (s *Server) runForLR(req RobotRunRequest) {
 		Step:        res.FailedStep,
 		Success:     res.Success,
 		Error:       res.Error,
+		Cancelled:   res.Cancelled,
 		DurationMs:  res.DurationMs,
 		KeyboardVia: res.KeyboardVia,
 	}
 	out.Status = "success"
-	if !res.Success {
+	switch {
+	case res.Cancelled:
+		out.Status = "cancelled"
+	case !res.Success:
 		out.Status = "error"
 	}
 	for i, st := range res.Steps {

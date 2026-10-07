@@ -66,6 +66,7 @@ const (
 	controlOutputTimeout = 15 * time.Second // a command's output reaching LR
 	controlStateTimeout  = 6 * time.Second  // an FC control-state change after a key press
 	controlRobotTimeout  = 2 * time.Minute  // one robot run, recording included
+	controlRobotStop     = 20 * time.Second // a cancelled robot run stopping (its instruction under way finishing)
 	controlRecordStart   = 15 * time.Second // the robot starting a recording
 	controlRecordSave    = 3 * time.Minute  // the robot stopping and uploading a recording
 	controlRecordLead    = 1 * time.Second  // recorded before the first step
@@ -563,7 +564,7 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 }
 
 // cancel stops the current run between (or while waiting within) steps. A
-// robot run already under way finishes on IANAR's side regardless.
+// robot run under way is cancelled too (see robotRun).
 func (e *controlEngine) cancel() {
 	e.mu.Lock()
 	if e.run != nil && e.run.Status == "running" && e.cancelCh != nil {
@@ -765,6 +766,7 @@ type RobotRunMsg struct {
 	Message     string               `json:"message,omitempty"`
 	Success     bool                 `json:"success"`
 	Error       string               `json:"error,omitempty"`
+	Cancelled   bool                 `json:"cancelled,omitempty"`
 	Steps       []RobotRunStepResult `json:"steps,omitempty"`
 	DurationMs  int64                `json:"duration_ms,omitempty"`
 	KeyboardVia string               `json:"keyboard_via,omitempty"`
@@ -1049,6 +1051,7 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 	case <-time.After(budget):
 		return "", fmt.Errorf("the robot didn't report back within %s", budget)
 	case <-r.cancel:
+		r.cancelRobotRun(runID, ch)
 		return "", errControlCancelled
 	}
 	if res.SavedAs != "" {
@@ -1070,6 +1073,28 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 		}
 	}
 	return strings.Join(notes, "; "), nil
+}
+
+// cancelRobotRun has IANAR cancel its run runID and waits (up to
+// controlRobotStop) for it to report back on ch, so the robot has let go of
+// the keyboard and screen before the control run ends.
+func (r *controlRun) cancelRobotRun(runID string, ch <-chan RobotRunMsg) {
+	req, err := json.Marshal(struct {
+		Run string `json:"run"`
+	}{runID})
+	if err != nil {
+		return
+	}
+	r.note("cancelling the robot's run…")
+	r.s.reprServer.SendCommand("robot", "__robot:cancel "+string(req))
+	select {
+	case res := <-ch:
+		if res.SavedAs != "" {
+			r.e.addValue("robot run", res.SavedAs+" (files tab, cancelled)")
+		}
+	case <-time.After(controlRobotStop):
+		log.Printf("control: the robot didn't stop its run %s within %s of being cancelled", runID, controlRobotStop)
+	}
 }
 
 // robotRunBudget is how long to wait for a robot run: controlRobotTimeout,

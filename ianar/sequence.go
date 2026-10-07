@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"log"
@@ -83,6 +84,7 @@ type SequenceResultMsg struct {
 	KeyboardVia string               `json:"keyboard_via,omitempty"`
 	Recording   *ClipResultMsg       `json:"recording,omitempty"`
 	Outputs     []SequenceOutput     `json:"outputs,omitempty"`      // what the run printed
+	Cancelled   bool                 `json:"cancelled,omitempty"`    // the run was cancelled (FailedStep is where)
 	Warnings    []string             `json:"warnings,omitempty"`     // e.g. a step used an out-of-date example action
 	ArtifactID  string               `json:"artifact_id,omitempty"` // names the run for "save-artifact" (see artifacts.go)
 }
@@ -99,6 +101,37 @@ type seqEnv struct {
 	vars    map[string]string
 	outputs []SequenceOutput
 	seen    map[string][]image.Rectangle
+	cancel  <-chan struct{} // the sequence's cancel, nil if it can't be cancelled
+}
+
+// errSeqCancelled is the error a step stops with once its run is cancelled.
+var errSeqCancelled = errors.New("cancelled")
+
+// cancelled returns errSeqCancelled once the run has been cancelled.
+func (env *seqEnv) cancelled() error {
+	if env.cancel == nil {
+		return nil
+	}
+	select {
+	case <-env.cancel:
+		return errSeqCancelled
+	default:
+		return nil
+	}
+}
+
+// pause waits d, ending early with errSeqCancelled if the run is cancelled.
+func (env *seqEnv) pause(d time.Duration) error {
+	if env.cancel == nil {
+		sleep(d)
+		return nil
+	}
+	select {
+	case <-env.cancel:
+		return errSeqCancelled
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // seqStep is a SequenceStepDef plus the code that carries it out. run
@@ -117,6 +150,10 @@ type sequence struct {
 	// recording the screen around it (an LR control sequence -- see
 	// lrrecord.go).
 	noRecord bool
+	// cancel, closed, stops the run before its next instruction and ends
+	// any wait it is in (an LR control sequence being cancelled -- see
+	// lrrun.go). nil: the run can't be cancelled.
+	cancel <-chan struct{}
 }
 
 func (q sequence) def() SequenceDef {
@@ -168,7 +205,7 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 		sleep(seqRecordLead)
 	}
 
-	env := &seqEnv{kb: kb, vars: map[string]string{}, seen: map[string][]image.Rectangle{}}
+	env := &seqEnv{kb: kb, vars: map[string]string{}, seen: map[string][]image.Rectangle{}, cancel: q.cancel}
 	for k, v := range q.vars {
 		env.vars[k] = v
 	}
@@ -177,11 +214,15 @@ func runSequence(q sequence, progress func(SequenceProgressMsg)) SequenceResultM
 		progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "running"})
 		t0 := clock()
 		env.shot = ""
-		note, err := st.run(env)
+		note, err := "", env.cancelled()
+		if err == nil {
+			note, err = st.run(env)
+		}
 		took := clock().Sub(t0).Milliseconds()
 		if err != nil {
 			res.Steps[i] = SequenceStepResult{Status: "error", Message: err.Error(), DurationMs: took, ImageURL: env.shot}
 			res.FailedStep = i
+			res.Cancelled = errors.Is(err, errSeqCancelled)
 			res.Error = fmt.Sprintf("step %d (%s): %v", i+1, st.Label, err)
 			progress(SequenceProgressMsg{SequenceID: q.id, Step: i, Status: "error", Message: err.Error(), ImageURL: env.shot, Outputs: env.outputs})
 			log.Printf("robot: sequence %q failed at %s", q.id, res.Error)

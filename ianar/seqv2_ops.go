@@ -170,8 +170,9 @@ var captureScreen = func() (image.Image, string, error) {
 var clickPoint = clickAtWith
 
 // pollScreen reads the screen until done accepts a reading or timeout
-// passes, looking at least once, and returns the last reading.
-func pollScreen(timeout time.Duration, done func(*screenReading) bool) (*screenReading, bool, error) {
+// passes, looking at least once, and returns the last reading. Cancelling
+// the run ends it with errSeqCancelled.
+func pollScreen(env *seqEnv, timeout time.Duration, done func(*screenReading) bool) (*screenReading, bool, error) {
 	deadline := clock().Add(timeout)
 	for {
 		sr, err := readScreen()
@@ -184,7 +185,9 @@ func pollScreen(timeout time.Duration, done func(*screenReading) bool) (*screenR
 		if !clock().Before(deadline) {
 			return sr, false, nil
 		}
-		sleep(screenPollInterval)
+		if err := env.pause(screenPollInterval); err != nil {
+			return sr, false, err
+		}
 	}
 }
 
@@ -389,8 +392,7 @@ var seqOps = []opSpec{
 			if err != nil {
 				return "", err
 			}
-			sleep(d)
-			return "", nil
+			return "", env.pause(d)
 		},
 	},
 	{
@@ -451,7 +453,7 @@ var seqOps = []opSpec{
 			if err != nil {
 				return "", fmt.Errorf("more_than should be a number, not %q", a["more_than"])
 			}
-			sr, ok, err := pollScreen(timeout, func(sr *screenReading) bool {
+			sr, ok, err := pollScreen(env, timeout, func(sr *screenReading) bool {
 				return len(textMatches(sr.lines, a["text"], a["exclude"], exact)) > more
 			})
 			if err != nil {
@@ -511,7 +513,7 @@ var seqOps = []opSpec{
 			if _, ok := pointerButtons[a["button"]]; !ok {
 				return "", fmt.Errorf("button should be left, right or middle, not %q", a["button"])
 			}
-			sr, ok, err := pollScreen(timeout, func(sr *screenReading) bool {
+			sr, ok, err := pollScreen(env, timeout, func(sr *screenReading) bool {
 				return len(matches(sr)) > 0
 			})
 			if err != nil {
@@ -815,7 +817,7 @@ func runReadText(env *seqEnv, a opArgs) (string, error) {
 		}
 		return false
 	}
-	sr, ok, err := pollScreen(timeout, find)
+	sr, ok, err := pollScreen(env, timeout, find)
 	if err != nil {
 		return "", err
 	}
@@ -903,6 +905,8 @@ func runClickIcon(env *seqEnv, a opArgs) (string, error) {
 			}
 			return "", errors.New(msg + ". Is it showing -- the dock may be hidden while a window is maximized?")
 		}
-		sleep(screenPollInterval)
+		if err := env.pause(screenPollInterval); err != nil {
+			return "", err
+		}
 	}
 }

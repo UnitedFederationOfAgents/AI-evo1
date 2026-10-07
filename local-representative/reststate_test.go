@@ -76,7 +76,7 @@ func TestCurrentStateCapturesManagedApps(t *testing.T) {
 	managedApps[app] = launchSpec{
 		binName:   "sleep",
 		singleton: false,
-		buildArgs: func(s *Server) []string { return []string{"30"} },
+		buildArgs: func(s *Server, instanceID string) []string { return []string{"30"} },
 	}
 	defer delete(managedApps, app)
 

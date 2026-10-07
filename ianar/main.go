@@ -64,6 +64,11 @@ type Server struct {
 
 	artifacts *artifactStore // results kept for "save-artifact" -- see artifacts.go
 	seqLib    *seqLibrary    // sequence-v2's actions and sequences -- see seqv2.go
+
+	// lrRuns are the runs local-representative started that haven't
+	// finished, by its run id; closing one cancels it (see lrrun.go).
+	lrRunsMu sync.Mutex
+	lrRuns   map[string]chan struct{}
 }
 
 func newServer() *Server {
@@ -75,6 +80,7 @@ func newServer() *Server {
 		reprStatus: "disconnected",
 		artifacts:  newArtifactStore(),
 		seqLib:     openSeqLibrary(""), // in memory until main opens the saved one
+		lrRuns:     make(map[string]chan struct{}),
 	}
 }
 

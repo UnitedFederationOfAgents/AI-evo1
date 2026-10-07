@@ -1336,6 +1336,9 @@ func actionRunner(a ActionDef, st StepRef) func(env *seqEnv) (string, error) {
 		}
 		var notes []string
 		for i, in := range a.Do {
+			if err := env.cancelled(); err != nil {
+				return strings.Join(notes, "; "), err
+			}
 			spec, _ := findOp(in["op"])
 			args := opArgs{}
 			for k, v := range in {

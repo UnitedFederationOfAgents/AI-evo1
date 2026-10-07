@@ -46,6 +46,7 @@ type selfVersionWatch struct {
 	updateAvailable bool
 	pendingVersion  string // last on-disk "--version" answer that triggered updateAvailable; "" if none
 	autoUpdate      bool
+	restartedFor    string // on-disk version restart last fired for, so poll fires at most once per landed update
 }
 
 // newSelfVersionWatch resolves this process's own executable path. It
@@ -79,7 +80,10 @@ func (w *selfVersionWatch) poll() {
 	changed := w.updateAvailable != updated
 	w.updateAvailable = updated
 	w.pendingVersion = onDisk
-	shouldRestart := updated && w.autoUpdate
+	shouldRestart := updated && w.autoUpdate && w.restartedFor != onDisk
+	if shouldRestart {
+		w.restartedFor = onDisk
+	}
 	w.mu.Unlock()
 
 	if changed {
@@ -130,6 +134,9 @@ func (w *selfVersionWatch) setAutoUpdate(v bool) {
 	w.mu.Lock()
 	w.autoUpdate = v
 	shouldRestart := v && w.updateAvailable
+	if shouldRestart {
+		w.restartedFor = w.pendingVersion
+	}
 	w.mu.Unlock()
 	w.notify()
 	if shouldRestart && w.restart != nil {

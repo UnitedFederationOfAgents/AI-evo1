@@ -271,7 +271,7 @@ var lrControlOps = []ControlOpSpec{
 	},
 	{
 		Op:       "node-fetch-file",
-		Summary:  "Copy files from a node into this node's files tab: a path, or a glob matching several. The node only hands over files its local-representative's control-fetch-allow setting allows. Another node's are asked for through agent-coordinator, as node-capture does.",
+		Summary:  "Copy files from a node into this node's files tab: a path, or a glob matching several. The node hands over any file, unless its local-representative's control-fetch-allow setting is set and doesn't allow it. Another node's are asked for through agent-coordinator, as node-capture does.",
 		Describe: "fetch {path} from {node}",
 		Args: []ControlOpArg{
 			{Name: "node", Help: "the node, as agent-coordinator names it -- usually a node control's {{name}}", Required: true},

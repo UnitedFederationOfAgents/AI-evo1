@@ -53,8 +53,9 @@ import (
 //     "node-fetch-result", relayed by AC as "__control:node-fetch" and
 //     "__control:node-fetch-result"): the node saves the files a path or
 //     glob matches into its own files tab, and this LR copies them across.
-//     A node only hands over files its control-fetch-allow setting allows
-//     (none unless it's set), whoever asks -- this node included.
+//     A node hands over any file by default; its control-fetch-allow
+//     setting, if set, limits it to the files that setting allows, whoever
+//     asks -- this node included.
 
 // controlTypeNode is the ControlParam.Type of a node control.
 const controlTypeNode = "node"
@@ -693,14 +694,10 @@ func (e *controlEngine) fetchForNode(req NodeFetchRequest) {
 }
 
 // fetchHere saves the files req.Path matches on this node into its files
-// tab, as far as control-fetch-allow allows.
+// tab: any file, unless control-fetch-allow is set and doesn't allow it.
 func (e *controlEngine) fetchHere(req NodeFetchRequest) NodeFetchResult {
 	out := NodeFetchResult{Node: e.s.lrName}
 	allow := e.getFetchAllow()
-	if len(allow) == 0 {
-		out.Error = fmt.Sprintf("%s doesn't hand over files: its local-representative has no control-fetch-allow setting", e.s.lrName)
-		return out
-	}
 	pattern, err := expandHome(req.Path)
 	if err != nil {
 		out.Error = err.Error()
@@ -749,7 +746,8 @@ func (e *controlEngine) fetchHere(req NodeFetchRequest) NodeFetchResult {
 var errNotAFile = errors.New("not a regular file")
 
 // fetchOne saves file p into this node's files tab, keeping only its last
-// maxSize bytes. p and the file it resolves to must both be allowed.
+// maxSize bytes. With an allow list, p and the file it resolves to must
+// both be on it; an empty one allows everything.
 func (e *controlEngine) fetchOne(p string, allow []string, maxSize int64) (NodeFetchedFile, error) {
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
@@ -762,7 +760,7 @@ func (e *controlEngine) fetchOne(p string, allow []string, maxSize int64) (NodeF
 	if !st.Mode().IsRegular() {
 		return NodeFetchedFile{}, errNotAFile
 	}
-	if !fetchAllowed(p, allow) || !fetchAllowed(resolved, allow) {
+	if len(allow) > 0 && (!fetchAllowed(p, allow) || !fetchAllowed(resolved, allow)) {
 		return NodeFetchedFile{}, errors.New("not allowed by control-fetch-allow")
 	}
 	f, err := os.Open(resolved)
@@ -793,7 +791,7 @@ func (e *controlEngine) getFetchAllow() []string {
 }
 
 // setFetchAllow takes the control-fetch-allow setting: the paths this node
-// hands over to node-fetch-file. Each entry is an absolute path or glob
+// hands over to node-fetch-file (with none, it hands over any). Each entry is an absolute path or glob
 // (~ for the home directory); one ending in "/" allows everything under
 // that directory.
 func (e *controlEngine) setFetchAllow(entries []string) error {

@@ -16,9 +16,9 @@ package main
 //   - upload that file to the files tab with node-fetch-file
 //   - delete the file, through the remote interface
 //
-// with this node's screen recorded across the run. node-fetch-file only
-// takes the file if this node's control-fetch-allow setting allows it
-// (~/Desktop/found-it-*.txt, say).
+// with this node's screen recorded across the run. node-fetch-file takes
+// any file unless this node's control-fetch-allow setting is set; if it is,
+// it has to allow the file (~/Desktop/found-it-*.txt, say).
 //
 // And a second (Revision F), capture-two-nodes: have the robots of two nodes
 // connected to agent-coordinator, chosen in the runner, each take a native
@@ -104,13 +104,13 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 		},
 		{
 			ID: "fetch-node-file", Name: "Upload a file from a node to the files tab",
-			Description: "node-fetch-file: copy a file from a node into this node's files tab, if that node's control-fetch-allow setting allows it",
+			Description: "node-fetch-file: copy a file from a node into this node's files tab",
 			Controls: []ControlParam{
 				{Name: "node", Label: "Node", Type: controlTypeNode, Default: "{{this_node}}", Help: "the node the file is on"},
 				{Name: "path", Label: "File", Help: "an absolute path or glob; ~ is the node user's home"},
 			},
 			Do: []ControlInstruction{
-				{"op": "node-fetch-file", "node": "{{node}}", "path": "{{path}}", "hint": "the node's control-fetch-allow setting has to allow the file"},
+				{"op": "node-fetch-file", "node": "{{node}}", "path": "{{path}}", "hint": "the file has to exist on the node (and, if its control-fetch-allow is set, be allowed by it)"},
 			},
 		},
 		{
@@ -182,7 +182,7 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 			Description: "Launch a new federation-command, mark it over the remote interface, then have the robot find it, take local control, echo \"found it\" into a new file on the desktop and hand it back; then upload that file to the files tab and delete it.",
 			Record:      []string{recordLocalRobot},
 			Controls: []ControlParam{
-				{Name: "found_file", Label: "Desktop file", Default: "~/Desktop/found-it-{{timestamp}}.txt", Help: "the new file \"found it\" is echoed into (~ is expanded; no spaces) -- this node's control-fetch-allow must allow it, e.g. ~/Desktop/found-it-*.txt"},
+				{Name: "found_file", Label: "Desktop file", Default: "~/Desktop/found-it-{{timestamp}}.txt", Help: "the new file \"found it\" is echoed into (~ is expanded; no spaces)"},
 			},
 			Steps: []ControlStepRef{
 				{Action: "unlock-screen", BeforeRecording: true},

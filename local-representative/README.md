@@ -316,10 +316,9 @@ In `fc-robot-handoff` the robot types `echo "found it" | tee <file>`, into
 a new file on the desktop (the **Desktop file** control, by default
 `~/Desktop/found-it-{{timestamp}}.txt`). Once the terminal is back in remote
 control, `node-fetch-file` uploads that file from this node to the files
-tab, and an `rm` sent over the remote interface deletes it. The fetch needs
-this node's `control-fetch-allow` to allow the file, for example
-`~/Desktop/found-it-*.txt`. Without that, the run stops at the fetch and the
-file stays on the desktop. A library saved before an example was added
+tab, and an `rm` sent over the remote interface deletes it. If this node's
+`control-fetch-allow` is set, it has to allow the file, for example
+`~/Desktop/found-it-*.txt`. A library saved before an example was added
 gains it when LR starts, and an example you haven't edited is updated to
 this build's version. agent-coordinator's
 control tab shows the same views for a chosen host, editing and running that
@@ -369,12 +368,12 @@ it:
   node's robot isn't running yet, as just after the node logged in.
 - `node-fetch-file` copies the files a path or glob matches from a node into
   this files tab, the way `node-capture` copies a screenshot. Each file keeps
-  its last `max_size` bytes, and the runner links them under the steps. A node
-  only hands over files its `control-fetch-allow` setting allows: a
-  comma-separated list of absolute paths or globs (`~` for home, a trailing
-  `/` for a whole directory), checked against the path and the file it
-  resolves to. With no setting, it hands over none. This applies to whichever
-  node's run asks, including its own.
+  its last `max_size` bytes, and the runner links them under the steps. By
+  default a node hands over any file. Its optional `control-fetch-allow`
+  setting limits that: a comma-separated list of absolute paths or globs (`~`
+  for home, a trailing `/` for a whole directory), checked against the path
+  and the file it resolves to. This applies to whichever node's run asks,
+  including its own.
 
 A robot step's run is given 2 minutes plus the `timeout`s and waits its
 instructions set, so `robot.wait-for-text` with `timeout: 10m` isn't cut off.

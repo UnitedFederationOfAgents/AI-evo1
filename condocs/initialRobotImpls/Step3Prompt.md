@@ -374,3 +374,22 @@ Recording
 Let's fix our control sequence based on the failure (context is resource 'Control Sequence Failure').
 
 Note that we do not want guards on what files a node may upload by default, although we may want this in a future increment.
+
+
+prompt: [`232ace0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/232ace0d0471d0824fea26f5fa515bd00ed0148f) → reply: [`821e110`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/821e1109029b745410e372b8a466450a8f9c8307)
+
+## Reply L
+
+I fixed the hand-off failure: the run stopped at step 7 because this node had no `control-fetch-allow` setting, and with no setting LR refused to hand over any file. Now, with no setting, `node-fetch-file` hands over any file (in `local-representative/controlnodes.go`). If the setting is set, it still limits which files a node hands over, so the guard is there for a later increment.
+
+I updated the wording that described the old default: the op summary, the example's hint and help text, the `--control-fetch-allow` flag help and the LR README. I also changed `TestFetchHere` to expect all three files when the setting isn't set. Nothing is built or tested, because `go` needed approval here, so please run `make build` / `make test` on the host.
+
+
+## <REPLACE-Revision|Retry> M
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

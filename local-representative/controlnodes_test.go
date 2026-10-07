@@ -209,8 +209,9 @@ func TestFetchAllowed(t *testing.T) {
 	}
 }
 
-// TestFetchHere: a node hands over only allowed regular files, keeping the
-// end of a long one, and none at all without control-fetch-allow.
+// TestFetchHere: a node hands over any regular file without
+// control-fetch-allow, and only allowed ones with it, keeping the end of a
+// long one.
 func TestFetchHere(t *testing.T) {
 	s := newServer("test-lr")
 	s.fileCacheDir = t.TempDir()
@@ -231,8 +232,8 @@ func TestFetchHere(t *testing.T) {
 	}
 
 	req := NodeFetchRequest{Path: filepath.Join(src, "*.log"), MaxFiles: 10, MaxSize: 4}
-	if res := s.control.fetchHere(req); res.Success || !strings.Contains(res.Error, "control-fetch-allow") {
-		t.Fatalf("without control-fetch-allow: %+v", res)
+	if res := s.control.fetchHere(req); !res.Success || len(res.Files) != 3 || len(res.Skipped) != 0 {
+		t.Fatalf("without control-fetch-allow, want a.log, b.log and link.log: %+v", res)
 	}
 	if err := s.control.setFetchAllow([]string{filepath.Join(src, "*.log")}); err != nil {
 		t.Fatal(err)

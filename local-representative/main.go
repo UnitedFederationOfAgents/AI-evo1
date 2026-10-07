@@ -1604,7 +1604,7 @@ func main() {
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	controlLibPath := flag.String("control-library", defaultControlLibraryPath(), "YAML file the control tab's actions and sequences are kept in (see controllib.go); empty keeps them in memory only")
-	fetchAllow := flag.String("control-fetch-allow", "", "comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) this node hands over to control runs' node-fetch-file, whichever node's run asks; empty hands over none (see controlnodes.go)")
+	fetchAllow := flag.String("control-fetch-allow", "", "comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) this node hands over to control runs' node-fetch-file, whichever node's run asks; empty hands over any file (see controlnodes.go)")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:

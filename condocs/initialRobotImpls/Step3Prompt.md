@@ -385,11 +385,46 @@ I fixed the hand-off failure: the run stopped at step 7 because this node had no
 I updated the wording that described the old default: the op summary, the example's hint and help text, the `--control-fetch-allow` flag help and the LR README. I also changed `TestFetchHere` to expect all three files when the setting isn't set. Nothing is built or tested, because `go` needed approval here, so please run `make build` / `make test` on the host.
 
 
-## <REPLACE-Revision|Retry> M
+## Revision M
 
-<REPLACE-PROMPT>
+Let's fix some tests, and let's also ensure that when we cancel a control sequence that it will cancel an ongoing robot sequence if one is ongoing.
 
+Test output:
+jedsall@provisioner01:~/workspace/research/AI-evo1$    cd ~/workspace/research/AI-evo1/local-representative && go test ./...
+# local-representative [local-representative.test]
+./procman_test.go:151:35: not enough arguments in call to spec.buildEnv
+	have (*Server)
+	want (*Server, string)
+./procman_test.go:179:41: not enough arguments in call to spec.buildArgs
+	have (*Server)
+	want (*Server, string)
+./procman_test.go:183:35: not enough arguments in call to spec.buildEnv
+	have (*Server)
+	want (*Server, string)
+./procman_test.go:250:41: not enough arguments in call to spec.buildArgs
+	have (*Server)
+	want (*Server, string)
+./procman_test.go:273:38: not enough arguments in call to spec.buildArgs
+	have (*Server)
+	want (*Server, string)
+./procman_test.go:283:38: not enough arguments in call to spec.buildArgs
+	have (*Server)
+	want (*Server, string)
+./procman_test.go:542:14: cannot use func(s *Server) []string {…} (value of type func(s *Server) []string) as func(s *Server, instanceID string) []string value in struct literal
+./procman_test.go:623:14: cannot use func(s *Server) []string {…} (value of type func(s *Server) []string) as func(s *Server, instanceID string) []string value in struct literal
+./procman_test.go:669:14: cannot use func(s *Server) []string {…} (value of type func(s *Server) []string) as func(s *Server, instanceID string) []string value in struct literal
+./procman_test.go:725:14: cannot use func(s *Server) []string {…} (value of type func(s *Server) []string) as func(s *Server, instanceID string) []string value in struct literal
+./procman_test.go:725:14: too many errors
+FAIL	local-representative [build failed]
+FAIL
+jedsall@provisioner01:~/workspace/research/AI-evo1/local-representative$    cd ../agent-coordinator && go test ./...
+2026/10/07 19:01:13 control: bad node-capture request from lr-a: invalid character 'o' in literal null (expecting 'u')
+2026/10/07 19:01:13 control: bad node-fetch request from lr-a: invalid character 'o' in literal null (expecting 'u')
+2026/10/07 19:01:13 self-version: /tmp/TestSelfVersionWatchPollFailure4037205755/001/does-not-exist --version failed: fork/exec /tmp/TestSelfVersionWatchPollFailure4037205755/001/does-not-exist: no such file or directory
+--- FAIL: TestSelfVersionWatchAutoUpdateFiresOnPoll (0.00s)
+    selfversion_test.go:137: restart fired 2 times after an unchanged poll, want still 1
+FAIL
+FAIL	agent-coordinator	0.019s
+FAIL
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's correct these tests.

@@ -31,9 +31,11 @@ func TestRelayNodeCaptureWithoutRepresentable(t *testing.T) {
 	hs.mu.Lock()
 	hs.connected = true
 	hs.mu.Unlock()
-	s.relayNodeCapture("lr-a", []byte(`{"req":"r1","node":"lr-b"}`))
-	s.relayNodeCapture("lr-a", []byte(`{"req":"r1","node":"lr-a"}`))
-	s.relayNodeCaptureResult("lr-b", []byte(`{"req":"r1","from":"lr-a","success":true}`))
-	s.relayNodeCapture("lr-a", []byte(`not json`))
+	for kind := range nodeRequestKinds {
+		s.relayNodeRequest(kind, "lr-a", []byte(`{"req":"r1","node":"lr-b"}`))
+		s.relayNodeRequest(kind, "lr-a", []byte(`{"req":"r1","node":"lr-a"}`))
+		s.relayNodeResult(kind, "lr-b", []byte(`{"req":"r1","from":"lr-a","success":true}`))
+		s.relayNodeRequest(kind, "lr-a", []byte(`not json`))
+	}
 	s.broadcastControlNodes()
 }

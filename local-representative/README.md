@@ -332,6 +332,37 @@ and then press continue, and the phrase comes back as the run's output. The
 terminal is left in local control, because by then the keyboard focus is in
 the browser.
 
+A few ops are for long runs that rebuild another node and then collect from
+it:
+
+- `fc-expect-output` takes a `fail_text`: a line starting with it, other than
+  the awaited `text`, fails the step at once. Wrapping a command as
+  `cmd; echo "<marker> exit=$?"` and waiting for `<marker> exit=0` with
+  `fail_text: "<marker> exit="` fails as soon as it exits non-zero. With
+  `since: run` it also sees lines printed before the step started. This is
+  for a command sent steps earlier: FC only reports a command's output once
+  it exits, and that can happen while a step in between, such as an
+  `ask-user`, is still waiting.
+- `node-wait-connected` waits for a node to be connected to
+  agent-coordinator. With `fresh: true`, only a connection made since the
+  step started counts, as after a reboot. With `prefix: true`, a node named
+  `<node>-<anything>` counts too: nodes are named `<hostname>-<4 characters>`,
+  and a rebuilt node draws new characters. `save_as` saves the name it
+  connected under, for later steps' `node`.
+- `node-capture` takes a `wait_robot` duration: it keeps asking while the
+  node's robot isn't running yet, as just after the node logged in.
+- `node-fetch-file` copies the files a path or glob matches from a node into
+  this files tab, the way `node-capture` copies a screenshot. Each file keeps
+  its last `max_size` bytes, and the runner links them under the steps. A node
+  only hands over files its `control-fetch-allow` setting allows: a
+  comma-separated list of absolute paths or globs (`~` for home, a trailing
+  `/` for a whole directory), checked against the path and the file it
+  resolves to. With no setting, it hands over none. This applies to whichever
+  node's run asks, including its own.
+
+A robot step's run is given 2 minutes plus the `timeout`s and waits its
+instructions set, so `robot.wait-for-text` with `timeout: 10m` isn't cut off.
+
 ## Files tab
 
 The **files** tab shows a wireframe-icon view (text / image / other — a small

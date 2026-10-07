@@ -245,20 +245,23 @@ function Runner({ connected, state, lib, replies, robotHealthy, onRun, onCancel,
 
 // Recordings plays back a run's screen recordings beside its steps
 // (Step3Prompt.md Revision B), and shows its screenshots (Revision F).
-// Recordings saved as a .zip of frames (no compositor video) only get a link.
+// Recordings saved as a .zip of frames (no compositor video), and files
+// fetched from nodes, only get a link.
 function Recordings({ recordings, fileUrl, node }: { recordings: ControlRecording[]; fileUrl: (id: string) => string; node: string }) {
   return (
     <div className="ctl-recordings">
       {recordings.map(rec => (
         <div key={rec.file_id} className="ctl-recording">
           <div className="ctl-recording-head">
-            {rec.who === 'robot' ? `${node}'s screen` : `${rec.who}'s screen`}
+            {rec.file
+              ? `${rec.who === 'robot' ? node : rec.who}: ${rec.path ?? 'file'}`
+              : rec.who === 'robot' ? `${node}'s screen` : `${rec.who}'s screen`}
             {rec.image ? ' · screenshot' : ''}
             {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
             {rec.via ? ` · via ${rec.via}` : ''}
             {' · '}
             <a href={`${fileUrl(rec.file_id)}?download=1`}>{rec.name}</a>
-            {!rec.video && !rec.image && ' (sampled frames, not a video — download to view)'}
+            {!rec.video && !rec.image && !rec.file && ' (sampled frames, not a video — download to view)'}
           </div>
           {rec.video && <video className="ctl-recording-video" src={fileUrl(rec.file_id)} controls preload="metadata" />}
           {rec.image && (

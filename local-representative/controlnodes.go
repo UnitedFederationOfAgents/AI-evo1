@@ -8,7 +8,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,14 +42,31 @@ import (
 //     LR that ran it, and the control tab can show them beside the steps.
 //     The image never crosses a representable link: its lines are capped
 //     well below a screenshot's size.
+//
+//   - The node-wait-connected op waits for a node to (re)connect to
+//     agent-coordinator, from the same "__control:nodes" lists; setNodes
+//     counts each node's connections so "fresh" can tell a new one from a
+//     connection that never dropped.
+//
+//   - The node-fetch-file op copies files from a node into the files tab,
+//     the way node-capture copies a screenshot ("node-fetch" and
+//     "node-fetch-result", relayed by AC as "__control:node-fetch" and
+//     "__control:node-fetch-result"): the node saves the files a path or
+//     glob matches into its own files tab, and this LR copies them across.
+//     A node only hands over files its control-fetch-allow setting allows
+//     (none unless it's set), whoever asks -- this node included.
 
 // controlTypeNode is the ControlParam.Type of a node control.
 const controlTypeNode = "node"
 
 const (
-	controlCaptureTimeout = 45 * time.Second // a node's robot capturing and saving a screenshot
-	controlCopyTimeout    = 2 * time.Minute  // copying another node's screenshot into this files tab
-	controlMaxCopy        = 64 << 20         // the most a copied screenshot may be, as for an upload
+	controlCaptureTimeout  = 45 * time.Second // a node's robot capturing and saving a screenshot
+	controlCopyTimeout     = 2 * time.Minute  // copying another node's screenshot into this files tab
+	controlMaxCopy         = 64 << 20         // the most a copied screenshot may be, as for an upload
+	controlNodeWaitTimeout = 15 * time.Minute // a node (re)connecting to agent-coordinator
+	controlFetchTimeout    = 1 * time.Minute  // a node saving the files asked for
+	controlFetchMaxFiles   = 100              // the most files one node-fetch-file may bring back
+	controlRobotRetry      = 5 * time.Second  // between asks while a node's robot isn't running (wait_robot)
 )
 
 // RobotCaptureMsg mirrors ianar's "robot-capture-result" payload
@@ -74,17 +94,54 @@ type NodeCaptureRequest struct {
 // NodeCaptureResult is the node's answer: sent to AC as
 // "node-capture-result", and by AC back to From as
 // "__control:node-capture-result". SavedID is the screenshot's id in the
-// node's own files tab.
+// node's own files tab. NoRobot says it failed because the node's robot
+// isn't running, which wait_robot waits out.
 type NodeCaptureResult struct {
 	Req     string `json:"req"`
 	From    string `json:"from,omitempty"`
 	Node    string `json:"node"`
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
+	NoRobot bool   `json:"no_robot,omitempty"`
 	Width   int    `json:"width,omitempty"`
 	Height  int    `json:"height,omitempty"`
 	SavedAs string `json:"saved_as,omitempty"`
 	SavedID string `json:"saved_id,omitempty"`
+}
+
+// NodeFetchRequest asks a node for files: sent to AC as "node-fetch", and
+// by AC to that node as "__control:node-fetch" with From set to the node
+// asking.
+type NodeFetchRequest struct {
+	Req      string `json:"req"`
+	From     string `json:"from,omitempty"`
+	Node     string `json:"node"`
+	Path     string `json:"path"`
+	MaxFiles int    `json:"max_files"`
+	MaxSize  int64  `json:"max_size"`
+}
+
+// NodeFetchResult is the node's answer: sent to AC as "node-fetch-result",
+// and by AC back to From as "__control:node-fetch-result". Success means
+// the request was carried out, even if nothing matched (Files empty).
+type NodeFetchResult struct {
+	Req     string            `json:"req"`
+	From    string            `json:"from,omitempty"`
+	Node    string            `json:"node"`
+	Success bool              `json:"success"`
+	Error   string            `json:"error,omitempty"`
+	Files   []NodeFetchedFile `json:"files,omitempty"`
+	Skipped []string          `json:"skipped,omitempty"` // "<path>: why", for matches not handed over
+}
+
+// NodeFetchedFile is one file a node saved into its files tab for a fetch.
+// Truncated means only its last max_size bytes were kept.
+type NodeFetchedFile struct {
+	Path      string `json:"path"`
+	SavedAs   string `json:"saved_as"`
+	SavedID   string `json:"saved_id"`
+	Size      int64  `json:"size"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // ---- The nodes connected to agent-coordinator ----
@@ -110,6 +167,11 @@ func (e *controlEngine) setNodes(nodes []string) {
 	same := len(clean) == len(e.nodes)
 	for i := 0; same && i < len(clean); i++ {
 		same = clean[i] == e.nodes[i]
+	}
+	for _, n := range clean {
+		if !containsString(e.nodes, n) {
+			e.nodeConnects[n]++
+		}
 	}
 	e.nodes = clean
 	e.mu.Unlock()
@@ -157,6 +219,8 @@ func containsString(list []string, s string) bool {
 //	__control:nodes <json list of node names>
 //	__control:node-capture <json NodeCaptureRequest>          (as the node asked)
 //	__control:node-capture-result <json NodeCaptureResult>    (as the node asking)
+//	__control:node-fetch <json NodeFetchRequest>              (as the node asked)
+//	__control:node-fetch-result <json NodeFetchResult>        (as the node asking)
 func (e *controlEngine) handleNodeCommand(verb, arg string) {
 	switch verb {
 	case "nodes":
@@ -188,6 +252,28 @@ func (e *controlEngine) handleNodeCommand(verb, arg string) {
 			default: // nobody waiting any more
 			}
 		}
+	case "node-fetch":
+		var req NodeFetchRequest
+		if err := json.Unmarshal([]byte(arg), &req); err != nil || req.Req == "" {
+			log.Printf("control: bad node-fetch request %q: %v", arg, err)
+			return
+		}
+		go e.fetchForNode(req)
+	case "node-fetch-result":
+		var res NodeFetchResult
+		if err := json.Unmarshal([]byte(arg), &res); err != nil {
+			log.Printf("control: bad node-fetch result %q: %v", arg, err)
+			return
+		}
+		e.mu.Lock()
+		ch := e.nodeFetches[res.Req]
+		e.mu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- res:
+			default:
+			}
+		}
 	}
 }
 
@@ -200,6 +286,7 @@ func (e *controlEngine) captureForNode(req NodeCaptureRequest) {
 	switch {
 	case err != nil:
 		out.Error = err.Error()
+		out.NoRobot = !e.s.robotUp()
 	case !res.Success:
 		out.Error = res.Error
 	default:
@@ -216,7 +303,7 @@ func (e *controlEngine) captureForNode(req NodeCaptureRequest) {
 // cancel may be nil.
 func (e *controlEngine) captureHere(name string, timeout time.Duration, cancel <-chan struct{}) (RobotCaptureMsg, error) {
 	s := e.s
-	if s.reprServer == nil || !s.reprServer.IsHealthy("robot") {
+	if !s.robotUp() {
 		return RobotCaptureMsg{}, fmt.Errorf("the robot (ianar) isn't connected to %s's local-representative -- launch it from its system tab", s.lrName)
 	}
 	req := randomToken(8)
@@ -328,17 +415,35 @@ func opNodeCapture(r *controlRun, a opArgs) (string, error) {
 	if name == "" {
 		name = node
 	}
+	var waitRobot time.Duration
+	if strings.TrimSpace(a["wait_robot"]) != "" {
+		if waitRobot, err = a.duration("wait_robot"); err != nil {
+			return "", err
+		}
+	}
 
 	var res NodeCaptureResult
 	here := node == r.s.lrName
-	if here {
-		r.note(fmt.Sprintf("asking %s's robot (this node's) for a screenshot…", node))
-		var rc RobotCaptureMsg
-		rc, err = r.e.captureHere(name, timeout, r.cancel)
-		res = NodeCaptureResult{Node: node, Success: rc.Success, Error: rc.Error, Width: rc.Width, Height: rc.Height, SavedAs: rc.SavedAs, SavedID: rc.SavedID}
-	} else {
-		r.note(fmt.Sprintf("asking %s's robot for a screenshot through agent-coordinator…", node))
-		res, err = r.e.captureOn(node, name, timeout, r.cancel)
+	robotBy := time.Now().Add(waitRobot)
+	for {
+		if here {
+			r.note(fmt.Sprintf("asking %s's robot (this node's) for a screenshot…", node))
+			var rc RobotCaptureMsg
+			rc, err = r.e.captureHere(name, timeout, r.cancel)
+			res = NodeCaptureResult{Node: node, Success: rc.Success, Error: rc.Error, NoRobot: err != nil && !r.s.robotUp(), Width: rc.Width, Height: rc.Height, SavedAs: rc.SavedAs, SavedID: rc.SavedID}
+		} else {
+			r.note(fmt.Sprintf("asking %s's robot for a screenshot through agent-coordinator…", node))
+			res, err = r.e.captureOn(node, name, timeout, r.cancel)
+		}
+		if errors.Is(err, errControlCancelled) || !res.NoRobot || time.Now().Add(controlRobotRetry).After(robotBy) {
+			break
+		}
+		r.note(fmt.Sprintf("%s's robot isn't running yet; asking again until %s…", node, robotBy.Format("15:04:05")))
+		select {
+		case <-r.cancel:
+			return "", errControlCancelled
+		case <-time.After(controlRobotRetry):
+		}
 	}
 	if err != nil {
 		return "", err
@@ -367,4 +472,382 @@ func opNodeCapture(r *controlRun, a opArgs) (string, error) {
 		size = fmt.Sprintf("%dx%d ", res.Width, res.Height)
 	}
 	return fmt.Sprintf("%s: saved a %sscreenshot as %s", node, size, saved), nil
+}
+
+// robotUp reports whether this node's robot is connected to its LR.
+func (s *Server) robotUp() bool {
+	return s.reprServer != nil && s.reprServer.IsHealthy("robot")
+}
+
+// ---- Waiting for a node ----
+
+// nodeMatches reports whether name is node or, with prefix, node-<suffix>
+// (ufahostid names a node <hostname>-<4 characters>, and a rebuilt node
+// draws new ones).
+func nodeMatches(name, node string, prefix bool) bool {
+	return name == node || prefix && strings.HasPrefix(name, node+"-")
+}
+
+// nodeConnections returns how many times this LR has seen each node matching
+// node (see nodeMatches) connect, and which of them are connected now,
+// sorted.
+func (e *controlEngine) nodeConnections(node string, prefix bool) (map[string]int, []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	counts := map[string]int{}
+	for name, n := range e.nodeConnects {
+		if nodeMatches(name, node, prefix) {
+			counts[name] = n
+		}
+	}
+	var up []string
+	for _, name := range e.nodes {
+		if nodeMatches(name, node, prefix) {
+			up = append(up, name)
+		}
+	}
+	return counts, up
+}
+
+// opNodeWaitConnected is the node-wait-connected op (see controlops.go).
+func opNodeWaitConnected(r *controlRun, a opArgs) (string, error) {
+	node := strings.TrimSpace(a["node"])
+	if node == "" || strings.Contains(node, "{{") {
+		return "", fmt.Errorf("no node given (node is %q)", a["node"])
+	}
+	fresh, err := a.flag("fresh")
+	if err != nil {
+		return "", err
+	}
+	prefix, err := a.flag("prefix")
+	if err != nil {
+		return "", err
+	}
+	timeout, err := a.duration("timeout")
+	if err != nil {
+		return "", err
+	}
+	if r.s.getACClient() == nil {
+		return "", fmt.Errorf("this local-representative isn't connected to agent-coordinator, so it can't see %s", node)
+	}
+	what := node
+	if prefix {
+		what = fmt.Sprintf("%s (or %s-…)", node, node)
+	}
+	before, _ := r.e.nodeConnections(node, prefix)
+	if fresh {
+		r.note(fmt.Sprintf("waiting for %s to connect anew…", what))
+	} else {
+		r.note(fmt.Sprintf("waiting for %s to be connected…", what))
+	}
+	start := time.Now()
+	var found string
+	ok, err := r.waitFor(timeout, func() bool {
+		counts, up := r.e.nodeConnections(node, prefix)
+		for _, name := range up {
+			if !fresh || counts[name] > before[name] {
+				found = name
+				return true
+			}
+		}
+		return false
+	})
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		if _, up := r.e.nodeConnections(node, prefix); len(up) > 0 && fresh {
+			return "", fmt.Errorf("%s stayed connected but nothing connected anew as %s within %s", strings.Join(up, ", "), what, timeout)
+		}
+		return "", fmt.Errorf("%s didn't connect to agent-coordinator within %s", what, timeout)
+	}
+	if saveAs := strings.TrimSpace(a["save_as"]); saveAs != "" {
+		if err := r.save(saveAs, found); err != nil {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("%s is connected (after %s)", found, time.Since(start).Round(time.Second)), nil
+}
+
+// ---- Fetching files ----
+
+// opNodeFetchFile is the node-fetch-file op (see controlops.go).
+func opNodeFetchFile(r *controlRun, a opArgs) (string, error) {
+	node := strings.TrimSpace(a["node"])
+	if node == "" || strings.Contains(node, "{{") {
+		return "", fmt.Errorf("no node given (node is %q)", a["node"])
+	}
+	p := strings.TrimSpace(a["path"])
+	if p == "" {
+		return "", errors.New("no path given")
+	}
+	maxFiles, err := strconv.Atoi(strings.TrimSpace(a["max_files"]))
+	if err != nil || maxFiles < 1 || maxFiles > controlFetchMaxFiles {
+		return "", fmt.Errorf("max_files %q should be a number from 1 to %d", a["max_files"], controlFetchMaxFiles)
+	}
+	maxSize, err := strconv.ParseInt(strings.TrimSpace(a["max_size"]), 10, 64)
+	if err != nil || maxSize < 1 || maxSize > controlMaxCopy {
+		return "", fmt.Errorf("max_size %q should be a number of bytes from 1 to %d", a["max_size"], controlMaxCopy)
+	}
+	optional, err := a.flag("optional")
+	if err != nil {
+		return "", err
+	}
+	timeout, err := a.duration("timeout")
+	if err != nil {
+		return "", err
+	}
+	req := NodeFetchRequest{Node: node, Path: p, MaxFiles: maxFiles, MaxSize: maxSize}
+
+	var res NodeFetchResult
+	here := node == r.s.lrName
+	if here {
+		r.note(fmt.Sprintf("fetching %s from this node…", p))
+		res = r.e.fetchHere(req)
+	} else {
+		r.note(fmt.Sprintf("asking %s for %s through agent-coordinator…", node, p))
+		if res, err = r.e.fetchOn(req, timeout, r.cancel); err != nil {
+			return "", err
+		}
+	}
+	if !res.Success {
+		msg := res.Error
+		if msg == "" {
+			msg = "the fetch failed"
+		}
+		return "", fmt.Errorf("%s: %s", node, msg)
+	}
+	skipped := append([]string(nil), res.Skipped...)
+	var saved []string
+	for _, f := range res.Files {
+		id, name := f.SavedID, f.SavedAs
+		if !here {
+			info, err := r.s.copyNodeFile(node, f.SavedID, f.SavedAs)
+			if err != nil {
+				skipped = append(skipped, fmt.Sprintf("%s: saved in %s's files tab as %s, but copying it here failed: %v", f.Path, node, f.SavedAs, err))
+				continue
+			}
+			id, name = info.ID, info.Name
+		}
+		label := name
+		if f.Truncated {
+			label += fmt.Sprintf(" (last %d bytes)", f.Size)
+		}
+		r.e.addValue("file from "+node, f.Path+" → "+label+" (files tab)")
+		r.e.addRecording(ControlRecording{Who: node, FileID: id, Name: name, File: true, Path: f.Path})
+		saved = append(saved, name)
+	}
+	if len(saved) == 0 && !optional {
+		if len(skipped) > 0 {
+			return "", fmt.Errorf("%s: nothing fetched for %s: %s", node, p, strings.Join(skipped, "; "))
+		}
+		return "", fmt.Errorf("%s: nothing matches %s", node, p)
+	}
+	note := fmt.Sprintf("%s: fetched %d file(s) for %s", node, len(saved), p)
+	if len(saved) == 0 {
+		note = fmt.Sprintf("%s: nothing fetched for %s (optional)", node, p)
+	}
+	if len(skipped) > 0 {
+		note += "; skipped " + strings.Join(skipped, "; ")
+	}
+	return note, nil
+}
+
+// fetchOn asks node, through AC, to save the files req names into its own
+// files tab.
+func (e *controlEngine) fetchOn(req NodeFetchRequest, timeout time.Duration, cancel <-chan struct{}) (NodeFetchResult, error) {
+	ac := e.s.getACClient()
+	if ac == nil {
+		return NodeFetchResult{}, fmt.Errorf("this local-representative isn't connected to agent-coordinator, so it can't reach %s", req.Node)
+	}
+	req.Req = randomToken(8)
+	ch := make(chan NodeFetchResult, 1)
+	e.mu.Lock()
+	e.nodeFetches[req.Req] = ch
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		delete(e.nodeFetches, req.Req)
+		e.mu.Unlock()
+	}()
+	ac.SendData("node-fetch", req)
+	select {
+	case res := <-ch:
+		return res, nil
+	case <-time.After(timeout):
+		return NodeFetchResult{}, fmt.Errorf("%s didn't answer through agent-coordinator within %s", req.Node, timeout)
+	case <-cancel:
+		return NodeFetchResult{}, errControlCancelled
+	}
+}
+
+// fetchForNode saves the files another node asked for, and answers it
+// through AC.
+func (e *controlEngine) fetchForNode(req NodeFetchRequest) {
+	log.Printf("control: %q asked through agent-coordinator for %s from this node (%s)", req.From, req.Path, req.Req)
+	res := e.fetchHere(req)
+	res.Req, res.From = req.Req, req.From
+	if ac := e.s.getACClient(); ac != nil {
+		ac.SendData("node-fetch-result", res)
+	}
+}
+
+// fetchHere saves the files req.Path matches on this node into its files
+// tab, as far as control-fetch-allow allows.
+func (e *controlEngine) fetchHere(req NodeFetchRequest) NodeFetchResult {
+	out := NodeFetchResult{Node: e.s.lrName}
+	allow := e.getFetchAllow()
+	if len(allow) == 0 {
+		out.Error = fmt.Sprintf("%s doesn't hand over files: its local-representative has no control-fetch-allow setting", e.s.lrName)
+		return out
+	}
+	pattern, err := expandHome(req.Path)
+	if err != nil {
+		out.Error = err.Error()
+		return out
+	}
+	if !filepath.IsAbs(pattern) {
+		out.Error = fmt.Sprintf("%q isn't an absolute path", req.Path)
+		return out
+	}
+	matches, err := filepath.Glob(filepath.Clean(pattern))
+	if err != nil {
+		out.Error = fmt.Sprintf("bad glob %q: %v", req.Path, err)
+		return out
+	}
+	sort.Strings(matches)
+	maxFiles, maxSize := req.MaxFiles, req.MaxSize
+	if maxFiles < 1 || maxFiles > controlFetchMaxFiles {
+		maxFiles = controlFetchMaxFiles
+	}
+	if maxSize < 1 || maxSize > controlMaxCopy {
+		maxSize = controlMaxCopy
+	}
+	out.Success = true
+	for i, m := range matches {
+		if len(out.Files) == maxFiles {
+			out.Skipped = append(out.Skipped, fmt.Sprintf("%d more match(es): max_files is %d", len(matches)-i, maxFiles))
+			break
+		}
+		f, err := e.fetchOne(m, allow, maxSize)
+		if err != nil {
+			if !errors.Is(err, errNotAFile) {
+				out.Skipped = append(out.Skipped, m+": "+err.Error())
+			}
+			continue
+		}
+		out.Files = append(out.Files, f)
+	}
+	if len(out.Files) > 0 {
+		e.s.broadcastFiles()
+	}
+	return out
+}
+
+// errNotAFile marks a glob match that isn't a regular file (a directory,
+// say), passed over without comment.
+var errNotAFile = errors.New("not a regular file")
+
+// fetchOne saves file p into this node's files tab, keeping only its last
+// maxSize bytes. p and the file it resolves to must both be allowed.
+func (e *controlEngine) fetchOne(p string, allow []string, maxSize int64) (NodeFetchedFile, error) {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return NodeFetchedFile{}, err
+	}
+	st, err := os.Stat(resolved)
+	if err != nil {
+		return NodeFetchedFile{}, err
+	}
+	if !st.Mode().IsRegular() {
+		return NodeFetchedFile{}, errNotAFile
+	}
+	if !fetchAllowed(p, allow) || !fetchAllowed(resolved, allow) {
+		return NodeFetchedFile{}, errors.New("not allowed by control-fetch-allow")
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return NodeFetchedFile{}, err
+	}
+	defer f.Close()
+	out := NodeFetchedFile{Path: p, Size: st.Size()}
+	if st.Size() > maxSize {
+		if _, err := f.Seek(st.Size()-maxSize, io.SeekStart); err != nil {
+			return NodeFetchedFile{}, err
+		}
+		out.Truncated, out.Size = true, maxSize
+	}
+	name := e.s.lrName + "_" + strings.ReplaceAll(strings.TrimPrefix(p, "/"), "/", "_")
+	info, err := e.s.saveFileFrom(name, io.LimitReader(f, maxSize))
+	if err != nil {
+		return NodeFetchedFile{}, err
+	}
+	out.SavedAs, out.SavedID = info.Name, info.ID
+	return out, nil
+}
+
+func (e *controlEngine) getFetchAllow() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fetchAllow
+}
+
+// setFetchAllow takes the control-fetch-allow setting: the paths this node
+// hands over to node-fetch-file. Each entry is an absolute path or glob
+// (~ for the home directory); one ending in "/" allows everything under
+// that directory.
+func (e *controlEngine) setFetchAllow(entries []string) error {
+	var clean []string
+	for _, entry := range entries {
+		dir := strings.HasSuffix(entry, "/")
+		p, err := expandHome(entry)
+		if err != nil {
+			return err
+		}
+		if !filepath.IsAbs(p) {
+			return fmt.Errorf("control-fetch-allow: %q isn't an absolute path", entry)
+		}
+		p = filepath.Clean(p)
+		if _, err := filepath.Match(p, ""); err != nil {
+			return fmt.Errorf("control-fetch-allow: bad glob %q: %v", entry, err)
+		}
+		if dir && p != "/" {
+			p += "/"
+		}
+		clean = append(clean, p)
+	}
+	e.mu.Lock()
+	e.fetchAllow = clean
+	e.mu.Unlock()
+	return nil
+}
+
+// fetchAllowed reports whether path p (absolute, clean) is allowed by one
+// of allow's entries (see setFetchAllow).
+func fetchAllowed(p string, allow []string) bool {
+	p = filepath.Clean(p)
+	for _, a := range allow {
+		if strings.HasSuffix(a, "/") {
+			if strings.HasPrefix(p, a) {
+				return true
+			}
+			continue
+		}
+		if ok, _ := filepath.Match(a, p); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// expandHome replaces a leading ~ with the home directory.
+func expandHome(p string) (string, error) {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("can't expand ~ in %q: %v", p, err)
+	}
+	return filepath.Join(home, strings.TrimPrefix(p, "~")), nil
 }

@@ -305,11 +305,8 @@ prompt: [`736d088`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7
 I fixed the LR build error: in `local-representative/frontend/src/App.tsx`, `continueControl` was defined in the status hook but never returned from it or taken out where `App` reads the hook. I added it to both lists so the control view's continue button can use it. AC's `agent-coordinator/frontend/src/App.tsx` had the same problem with `sendLRControlContinue`, which would have broken the AC build next, so I now return it from AC's hook and pass it as a prop to `LRView`. I couldn't confirm either fix because `tsc` needed approval here, so please re-run `make build` on the host.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+We've added some functionality as an aside. The node-fetch-file op should now be worked in to the robot hand-off - we will make it so that the "found it" line is echoed to a new file on the desktop.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The 'node-fetch-file' will then be used to upload the file, then the file should be deleted.

@@ -1448,6 +1448,7 @@ type appConfig struct {
 	robotPort     string   // HTTP port a managed ianar serves on / is reverse-proxied from
 	fileCacheDir  string   // directory uploaded files land in for the files tab
 	hostStoreDir  string   // directory a "persist" press moves a file into
+	fetchAllow    []string // paths/globs this node hands over to control runs' node-fetch-file (see controlnodes.go)
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -1498,6 +1499,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		robotPort:     pick("robot-port", defaults.robotPort),
 		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
 		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
+		fetchAllow:    splitList(pick("control-fetch-allow", strings.Join(defaults.fetchAllow, ","))),
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -1601,6 +1603,7 @@ func main() {
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	controlLibPath := flag.String("control-library", defaultControlLibraryPath(), "YAML file the control tab's actions and sequences are kept in (see controllib.go); empty keeps them in memory only")
+	fetchAllow := flag.String("control-fetch-allow", "", "comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) this node hands over to control runs' node-fetch-file, whichever node's run asks; empty hands over none (see controlnodes.go)")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -1632,6 +1635,7 @@ func main() {
 		robotPort:     *robotPort,
 		fileCacheDir:  *fileCacheDir,
 		hostStoreDir:  *hostStoreDir,
+		fetchAllow:    splitList(*fetchAllow),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -1662,6 +1666,12 @@ func main() {
 
 	s := newServer(cfg.name)
 	s.control.lib = openControlLibrary(*controlLibPath)
+	if err := s.control.setFetchAllow(cfg.fetchAllow); err != nil {
+		log.Fatal(err)
+	}
+	if len(cfg.fetchAllow) > 0 {
+		log.Printf("control: node-fetch-file may take %s", strings.Join(cfg.fetchAllow, ", "))
+	}
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
 		// Only worth polling for an on-disk update when a restart could

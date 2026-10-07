@@ -49,13 +49,16 @@ export interface ControlPrompt {
   message: string
 }
 
-// A screen recording, or a screenshot, a run saved into the node's files tab.
+// A screen recording, a screenshot, or a file fetched from a node, that a
+// run saved into the node's files tab.
 export interface ControlRecording {
   who: string // whose screen ("robot": the node's own; else a node's name)
   file_id: string // <files api>/<file_id>
   name: string
   video: boolean // playable in the browser, rather than a .zip of frames
   image?: boolean // a screenshot (node-capture), rather than a recording
+  file?: boolean // a file fetched from who (node-fetch-file), rather than a recording
+  path?: string // where on who a fetched file came from
   duration_ms?: number
   via?: string
 }

@@ -1648,12 +1648,12 @@ func main() {
 			s.broadcast("lr-control-library", LRControlLibraryMsg{HostID: name, Library: data})
 		case "control-reply":
 			s.broadcast("lr-control-reply", LRControlReplyMsg{HostID: name, Reply: data})
-		case "node-capture":
+		case "node-capture", "node-fetch":
 			// A control sequence on this host wants another node's
-			// screenshot -- see controlnodes.go.
-			s.relayNodeCapture(name, data)
-		case "node-capture-result":
-			s.relayNodeCaptureResult(name, data)
+			// screenshot or files -- see controlnodes.go.
+			s.relayNodeRequest(dataType, name, data)
+		case "node-capture-result", "node-fetch-result":
+			s.relayNodeResult(strings.TrimSuffix(dataType, "-result"), name, data)
 		case "control-nodes-request":
 			s.sendControlNodes(name, s.connectedHostNames())
 		case "ridealong-state":

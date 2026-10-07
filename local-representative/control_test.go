@@ -93,6 +93,65 @@ func TestWaitForOutputSeesOnlyNewLinesFromThatInstance(t *testing.T) {
 	}
 }
 
+// TestFCExpectOutputFailText: a line starting with fail_text fails the
+// step at once; the awaited line itself (which starts with it too) passes.
+func TestFCExpectOutputFailText(t *testing.T) {
+	s := newServer("test-lr")
+	r := runningEngine(s)
+	r.stepMark = r.e.logMark()
+	args := opArgs{"fc": "federation-command#1", "text": "tok exit=0", "fail_text": "tok exit=", "timeout": "5s"}
+
+	s.handleFCLog("federation-command#2", "tok exit=1", "output") // another instance's doesn't count
+	s.handleFCLog("federation-command#1", "tok exit=0", "output")
+	if _, err := opFCExpectOutput(r, args); err != nil {
+		t.Fatalf("exit=0: %v", err)
+	}
+
+	r.stepMark = r.e.logMark()
+	s.handleFCLog("federation-command#1", "tok exit=2", "output")
+	start := time.Now()
+	_, err := opFCExpectOutput(r, args)
+	if err == nil || !strings.Contains(err.Error(), `"tok exit=2"`) {
+		t.Fatalf("exit=2: err = %v", err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Errorf("waited %s rather than failing at once", time.Since(start))
+	}
+}
+
+// TestFCExpectOutputSinceRun: since run sees a line printed before the step
+// started (while an earlier step was waiting); since step doesn't.
+func TestFCExpectOutputSinceRun(t *testing.T) {
+	s := newServer("test-lr")
+	r := runningEngine(s)
+	s.handleFCLog("federation-command#1", "tok exit=0", "output")
+	r.stepMark = r.e.logMark()
+
+	args := opArgs{"fc": "federation-command#1", "text": "tok exit=0", "timeout": "200ms"}
+	if _, err := opFCExpectOutput(r, args); err == nil {
+		t.Fatal("since step: saw a line printed before the step started")
+	}
+	args["since"] = "run"
+	if _, err := opFCExpectOutput(r, args); err != nil {
+		t.Fatalf("since run: %v", err)
+	}
+	args["since"] = "yesterday"
+	if _, err := opFCExpectOutput(r, args); err == nil {
+		t.Fatal("since yesterday: no error")
+	}
+}
+
+func TestRobotRunBudget(t *testing.T) {
+	steps := []robotStep{
+		{Do: []map[string]string{{"op": "wait-for-text", "text": "x", "timeout": "10m"}}},
+		{Do: []map[string]string{{"op": "wait", "duration": "1500"}}},
+		{Do: []map[string]string{{"op": "key", "keys": "enter"}, {"op": "type", "timeout": "nonsense"}}},
+	}
+	if got, want := robotRunBudget(steps), controlRobotTimeout+10*time.Minute+1500*time.Millisecond; got != want {
+		t.Errorf("budget = %s, want %s", got, want)
+	}
+}
+
 func TestWaitForCancelled(t *testing.T) {
 	s := newServer("test-lr")
 	r := runningEngine(s)

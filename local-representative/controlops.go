@@ -212,11 +212,13 @@ var lrControlOps = []ControlOpSpec{
 	},
 	{
 		Op:       "fc-expect-output",
-		Summary:  "Wait for a federation-command instance to print a line, since this step started.",
+		Summary:  "Wait for a federation-command instance to print a line, since this step started -- failing at once, with fail_text, on a line that says it went wrong.",
 		Describe: "wait for {fc} to print {text}",
 		Args: []ControlOpArg{
 			fcArg,
 			{Name: "text", Help: "the line (after trimming)", Required: true},
+			{Name: "fail_text", Help: "fail as soon as a line (after trimming) starts with this, unless it's text itself -- e.g. \"<marker> exit=\" to wait for \"<marker> exit=0\" and fail on any other exit status"},
+			{Name: "since", Help: "step: only lines printed since this step started; run: since the run started -- for a command sent steps earlier, whose output may arrive while a step in between (an ask-user, say) is still waiting", Default: "step"},
 			{Name: "timeout", Help: "how long to wait", Default: controlOutputTimeout.String()},
 			hintArg,
 		},
@@ -249,8 +251,38 @@ var lrControlOps = []ControlOpSpec{
 			{Name: "node", Help: "the node, as agent-coordinator names it -- usually a node control's {{name}}", Required: true},
 			{Name: "name", Help: "part of the screenshot's file name; empty for the node's name"},
 			{Name: "timeout", Help: "how long to wait for the node's robot", Default: controlCaptureTimeout.String()},
+			{Name: "wait_robot", Help: "how long to keep asking while the node's robot isn't running yet (just after the node started, say); empty to fail at once"},
 		},
 		run: opNodeCapture,
+	},
+	{
+		Op:       "node-wait-connected",
+		Summary:  "Wait for a node to be connected to agent-coordinator -- with fresh, for it to connect anew (after a reboot or rebuild), not just to still be connected -- and save the name it connected under.",
+		Describe: "wait up to {timeout} for {node} to connect to agent-coordinator",
+		Args: []ControlOpArg{
+			{Name: "node", Help: "the node, as agent-coordinator names it -- or, with prefix, its host name", Required: true},
+			{Name: "prefix", Help: "true: a node named <node>-<anything> counts too (nodes are named <hostname>-<4 characters>, which a rebuilt node draws anew)", Default: "false"},
+			{Name: "fresh", Help: "true: only a connection made since this step started counts", Default: "false"},
+			{Name: "save_as", Help: "name to save the connected node's name under, for later instructions' node"},
+			{Name: "timeout", Help: "how long to wait", Default: controlNodeWaitTimeout.String()},
+			hintArg,
+		},
+		run: opNodeWaitConnected,
+	},
+	{
+		Op:       "node-fetch-file",
+		Summary:  "Copy files from a node into this node's files tab: a path, or a glob matching several. The node only hands over files its local-representative's control-fetch-allow setting allows. Another node's are asked for through agent-coordinator, as node-capture does.",
+		Describe: "fetch {path} from {node}",
+		Args: []ControlOpArg{
+			{Name: "node", Help: "the node, as agent-coordinator names it -- usually a node control's {{name}}", Required: true},
+			{Name: "path", Help: "an absolute path or glob (*, ?, [...]); ~ is the node user's home", Required: true},
+			{Name: "max_files", Help: "the most files a glob may bring back", Default: "20"},
+			{Name: "max_size", Help: "the most bytes kept of each file (a longer one keeps its end, as a log's last lines)", Default: "8388608"},
+			{Name: "optional", Help: "true: matching nothing (or nothing readable) isn't an error", Default: "false"},
+			{Name: "timeout", Help: "how long to wait for the node's answer", Default: controlFetchTimeout.String()},
+			hintArg,
+		},
+		run: opNodeFetchFile,
 	},
 	{
 		Op:       "ask-user",
@@ -414,12 +446,39 @@ func opFCExpectOutput(r *controlRun, a opArgs) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text := strings.TrimSpace(a["text"])
-	ok, err := r.waitForOutput(fc, r.stepMark, text, timeout)
-	if err != nil {
-		return "", err
+	mark := r.stepMark
+	switch strings.TrimSpace(a["since"]) {
+	case "", "step":
+	case "run":
+		mark = 0 // the run's FC log starts empty
+	default:
+		return "", fmt.Errorf("since %q should be step or run", a["since"])
 	}
-	if !ok {
+	text := strings.TrimSpace(a["text"])
+	failText := strings.TrimSpace(a["fail_text"])
+	var failed string
+	ok, err := r.waitFor(timeout, func() bool {
+		for _, ev := range r.e.logsSince(mark) {
+			if ev.fc != fc || ev.kind != "output" {
+				continue
+			}
+			line := strings.TrimSpace(ev.line)
+			if line == text {
+				return true
+			}
+			if failText != "" && strings.HasPrefix(line, failText) {
+				failed = line
+				return true
+			}
+		}
+		return false
+	})
+	switch {
+	case err != nil:
+		return "", err
+	case failed != "":
+		return "", fmt.Errorf("%s printed %q rather than %q", fc, failed, text)
+	case !ok:
 		return "", fmt.Errorf("%s didn't print %q within %s", fc, text, timeout)
 	}
 	return fmt.Sprintf("%s printed %q", fc, text), nil

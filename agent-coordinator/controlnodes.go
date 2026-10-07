@@ -19,6 +19,16 @@ import (
 //     node's "node-capture-result" is passed back to that host as
 //     "__control:node-capture-result". A node that isn't connected is
 //     answered for, so the asking run fails at once rather than timing out.
+//   - "node-fetch" (files for node-fetch-file) and its "node-fetch-result"
+//     are relayed the same way.
+
+// nodeRequestKinds are the requests one host's control run makes of
+// another node, relayed by relayNodeRequest; each is answered by
+// "<kind>-result" (relayNodeResult).
+var nodeRequestKinds = map[string]string{
+	"node-capture": "screenshot",
+	"node-fetch":   "file",
+}
 
 // connectedHostNames lists the hosts whose local-representative is
 // connected, sorted.
@@ -73,18 +83,18 @@ func (s *Server) hostConnected(name string) bool {
 	return hs.connected
 }
 
-// relayNodeCapture passes host from's "node-capture" request to the node it
-// names.
-func (s *Server) relayNodeCapture(from string, data json.RawMessage) {
+// relayNodeRequest passes host from's request of kind (one of
+// nodeRequestKinds) to the node it names.
+func (s *Server) relayNodeRequest(kind, from string, data json.RawMessage) {
 	var req map[string]interface{}
 	if err := json.Unmarshal(data, &req); err != nil {
-		log.Printf("control: bad node-capture request from %s: %v", from, err)
+		log.Printf("control: bad %s request from %s: %v", kind, from, err)
 		return
 	}
 	node, _ := req["node"].(string)
 	req["from"] = from // whoever it says it is, it's the host that sent it
 	if node == "" || !s.hostConnected(node) {
-		s.answerNodeCapture(from, map[string]interface{}{
+		s.answerNodeRequest(kind, from, map[string]interface{}{
 			"req": req["req"], "from": from, "node": node, "success": false,
 			"error": "node " + quoteName(node) + " isn't connected to agent-coordinator",
 		})
@@ -94,16 +104,16 @@ func (s *Server) relayNodeCapture(from string, data json.RawMessage) {
 	if err != nil || s.reprServer == nil {
 		return
 	}
-	log.Printf("control: relaying %s's screenshot request to %s", from, node)
-	s.reprServer.SendCommand(node, "__control:node-capture "+string(b))
+	log.Printf("control: relaying %s's %s request to %s", from, nodeRequestKinds[kind], node)
+	s.reprServer.SendCommand(node, "__control:"+kind+" "+string(b))
 }
 
-// relayNodeCaptureResult passes a node's "node-capture-result" back to the
-// host that asked.
-func (s *Server) relayNodeCaptureResult(node string, data json.RawMessage) {
+// relayNodeResult passes a node's "<kind>-result" back to the host that
+// asked.
+func (s *Server) relayNodeResult(kind, node string, data json.RawMessage) {
 	var res map[string]interface{}
 	if err := json.Unmarshal(data, &res); err != nil {
-		log.Printf("control: bad node-capture result from %s: %v", node, err)
+		log.Printf("control: bad %s result from %s: %v", kind, node, err)
 		return
 	}
 	from, _ := res["from"].(string)
@@ -111,15 +121,15 @@ func (s *Server) relayNodeCaptureResult(node string, data json.RawMessage) {
 		return // the host that asked has gone
 	}
 	res["node"] = node
-	s.answerNodeCapture(from, res)
+	s.answerNodeRequest(kind, from, res)
 }
 
-func (s *Server) answerNodeCapture(to string, res map[string]interface{}) {
+func (s *Server) answerNodeRequest(kind, to string, res map[string]interface{}) {
 	b, err := json.Marshal(res)
 	if err != nil || s.reprServer == nil {
 		return
 	}
-	s.reprServer.SendCommand(to, "__control:node-capture-result "+string(b))
+	s.reprServer.SendCommand(to, "__control:"+kind+"-result "+string(b))
 }
 
 func quoteName(name string) string {

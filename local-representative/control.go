@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/big"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,12 @@ import (
 // (ControlRunMsg.Prompt), and the output op adds to what the run brings back
 // (ControlRunMsg.Output). The you-tell-me example uses them to capture a
 // phrase someone echoes into the terminal the robot left ready for them.
+//
+// For long runs that rebuild another node, a step can also wait for a node
+// to connect anew (node-wait-connected) and copy files from it into the
+// files tab (node-fetch-file), and fc-expect-output can fail at once on a
+// line saying the command failed (fail_text), and look back to the run's
+// start for a command sent steps earlier (since) -- see controlnodes.go.
 
 const (
 	controlLaunchTimeout = 45 * time.Second // a launched FC connecting in remote control
@@ -135,14 +142,16 @@ type ControlPrompt struct {
 	Message string `json:"message"`
 }
 
-// ControlRecording is a screen recording, or a screenshot, a run saved into
-// the files tab.
+// ControlRecording is a screen recording, a screenshot, or a file fetched
+// from a node, that a run saved into the files tab.
 type ControlRecording struct {
 	Who        string `json:"who"`     // whose screen (recordLocalRobot, or a node's name)
 	FileID     string `json:"file_id"` // GET /api/files/<file_id>
 	Name       string `json:"name"`
 	Video      bool   `json:"video"`           // a video the browser can play, rather than a .zip of frames
 	Image      bool   `json:"image,omitempty"` // a screenshot (node-capture), rather than a recording
+	File       bool   `json:"file,omitempty"`  // a file fetched from Who (node-fetch-file), rather than a recording
+	Path       string `json:"path,omitempty"`  // where on Who a fetched file came from
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Via        string `json:"via,omitempty"`
 }
@@ -217,6 +226,15 @@ type controlEngine struct {
 	nodes    []string
 	caps     map[string]chan RobotCaptureMsg
 	nodeCaps map[string]chan NodeCaptureResult
+
+	// nodeConnects counts each node's connections as seen in AC's node
+	// lists (node-wait-connected's fresh); nodeFetches are fetches under
+	// way through agent-coordinator; fetchAllow is the control-fetch-allow
+	// setting, what this node hands over to them (see controlnodes.go).
+	nodeConnects map[string]int
+	nodeFetches  map[string]chan NodeFetchResult
+	fetchAllow   []string
+
 	// promptCh is closed when someone presses continue on the run's
 	// prompt, nil while nothing waits for it.
 	promptCh chan struct{}
@@ -233,6 +251,9 @@ func newControlEngine(s *Server) *controlEngine {
 		recs:     make(map[string]chan RobotRecordMsg),
 		caps:     make(map[string]chan RobotCaptureMsg),
 		nodeCaps: make(map[string]chan NodeCaptureResult),
+
+		nodeConnects: make(map[string]int),
+		nodeFetches:  make(map[string]chan NodeFetchResult),
 	}
 }
 
@@ -477,7 +498,7 @@ func (e *controlEngine) handleCommand(raw string) {
 	case "refresh":
 		e.broadcastLibrary()
 		e.broadcast()
-	case "nodes", "node-capture", "node-capture-result":
+	case "nodes", "node-capture", "node-capture-result", "node-fetch", "node-fetch-result":
 		e.handleNodeCommand(verb, arg) // see controlnodes.go
 	default:
 		log.Printf("control: ignoring unrecognised command %q", raw)
@@ -1004,10 +1025,11 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 	s.reprServer.SendCommand("robot", "__robot:run "+string(req))
 
 	var res RobotRunMsg
+	budget := robotRunBudget(steps)
 	select {
 	case res = <-ch:
-	case <-time.After(controlRobotTimeout):
-		return "", fmt.Errorf("the robot didn't report back within %s", controlRobotTimeout)
+	case <-time.After(budget):
+		return "", fmt.Errorf("the robot didn't report back within %s", budget)
 	case <-r.cancel:
 		return "", errControlCancelled
 	}
@@ -1030,6 +1052,36 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 		}
 	}
 	return strings.Join(notes, "; "), nil
+}
+
+// robotRunBudget is how long to wait for a robot run: controlRobotTimeout,
+// plus the timeouts and waits its instructions set themselves, so a run
+// told to wait-for-text for 10m isn't given up on after 2. A bare number is
+// milliseconds, as IANAR reads it.
+func robotRunBudget(steps []robotStep) time.Duration {
+	budget := controlRobotTimeout
+	for _, st := range steps {
+		for _, in := range st.Do {
+			for _, k := range []string{"timeout", "duration"} {
+				v := strings.TrimSpace(in[k])
+				if v == "" {
+					continue
+				}
+				d, err := time.ParseDuration(v)
+				if err != nil {
+					ms, err := strconv.Atoi(v)
+					if err != nil {
+						continue
+					}
+					d = time.Duration(ms) * time.Millisecond
+				}
+				if d > 0 {
+					budget += d
+				}
+			}
+		}
+	}
+	return budget
 }
 
 // randomToken returns n random lower-case letters and digits, leaving out

@@ -363,12 +363,14 @@ Adding a "Highlighted" resource in condoccer now pulls highlighted files from ev
 
 I also added a short note to `docs/DistributedExchange.md`.
 
+## Resource 3 -- Control Sequence Failure
 
-## <REPLACE-Revision|Retry> L
+Recording
 
-<REPLACE-PROMPT>
+- [lr-control-fc-robot-handoff-2026-10-07T18-29-42.zip (desktop01-8x5i)](186d22d8_lr-control-fc-robot-handoff-2026-10-07T18-29-42.zip)
 
+## Revision L
 
-## Human-Prompt
+Let's fix our control sequence based on the failure (context is resource 'Control Sequence Failure').
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Note that we do not want guards on what files a node may upload by default, although we may want this in a future increment.

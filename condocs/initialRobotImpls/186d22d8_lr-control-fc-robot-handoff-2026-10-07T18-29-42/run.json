@@ -1,0 +1,153 @@
+{
+  "id": "ayztftzn",
+  "sequence": "fc-robot-handoff",
+  "name": "federation-command: robot hand-off",
+  "controls": {
+    "found_file": "~/Desktop/found-it-{{timestamp}}.txt"
+  },
+  "status": "error",
+  "error": "step 7 (Upload that file to the files tab): desktop01-8x5i: desktop01-8x5i doesn't hand over files: its local-representative has no control-fetch-allow setting -- the node's control-fetch-allow setting has to allow the file",
+  "started_at": 1791396605893,
+  "duration_ms": 12073,
+  "steps": [
+    {
+      "label": "Unlock the screen if it is locked",
+      "detail": "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked",
+      "do": [
+        "robot: unlock the screen if it is locked, and wake it if it has blanked"
+      ],
+      "action": "unlock-screen",
+      "status": "success",
+      "message": "the screen wasn't locked",
+      "duration_ms": 1981
+    },
+    {
+      "label": "Launch a new federation-command instance",
+      "detail": "launch federation-command as the system tab does, then wait for the new instance to connect under its own name, in remote control",
+      "do": [
+        "launch a new federation-command, saved as {{fc}}"
+      ],
+      "action": "launch-fc",
+      "status": "success",
+      "message": "federation-command#1 is connected in remote control",
+      "duration_ms": 202
+    },
+    {
+      "label": "Echo \"This is the one - \u003crandom-chars\u003e\" through the remote interface",
+      "detail": "send an echo of a marker ending in random characters to that instance only, and wait for its output to come back -- from it and no other instance; saved as {{marker}}",
+      "do": [
+        "save 6 random characters as {{marker_token}}",
+        "save This is the one - {{marker_token}} as {{marker}}",
+        "show marker command: echo \"{{marker}}\"",
+        "send echo \"{{marker}}\" to {{fc}}"
+      ],
+      "action": "echo-marker",
+      "status": "success",
+      "message": "federation-command#1 printed \"This is the one - 2kdtdz\"",
+      "duration_ms": 301
+    },
+    {
+      "label": "Find that terminal with the robot and bring it to local control",
+      "detail": "robot: click the line reading the text on screen, press →; then check the instance reports local control",
+      "do": [
+        "check {{fc}} has a window on screen",
+        "robot: check the screen is unlocked, and wake it if it has blanked",
+        "robot: left-click the line on screen reading \"{{marker}}\" (waiting up to 10s for it)",
+        "robot: press right",
+        "wait for {{fc}} to be in local-control"
+      ],
+      "action": "robot-take-local",
+      "status": "success",
+      "message": "the screen is awake and unlocked; saw \"This is the one 2kdtdz\" at (186, 508) and left-clicked it via compositor (org.gnome.Mutter.RemoteDesktop); federation-command#1 is in local-control",
+      "duration_ms": 3472
+    },
+    {
+      "label": "Type into it with the robot: echo \"found it\" into a new file on the desktop",
+      "detail": "robot: clear the command line, type the command, press Enter; then check the instance printed the expected line",
+      "do": [
+        "robot: press end ctrl+u",
+        "robot: type \"echo \"found it\" | tee ~/Desktop/found-it-2026-10-07T18-10-05.txt\"",
+        "robot: press enter",
+        "wait for {{fc}} to print found it"
+      ],
+      "action": "robot-type-command",
+      "status": "success",
+      "message": "federation-command#1 printed \"found it\"",
+      "duration_ms": 2405
+    },
+    {
+      "label": "Put the terminal back into remote control",
+      "detail": "robot: press ←; then check the instance reports remote control",
+      "do": [
+        "robot: press left",
+        "wait for {{fc}} to be in remote-control"
+      ],
+      "action": "robot-give-back",
+      "status": "success",
+      "message": "federation-command#1 is in remote-control",
+      "duration_ms": 308
+    },
+    {
+      "label": "Upload that file to the files tab",
+      "detail": "node-fetch-file: copy a file from a node into this node's files tab, if that node's control-fetch-allow setting allows it",
+      "do": [
+        "fetch ~/Desktop/found-it-2026-10-07T18-10-05.txt from desktop01-8x5i"
+      ],
+      "action": "fetch-node-file",
+      "status": "error",
+      "message": "desktop01-8x5i: desktop01-8x5i doesn't hand over files: its local-representative has no control-fetch-allow setting -- the node's control-fetch-allow setting has to allow the file",
+      "duration_ms": 1
+    },
+    {
+      "label": "Delete the file",
+      "detail": "send rm for the file to that instance, and wait for it to report rm's exit status -- failing unless it's 0",
+      "do": [
+        "save 6 random characters as {{rm_token}}",
+        "send rm -- ~/Desktop/found-it-2026-10-07T18-10-05.txt; echo \"{{rm_token}} exit=$?\" to {{fc}}",
+        "wait for {{fc}} to print {{rm_token}} exit=0"
+      ],
+      "action": "fc-remove-file",
+      "status": "skipped"
+    }
+  ],
+  "values": [
+    {
+      "label": "robot run",
+      "value": "ianar-sequence-lr-nqb6cs3y-2026-10-07T18-10-07.zip (files tab)"
+    },
+    {
+      "label": "screen recording",
+      "value": "ianar-recording-fc-robot-handoff-2026-10-07T18-10-17.webm (files tab; 9.9s via compositor (org.gnome.Shell.Screencast))"
+    },
+    {
+      "label": "federation-command instance",
+      "value": "federation-command#1"
+    },
+    {
+      "label": "marker command",
+      "value": "echo \"This is the one - 2kdtdz\""
+    },
+    {
+      "label": "robot run",
+      "value": "ianar-sequence-lr-cs89q65h-2026-10-07T18-10-13.zip (files tab)"
+    },
+    {
+      "label": "robot run",
+      "value": "ianar-sequence-lr-mrgzp9t5-2026-10-07T18-10-15.zip (files tab)"
+    },
+    {
+      "label": "robot run",
+      "value": "ianar-sequence-lr-mc7cuet9-2026-10-07T18-10-15.zip (files tab)"
+    }
+  ],
+  "recordings": [
+    {
+      "who": "robot",
+      "file_id": "c225a9c6_ianar-recording-fc-robot-handoff-2026-10-07T18-10-17.webm",
+      "name": "ianar-recording-fc-robot-handoff-2026-10-07T18-10-17.webm",
+      "video": true,
+      "duration_ms": 9886,
+      "via": "compositor (org.gnome.Shell.Screencast)"
+    }
+  ]
+}

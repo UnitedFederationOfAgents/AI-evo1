@@ -119,11 +119,56 @@ I've finished Revision D: control sequences are now data that you can define, co
 I continued from the files the interrupted Revision C attempt had left in LR, and added the engine changes, the AC and robot wiring, and one shared `ControlV1.tsx` that both frontends use. New tests are in `local-representative/controllib_test.go`, with updates to `control_test.go`, and in `ianar/repr_test.go`.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+We have a build error in this increment:
 
+=== Building local-representative ===
+make[1]: Entering directory '/home/jedsall/workspace/research/AI-evo1/local-representative'
+cd frontend && npm install && npm run build
 
-## Human-Prompt
+up to date, audited 69 packages in 1s
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+7 packages are looking for funding
+  run `npm fund` for details
+
+3 vulnerabilities (1 moderate, 2 high)
+
+To address issues that do not require attention, run:
+  npm audit fix
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+
+> local-representative-frontend@1.0.0 build
+> tsc && vite build
+
+The CJS build of Vite's Node API is deprecated. See https://vite.dev/guide/troubleshooting.html#vite-cjs-node-api-deprecated for more details.
+vite v5.4.21 building for production...
+transforming...
+✓ 32 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.41 kB │ gzip:  0.27 kB
+dist/assets/index-BnZyqK35.css   30.72 kB │ gzip:  5.75 kB
+dist/assets/index-DVMUXoqh.js   210.23 kB │ gzip: 64.42 kB
+✓ built in 2.17s
+go build -ldflags "-X ufa-version.Version=v0.0.3-inirob-b95e59d" -o local-representative .
+# local-representative
+./controlops.go:151:5: initialization cycle for controlOps
+	./controlops.go:151:5: controlOps refers to opLaunchFC
+	./controlops.go:254:6: opLaunchFC refers to addValue
+	./control.go:546:25: addValue refers to broadcast
+	./control.go:285:25: broadcast refers to state
+	./control.go:271:25: state refers to sequenceInfos
+	./control.go:250:25: sequenceInfos refers to snapshot
+	./controllib.go:1121:26: snapshot refers to controlOps
+make[1]: *** [Makefile:20: build-go] Error 1
+make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/local-representative'
+
+=== Build failed -- leaving /AI-evo1-dev/bin untouched ===
+make: *** [Makefile:77: deploy-dev-binaries] Error 1
+
+Let's fix that.

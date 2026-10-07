@@ -172,3 +172,22 @@ make[1]: Leaving directory '/home/jedsall/workspace/research/AI-evo1/local-repre
 make: *** [Makefile:77: deploy-dev-binaries] Error 1
 
 Let's fix that.
+
+
+prompt: [`b95e59d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b95e59d74247fb94b552c9b1bc4a5188096d3eed) → reply: [`c15c0e6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c15c0e6ac64c2ba236c39cff82987afc653b8276)
+
+## Reply E
+
+I fixed the build error by breaking the initialization cycle in `local-representative/controlops.go`. The op table literal is now a separate var, `lrControlOps`. `controlOps` is declared without an initializer and set from `lrControlOps` in an `init()`. Go's initialization-cycle check only applies to variable initializers, so the loop back to `controlOps` (`opLaunchFC` → `broadcast` → `snapshot` → `controlOps`) no longer counts as a cycle. Nothing else in the code changes.
+
+I haven't built or tested it, because `go`/`gofmt` needed approval here. Please re-run `make build` / `make test` on the host to confirm.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

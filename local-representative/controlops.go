@@ -148,7 +148,15 @@ var (
 	hintArg = ControlOpArg{Name: "hint", Help: "added to the error if this fails, e.g. what probably went wrong"}
 )
 
-var controlOps = []ControlOpSpec{
+// controlOps is LR's own ops. It's set from lrControlOps in init rather
+// than initialized directly: the ops' run funcs reach back to controlOps
+// (through the control state's broadcasts, which snapshot the library),
+// and Go rejects that as an initialization cycle.
+var controlOps []ControlOpSpec
+
+func init() { controlOps = lrControlOps }
+
+var lrControlOps = []ControlOpSpec{
 	{
 		Op:       "launch-fc",
 		Summary:  "Launch a new federation-command instance as the system tab does, and wait for it to connect under its own name, in remote control. Only a connection made since the launch counts, so an instance already running can't take its place.",

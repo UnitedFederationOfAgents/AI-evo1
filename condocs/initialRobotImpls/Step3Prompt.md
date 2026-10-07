@@ -349,3 +349,26 @@ Let's take a brief detour to fix the addition of highlighted file resources to c
 When we create a new resource with 'highlighted' as the source, this should include all highlighted files from all LR instances and AC files (AC files are not yet implemented, we will do that later).
 
 Let's fix that now.
+
+
+prompt: [`f2c4391`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f2c43914ec8f32ab8260fc52256209d54f436567) → reply: [`7e0b092`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7e0b092332f20a7dabe4d673bf49c2aaaa1e363d)
+
+## Reply K
+
+Adding a "Highlighted" resource in condoccer now pulls highlighted files from every LR connected to AC, not just this box's own LR. It isn't built or tested yet, because `go` needed approval here, so please run `make build` / `make test` on the host. New tests are in `condoccer/resources_test.go` and `local-representative/filepeers_test.go`.
+
+- **How it finds the other LRs:** LR has a new `GET /api/file-peers` (`local-representative/filepeers.go`) that lists each connected LR's address through AC. condoccer reads each one's files tab the same way it reads its own (`condoccer/resources.go`).
+- **Behaviour:** files from other nodes are listed as `<name> (<node>)` in the resource block. If a node can't be reached, condoccer logs it and carries on with the rest. An older LR without the new endpoint just gives its own files.
+- **AC files:** `acHighlightedSources` is an empty placeholder where AC's own files will join once AC has a files tab.
+
+I also added a short note to `docs/DistributedExchange.md`.
+
+
+## <REPLACE-Revision|Retry> L
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -95,7 +96,7 @@ func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action
 		return err
 	}
 	if len(links) == 0 {
-		return fmt.Errorf("no highlighted files on local-representative")
+		return fmt.Errorf("no highlighted files on any local-representative")
 	}
 
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, links)
@@ -128,16 +129,16 @@ func (s *Server) addVoiceNoteResource(info CondocInfo, action ActionRequest) err
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, nil)
 }
 
-// fetchHighlightedFiles asks local-representative (over the same connection
-// condoccer already maintains for status/commands -- see repr.go) which
-// files are currently highlighted, and copies each one's bytes into destDir.
-// It talks straight HTTP to LR's own dashboard port, disclosed over the
-// representable connection's "hello" message (see representable.Client.
-// PeerHTTPPort) -- LR's GET /api/files and GET /api/files/<id> are
-// deliberately ungated on proxiedHeader (see docs/DistributedExchange.md),
-// so this same call would also work unmodified if condoccer were ever
-// reached through agent-coordinator's transparent proxy instead of dialing
-// LR directly.
+// fetchHighlightedFiles copies every currently-highlighted file into destDir
+// -- from this box's local-representative and, through it, from every other
+// LR connected to agent-coordinator (Revision K of
+// condocs/initialRobotImpls/Step3Prompt.md). It talks straight HTTP to this
+// LR's own dashboard port, disclosed over the representable connection's
+// "hello" message (see representable.Client.PeerHTTPPort) -- LR's GET
+// /api/files and GET /api/files/<id> are deliberately ungated on
+// proxiedHeader (see docs/DistributedExchange.md), so this same call would
+// also work unmodified if condoccer were ever reached through
+// agent-coordinator's transparent proxy instead of dialing LR directly.
 func (s *Server) fetchHighlightedFiles(destDir string) ([]resourceLink, error) {
 	s.reprMu.Lock()
 	client := s.reprClient
@@ -151,14 +152,89 @@ func (s *Server) fetchHighlightedFiles(destDir string) ([]resourceLink, error) {
 		return nil, fmt.Errorf("local-representative has not disclosed its HTTP port")
 	}
 	base := "http://" + net.JoinHostPort(host, lrHTTPPort)
-	return fetchHighlightedFilesFrom(base, destDir)
+	return fetchAllHighlightedFiles(base, destDir)
 }
 
-// fetchHighlightedFilesFrom does the actual HTTP work for
-// fetchHighlightedFiles against a resolved "http://host:port" base URL --
-// split out so it can be exercised against an httptest.Server without a real
-// representable connection.
-func fetchHighlightedFilesFrom(base, destDir string) ([]resourceLink, error) {
+// highlightedSource is one files tab fetchAllHighlightedFiles reads: Node
+// labels its files' links ("" for this box's own LR), Base is where its
+// GET /api/files and GET /api/files/<id> live.
+type highlightedSource struct {
+	Node string `json:"node"`
+	Base string `json:"base"`
+}
+
+// fetchAllHighlightedFiles copies the highlighted files of every source
+// into destDir: this LR (at base) first, then each other LR it reports from
+// GET /api/file-peers (agent-coordinator's /host/<node> proxies), then
+// agent-coordinator's own files (acHighlightedSources). This LR failing is
+// an error; a peer that can't be listed or copied from is logged and
+// skipped, so one unreachable node doesn't block the rest. A file id
+// already copied from an earlier source is skipped rather than overwritten.
+func fetchAllHighlightedFiles(base, destDir string) ([]resourceLink, error) {
+	links, err := fetchHighlightedFilesFrom(base, destDir, nil)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, l := range links {
+		seen[l.Filename] = true
+	}
+
+	peers, err := listHighlightedPeers(base)
+	if err != nil {
+		log.Printf("add resource: listing other local-representatives: %v", err)
+	}
+	for _, src := range append(peers, acHighlightedSources()...) {
+		got, err := fetchHighlightedFilesFrom(src.Base, destDir, seen)
+		if err != nil {
+			log.Printf("add resource: highlighted files on %s: %v", src.Node, err)
+			continue
+		}
+		for _, l := range got {
+			seen[l.Filename] = true
+			l.Name = fmt.Sprintf("%s (%s)", l.Name, src.Node)
+			links = append(links, l)
+		}
+	}
+	return links, nil
+}
+
+// listHighlightedPeers asks this LR (at base) for the other LRs connected to
+// agent-coordinator (see local-representative/filepeers.go). An LR that
+// predates GET /api/file-peers answers 404, which just means no peers.
+func listHighlightedPeers(base string) ([]highlightedSource, error) {
+	resp, err := http.Get(base + "/api/file-peers")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	var msg struct {
+		Peers []highlightedSource `json:"peers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		return nil, err
+	}
+	return msg.Peers, nil
+}
+
+// acHighlightedSources is where agent-coordinator's own files will join the
+// "Highlighted" sources. AC has no files of its own yet, so for now there
+// are none.
+func acHighlightedSources() []highlightedSource {
+	return nil
+}
+
+// fetchHighlightedFilesFrom does the actual HTTP work for one source against
+// a resolved base URL -- split out so it can be exercised against an
+// httptest.Server without a real representable connection. Files whose id
+// is in skip (which may be nil) are left out.
+func fetchHighlightedFilesFrom(base, destDir string, skip map[string]bool) ([]resourceLink, error) {
 	resp, err := http.Get(base + "/api/files")
 	if err != nil {
 		return nil, fmt.Errorf("listing local-representative's files: %w", err)
@@ -184,7 +260,7 @@ func fetchHighlightedFilesFrom(base, destDir string) ([]resourceLink, error) {
 
 	var links []resourceLink
 	for _, f := range listing.Files {
-		if !f.Highlighted {
+		if !f.Highlighted || skip[f.ID] {
 			continue
 		}
 		if err := downloadFile(base, f.ID, destDir); err != nil {

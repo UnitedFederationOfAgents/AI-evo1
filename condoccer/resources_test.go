@@ -139,7 +139,7 @@ func TestFetchHighlightedFilesFrom(t *testing.T) {
 	defer srv.Close()
 
 	destDir := t.TempDir()
-	links, err := fetchHighlightedFilesFrom(srv.URL, destDir)
+	links, err := fetchHighlightedFilesFrom(srv.URL, destDir, nil)
 	if err != nil {
 		t.Fatalf("fetchHighlightedFilesFrom: %v", err)
 	}
@@ -173,12 +173,78 @@ func TestFetchHighlightedFilesFromNoneHighlighted(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	links, err := fetchHighlightedFilesFrom(srv.URL, t.TempDir())
+	links, err := fetchHighlightedFilesFrom(srv.URL, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(links) != 0 {
 		t.Errorf("expected no links, got %+v", links)
+	}
+}
+
+// fakeFilesTab serves a files tab at prefix ("" or "/host/<node>") on mux,
+// listing files (id -> highlighted) with each file's content being its id.
+func fakeFilesTab(mux *http.ServeMux, prefix string, files map[string]bool) {
+	mux.HandleFunc(prefix+"/api/files", func(w http.ResponseWriter, r *http.Request) {
+		var list []map[string]interface{}
+		for id, hl := range files {
+			list = append(list, map[string]interface{}{"id": id, "name": strings.SplitN(id, "_", 2)[1], "highlighted": hl})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"files": list})
+	})
+	mux.HandleFunc(prefix+"/api/files/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.TrimPrefix(r.URL.Path, prefix+"/api/files/")))
+	})
+}
+
+// TestFetchAllHighlightedFilesIncludesPeers verifies the "Highlighted"
+// source (Revision K) copies the highlighted files of this LR and of every
+// peer LR it reports, labels peer files with their node, skips an id
+// already copied, and carries on past an unreachable peer.
+func TestFetchAllHighlightedFilesIncludesPeers(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	fakeFilesTab(mux, "", map[string]bool{"aaa_local.txt": true, "bbb_off.txt": false})
+	fakeFilesTab(mux, "/host/node-b", map[string]bool{"ccc_peer.txt": true, "aaa_local.txt": true})
+	mux.HandleFunc("/api/file-peers", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node": "node-a",
+			"peers": []highlightedSource{
+				{Node: "node-b", Base: srv.URL + "/host/node-b"},
+				{Node: "node-c", Base: srv.URL + "/host/node-c"}, // 404s
+			},
+		})
+	})
+
+	destDir := t.TempDir()
+	links, err := fetchAllHighlightedFiles(srv.URL, destDir)
+	if err != nil {
+		t.Fatalf("fetchAllHighlightedFiles: %v", err)
+	}
+	want := []resourceLink{
+		{Name: "local.txt", Filename: "aaa_local.txt"},
+		{Name: "peer.txt (node-b)", Filename: "ccc_peer.txt"},
+	}
+	if len(links) != len(want) || links[0] != want[0] || links[1] != want[1] {
+		t.Fatalf("links = %+v, want %+v", links, want)
+	}
+	if got, err := os.ReadFile(filepath.Join(destDir, "ccc_peer.txt")); err != nil || string(got) != "ccc_peer.txt" {
+		t.Errorf("peer file = %q, %v", got, err)
+	}
+}
+
+// TestFetchAllHighlightedFilesOlderLR verifies an LR without
+// GET /api/file-peers still gives its own highlighted files.
+func TestFetchAllHighlightedFilesOlderLR(t *testing.T) {
+	mux := http.NewServeMux()
+	fakeFilesTab(mux, "", map[string]bool{"aaa_local.txt": true})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	links, err := fetchAllHighlightedFiles(srv.URL, t.TempDir())
+	if err != nil || len(links) != 1 || links[0].Filename != "aaa_local.txt" {
+		t.Fatalf("links = %+v, err = %v", links, err)
 	}
 }
 
@@ -695,7 +761,7 @@ func TestFetchHighlightedFilesFromExtractsZip(t *testing.T) {
 	defer srv.Close()
 
 	destDir := t.TempDir()
-	if _, err := fetchHighlightedFilesFrom(srv.URL, destDir); err != nil {
+	if _, err := fetchHighlightedFilesFrom(srv.URL, destDir, nil); err != nil {
 		t.Fatalf("fetchHighlightedFilesFrom: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(destDir, "aaa_seq", "step-1.jpg"))

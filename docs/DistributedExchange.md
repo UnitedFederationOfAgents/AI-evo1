@@ -72,6 +72,13 @@ reachable only by a browser connected directly to that LR — into
   action — inserting a resource block doesn't itself change the condoc's
   phase, so nothing else would otherwise stop local-representative's
   dev-repo watcher from rebuilding mid-operation.
+  Since Revision K of `initialRobotImpls/Step3Prompt.md`, "Highlighted" also
+  takes the highlighted files of every other LR connected to AC: LR's new
+  `GET /api/file-peers` (`local-representative/filepeers.go`) lists them as
+  AC `/host/<node>` proxy bases, and condoccer reads each one's
+  `/api/files` the same way, labelling those links `<name> (<node>)`. An
+  unreachable peer is logged and skipped. AC's own files will join as a
+  further source once AC has a files tab (`acHighlightedSources`).
 - **Revision B of Step5SubstepRPrompt.md makes a resource block a first-class
   citizen of the condoc viewer**, rather than unstyled text tacked onto
   whichever Reply/Revision preceded it. The heading dropped its parens

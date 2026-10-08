@@ -24,7 +24,10 @@ import (
 //     node's robot records one thing at a time;
 //   - Node is a node connected to agent-coordinator, as a literal name or a
 //     {{reference}} to the sequence's controls and built-ins ({{this_node}},
-//     a node control), filled in when the run starts.
+//     a node control), filled in when the run starts -- or to a value a step
+//     before the block saves (node-wait-connected's save_as, say: a node
+//     that only joins agent-coordinator during the run, like a rebuilt
+//     one), filled in when the block starts.
 //
 // This node's screen is recorded by its own robot ("__robot:record-start" /
 // "__robot:record-stop", ianar/lrrecord.go). Another node's is recorded by
@@ -83,6 +86,10 @@ func (b ControlRecordBlock) steps() string {
 
 // covers reports whether the block records step i (1-based).
 func (b ControlRecordBlock) covers(i int) bool { return b.From <= i && i <= b.To }
+
+// later reports whether the block's node, in a compiled sequence, still
+// refers to a value saved during the run (see resolveRecordBlocks).
+func (b ControlRecordBlock) later() bool { return strings.Contains(b.Node, "{{") }
 
 // checkRecordBlocks checks a sequence's blocks against its nSteps steps:
 // each within them, at most controlMaxParallelRecordings at any step, and
@@ -199,15 +206,26 @@ func decodeRecordBlocks(n *yNode) ([]ControlRecordBlock, error) {
 
 // resolveRecordBlocks fills in the blocks' node and label references from
 // vars (the built-ins and the sequence's controls) and checks no node is
-// recorded twice at a step. A node left empty (a node control not yet
-// chosen) is caught when the run starts (checkRecordNodes).
-func resolveRecordBlocks(blocks []ControlRecordBlock, vars map[string]string) ([]ControlRecordBlock, error) {
+// recorded twice at a step. A node referring to a value saved during the
+// run is left as written, if savedBy (ctlSavedBy) has a step before the
+// block's first saving it: it's filled in when the block starts
+// (fillRecordNode). A node left empty (a node control not yet chosen) is
+// caught when the run starts (checkRecordNodes).
+func resolveRecordBlocks(blocks []ControlRecordBlock, vars map[string]string, savedBy map[string]int) ([]ControlRecordBlock, error) {
 	lookup := func(k string) (string, bool) { v, ok := vars[k]; return v, ok }
 	out := make([]ControlRecordBlock, len(blocks))
 	for k, b := range blocks {
 		node, err := ctlExpand(b.Node, lookup)
 		if err != nil {
-			return nil, fmt.Errorf("recording %d's node can only use the sequence's controls and built-ins: %v", k+1, err)
+			refs := ctlRefs(node)
+			if len(refs) == 0 {
+				return nil, fmt.Errorf("recording %d's node: %v", k+1, err)
+			}
+			for _, name := range refs {
+				if step, ok := savedBy[name]; !ok || step >= b.From {
+					return nil, fmt.Errorf("recording %d's node can only use the sequence's controls, built-ins and values saved by a step before step %d: {{%s}} isn't one", k+1, b.From, name)
+				}
+			}
 		}
 		label, _ := ctlExpand(b.Label, lookup)
 		out[k] = ControlRecordBlock{Node: strings.TrimSpace(node), From: b.From, To: b.To, Label: label}
@@ -346,6 +364,16 @@ func (r *controlRun) finishRecordings() {
 // the node's robot waits for it to let go of the recorder (up to
 // ianar's lrRecordHandoffWait), not for it to be saved.
 func (r *controlRun) startRecord(q controlSequence, rr *runRecord) bool {
+	if err := r.fillRecordNode(rr); err != nil {
+		r.e.setRecord(rr.idx, "error", "not recording: "+err.Error())
+		return false
+	}
+	for _, other := range r.records {
+		if other != rr && other.Node == rr.Node && other.rec != "" {
+			r.e.setRecord(rr.idx, "error", fmt.Sprintf("not recording: recording %d is already recording %s", other.idx+1, rr.Node))
+			return false
+		}
+	}
 	msg := ""
 	for _, other := range r.records {
 		if other != rr && other.Node == rr.Node && other.stopping() {
@@ -368,6 +396,33 @@ func (r *controlRun) startRecord(q controlSequence, rr *runRecord) bool {
 	rr.rec = rec
 	r.e.setRecord(rr.idx, "recording", "")
 	return true
+}
+
+// fillRecordNode fills in rr's node (and label) from the values the run has
+// saved so far, if it refers to one (ControlRecordBlock.later), and shows
+// the node on the run.
+func (r *controlRun) fillRecordNode(rr *runRecord) error {
+	if !rr.later() {
+		return nil
+	}
+	lookup := func(k string) (string, bool) { v, ok := r.vars[k]; return v, ok }
+	node, err := ctlExpand(rr.Node, lookup)
+	if err != nil {
+		return fmt.Errorf("%v -- the step meant to save it didn't", err)
+	}
+	if node = strings.TrimSpace(node); node == "" {
+		return fmt.Errorf("%s was saved empty, so there's no node to record", rr.Node)
+	}
+	rr.Node = node
+	if label, err := ctlExpand(rr.Label, lookup); err == nil {
+		rr.Label = label
+	}
+	r.e.mu.Lock()
+	if r.e.run != nil && rr.idx < len(r.e.run.Records) {
+		r.e.run.Records[rr.idx].Node, r.e.run.Records[rr.idx].Label = rr.Node, rr.Label
+	}
+	r.e.mu.Unlock()
+	return nil
 }
 
 // stopRecord stops rr in the background, after the tail if tail is set, and

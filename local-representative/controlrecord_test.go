@@ -58,7 +58,7 @@ func TestResolveRecordBlocks(t *testing.T) {
 		{Node: "{{first}}", From: 2, To: 3},
 		{Node: "{{second}}", From: 3, To: 3},
 		{Node: "{{unset}}", From: 1, To: 3},
-	}, vars)
+	}, vars, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,12 +70,106 @@ func TestResolveRecordBlocks(t *testing.T) {
 		t.Errorf("checkRecordNodes = %v, want recording 4 to need a node", err)
 	}
 
-	_, err = resolveRecordBlocks([]ControlRecordBlock{{Node: "{{this_node}}", From: 1, To: 2}, {Node: "{{second}}", From: 2, To: 3}}, vars)
+	_, err = resolveRecordBlocks([]ControlRecordBlock{{Node: "{{this_node}}", From: 1, To: 2}, {Node: "{{second}}", From: 2, To: 3}}, vars, nil)
 	if err == nil || !strings.Contains(err.Error(), "lr-a at step 2") {
 		t.Errorf("same node side by side: err = %v", err)
 	}
-	if _, err := resolveRecordBlocks([]ControlRecordBlock{{Node: "{{later}}", From: 1, To: 1}}, vars); err == nil {
-		t.Error("a node from a value saved during the run resolved")
+	if _, err := resolveRecordBlocks([]ControlRecordBlock{{Node: "{{later}}", From: 1, To: 1}}, vars, nil); err == nil {
+		t.Error("a node from a value nothing saves resolved")
+	}
+}
+
+// TestRecordNodeSavedDuringRun: a block's node may refer to a value a step
+// before it saves -- a node that only joins agent-coordinator during the
+// run -- left as written until the block starts; not to one saved at or
+// after its first step.
+func TestRecordNodeSavedDuringRun(t *testing.T) {
+	vars := map[string]string{"this_node": "lr-a", "node": "laptop01"}
+	saved := map[string]int{"rebuilt_node": 3}
+	got, err := resolveRecordBlocks([]ControlRecordBlock{
+		{Node: "{{this_node}}", From: 1, To: 2},
+		{Node: "{{rebuilt_node}}", From: 4, To: 5, Label: "{{node}} as {{rebuilt_node}}"},
+	}, vars, saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[1].Node != "{{rebuilt_node}}" || !got[1].later() || got[0].later() || got[1].Label != "laptop01 as {{rebuilt_node}}" {
+		t.Errorf("resolved %+v", got)
+	}
+	for _, from := range []int{3, 2} {
+		_, err := resolveRecordBlocks([]ControlRecordBlock{{Node: "{{rebuilt_node}}", From: from, To: 5}}, vars, saved)
+		if err == nil || !strings.Contains(err.Error(), "before step") {
+			t.Errorf("from step %d, saved by step 3: err = %v", from, err)
+		}
+	}
+	if _, err := resolveRecordBlocks([]ControlRecordBlock{{Node: "{{rebuilt_nod}}", From: 4, To: 5}}, vars, saved); err == nil {
+		t.Error("a misspelt saved value resolved")
+	}
+}
+
+// TestCompileRecordsSavedNode: compiling works out which values steps save
+// -- save_as, as a step's controls fill it in, or the op's default -- so
+// a recording can follow a node-wait-connected.
+func TestCompileRecordsSavedNode(t *testing.T) {
+	actions := map[string]ControlActionDef{
+		"wait":   {ID: "wait", Name: "Wait", Controls: []ControlParam{{Name: "as", Default: "joined"}}, Do: []ControlInstruction{{"op": "node-wait-connected", "node": "{{node}}", "save_as": "{{as}}"}}},
+		"launch": {ID: "launch", Name: "Launch", Do: []ControlInstruction{{"op": "launch-fc"}}},
+		"shot":   {ID: "shot", Name: "Shot", Do: []ControlInstruction{{"op": "node-capture", "node": "{{rebuilt_node}}"}}},
+	}
+	savedBy := ctlSavedBy(ControlSequenceDef{Steps: []ControlStepRef{{Action: "launch"}, {Action: "wait", With: map[string]string{"as": "rebuilt_node"}}, {Action: "shot"}}}, actions, map[string]string{})
+	if want := map[string]int{"fc": 1, "rebuilt_node": 2}; !reflect.DeepEqual(savedBy, want) {
+		t.Errorf("saved by = %v, want %v", savedBy, want)
+	}
+
+	q := ControlSequenceDef{ID: "q", Name: "Q", Controls: []ControlParam{{Name: "node", Default: "laptop01"}},
+		Steps:      []ControlStepRef{{Action: "launch"}, {Action: "wait", With: map[string]string{"as": "rebuilt_node"}}, {Action: "shot"}},
+		Recordings: []ControlRecordBlock{{Node: "{{this_node}}", From: 1, To: 2}, {Node: "{{rebuilt_node}}", From: 3, To: 3}}}
+	seq, _, err := compileControlSequence(q, actions, nil, nil, time.Now(), "lr-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []ControlRecordBlock{{Node: "lr-a", From: 1, To: 2}, {Node: "{{rebuilt_node}}", From: 3, To: 3}}; !reflect.DeepEqual(seq.records, want) {
+		t.Errorf("records = %+v, want %+v", seq.records, want)
+	}
+	q.Steps[1].With = nil // saves joined instead
+	if _, _, err := compileControlSequence(q, actions, nil, nil, time.Now(), "lr-a"); err == nil {
+		t.Error("compiled a recording of a value no step saves")
+	}
+}
+
+// TestRecordNodeFilledInWhenItStarts: the run's saved value names the node
+// once the block starts, shown on the run; a value never saved fails only
+// that recording.
+func TestRecordNodeFilledInWhenItStarts(t *testing.T) {
+	s := newServer("test-lr")
+	r := recordingRun(s, ControlRecordBlock{Node: "{{rebuilt_node}}", From: 1, To: 1, Label: "{{rebuilt_node}} rebuilt"}, ControlRecordBlock{Node: "{{gone}}", From: 1, To: 1})
+	r.vars["rebuilt_node"] = "laptop01-ab3d"
+	q := exampleSequence(t)
+	if r.startRecord(q, r.records[0]) || r.startRecord(q, r.records[1]) {
+		t.Fatal("started recording with no agent-coordinator")
+	}
+	recs := s.control.state().Run.Records
+	if recs[0].Node != "laptop01-ab3d" || recs[0].Label != "laptop01-ab3d rebuilt" || !strings.Contains(recs[0].Message, "agent-coordinator") {
+		t.Errorf("record 1 = %+v, want laptop01-ab3d, failing for want of agent-coordinator", recs[0])
+	}
+	if recs[1].Node != "{{gone}}" || recs[1].Status != "error" || !strings.Contains(recs[1].Message, "didn't") {
+		t.Errorf("record 2 = %+v, want an error for the value never saved", recs[1])
+	}
+}
+
+// TestRecordNodeAlreadyRecording: a block whose node turns out, when it
+// starts, to be one another block is recording fails rather than taking
+// over its recorder.
+func TestRecordNodeAlreadyRecording(t *testing.T) {
+	s := newServer("test-lr")
+	r := recordingRun(s, ControlRecordBlock{Node: "lr-b", From: 1, To: 2}, ControlRecordBlock{Node: "{{again}}", From: 2, To: 2})
+	r.records[0].rec = "x"
+	r.vars["again"] = "lr-b"
+	if r.startRecord(exampleSequence(t), r.records[1]) {
+		t.Fatal("started a second recording of lr-b")
+	}
+	if rec := s.control.state().Run.Records[1]; rec.Status != "error" || !strings.Contains(rec.Message, "recording 1 is already recording lr-b") {
+		t.Errorf("record 2 = %+v", rec)
 	}
 }
 

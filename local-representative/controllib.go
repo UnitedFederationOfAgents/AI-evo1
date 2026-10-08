@@ -143,6 +143,17 @@ func ctlCheckTemplate(s string) error {
 	return nil
 }
 
+// ctlRefs lists the names s refers to as {{name}}, skipping malformed ones.
+func ctlRefs(s string) []string {
+	var out []string
+	for _, m := range ctlTmplRe.FindAllStringSubmatch(s, -1) {
+		if name, err := ctlParseRef(m[1]); err == nil {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // ctlExpand replaces each {{name}} in s with its value. A reference lookup
 // can't fill stays as written, and the first such is returned as an error.
 func ctlExpand(s string, lookup func(string) (string, bool)) (string, error) {
@@ -1189,7 +1200,7 @@ func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActi
 		}
 		vars[c.Name] = v
 	}
-	records, err := resolveRecordBlocks(q.Recordings, vars)
+	records, err := resolveRecordBlocks(q.Recordings, vars, ctlSavedBy(q, actions, vars))
 	if err != nil {
 		return controlSequence{}, nil, err
 	}
@@ -1222,6 +1233,42 @@ func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActi
 		})
 	}
 	return seq, vars, nil
+}
+
+// ctlSavedBy maps each name q's steps save (save_as, or the op's default
+// for it) to the first step (1-based) that saves it, as far as it can be
+// worked out before the run. Only LR's own ops count: a robot.* op's
+// save_as is the robot's, not the run's.
+func ctlSavedBy(q ControlSequenceDef, actions map[string]ControlActionDef, vars map[string]string) map[string]int {
+	out := map[string]int{}
+	for i, st := range q.Steps {
+		a, ok := actions[st.Action]
+		if !ok {
+			continue
+		}
+		scope := ctlPreviewScope(a, st, vars)
+		for _, in := range a.Do {
+			spec, native := findControlOp(in["op"], nil)
+			if !native {
+				continue
+			}
+			raw, given := in["save_as"]
+			if !given {
+				if sa := spec.arg("save_as"); sa != nil {
+					raw = sa.Default
+				}
+			}
+			name, err := ctlExpand(raw, scope)
+			name = strings.TrimSpace(name)
+			if err != nil || !ctlNameRe.MatchString(name) {
+				continue
+			}
+			if _, seen := out[name]; !seen {
+				out[name] = i + 1
+			}
+		}
+	}
+	return out
 }
 
 // ctlPreviewScope is the lookup used to describe an action's instructions

@@ -167,11 +167,22 @@ To help you find the setting, LR now logs at startup what it's set to and which 
 The changes are in `controlnodes.go`, `control.go` and `main.go`, with the wording updated in `controlops.go`, `controlexamples.go` and the README. I left the hand-off example's hint text alone, because changing it could make unedited copies look edited. I added tests to `controlnodes_test.go` for the `*` default and the new error.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+As a quick touch-up, let's make it so that in FC's startup text:
+
+● session: /host-agent-files/agent-records/2026-10-08-provisioner01-rfge-default
+  agent: claude | 'set-agent <name>' to change | 'list-agents' for options
+  model: 'set-model <name>' to override | 'list-models' for options
+  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI
+  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)
+  records: 'list-sessions' | 'select-session' to switch interactively | add '-provide-records <id>' to agent command
+  multi-line: trailing \, unclosed quotes, or <<<DELIMITER
+
+⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): federation-command, clauditable, ambiguous-agent
+◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session
+⟳ auto-connect enabled: dialing local-representative at localhost:8082 every 10s for up to 10m0s (runs in background; adopts remote control — local input suspended until local-representative connects)
+auto-connect: connected to local-representative at localhost:8082 (remote control)
 
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We want to see a timestamp of the startup time as well.

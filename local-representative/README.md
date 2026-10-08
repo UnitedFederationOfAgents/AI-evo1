@@ -305,8 +305,11 @@ The **control** tab sequences actions across this host's sub-apps
 - **composer** — sequences: actions in order with values for their
   controls, and slim **recording** blocks to the right of the steps
   (`controlrecord.go`). Each block records one node's screen from its first
-  step to its last: this node's (`{{this_node}}`), a node control's, or any
-  node connected to agent-coordinator. Blocks may overlap, up to 3 side by
+  step to its last: this node's (`{{this_node}}`), a node control's, any
+  node connected to agent-coordinator, or a node saved by a step before the
+  block (e.g. `{{rebuilt_node}}` from `node-wait-connected`'s `save_as`: a
+  node that only joins during the run), filled in when the block starts.
+  Blocks may overlap, up to 3 side by
   side, but a node can't be in two blocks at the same step. Another node's
   screen is recorded by that node's robot, asked through agent-coordinator
   (`node-record`), and the video is copied into this files tab. Every

@@ -1,7 +1,7 @@
 .PHONY: test test-all build-all clean-all deploy-dev-binaries check-dev-deps
 
 # Sub-projects in this directory
-SUBPROJECTS = ufa-configurable ufa-version ufa-loader clauditable clod ambiguous-agent federation-command dungeon-keeper condoccer session-manager the-conversationalist ianar local-representative agent-coordinator
+SUBPROJECTS = ufa-configurable ufa-version ufa-hostid ufa-loader clauditable clod ambiguous-agent federation-command dungeon-keeper condoccer session-manager the-conversationalist ianar local-representative agent-coordinator
 
 DEV_BIN_DIR=/AI-evo1-dev/bin
 # Staging dir binaries are actually built into -- a sibling of DEV_BIN_DIR so
@@ -12,15 +12,24 @@ DEV_BIN_STAGING_DIR=$(DEV_BIN_DIR).new
 # Run tests in all sub-projects
 test: test-all
 
+#
+# Every sub-project is tested even if an earlier one fails, so a single
+# failure doesn't hide the state of the rest; the failures are listed (and
+# the target fails) at the end.
 test-all:
 	@echo "Running tests for all AI-evo1 sub-projects..."
-	@for proj in $(SUBPROJECTS); do \
+	@failed=""; \
+	for proj in $(SUBPROJECTS); do \
 		echo ""; \
 		echo "=== Testing $$proj ==="; \
-		$(MAKE) -C $$proj test || exit 1; \
-	done
-	@echo ""
-	@echo "=== All tests passed ==="
+		$(MAKE) -C $$proj test || failed="$$failed $$proj"; \
+	done; \
+	echo ""; \
+	if [ -n "$$failed" ]; then \
+		echo "=== Tests FAILED in:$$failed ==="; \
+		exit 1; \
+	fi; \
+	echo "=== All tests passed ==="
 
 # Build all sub-projects
 build-all:

@@ -160,3 +160,32 @@ make: *** [Makefile:17: test-all] Error 1
 
 
 Let's fix these.
+
+
+prompt: [`61ace9d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/61ace9d41afa4d6ef39d6e4dae1075242d3854b6) → reply: [`39640dd`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/39640dd7d7ede5e175cfbfd13e5181fdf7f0df10)
+
+## Reply
+
+I fixed the two test failures, but I haven't run anything: `go` needed approval here, so please re-run `make test` on the host. Not all tests ran last time either. `test-all` stopped at the first failing sub-project, so the 11 after `ufa-loader` never ran, and `ufa-hostid` was never on the list.
+
+- **Cause of both failures:** your shell inherits `UFA_LOADER_STATE` from LR, because it was opened under it. That's the LR state you can see in the failure output.
+  - `TestPreviousState` read that inherited value.
+  - `TestLoaderCarriesStateForward` failed because of a real bug: `ufa-loader` passed any inherited state on to its child's first launch.
+- **Fixes:**
+  - **The bug:** `ufa-loader/main.go` now removes `UFA_LOADER_STATE` and `UFA_LOADER_INIT` from what it passes on, through a new `childEnviron()`, before setting its own values.
+  - **`TestLoaderCarriesStateForward`** now sets a stale state on purpose, so it checks for this case every time.
+  - **`TestPreviousState`** clears the variable first.
+  - **LR's `TestLoadPreviousStateNoEnv`** in `reststate_test.go` had the same problem and would have failed next, so it clears the variable too.
+- **Running every sub-project:** in the top-level `Makefile`, `test-all` now tests every sub-project even after a failure. At the end it lists the ones that failed and exits with an error.
+- **`ufa-hostid` was being skipped:** it has a `test` target but wasn't in `SUBPROJECTS`. I added it, which also puts it in `build-all` and `deploy-dev-binaries`; as a library it has nothing to deploy.
+- **Still skipped:** `representable` has a test file but no Makefile, so `test-all` still doesn't run it.
+
+
+## <REPLACE-Revision|Retry> A
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.

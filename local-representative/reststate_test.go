@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -101,6 +102,10 @@ func TestCurrentStateCapturesManagedApps(t *testing.T) {
 // fresh launch (UFA_LOADER_STATE unset), as it will be for every launch not
 // coming out of an announced restart.
 func TestLoadPreviousStateNoEnv(t *testing.T) {
+	// The test may itself run under a loader-managed process (e.g. a shell
+	// opened from local-representative) that already has UFA_LOADER_STATE set.
+	t.Setenv("UFA_LOADER_STATE", "")
+	os.Unsetenv("UFA_LOADER_STATE")
 	if _, ok := loadPreviousState(); ok {
 		t.Fatal("expected ok=false with no restart state in the environment")
 	}

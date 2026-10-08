@@ -3,6 +3,7 @@ package restartsignal
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -163,6 +164,10 @@ func TestAnnounceStateRoundTrip(t *testing.T) {
 // false when it's unset or empty (a fresh launch, or a prior announcement
 // with no state).
 func TestPreviousState(t *testing.T) {
+	// The test may itself run under a loader-managed process (e.g. a shell
+	// opened from local-representative) that already has StateEnvVar set.
+	t.Setenv(StateEnvVar, "")
+	os.Unsetenv(StateEnvVar)
 	if _, ok := PreviousState(); ok {
 		t.Fatal("expected ok=false with StateEnvVar unset")
 	}

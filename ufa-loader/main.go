@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -120,7 +121,7 @@ func (l *loader) runOnce(sigCh <-chan os.Signal, state json.RawMessage) (exitCod
 	// Let the sub-application detect it is loader-managed (see
 	// restartsignal.IsLoaderManaged) without needing to know anything else
 	// about how it was invoked.
-	env := append(os.Environ(), restartsignal.InitEnvVar+"=1")
+	env := append(childEnviron(), restartsignal.InitEnvVar+"=1")
 	if len(state) > 0 {
 		// Hand the previous instance's disclosed state back to this one
 		// (see restartsignal.PreviousState) — opaque to ufa-loader itself.
@@ -178,4 +179,21 @@ func (l *loader) runOnce(sigCh <-chan os.Signal, state json.RawMessage) (exitCod
 	}
 	log.Printf("%s (pid %d) exited %d", l.bin, cmd.Process.Pid, code)
 	return code, nil
+}
+
+// childEnviron returns ufa-loader's own environment minus the loader
+// variables it sets itself (see restartsignal.InitEnvVar / StateEnvVar).
+// ufa-loader may itself run inside a loader-managed process tree (e.g. a
+// shell opened from local-representative), and an inherited StateEnvVar
+// would otherwise hand that unrelated app's state to our child's very first
+// launch.
+func childEnviron() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, restartsignal.InitEnvVar+"=") || strings.HasPrefix(kv, restartsignal.StateEnvVar+"=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
 }

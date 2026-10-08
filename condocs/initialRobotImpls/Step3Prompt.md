@@ -452,11 +452,6 @@ New tests are in `ianar/lrcancel_test.go`. Robot runs started from the robot's o
 [Step 3 Substep N](Step3SubstepNPrompt.md)
 
 
-## <REPLACE-Revision|Retry> N
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1791462554 (Thu Oct 8 12:29:14 PM UTC 2026).

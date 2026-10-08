@@ -16,11 +16,8 @@ prompt: [`57c5317`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5
 Each turn in session-manager's transcript now has an **⤢ expand** button that opens that turn's full `-processed.txt` file. To go back **up**, use the **↑ transcript** button (styled like condoccer's ↑ buttons) or press Escape, and the transcript reappears at the scroll position you left. Nothing has been built or tested: `go test` and `tsc` needed approval here, so please run `make build` and `make test` in `session-manager` on the host. The changes are in `sessions.go` and `main.go` (a new `view-processed` request, with new tests in `sessions_test.go`) and the frontend's `App.tsx`, `types.ts` and `index.css`.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+In our session-manager expanded view let's depict the header jsonl blob as an attractive table.
 
-
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+Let's also strip the IN>> and OUT>> and use colouration to depict command/response.

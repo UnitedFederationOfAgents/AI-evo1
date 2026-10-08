@@ -311,9 +311,13 @@ The **control** tab sequences actions across this host's sub-apps
   screen is recorded by that node's robot, asked through agent-coordinator
   (`node-record`), and the video is copied into this files tab. Every
   recording is gathered on the run and in its saved zip. ⏺ beside a step
-  starts a block there; the recordings list below the steps sets each
-  block's node, steps and label. A library saved before blocks existed
-  (`record: [robot]`, `before_recording`) loads as one block of this node.
+  starts a block there; drag a block's top or bottom end to change its
+  steps, and the recordings list below the steps sets each block's node,
+  steps and label. A node's blocks may follow straight on from each other
+  (the hand-off example records steps 2–4, then 5–7): the next takes over
+  the screen as soon as the one before stops, without waiting for it to be
+  saved. A library saved before blocks existed (`record: [robot]`,
+  `before_recording`) loads as one block of this node.
 
 Values may refer to controls, built-ins (`{{timestamp}}`, when the run
 started, and `{{this_node}}`, the node running it) and values earlier

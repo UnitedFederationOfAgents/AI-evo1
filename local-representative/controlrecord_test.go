@@ -96,9 +96,7 @@ func TestRunStartNeedsRecordingNodes(t *testing.T) {
 
 // TestLegacyRecordIsOneBlock: a sequence saved before recording blocks
 // (record: [robot], leading steps before_recording) reads as one block of
-// this node from the first recorded step to the last -- the same as the
-// hand-off example now ships, so an unedited copy isn't taken for an edited
-// one.
+// this node from the first recorded step to the last.
 func TestLegacyRecordIsOneBlock(t *testing.T) {
 	src := `
 format: lr-control-v1
@@ -156,6 +154,47 @@ func TestFinishRecordingsSkipsUnstarted(t *testing.T) {
 	recs := s.control.state().Run.Records
 	if len(recs) != 2 || recs[0].Status != "error" || recs[1].Status != "skipped" {
 		t.Errorf("records = %+v", recs)
+	}
+}
+
+// TestHandsOff: a recording whose node's next recording starts with the
+// following step hands the screen straight over (stops without its tail);
+// one with a gap, or followed by another node's, doesn't.
+func TestHandsOff(t *testing.T) {
+	s := newServer("test-lr")
+	r := recordingRun(s,
+		ControlRecordBlock{Node: "test-lr", From: 2, To: 4},
+		ControlRecordBlock{Node: "test-lr", From: 5, To: 7},
+		ControlRecordBlock{Node: "lr-b", From: 1, To: 3},
+		ControlRecordBlock{Node: "lr-b", From: 5, To: 5},
+		ControlRecordBlock{Node: "lr-c", From: 6, To: 6},
+	)
+	for k, want := range []bool{true, false, false, false, false} {
+		if got := r.handsOff(r.records[k]); got != want {
+			t.Errorf("recording %d hands off = %v, want %v", k+1, got, want)
+		}
+	}
+}
+
+// TestUpgradeFormerHandoff: an unedited copy of the hand-off as Step4Prompt.md
+// first shipped it (steps 2-8 as one block) -- or read from a library saved
+// before recording blocks -- takes the two blocks, whatever the library
+// recorded for it; an edited one is kept.
+func TestUpgradeFormerHandoff(t *testing.T) {
+	actions, sequences := exampleControlLibrary()
+	former := sequences[0]
+	former.Recordings = []ControlRecordBlock{{Node: "{{this_node}}", From: 2, To: 8}}
+	rec := map[string]string{ctlExampleKey("sequence", former.ID): "a print from an older encoding"}
+	_, got, _, updated := upgradeControlExamples(actions, append([]ControlSequenceDef{former}, sequences[1:]...), rec)
+	if !reflect.DeepEqual(got[0].Recordings, sequences[0].Recordings) || len(updated) != 1 {
+		t.Errorf("former hand-off not upgraded: %+v, updated %v", got[0].Recordings, updated)
+	}
+
+	edited := former
+	edited.Recordings = []ControlRecordBlock{{Node: "{{this_node}}", From: 3, To: 8}}
+	_, got, _, updated = upgradeControlExamples(actions, append([]ControlSequenceDef{edited}, sequences[1:]...), rec)
+	if !reflect.DeepEqual(got[0].Recordings, edited.Recordings) || len(updated) != 0 {
+		t.Errorf("edited hand-off replaced: %+v, updated %v", got[0].Recordings, updated)
 	}
 }
 

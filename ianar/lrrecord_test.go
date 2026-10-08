@@ -3,11 +3,14 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLRRecordingStartStop(t *testing.T) {
 	_, stops := stubSequence(t)
 	s := newServer()
+	defer func(w time.Duration) { lrRecordHandoffWait = w }(lrRecordHandoffWait)
+	lrRecordHandoffWait = 100 * time.Millisecond
 
 	if got := startLRRecording(RobotRecordRequest{Rec: "r1", Name: "fc-robot-handoff"}); got.Status != "recording" {
 		t.Fatalf("start = %+v", got)
@@ -37,6 +40,40 @@ func TestRecordingArtifactName(t *testing.T) {
 	a := recordingArtifact("FC robot hand-off!", ClipResultMsg{Success: true, VideoURL: "data:video/webm;base64,Zm9v"})
 	if !strings.HasPrefix(a.name, "ianar-recording-fc-robot-hand-off-") || !strings.HasSuffix(a.name, ".webm") {
 		t.Errorf("name = %q", a.name)
+	}
+}
+
+// TestLRRecordingHandoff: a recording asked for while the one before it
+// still holds the recorder -- back-to-back blocks of the same screen --
+// waits for it to stop rather than failing.
+func TestLRRecordingHandoff(t *testing.T) {
+	_, stops := stubSequence(t)
+	s := newServer()
+
+	if got := startLRRecording(RobotRecordRequest{Rec: "r1", Name: "steps-2-4"}); got.Status != "recording" {
+		t.Fatalf("start r1 = %+v", got)
+	}
+	// r2's start arrives before r1's stop, as it may through
+	// agent-coordinator.
+	started := make(chan RobotRecordMsg, 1)
+	go func() { started <- startLRRecording(RobotRecordRequest{Rec: "r2", Name: "steps-5-7"}) }()
+	time.Sleep(150 * time.Millisecond)
+	if got := s.stopLRRecording(RobotRecordRequest{Rec: "r1"}); got.Status != "saved" {
+		t.Fatalf("stop r1 = %+v", got)
+	}
+	select {
+	case got := <-started:
+		if got.Status != "recording" {
+			t.Fatalf("start r2 = %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("r2 never started")
+	}
+	if got := s.stopLRRecording(RobotRecordRequest{Rec: "r2"}); got.Status != "saved" || *stops != 2 {
+		t.Fatalf("stop r2 = %+v (stops %d)", got, *stops)
+	}
+	if lrRecordBusy() {
+		t.Error("the recorder is still marked busy")
 	}
 }
 

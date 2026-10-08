@@ -53,3 +53,24 @@ Let's ensure that our multi-step recording control is capable of what we need fr
 Recall that we need that bar to span multiple steps visually. (Note the markup in resource 'Adjustments To Recording')
 
 Let's implement that now.
+
+
+prompt: [`5f1c0f7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5f1c0f7803fe955d37905dc0b1328da0ffef8114) → reply: [`31eea3b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/31eea3bfb31c7d4f5020ccf8d7cf6a11c73374b3)
+
+## Reply A
+
+I've split the hand-off example into two recordings of this node: steps 2–4, then steps 5–7. Each recording in the composer and runner is now one bar spanning its steps, with draggable top and bottom ends to change which steps it covers. Two back-to-back recordings on the same node now hand over directly: the first stops without its 2-second tail, and the robot starts the second as soon as the first stops, instead of waiting for it to be saved. An unedited hand-off copy saved with the old single 2–8 recording, or in the older `record:` format, is upgraded to the new pair.
+
+Nothing has been built or tested: `go test` and `tsc` needed approval here, so please run `make build` and `make test` on the host.
+
+Your screenshot shows no recording bars at all, even though the hand-off already recorded steps 2–8, so desktop01's local-representative may be running an older build than AC's frontend. Redeploy it before checking the bars. The main changes are in `local-representative/frontend/src/ControlV1.tsx` (copied to AC), `controlrecord.go`, `controlexamples.go`, `controllib.go`, both `index.css` files and the LR README, plus `ianar/lrrecord.go` on the robot side, with new tests in `controlrecord_test.go` and `lrrecord_test.go`.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

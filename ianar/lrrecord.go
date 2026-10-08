@@ -20,8 +20,20 @@ import (
 // left running stops itself after lrRecordMax. While one runs it holds
 // clipMu, so Native Clip waits; LR's robot runs for the same sequence ask
 // not to record themselves (RobotRunRequest.NoRecord).
+//
+// One recording at a time, but a sequence may record this screen in
+// back-to-back blocks (Step4Prompt.md, Revision A: steps 2-4, then 5-7). So
+// a record-start arriving while another LR recording still holds the
+// recorder -- its record-stop just sent, or still on its way -- waits up to
+// lrRecordHandoffWait for it to stop (not to be saved: clipMu is released
+// as soon as it stops), rather than failing.
 
 const lrRecordMax = 10 * time.Minute
+
+// lrRecordHandoffWait is how long a record-start waits for an earlier LR
+// recording to stop; under LR's wait for the answer (controlRecordStart).
+// Overridable in tests.
+var lrRecordHandoffWait = 10 * time.Second
 
 // RobotRecordRequest is the JSON after "__robot:record-start " and
 // "__robot:record-stop ".
@@ -61,9 +73,34 @@ func (r *lrRecording) finish() ClipResultMsg {
 }
 
 var (
-	lrRecMu sync.Mutex
-	lrRecs  = map[string]*lrRecording{}
+	lrRecMu     sync.Mutex
+	lrRecs      = map[string]*lrRecording{}
+	lrFinishing int // recordings taken out of lrRecs that haven't stopped yet
 )
+
+// lrRecordBusy reports whether an LR recording holds (or is releasing) the
+// recorder.
+func lrRecordBusy() bool {
+	lrRecMu.Lock()
+	defer lrRecMu.Unlock()
+	return len(lrRecs) > 0 || lrFinishing > 0
+}
+
+// lockForLRRecording takes clipMu for a new LR recording, waiting up to
+// lrRecordHandoffWait while an earlier LR recording holds it. A Native Clip
+// or a robot run's own recording isn't waited for.
+func lockForLRRecording() bool {
+	deadline := time.Now().Add(lrRecordHandoffWait)
+	for {
+		if clipMu.TryLock() {
+			return true
+		}
+		if !lrRecordBusy() || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
 
 func (s *Server) handleRobotRecord(verb, arg string) {
 	var req RobotRecordRequest
@@ -82,7 +119,7 @@ func (s *Server) handleRobotRecord(verb, arg string) {
 // startLRRecording starts recording the screen for req.
 func startLRRecording(req RobotRecordRequest) RobotRecordMsg {
 	out := RobotRecordMsg{Rec: req.Rec}
-	if !clipMu.TryLock() {
+	if !lockForLRRecording() {
 		out.Status, out.Error = "error", "a native clip or sequence recording is already under way"
 		return out
 	}
@@ -112,12 +149,18 @@ func (s *Server) stopLRRecording(req RobotRecordRequest) RobotRecordMsg {
 	lrRecMu.Lock()
 	rec := lrRecs[req.Rec]
 	delete(lrRecs, req.Rec)
+	if rec != nil {
+		lrFinishing++
+	}
 	lrRecMu.Unlock()
 	if rec == nil {
 		out.Status, out.Error = "error", "no recording "+req.Rec+" is under way"
 		return out
 	}
 	clip := rec.finish()
+	lrRecMu.Lock()
+	lrFinishing--
+	lrRecMu.Unlock()
 	if !clip.Success {
 		out.Status, out.Error = "error", clip.Error
 		return out

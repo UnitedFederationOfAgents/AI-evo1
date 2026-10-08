@@ -54,7 +54,6 @@ const (
 	controlRecordRelayExtra      = 15 * time.Second // on top of the node's own wait, for the relay through AC
 	controlRecordCopyTimeout     = 10 * time.Minute // copying another node's recording into this files tab
 	controlMaxRecordingCopy      = 1 << 30          // the most a copied recording may be
-	controlRecordStopWait        = 5 * time.Minute  // a node's earlier recording finishing before it starts another
 )
 
 // ControlRecordBlock is one recording block of a sequence: Node's screen
@@ -296,13 +295,27 @@ func (r *controlRun) startRecordings(q controlSequence, i int) {
 }
 
 // stopRecordings stops, in the background, the recordings that end with step
-// i (0-based).
+// i (0-based). One whose node's next recording starts with the next step
+// (back-to-back blocks, Step4Prompt.md Revision A) stops without its tail:
+// the next one picks up the screen, as soon as this one lets go of the
+// node's recorder.
 func (r *controlRun) stopRecordings(i int) {
 	for _, rr := range r.records {
 		if rr.To == i+1 && rr.rec != "" {
-			r.stopRecord(rr)
+			r.stopRecord(rr, !r.handsOff(rr))
 		}
 	}
+}
+
+// handsOff reports whether another of the run's recordings of rr's node
+// starts with the step after rr's last.
+func (r *controlRun) handsOff(rr *runRecord) bool {
+	for _, next := range r.records {
+		if next != rr && next.Node == rr.Node && next.From == rr.To+1 {
+			return true
+		}
+	}
+	return false
 }
 
 // finishRecordings stops every recording still under way, marks those that
@@ -311,7 +324,7 @@ func (r *controlRun) finishRecordings() {
 	for _, rr := range r.records {
 		switch {
 		case rr.rec != "":
-			r.stopRecord(rr)
+			r.stopRecord(rr, true)
 		case rr.done == nil:
 			r.e.mu.Lock()
 			pending := r.e.run != nil && rr.idx < len(r.e.run.Records) && r.e.run.Records[rr.idx].Status == "pending"
@@ -328,19 +341,18 @@ func (r *controlRun) finishRecordings() {
 	}
 }
 
-// startRecord starts rr, after any earlier recording of the same node has
-// finished. It reports whether it started.
+// startRecord starts rr. It reports whether it started. An earlier
+// recording of the same node still stopping needn't be waited for here:
+// the node's robot waits for it to let go of the recorder (up to
+// ianar's lrRecordHandoffWait), not for it to be saved.
 func (r *controlRun) startRecord(q controlSequence, rr *runRecord) bool {
+	msg := ""
 	for _, other := range r.records {
 		if other != rr && other.Node == rr.Node && other.stopping() {
-			r.e.setRecord(rr.idx, "starting", "waiting for the recording before it on "+rr.Node+" to be saved…")
-			select {
-			case <-other.done:
-			case <-time.After(controlRecordStopWait):
-			}
+			msg = "taking over " + rr.Node + "'s screen from the recording before it…"
 		}
 	}
-	r.e.setRecord(rr.idx, "starting", "")
+	r.e.setRecord(rr.idx, "starting", msg)
 	rec := randomToken(8)
 	name := fmt.Sprintf("%s-%s-steps-%d-%d", q.id, rr.Node, rr.From, rr.To)
 	var err error
@@ -358,15 +370,17 @@ func (r *controlRun) startRecord(q controlSequence, rr *runRecord) bool {
 	return true
 }
 
-// stopRecord stops rr in the background, after the tail, and saves it into
-// this files tab; rr.done is closed once it's done.
-func (r *controlRun) stopRecord(rr *runRecord) {
+// stopRecord stops rr in the background, after the tail if tail is set, and
+// saves it into this files tab; rr.done is closed once it's done.
+func (r *controlRun) stopRecord(rr *runRecord, tail bool) {
 	rec := rr.rec
 	rr.rec = ""
 	rr.done = make(chan struct{})
 	go func() {
 		defer close(rr.done)
-		time.Sleep(controlRecordTail)
+		if tail {
+			time.Sleep(controlRecordTail)
+		}
 		r.e.setRecord(rr.idx, "saving", "")
 		here := rr.Node == r.s.lrName
 		var res RobotRecordMsg

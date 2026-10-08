@@ -158,43 +158,68 @@ function recTitle(b: ControlRecordBlock, k: number, st?: ControlRecordState): st
   return t
 }
 
-// RecordRail is one step's slice of the recording lanes beside the steps:
-// a piece of each block covering the step, in its lane, so a block reads as
-// one slim bar from its first step to its last. children (the composer's
-// add button) go after the lanes.
-function RecordRail({ step, blocks, layout, states, selected, onSelect, children }: {
-  step: number // 1-based
+// A step list with recordings is a grid (Step4Prompt.md Revision A): each
+// step one row in the first column, then a slim column per recording lane,
+// then (in the composer) a column of ⏺ buttons. A recording is then one
+// element spanning the rows of its first step to its last -- a single bar
+// across the steps and the gaps between them.
+const recGridColumns = (lanes: number, addColumn: boolean) =>
+  ['minmax(0, 1fr)', ...Array.from({ length: lanes }, () => '9px'), ...(addColumn ? ['auto'] : [])].join(' ')
+const stepCell = (i: number) => ({ gridRow: i + 1, gridColumn: 1 })
+
+type RecEnd = 'from' | 'to'
+
+// RecordBars draws each recording block as one bar in its lane, from its
+// first step's row to its last's (clamped to the nSteps there are, as an
+// edit may leave it past them). onGrab, in the composer, gives each bar
+// handles to drag its first and last step.
+function RecordBars({ blocks, layout, nSteps, states, selected, onSelect, onGrab }: {
   blocks: ControlRecordBlock[]
   layout: { lane: number[]; lanes: number }
+  nSteps: number
   states?: ControlRecordState[]
   selected?: number | null
   onSelect?: (k: number) => void
-  children?: ReactNode
+  onGrab?: (k: number, end: RecEnd) => void
 }) {
-  if (layout.lanes === 0 && !children) return null
   return (
-    <div className="ctl-rec-rail">
-      {Array.from({ length: layout.lanes }, (_, l) => {
-        const k = blocks.findIndex((b, j) => layout.lane[j] === l && covers(b, step))
-        if (k < 0) return <div key={l} className="ctl-rec-lane" />
-        const b = blocks[k]
+    <>
+      {blocks.map((b, k) => {
+        const from = Math.max(1, b.from)
+        const to = Math.min(nSteps, b.to)
+        if (from > to) return null
         const st = states?.[k]
         const cls = [
-          'ctl-rec-seg',
-          b.from === step && 'ctl-rec-seg-start',
-          b.to === step && 'ctl-rec-seg-end',
+          'ctl-rec-bar',
           st && `ctl-rec-st-${st.status}`,
-          selected === k && 'ctl-rec-seg-selected',
-          onSelect && 'ctl-rec-seg-click',
+          selected === k && 'ctl-rec-bar-selected',
+          onSelect && 'ctl-rec-bar-click',
         ].filter(Boolean).join(' ')
+        const grip = (end: RecEnd) => (
+          <span
+            className={`ctl-rec-grip ctl-rec-grip-${end}`}
+            title={end === 'from' ? 'drag to change the first step it records' : 'drag to change the last step it records'}
+            onPointerDown={e => {
+              e.preventDefault()
+              e.stopPropagation()
+              onGrab?.(k, end)
+            }}
+          />
+        )
         return (
-          <div key={l} className="ctl-rec-lane">
-            <div className={cls} style={{ background: recColor(k) }} title={recTitle(b, k, st)} onClick={onSelect ? () => onSelect(k) : undefined} />
-          </div>
+          <li
+            key={`rec-${k}`}
+            className={cls}
+            style={{ gridRow: `${from} / ${to + 1}`, gridColumn: 2 + layout.lane[k], background: recColor(k) }}
+            title={recTitle(b, k, st)}
+            onClick={onSelect ? () => onSelect(k) : undefined}
+          >
+            {onGrab && grip('from')}
+            {onGrab && grip('to')}
+          </li>
         )
       })}
-      {children}
-    </div>
+    </>
   )
 }
 
@@ -316,11 +341,11 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
           })}
         </div>
       )}
-      <ol className="ctl-steps">
+      <ol className="ctl-steps ctl-rec-grid" style={{ gridTemplateColumns: recGridColumns(recLayout.lanes, false) }}>
         {steps.map((st, i) => {
           const status = st.status ?? 'pending'
           return (
-            <li key={i} className={`ctl-step ctl-step-${status}`}>
+            <li key={i} className={`ctl-step ctl-step-${status}`} style={stepCell(i)}>
               <span className="ctl-step-icon">{stepIcon(status)}</span>
               <div className="ctl-step-body">
                 <div className="ctl-step-label">{i + 1}. {st.label}</div>
@@ -340,10 +365,10 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
                 )}
               </div>
               <span className="ctl-step-time">{status !== 'skipped' ? formatMs(st.duration_ms) : ''}</span>
-              <RecordRail step={i + 1} blocks={recBlocks} layout={recLayout} states={thisRun?.records} />
             </li>
           )
         })}
+        <RecordBars blocks={recBlocks} layout={recLayout} nSteps={steps.length} states={thisRun?.records} />
       </ol>
       {recBlocks.length > 0 && (
         <>
@@ -865,8 +890,12 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
   const pendingId = useRef('')
   const [addAction, setAddAction] = useState('')
   const [selRec, setSelRec] = useState<number | null>(null)
+  const [drag, setDrag] = useState<{ k: number; end: RecEnd } | null>(null)
+  const stepEls = useRef<(HTMLLIElement | null)[]>([])
   const d = ed.draft
   const recs = d.recordings ?? []
+  const recsRef = useRef(recs)
+  recsRef.current = recs
   const recLayout = recordLanes(recs)
   const problems = recordProblems(recs, d.steps.length)
   const nodeControls = (d.controls ?? []).filter(c => c.type === 'node' && c.name)
@@ -881,6 +910,27 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
   useEffect(() => {
     setSelRec(null)
   }, [ed.selected])
+  // Dragging a bar's end moves its first or last step to the step under
+  // the pointer, never past its other end.
+  useEffect(() => {
+    if (!drag) return
+    const move = (e: PointerEvent) => {
+      const tops = stepEls.current.slice(0, d.steps.length).map(el => el?.getBoundingClientRect().top ?? Infinity)
+      const step = Math.max(1, tops.filter(top => top <= e.clientY).length)
+      const b = recsRef.current[drag.k]
+      if (!b) return
+      // Only on a change: any update marks the sequence edited.
+      if (drag.end === 'from' && b.from !== Math.min(step, b.to)) setRec(drag.k, { from: Math.min(step, b.to) })
+      if (drag.end === 'to' && b.to !== Math.max(step, b.from)) setRec(drag.k, { to: Math.max(step, b.from) })
+    }
+    const up = () => setDrag(null)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+  }, [drag, d.steps.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const setRecs = (fn: (r: ControlRecordBlock[]) => ControlRecordBlock[]) => ed.update(q => ({ ...q, recordings: fn(q.recordings ?? []) }))
   const setRec = (k: number, patch: Partial<ControlRecordBlock>) => setRecs(r => r.map((b, j) => (j === k ? { ...b, ...patch } : b)))
@@ -978,15 +1028,16 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
       <div className="ctl-section">
         <div className="ctl-section-title">steps</div>
         <div className="ctl-hint">
-          The slim blocks to the right of the steps are recordings: each records one node's screen from its first step to its
-          last, up to {MAX_PARALLEL_RECORDINGS} side by side, never the same node twice at a step. ⏺ starts one at that step.
+          The slim bars to the right of the steps are recordings: each records one node's screen from its first step to its
+          last, up to {MAX_PARALLEL_RECORDINGS} side by side, never the same node twice at a step. ⏺ starts one at that step;
+          drag a bar's top or bottom end to change the steps it spans.
         </div>
-        <ol className="ctl-instrs ctl-comp-steps">
+        <ol className="ctl-instrs ctl-comp-steps ctl-rec-grid" style={{ gridTemplateColumns: recGridColumns(recLayout.lanes, d.steps.length > 0) }}>
           {d.steps.map((st, i) => {
             const a = actionById.get(st.action)
             const atStep = recs.filter(b => covers(b, i + 1)).length
-            return (
-              <li className="ctl-comp-step" key={i}>
+            return [
+              <li className="ctl-comp-step" key={i} style={stepCell(i)} ref={el => { stepEls.current[i] = el }}>
                 <div className="ctl-instr">
                   <div className="ctl-row">
                     <span className="ctl-num">{i + 1}.</span>
@@ -1013,20 +1064,31 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
                     </Field>
                   ))}
                 </div>
-                <RecordRail step={i + 1} blocks={recs} layout={recLayout} selected={selRec} onSelect={setSelRec}>
-                  <button
-                    className="ctl-rec-add"
-                    disabled={atStep >= MAX_PARALLEL_RECORDINGS}
-                    title={atStep >= MAX_PARALLEL_RECORDINGS ? `${MAX_PARALLEL_RECORDINGS} recordings already run at this step` : `start a recording at step ${i + 1}`}
-                    onClick={() => addRec(i + 1)}
-                  >
-                    ⏺
-                  </button>
-                </RecordRail>
-              </li>
-            )
+              </li>,
+              <li className="ctl-rec-add-cell" key={`add-${i}`} style={{ gridRow: i + 1, gridColumn: 2 + recLayout.lanes }}>
+                <button
+                  className="ctl-rec-add"
+                  disabled={atStep >= MAX_PARALLEL_RECORDINGS}
+                  title={atStep >= MAX_PARALLEL_RECORDINGS ? `${MAX_PARALLEL_RECORDINGS} recordings already run at this step` : `start a recording at step ${i + 1}`}
+                  onClick={() => addRec(i + 1)}
+                >
+                  ⏺
+                </button>
+              </li>,
+            ]
           })}
-          {d.steps.length === 0 && <li className="ctl-empty">No steps yet — add actions below.</li>}
+          <RecordBars
+            blocks={recs}
+            layout={recLayout}
+            nSteps={d.steps.length}
+            selected={selRec}
+            onSelect={setSelRec}
+            onGrab={(k, end) => {
+              setSelRec(k)
+              setDrag({ k, end })
+            }}
+          />
+          {d.steps.length === 0 && <li className="ctl-empty" style={stepCell(0)}>No steps yet — add actions below.</li>}
         </ol>
         <datalist id="ctl-node-list">
           <option value="{{this_node}}">{node}</option>

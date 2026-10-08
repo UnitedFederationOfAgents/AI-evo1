@@ -16,8 +16,10 @@ package main
 //   - upload that file to the files tab with node-fetch-file
 //   - delete the file, through the remote interface
 //
-// with this node's screen recorded from the launch to the end, as one
-// recording block (Step4Prompt.md, see controlrecord.go). node-fetch-file takes
+// with this node's screen recorded in two back-to-back recording blocks
+// (Step4Prompt.md Revision A, see controlrecord.go): steps 2-4, launching
+// and marking it and the robot taking local control, then steps 5-7, the
+// robot typing, handing back and the upload. node-fetch-file takes
 // any file unless this node's control-fetch-allow setting is set; if it is,
 // it has to allow the file (~/Desktop/found-it-*.txt, say).
 //
@@ -195,7 +197,10 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 				{Action: "fetch-node-file", Label: "Upload that file to the files tab", With: map[string]string{"node": "{{this_node}}", "path": "{{found_file}}"}},
 				{Action: "fc-remove-file", Label: "Delete the file", With: map[string]string{"path": "{{found_file}}"}},
 			},
-			Recordings: []ControlRecordBlock{{Node: "{{this_node}}", From: 2, To: 8}},
+			Recordings: []ControlRecordBlock{
+				{Node: "{{this_node}}", From: 2, To: 4, Label: "launch, mark and take local control"},
+				{Node: "{{this_node}}", From: 5, To: 7, Label: "type, hand back and upload"},
+			},
 		},
 		{
 			ID:          "capture-two-nodes",
@@ -225,4 +230,22 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 		},
 	}
 	return actions, sequences
+}
+
+// formerlyShippedSequence reports whether q is exactly an earlier build's
+// version of a built-in example, as this build reads it -- unedited, so
+// upgradeControlExamples takes it even when the library's record of it
+// doesn't match (a library saved before recording blocks re-reads in the
+// new form). So far: fc-robot-handoff recording steps 2-8 as one block, as
+// shipped by Step4Prompt.md and read from record: [robot] before it.
+func formerlyShippedSequence(q ControlSequenceDef) bool {
+	_, sequences := exampleControlLibrary()
+	for _, former := range sequences {
+		if former.ID != "fc-robot-handoff" || q.ID != former.ID {
+			continue
+		}
+		former.Recordings = []ControlRecordBlock{{Node: "{{this_node}}", From: 2, To: 8}}
+		return ctlSequencePrint(q) == ctlSequencePrint(former)
+	}
+	return false
 }

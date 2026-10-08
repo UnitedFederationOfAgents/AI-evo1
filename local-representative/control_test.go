@@ -172,11 +172,14 @@ func TestRobotRunNeedsRobot(t *testing.T) {
 	}
 }
 
-// TestHandoffSequenceRecordsTheRobotsScreen: one recording block, this
-// node's screen from the launch (step 2) to the end.
+// TestHandoffSequenceRecordsTheRobotsScreen: two back-to-back recording
+// blocks of this node's screen (Revision A), steps 2-4 then 5-7.
 func TestHandoffSequenceRecordsTheRobotsScreen(t *testing.T) {
 	q := exampleSequence(t)
-	want := []ControlRecordBlock{{Node: "test-lr", From: 2, To: 8}}
+	want := []ControlRecordBlock{
+		{Node: "test-lr", From: 2, To: 4, Label: "launch, mark and take local control"},
+		{Node: "test-lr", From: 5, To: 7, Label: "type, hand back and upload"},
+	}
 	if info := q.info(); !reflect.DeepEqual(info.Recordings, want) {
 		t.Errorf("recordings = %+v, want %+v", info.Recordings, want)
 	}

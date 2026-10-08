@@ -762,11 +762,12 @@ func upgradeControlExamples(actions []ControlActionDef, sequences []ControlSeque
 		key := ctlExampleKey("sequence", q.ID)
 		if i := indexOfControlSequence(sequences, q.ID); i >= 0 {
 			have, want := ctlSequencePrint(sequences[i]), ctlSequencePrint(q)
-			if have != want && rec[key] == have {
+			unedited := rec[key] == have || formerlyShippedSequence(sequences[i])
+			if have != want && unedited {
 				sequences[i] = q
 				updated = append(updated, "sequence "+q.ID)
 			}
-			if have == want || rec[key] == have {
+			if have == want || unedited {
 				out[key] = want
 			}
 		} else if _, known := rec[key]; !known {

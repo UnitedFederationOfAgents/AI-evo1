@@ -447,11 +447,11 @@ I've made the fixes for Revision M, but none of it is built or tested: `go` and 
 New tests are in `ianar/lrcancel_test.go`. Robot runs started from the robot's own runner tab, not from a control sequence, still can't be cancelled. There's no LR-side test for the cancel message, because LR's tests have no stand-in for the robot's connection.
 
 
-## <REPLACE-Revision|Retry> N
+## Substep N - Let's take a detour to fix our tests.
 
-<REPLACE-PROMPT>
+[Step 3 Substep N](Step3SubstepNPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep N is now active. Interact with the substep file (Step3SubstepNPrompt.md).

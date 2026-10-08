@@ -1099,7 +1099,8 @@ const fcWindowTitle = "federation-command"
 
 func (m appModel) Init() tea.Cmd {
 	info := strings.Join([]string{
-		sessionStyle.Render("● session: " + m.sessionDir),
+		sessionStyle.Render("● started: " + time.Now().Format("2006-01-02 15:04:05 MST")),
+		sessionStyle.Render("  session: " + m.sessionDir),
 		sessionStyle.Render("  agent: " + m.currentAgent + " | 'set-agent <name>' to change | 'list-agents' for options"),
 		sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"),
 		sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"),

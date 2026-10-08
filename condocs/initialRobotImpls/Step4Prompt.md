@@ -195,11 +195,11 @@ prompt: [`caf0787`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c
 FC's startup block now begins with a `● started: 2026-10-08 13:45:12 UTC`-style line showing the local date, time and time zone when FC launched. The session path moves to the next line as `  session: …`, and the rest of the block is unchanged. I haven't built or tested it because `go build` needed approval here, so please run `make build` on the host. The change is one line in `Init()` in `federation-command/main.go`, and `time` was already imported.
 
 
-## <REPLACE-Revision|Retry> D
+## Substep D - Small touch-ups
 
-<REPLACE-PROMPT>
+[Step 4 Substep D](Step4SubstepDPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep D is now active. Interact with the substep file (Step4SubstepDPrompt.md).

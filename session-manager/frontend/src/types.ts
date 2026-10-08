@@ -57,7 +57,9 @@ export interface SessionInfo {
   fields: [string, string][]
 }
 
-// SessionEntry is one readable turn of a session's transcript.
+// SessionEntry is one readable turn of a session's transcript. record is the
+// turn's record ID (its files' {timestamp} prefix) -- what "view-processed"
+// takes to expand it; absent when the turn's header carries no record_path.
 export interface SessionEntry {
   timestamp: string
   event_type?: string
@@ -65,6 +67,7 @@ export interface SessionEntry {
   model?: string
   duration_ms: number
   exit_code: number
+  record?: string
   input?: string
   output?: string
   error?: string
@@ -83,6 +86,17 @@ export interface SessionView {
   sync_incomplete?: boolean
 }
 
+// ProcessedView is the "processed-view" payload: one expanded turn's full
+// {record}-processed.txt (or -s-processed.txt), which the transcript only
+// previews. error is set instead of content when it couldn't be read.
+export interface ProcessedView {
+  id: string
+  record: string
+  file?: string
+  content: string
+  error?: string
+}
+
 // ArchiveResultMsg is the "archive-result" payload ("ufa session archive"
 // parity's outcome).
 export interface ArchiveResultMsg {
@@ -98,5 +112,6 @@ export type ServerMsg =
   | { type: 'sessions'; payload: SessionsMsg }
   | { type: 'session-info'; payload: SessionInfo }
   | { type: 'session-view'; payload: SessionView }
+  | { type: 'processed-view'; payload: ProcessedView }
   | { type: 'archive-result'; payload: ArchiveResultMsg }
   | { type: 'error'; payload: string }

@@ -236,6 +236,14 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		json.Unmarshal(m.Payload, &p)
 		s.sendSessionView(c, strings.TrimSpace(p.ID))
 
+	case "view-processed":
+		var p struct {
+			ID     string `json:"id"`
+			Record string `json:"record"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.sendProcessedView(c, strings.TrimSpace(p.ID), strings.TrimSpace(p.Record))
+
 	case "archive-sessions":
 		s.handleArchiveSessions(c)
 	}

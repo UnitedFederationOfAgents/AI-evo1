@@ -403,6 +403,82 @@ body {
 .transcript-exit-ok { color: #4ec94e; }
 .transcript-exit-err { color: #e07070; }
 
+.transcript-expand-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #888;
+  font-size: 10px;
+  font-family: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+.transcript-expand-btn:hover { color: #ccc; border-color: #555; }
+
+/* ---- Expanded turn (its -processed file) ---- */
+
+/* Wraps the transcript so it can be hidden, not unmounted, while a turn is
+   expanded -- keeping its scroll position for the way back up. */
+.session-transcript-scope {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-transcript-scope.is-hidden { display: none; }
+
+.processed-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.processed-pane-header {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid #333;
+}
+
+.processed-pane-file {
+  font-size: 12px;
+  color: #aaa;
+}
+
+.processed-pane > .session-detail-loading {
+  padding: 16px;
+}
+
+.processed-pane-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+}
+
+.nav-up-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.nav-up-btn:hover { color: #999; }
+
 .transcript-block {
   margin-top: 6px;
 }

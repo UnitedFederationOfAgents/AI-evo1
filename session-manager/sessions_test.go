@@ -368,3 +368,66 @@ func TestRenameSessionStripsQuotes(t *testing.T) {
 		t.Errorf("Name = %q, want %q", sessions[0].Name, "Renamed Without Quotes")
 	}
 }
+
+func TestParseSessionLogRecordID(t *testing.T) {
+	log := `{"timestamp":"2026-10-06T13:44:25Z","event_type":"command_execution","record_path":"/elsewhere/s/1791294265-raw.txt"}
+IN>> hi
+{"timestamp":"2026-10-06T13:45:00Z","event_type":"command_execution","record_path":"/elsewhere/s/1791294300-s-raw.txt"}
+IN>> secondary
+{"timestamp":"2026-10-06T13:46:00Z","event_type":"command_execution"}
+IN>> no record path
+`
+	entries := parseSessionLog([]byte(log))
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	for i, want := range []string{"1791294265", "1791294300", ""} {
+		if entries[i].Record != want {
+			t.Errorf("entry %d: record = %q, want %q", i, entries[i].Record, want)
+		}
+	}
+}
+
+func TestRecordIDFromPath(t *testing.T) {
+	cases := map[string]string{
+		"/a/b/1791294265-raw.txt": "1791294265",
+		"1791294265-s-raw.txt":    "1791294265",
+		"":                        "",
+		"/a/b/notanumber-raw.txt": "",
+		"/a/b/../../etc-raw.txt":  "",
+		"/a/b/1791294265.txt":     "",
+	}
+	for in, want := range cases {
+		if got := recordIDFromPath(in); got != want {
+			t.Errorf("recordIDFromPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestViewProcessed(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "s1")
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(sessionDir, "100-processed.txt"), []byte("primary"), 0644)
+	os.WriteFile(filepath.Join(sessionDir, "200-s-processed.txt"), []byte("secondary"), 0644)
+
+	v, err := viewProcessed(dir, "s1", "100")
+	if err != nil || v.File != "100-processed.txt" || v.Content != "primary" {
+		t.Errorf("primary: got %+v, %v", v, err)
+	}
+	v, err = viewProcessed(dir, "s1", "200")
+	if err != nil || v.File != "200-s-processed.txt" || v.Content != "secondary" {
+		t.Errorf("secondary: got %+v, %v", v, err)
+	}
+	if _, err := viewProcessed(dir, "s1", "300"); err == nil {
+		t.Error("missing record: expected an error")
+	}
+	if _, err := viewProcessed(dir, "s1", "../s1/100"); err == nil {
+		t.Error("non-numeric record: expected an error")
+	}
+	if _, err := viewProcessed(dir, "nope", "100"); err == nil {
+		t.Error("missing session: expected an error")
+	}
+}

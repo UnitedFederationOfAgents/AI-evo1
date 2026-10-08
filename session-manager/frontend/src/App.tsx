@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ArchiveResultMsg,
   ModeMismatchMsg,
+  ProcessedView,
   ReprStatus,
   ReprStatusMsg,
   SelfInfoMsg,
@@ -40,6 +41,13 @@ function useSessionManagerWS() {
   const [sessionView, setSessionView] = useState<SessionView | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
 
+  // The transcript turn currently expanded into its full -processed file,
+  // or null at the transcript level. expandedRef lets the message handler
+  // drop a "processed-view" reply for a turn that's no longer expanded.
+  const [expanded, setExpanded] = useState<{ id: string; record: string } | null>(null)
+  const [processedView, setProcessedView] = useState<ProcessedView | null>(null)
+  const expandedRef = useRef<{ id: string; record: string } | null>(null)
+
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -70,6 +78,26 @@ function useSessionManagerWS() {
     [send],
   )
 
+  // expandEntry scopes the transcript down into one turn's full -processed
+  // file; collapseEntry goes back "up" to the transcript, the way
+  // condoccer's ↑ buttons step back out of a step or substep.
+  const expandEntry = useCallback(
+    (id: string, record: string) => {
+      const target = { id, record }
+      expandedRef.current = target
+      setExpanded(target)
+      setProcessedView(null)
+      send('view-processed', target)
+    },
+    [send],
+  )
+
+  const collapseEntry = useCallback(() => {
+    expandedRef.current = null
+    setExpanded(null)
+    setProcessedView(null)
+  }, [])
+
   // selectSession picks a session for the detail pane and asks the server
   // for both its describe-parity info and its readable transcript.
   const selectSession = useCallback(
@@ -77,10 +105,11 @@ function useSessionManagerWS() {
       setSelectedId(id)
       setSessionInfo(null)
       setSessionView(null)
+      collapseEntry()
       send('describe-session', { id })
       send('view-session', { id })
     },
-    [send],
+    [send, collapseEntry],
   )
 
   const newSession = useCallback(
@@ -170,6 +199,12 @@ function useSessionManagerWS() {
             setSessionInfo(msg.payload as SessionInfo)
           } else if (msg.type === 'session-view') {
             setSessionView(msg.payload as SessionView)
+          } else if (msg.type === 'processed-view') {
+            const p = msg.payload as ProcessedView
+            const cur = expandedRef.current
+            if (cur && cur.id === p.id && cur.record === p.record) {
+              setProcessedView(p)
+            }
           } else if (msg.type === 'archive-result') {
             const p = msg.payload as ArchiveResultMsg
             if (p.error) {
@@ -179,6 +214,9 @@ function useSessionManagerWS() {
               setSelectedId(null)
               setSessionInfo(null)
               setSessionView(null)
+              expandedRef.current = null
+              setExpanded(null)
+              setProcessedView(null)
             } else {
               setNotice({ kind: 'success', message: 'no sessions to archive' })
             }
@@ -212,8 +250,12 @@ function useSessionManagerWS() {
     selectedId,
     sessionInfo,
     sessionView,
+    expanded,
+    processedView,
     notice,
     selectSession,
+    expandEntry,
+    collapseEntry,
     newSession,
     setCurrentSession,
     renameSession,
@@ -401,11 +443,26 @@ interface SessionDetailProps {
   currentId: string
   info: SessionInfo | null
   view: SessionView | null
+  expanded: { id: string; record: string } | null
+  processedView: ProcessedView | null
   onSetCurrent: (id: string) => void
   onRename: (id: string, name: string) => void
+  onExpand: (id: string, record: string) => void
+  onCollapse: () => void
 }
 
-function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: SessionDetailProps) {
+function SessionDetail({
+  id,
+  currentId,
+  info,
+  view,
+  expanded,
+  processedView,
+  onSetCurrent,
+  onRename,
+  onExpand,
+  onCollapse,
+}: SessionDetailProps) {
   const [tab, setTab] = useState<DetailTab>('details')
   const [renameInput, setRenameInput] = useState('')
   const [renaming, setRenaming] = useState(false)
@@ -494,7 +551,48 @@ function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: Se
           )}
         </div>
       ) : (
-        <SessionTranscript view={view} />
+        <>
+          {/* Hidden rather than unmounted while a turn is expanded, so going
+              back up lands at the same scroll position. */}
+          <div className={`session-transcript-scope${expanded ? ' is-hidden' : ''}`}>
+            <SessionTranscript view={view} onExpand={(record) => onExpand(id, record)} />
+          </div>
+          {expanded && <ProcessedPane record={expanded.record} view={processedView} onUp={onCollapse} />}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ProcessedPane is one transcript turn expanded into its full -processed
+// file -- everything the transcript's capped preview leaves out. "↑
+// transcript" (or Escape) goes back up, mirroring condoccer's scoping.
+function ProcessedPane({ record, view, onUp }: { record: string; view: ProcessedView | null; onUp: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (e.key === 'Escape' && !(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'))) {
+        onUp()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onUp])
+
+  return (
+    <div className="processed-pane">
+      <div className="processed-pane-header">
+        <button className="nav-up-btn" onClick={onUp} title="back to the transcript (Esc)">
+          ↑ transcript
+        </button>
+        <span className="processed-pane-file">{view?.file ?? `${record}-processed.txt`}</span>
+      </div>
+      {!view ? (
+        <div className="session-detail-loading">loading…</div>
+      ) : view.error ? (
+        <div className="session-transcript-warning">{view.error}</div>
+      ) : (
+        <pre className="processed-pane-content">{view.content}</pre>
       )}
     </div>
   )
@@ -503,8 +601,9 @@ function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: Se
 // SessionTranscript presents a session's session.jsonl in the "ice readable"
 // way Revision I asks for: one card per turn, timestamp/agent/model/
 // duration/exit-code header, then its input/output/error blocks -- instead
-// of the raw IN>>/OUT>>/ERR>> prefixed log text.
-function SessionTranscript({ view }: { view: SessionView | null }) {
+// of the raw IN>>/OUT>>/ERR>> prefixed log text. A turn with a record ID gets
+// an "expand" control that opens its full -processed file (ProcessedPane).
+function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExpand: (record: string) => void }) {
   if (!view) {
     return <div className="session-detail-body session-detail-loading">loading…</div>
   }
@@ -539,6 +638,15 @@ function SessionTranscript({ view }: { view: SessionView | null }) {
             <span className={`transcript-entry-tag ${e.exit_code === 0 ? 'transcript-exit-ok' : 'transcript-exit-err'}`}>
               exit {e.exit_code}
             </span>
+            {e.record && (
+              <button
+                className="transcript-expand-btn"
+                onClick={() => onExpand(e.record!)}
+                title={`open ${e.record}-processed.txt -- the full turn, not just this preview`}
+              >
+                ⤢ expand
+              </button>
+            )}
           </div>
           {e.input && (
             <div className="transcript-block transcript-block-in">
@@ -582,8 +690,12 @@ export default function App() {
     selectedId,
     sessionInfo,
     sessionView,
+    expanded,
+    processedView,
     notice,
     selectSession,
+    expandEntry,
+    collapseEntry,
     newSession,
     setCurrentSession,
     renameSession,
@@ -633,8 +745,12 @@ export default function App() {
             currentId={currentSessionId}
             info={sessionInfo}
             view={sessionView}
+            expanded={expanded}
+            processedView={processedView}
             onSetCurrent={setCurrentSession}
             onRename={renameSession}
+            onExpand={expandEntry}
+            onCollapse={collapseEntry}
           />
         ) : (
           <div className="empty-state">

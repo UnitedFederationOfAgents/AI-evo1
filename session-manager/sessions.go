@@ -31,7 +31,7 @@ import (
 //
 // main.go's handleClientMsg dispatches "list-sessions"/"new-session"/
 // "set-session"/"rename-session"/"describe-session"/"view-session"/
-// "archive-sessions" into the handlers below, which wrap the pure functions
+// "view-processed"/"archive-sessions" into the handlers below, which wrap the pure functions
 // below (path resolution, listing, describing, creating, renaming,
 // archiving, viewing) with WS request/response and s.currentSession
 // bookkeeping.
@@ -560,10 +560,14 @@ type sessionLogEvent struct {
 	Model      string `json:"model"`
 	DurationMs int64  `json:"duration_ms"`
 	ExitCode   int    `json:"exit_code"`
+	RecordPath string `json:"record_path"`
 }
 
 // SessionEntry is one readable turn of a session's transcript: the event
-// header plus its IN>>/OUT>>/ERR>> blocks with prefixes stripped.
+// header plus its IN>>/OUT>>/ERR>> blocks with prefixes stripped. Record is
+// the turn's record ID (see recordIDFromPath) -- what "view-processed" takes
+// to expand the turn into its full -processed file; empty when the header
+// carries no record_path.
 type SessionEntry struct {
 	Timestamp  string `json:"timestamp"`
 	EventType  string `json:"event_type,omitempty"`
@@ -571,6 +575,7 @@ type SessionEntry struct {
 	Model      string `json:"model,omitempty"`
 	DurationMs int64  `json:"duration_ms"`
 	ExitCode   int    `json:"exit_code"`
+	Record     string `json:"record,omitempty"`
 	Input      string `json:"input,omitempty"`
 	Output     string `json:"output,omitempty"`
 	Error      string `json:"error,omitempty"`
@@ -643,6 +648,7 @@ func parseSessionLog(data []byte) []SessionEntry {
 					Model:      ev.Model,
 					DurationMs: ev.DurationMs,
 					ExitCode:   ev.ExitCode,
+					Record:     recordIDFromPath(ev.RecordPath),
 				}
 				in.Reset()
 				out.Reset()
@@ -667,4 +673,97 @@ func parseSessionLog(data []byte) []SessionEntry {
 	}
 	flush()
 	return entries
+}
+
+// ---- expanding one turn (its {record}-processed.txt) ----
+
+// recordIDFromPath reduces an event header's record_path (e.g.
+// ".../1791294265-raw.txt", or a promoted secondary's "-s-raw.txt") to its
+// record ID, "1791294265" -- the {timestamp} prefix clauditable names every
+// file of one turn with (see clauditable/main.go's writeProcessedFile). Only
+// the base name is used: record_path is absolute on whichever host produced
+// the turn, which needn't match this host's AGENT_RECORDS_PATH. Returns ""
+// for anything that isn't a plain numeric prefix.
+func recordIDFromPath(recordPath string) string {
+	if recordPath == "" {
+		return ""
+	}
+	id, _, _ := strings.Cut(filepath.Base(recordPath), "-")
+	if !isRecordID(id) {
+		return ""
+	}
+	return id
+}
+
+// isRecordID reports whether s is a bare unix-timestamp record ID -- also
+// what keeps a client-supplied "view-processed" record from naming a path
+// outside the session directory.
+func isRecordID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// ProcessedView is the "processed-view" response: one turn's full
+// -processed file, which the transcript only previews (session.jsonl caps
+// each block at clauditable's MaxPreviewLines).
+type ProcessedView struct {
+	ID      string `json:"id"`
+	Record  string `json:"record"`
+	File    string `json:"file,omitempty"`
+	Content string `json:"content"`
+	Error   string `json:"error,omitempty"`
+}
+
+// processedFileNames are the names a record's processed file may have, in
+// preference order: a consolidated turn's {record}-processed.txt, then a
+// secondary's not-yet-consolidated {record}-s-processed.txt.
+func processedFileNames(record string) []string {
+	return []string{record + "-processed.txt", record + "-s-processed.txt"}
+}
+
+// viewProcessed reads id's processed file for record.
+func viewProcessed(recordsPath, id, record string) (ProcessedView, error) {
+	if !isRecordID(record) {
+		return ProcessedView{}, fmt.Errorf("invalid record %q", record)
+	}
+	sessionDir := filepath.Join(recordsPath, id)
+	if _, err := os.Stat(sessionDir); err != nil {
+		return ProcessedView{}, fmt.Errorf("session %q not found", id)
+	}
+	for _, name := range processedFileNames(record) {
+		data, err := os.ReadFile(filepath.Join(sessionDir, name))
+		if err == nil {
+			return ProcessedView{ID: id, Record: record, File: name, Content: string(data)}, nil
+		}
+		if !os.IsNotExist(err) {
+			return ProcessedView{}, fmt.Errorf("reading %s: %w", name, err)
+		}
+	}
+	return ProcessedView{}, fmt.Errorf("no processed file for record %s in session %q", record, id)
+}
+
+// sendProcessedView expands one transcript turn into its full -processed
+// file, replying to c only. The file is normally already here -- the
+// transcript's own sendSessionView synced the "*-processed.txt" glob -- so
+// this only asks local-representative to sync again when the first read
+// misses (e.g. a remote turn that landed after the transcript was fetched).
+// A failure is reported on the payload rather than as a generic "error", so
+// the expanded pane can show it in place.
+func (s *Server) sendProcessedView(c *wsClient, id, record string) {
+	view, err := viewProcessed(s.recordsPath, id, record)
+	if err != nil && isRecordID(record) {
+		s.triggerSessionSync(id)
+		view, err = viewProcessed(s.recordsPath, id, record)
+	}
+	if err != nil {
+		view = ProcessedView{ID: id, Record: record, Error: err.Error()}
+	}
+	s.sendToClient(c, "processed-view", view)
 }

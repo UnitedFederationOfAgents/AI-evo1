@@ -20,8 +20,8 @@ package main
 // (Step4Prompt.md Revision A, see controlrecord.go): steps 2-4, launching
 // and marking it and the robot taking local control, then steps 5-7, the
 // robot typing, handing back and the upload. node-fetch-file takes
-// any file unless this node's control-fetch-allow setting is set; if it is,
-// it has to allow the file (~/Desktop/found-it-*.txt, say).
+// any file by default (control-fetch-allow "*"); if this node's setting is
+// a list of paths, it has to allow the file (~/Desktop/found-it-*.txt, say).
 //
 // And a second (Revision F), capture-two-nodes: have the robots of two nodes
 // connected to agent-coordinator, chosen in the runner, each take a native

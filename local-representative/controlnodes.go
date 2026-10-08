@@ -53,9 +53,9 @@ import (
 //     "node-fetch-result", relayed by AC as "__control:node-fetch" and
 //     "__control:node-fetch-result"): the node saves the files a path or
 //     glob matches into its own files tab, and this LR copies them across.
-//     A node hands over any file by default; its control-fetch-allow
-//     setting, if set, limits it to the files that setting allows, whoever
-//     asks -- this node included.
+//     A node hands over any file by default (control-fetch-allow "*"); a
+//     control-fetch-allow list of paths limits it to the files that list
+//     allows, whoever asks -- this node included.
 
 // controlTypeNode is the ControlParam.Type of a node control.
 const controlTypeNode = "node"
@@ -716,7 +716,7 @@ func (e *controlEngine) fetchForNode(req NodeFetchRequest) {
 }
 
 // fetchHere saves the files req.Path matches on this node into its files
-// tab: any file, unless control-fetch-allow is set and doesn't allow it.
+// tab: any file, unless control-fetch-allow is a list that doesn't allow it.
 func (e *controlEngine) fetchHere(req NodeFetchRequest) NodeFetchResult {
 	out := NodeFetchResult{Node: e.s.lrName}
 	allow := e.getFetchAllow()
@@ -783,7 +783,15 @@ func (e *controlEngine) fetchOne(p string, allow []string, maxSize int64) (NodeF
 		return NodeFetchedFile{}, errNotAFile
 	}
 	if len(allow) > 0 && (!fetchAllowed(p, allow) || !fetchAllowed(resolved, allow)) {
-		return NodeFetchedFile{}, errors.New("not allowed by control-fetch-allow")
+		msg := "not allowed by control-fetch-allow"
+		if resolved != p {
+			msg += " (it resolves to " + resolved + ")"
+		}
+		msg += ": this node's setting is " + strings.Join(allow, ", ")
+		if from := e.getFetchAllowFrom(); from != "" {
+			msg += ", from " + from
+		}
+		return NodeFetchedFile{}, errors.New(msg + `; remove it, or set it to "*", to hand over any file`)
 	}
 	f, err := os.Open(resolved)
 	if err != nil {
@@ -812,13 +820,28 @@ func (e *controlEngine) getFetchAllow() []string {
 	return e.fetchAllow
 }
 
+func (e *controlEngine) getFetchAllowFrom() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.fetchAllowFrom
+}
+
+// fetchAllowAll is the control-fetch-allow entry, and its default, that
+// hands over any file.
+const fetchAllowAll = "*"
+
 // setFetchAllow takes the control-fetch-allow setting: the paths this node
-// hands over to node-fetch-file (with none, it hands over any). Each entry is an absolute path or glob
-// (~ for the home directory); one ending in "/" allows everything under
-// that directory.
+// hands over to node-fetch-file. "*" (the default) or none hands over any
+// file. Otherwise each entry is an absolute path or glob (~ for the home
+// directory); one ending in "/" allows everything under that directory.
 func (e *controlEngine) setFetchAllow(entries []string) error {
 	var clean []string
+	all := false
 	for _, entry := range entries {
+		if entry == fetchAllowAll {
+			all = true
+			continue
+		}
 		dir := strings.HasSuffix(entry, "/")
 		p, err := expandHome(entry)
 		if err != nil {
@@ -835,6 +858,9 @@ func (e *controlEngine) setFetchAllow(entries []string) error {
 			p += "/"
 		}
 		clean = append(clean, p)
+	}
+	if all {
+		clean = nil
 	}
 	e.mu.Lock()
 	e.fetchAllow = clean

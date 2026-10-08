@@ -233,10 +233,12 @@ type controlEngine struct {
 	// nodeConnects counts each node's connections as seen in AC's node
 	// lists (node-wait-connected's fresh); nodeFetches are fetches under
 	// way through agent-coordinator; fetchAllow is the control-fetch-allow
-	// setting, what this node hands over to them (see controlnodes.go).
-	nodeConnects map[string]int
-	nodeFetches  map[string]chan NodeFetchResult
-	fetchAllow   []string
+	// setting, what this node hands over to them (empty: any file), and
+	// fetchAllowFrom where it was set (see controlnodes.go).
+	nodeConnects   map[string]int
+	nodeFetches    map[string]chan NodeFetchResult
+	fetchAllow     []string
+	fetchAllowFrom string
 
 	// nodeRecs are recordings started or stopped on other nodes through
 	// agent-coordinator, waiting for their answers (see controlrecord.go).

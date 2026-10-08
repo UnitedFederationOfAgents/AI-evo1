@@ -1449,7 +1449,8 @@ type appConfig struct {
 	robotPort     string   // HTTP port a managed ianar serves on / is reverse-proxied from
 	fileCacheDir  string   // directory uploaded files land in for the files tab
 	hostStoreDir  string   // directory a "persist" press moves a file into
-	fetchAllow    []string // paths/globs this node hands over to control runs' node-fetch-file (see controlnodes.go)
+	fetchAllow    []string // paths/globs this node hands over to control runs' node-fetch-file; "*" (the default): any file (see controlnodes.go)
+	fetchAllowSrc string   // where fetchAllow came from: a config file, "the command line" or "(default)"
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -1501,6 +1502,10 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
 		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
 		fetchAllow:    splitList(pick("control-fetch-allow", strings.Join(defaults.fetchAllow, ","))),
+		fetchAllowSrc: conf.Source("control-fetch-allow"),
+	}
+	if setOnCLI["control-fetch-allow"] {
+		out.fetchAllowSrc = "the command line"
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -1604,7 +1609,7 @@ func main() {
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	controlLibPath := flag.String("control-library", defaultControlLibraryPath(), "YAML file the control tab's actions and sequences are kept in (see controllib.go); empty keeps them in memory only")
-	fetchAllow := flag.String("control-fetch-allow", "", "comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) this node hands over to control runs' node-fetch-file, whichever node's run asks; empty hands over any file (see controlnodes.go)")
+	fetchAllow := flag.String("control-fetch-allow", fetchAllowAll, "files this node hands over to control runs' node-fetch-file, whichever node's run asks: \"*\" (or empty) for any file, or comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) (see controlnodes.go)")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -1670,8 +1675,11 @@ func main() {
 	if err := s.control.setFetchAllow(cfg.fetchAllow); err != nil {
 		log.Fatal(err)
 	}
-	if len(cfg.fetchAllow) > 0 {
-		log.Printf("control: node-fetch-file may take %s", strings.Join(cfg.fetchAllow, ", "))
+	s.control.fetchAllowFrom = cfg.fetchAllowSrc
+	if allow := s.control.getFetchAllow(); len(allow) > 0 {
+		log.Printf("control: node-fetch-file may only take %s (control-fetch-allow, from %s)", strings.Join(allow, ", "), cfg.fetchAllowSrc)
+	} else {
+		log.Printf("control: node-fetch-file may take any file (control-fetch-allow, from %s)", cfg.fetchAllowSrc)
 	}
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {

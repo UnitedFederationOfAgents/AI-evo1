@@ -207,6 +207,13 @@ func TestFetchAllowed(t *testing.T) {
 	if err := e.setFetchAllow([]string{"relative/path"}); err == nil {
 		t.Error("a relative entry was accepted")
 	}
+	// "*", the default, hands over any file, even beside other entries.
+	if err := e.setFetchAllow([]string{fetchAllowAll}); err != nil || len(e.getFetchAllow()) != 0 {
+		t.Errorf("\"*\" should allow any file: %v %v", e.getFetchAllow(), err)
+	}
+	if err := e.setFetchAllow([]string{"/var/log/", fetchAllowAll}); err != nil || len(e.getFetchAllow()) != 0 {
+		t.Errorf("\"*\" beside a path should allow any file: %v %v", e.getFetchAllow(), err)
+	}
 }
 
 // TestFetchHere: a node hands over any regular file without
@@ -244,6 +251,8 @@ func TestFetchHere(t *testing.T) {
 	}
 	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "link.log") {
 		t.Errorf("the symlink out of the allowed files wasn't refused: %v", res.Skipped)
+	} else if !strings.Contains(res.Skipped[0], "secret.txt") || !strings.Contains(res.Skipped[0], filepath.Join(src, "*.log")) {
+		t.Errorf("the refusal doesn't say what the link resolves to and what the setting is: %v", res.Skipped[0])
 	}
 	b := res.Files[1]
 	if !b.Truncated || b.Size != 4 || b.SavedAs != "test-lr_"+strings.ReplaceAll(strings.TrimPrefix(filepath.Join(src, "b.log"), "/"), "/", "_") {

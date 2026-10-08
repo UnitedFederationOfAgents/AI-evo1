@@ -152,3 +152,26 @@ send rm for the file to that instance, and wait for it to report rm's exit statu
 Recall that we want 'control-fetch-allow' to be enabled by default.
 
 Let's make that adjustment.
+
+
+prompt: [`34e39d4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/34e39d416e2d10d7a307c0bbbc6e2d388334ea6d) → reply: [`fc46966`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fc469667bec044cb7c8747834f386de7a73f54ca)
+
+## Reply B
+
+I've made `control-fetch-allow` on by default: it now has a real default value, `*`, which means a node hands over any file. A `*` anywhere in a list of paths also allows everything. None of this is built or tested — `go test` needed approval here — so please run `make build` and `make test` on the host.
+
+**Why your run still failed:** the old code already handed over any file when the setting was empty. The "not allowed by control-fetch-allow" error only happens when the setting has a value, so desktop01-itjf must have one in its config. Most likely it's in `~/.ufa/config/global.yaml` or `local-representative.yaml`, maybe added after my step 3 suggestion of `~/Desktop/found-it-*.txt`. My change doesn't override a value someone set on purpose, so remove that line or change it to `*`. If the value is `~/Desktop/found-it-*.txt` and the file was still refused, `~/Desktop` is probably a symlink: the file's real location has to match the setting too.
+
+To help you find the setting, LR now logs at startup what it's set to and which config file it came from. A refused file's error now says the same, plus where the file really points if that's different.
+
+The changes are in `controlnodes.go`, `control.go` and `main.go`, with the wording updated in `controlops.go`, `controlexamples.go` and the README. I left the hand-off example's hint text alone, because changing it could make unedited copies look edited. I added tests to `controlnodes_test.go` for the `*` default and the new error.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

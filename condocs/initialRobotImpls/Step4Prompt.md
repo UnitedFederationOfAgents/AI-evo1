@@ -40,12 +40,16 @@ Two limits to know:
 
 The new code is mainly in `local-representative/controlrecord.go`, with changes to `control.go`, `controllib.go`, `controlnodes.go`, `controlsave.go` and `controlexamples.go`. On the AC side, `agent-coordinator/controlnodes.go` and `main.go` relay the new messages. The shared `ControlV1.tsx` and `controlTypes.ts` are copied to AC, the CSS is added to both frontends, and the LR README's control-tab section is updated. New tests are in `controlrecord_test.go`, and I updated the existing recording tests in `control_test.go`, `controllib_test.go` and `controlnodes_test.go`.
 
+## Resource 1 -- Adjustments to recording
 
-## <REPLACE-Revision|Retry> A
+Marked up
 
-<REPLACE-PROMPT>
+- [ianar-capture-native-2026-10-08T13-03-05.png](82b371e6_ianar-capture-native-2026-10-08T13-03-05.png)
 
+## Revision A
 
-## Human-Prompt
+Let's ensure that our multi-step recording control is capable of what we need from it, and let's adjust it so that for the robot handoff we do one recording for steps 2-4, and a second for 5-7.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Recall that we need that bar to span multiple steps visually. (Note the markup in resource 'Adjustments To Recording')
+
+Let's implement that now.

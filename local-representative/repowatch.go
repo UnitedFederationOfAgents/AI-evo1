@@ -397,9 +397,15 @@ func (w *repoWatch) maybeAutoRebuild() bool {
 	}
 
 	due := !now.Before(w.autoRebuildDeadline)
+	if due {
+		// Disarm before building, so the snapshot doesn't keep reporting a
+		// pending countdown at 0s for the whole build.
+		w.autoRebuildDeadline = time.Time{}
+		w.autoRebuildArmedHead = ""
+	}
 	w.mu.Unlock()
 	if due {
-		w.rebuild() // rebuild() notifies on its own; deadline clears next pass
+		w.rebuild() // rebuild() notifies on its own
 		return false
 	}
 	return true // still counting down -- the reported seconds-left changed

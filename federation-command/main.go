@@ -5283,7 +5283,22 @@ const (
 	// instance it already knows the session of, so a dropped argv still lands
 	// FC back in the same session (mirrors envAutoConnect/envDevMode).
 	envSession = "FC_SESSION"
+	// envInstanceID is set by local-representative to tag a managed FC instance.
+	envInstanceID = "FC_INSTANCE_ID"
 )
+
+// launchEnvVars are the FC_* variables a launcher hands to this one FC process.
+var launchEnvVars = []string{envAutoConnect, envLRHost, envLRPort, envDevMode, envSession, envInstanceID}
+
+// clearLaunchEnv removes launchEnvVars from this process's environment once
+// they have been read. Without it every shell and agent FC spawns would inherit
+// them, so an FC (or `go test`) started from one of those shells would silently
+// auto-connect, enter dev mode and claim this instance's ID and session.
+func clearLaunchEnv() {
+	for _, k := range launchEnvVars {
+		os.Unsetenv(k)
+	}
+}
 
 // envTruthy interprets a boolean-ish environment variable. Unset, "", "0",
 // "false", "no" and "off" (any case) are false; anything else is true.
@@ -5428,9 +5443,10 @@ func parseLRPort(s string) (int, error) {
 func main() {
 	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
 	fcHostID = ufahostid.GetHostID()
-	fcInstanceID = strings.TrimSpace(os.Getenv("FC_INSTANCE_ID"))
+	fcInstanceID = strings.TrimSpace(os.Getenv(envInstanceID))
 
 	cfg, handled, err := parseCLIArgs(os.Args[1:])
+	clearLaunchEnv()
 	if handled {
 		return
 	}

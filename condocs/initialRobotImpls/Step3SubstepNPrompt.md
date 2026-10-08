@@ -2158,3 +2158,33 @@ make: *** [Makefile:21: test-all] Error 1
 
 
 Let's fix these failures now.
+
+
+prompt: [`bd637a5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bd637a5a32254e1f5e980f98ae08bbc8e17ba6c6) → reply: [`adea047`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/adea047e3de34e02155850fa9395a8173d0c0890)
+
+## Reply A
+
+I fixed all seven failing tests in the four sub-projects, but I couldn't run anything: `go` and `gofmt` both needed approval again. Please re-run `make test`.
+
+Two of the failures came from real bugs in the program code. The other five were tests that were wrong or out of date.
+
+- **federation-command (`TestParseCLIArgs`, `TestParseCLIArgsConfigFilePrecedence`, `TestAutoConnectImpliesRemote`):** same cause as last time. LR sets `FC_AUTO_CONNECT`, `FC_DEV_MODE`, `FC_LR_HOST`, `FC_LR_PORT`, `FC_SESSION` and `FC_INSTANCE_ID` when it launches FC. FC never cleared them, so every shell FC opens inherited them.
+  - **The bug:** an FC started from one of those shells would quietly auto-connect, turn on dev mode and take the parent's instance ID. `main.go` now has a `clearLaunchEnv()` that removes these variables once FC has read them.
+  - **The tests:** a new `isolateLaunchEnv(t)` helper unsets them in the CLI-parsing tests.
+- **local-representative `TestRepoWatchAutoRebuildFiresWhenDeadlineElapses`:** a real bug. When the 90s auto-rebuild countdown ran out, the countdown wasn't cleared until the next check, so the status showed "auto-rebuild pending, 0s" for the whole build. `maybeAutoRebuild` in `repowatch.go` now clears it before starting the rebuild.
+- **local-representative `TestCurrentStateCapturesACTarget`:** out of date. Revision I changed the saved restart state to record the auto-connect toggle rather than whether a connection attempt is in progress. I rewrote the test to check the toggle.
+- **local-representative `TestExportImport`:** out of date. The robot hand-off example sequence gained two actions (`fetch-node-file`, `fc-remove-file`), so the test now expects 8 actions instead of 6.
+- **clauditable `TestConsolidatePrimaryToJSONLPromotesLocalSecondary`:** the test's mistake. It added its marker text after the raw-output separator, a part of the file that is deliberately left out of `session.jsonl`, so the marker could never show up. It now goes in the part that is copied over.
+- **condoccer `TestAddVoiceNoteResource`:** the test's mistake. It expected an empty Impls folder, but its own setup puts `Step1Prompt.md` there. It now only fails if a voice note adds some other file.
+
+These tests had probably been failing for a while without anyone seeing them, because `make test` used to stop at the first sub-project that failed.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

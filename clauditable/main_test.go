@@ -756,7 +756,14 @@ func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected secondary producer to have written its own processed file: %v", err)
 	}
-	if err := os.WriteFile(secondaryProcessedPath, append(sentinel, []byte("\nSENTINEL-FROM-SECONDARY\n")...), 0644); err != nil {
+	// Mark the session-log part (before the separator) -- only that part is folded
+	// into session.jsonl, so a marker appended to the end would never show up.
+	sepIdx := strings.Index(string(sentinel), records.WrittenFileSeparator)
+	if sepIdx < 0 {
+		t.Fatalf("secondary processed file has no %q separator", records.WrittenFileSeparator)
+	}
+	marked := string(sentinel[:sepIdx]) + "SENTINEL-FROM-SECONDARY\n" + string(sentinel[sepIdx:])
+	if err := os.WriteFile(secondaryProcessedPath, []byte(marked), 0644); err != nil {
 		t.Fatalf("failed to mark secondary processed file: %v", err)
 	}
 

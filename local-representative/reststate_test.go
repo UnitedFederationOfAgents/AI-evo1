@@ -49,24 +49,34 @@ func TestCurrentStateCapturesAutoUpdate(t *testing.T) {
 }
 
 // TestCurrentStateCapturesACTarget verifies currentState reports
-// AutoConnect/ACHost/ACPort only while a connection is live or being
-// attempted, and clears the host/port once neither is true.
+// AutoConnect/ACHost/ACPort from the persistent auto-connect toggle (see
+// lrState.AutoConnect), not from whether an attempt happens to be in flight,
+// and drops the host/port once the toggle is off.
 func TestCurrentStateCapturesACTarget(t *testing.T) {
 	s := newServer("test-lr")
 	if got := s.currentState(); got.AutoConnect || got.ACHost != "" || got.ACPort != "" {
 		t.Fatalf("expected zero AC state on a fresh server, got %+v", got)
 	}
 
+	// An attempt in flight without the toggle armed carries nothing forward.
 	s.acHost, s.acPort = "10.0.0.5", "9000"
 	s.setACAutoConnecting(true)
-	got := s.currentState()
-	if !got.AutoConnect || got.ACHost != "10.0.0.5" || got.ACPort != "9000" {
-		t.Fatalf("expected AutoConnect=true at 10.0.0.5:9000 while connecting, got %+v", got)
+	if got := s.currentState(); got.AutoConnect || got.ACHost != "" || got.ACPort != "" {
+		t.Fatalf("expected no AC state while connecting with the toggle off, got %+v", got)
 	}
 
+	s.acMu.Lock()
+	s.acAutoConnectEnabled = true
+	s.acMu.Unlock()
 	s.setACAutoConnecting(false)
-	if got := s.currentState(); got.AutoConnect {
-		t.Fatalf("expected AutoConnect=false once neither connected nor connecting, got %+v", got)
+	got := s.currentState()
+	if !got.AutoConnect || got.ACHost != "10.0.0.5" || got.ACPort != "9000" {
+		t.Fatalf("expected AutoConnect=true at 10.0.0.5:9000 while the toggle is armed, got %+v", got)
+	}
+
+	s.disconnectAC() // operator-driven: clears the toggle
+	if got := s.currentState(); got.AutoConnect || got.ACHost != "" || got.ACPort != "" {
+		t.Fatalf("expected no AC state once the toggle is off, got %+v", got)
 	}
 }
 

@@ -35,6 +35,17 @@ func writeConfigFile(t *testing.T, path, content string) {
 	}
 }
 
+// isolateLaunchEnv unsets the FC_* launch variables for the duration of the
+// test, so a run from a shell that inherited them (e.g. one under an
+// LR-launched FC) sees the same defaults as a clean one.
+func isolateLaunchEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range launchEnvVars {
+		t.Setenv(k, "") // registers the restore of the original value
+		os.Unsetenv(k)
+	}
+}
+
 // TestVersion verifies that the --version flag works correctly
 func TestVersion(t *testing.T) {
 	// Build the binary first
@@ -330,8 +341,9 @@ func TestModeDescription(t *testing.T) {
 
 // TestParseCLIArgs verifies startup flag parsing for auto-connect and --lr-port.
 func TestParseCLIArgs(t *testing.T) {
-	// Isolate from any real ~/.ufa/config on the host running the tests.
+	// Isolate from any real ~/.ufa/config or FC_* launch vars on the host.
 	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+	isolateLaunchEnv(t)
 
 	defaultAddr := "localhost:8082"
 
@@ -394,6 +406,7 @@ func TestParseCLIArgs(t *testing.T) {
 // (per-app file beating global.yaml per key) and that command-line flags still
 // win over both.
 func TestParseCLIArgsConfigFilePrecedence(t *testing.T) {
+	isolateLaunchEnv(t)
 	dir := t.TempDir()
 	writeConfigFile(t, filepath.Join(dir, "global.yaml"), "lr-host: globalhost\nlr-port: 7000\n")
 	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\nlr-port: 7100\n")
@@ -431,6 +444,7 @@ func TestParseCLIArgsConfigFilePrecedence(t *testing.T) {
 // TestParseCLIArgsRejectsBadConfig verifies a malformed config value is a
 // startup error rather than being silently ignored.
 func TestParseCLIArgsRejectsBadConfig(t *testing.T) {
+	isolateLaunchEnv(t)
 	dir := t.TempDir()
 	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: banana\n")
 	conf, err := ufaconfig.Load("federation-command", dir)
@@ -478,6 +492,7 @@ func TestAutoConnectControlState(t *testing.T) {
 // --remote / remote: is ignored for backward compatibility.
 func TestAutoConnectImpliesRemote(t *testing.T) {
 	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+	isolateLaunchEnv(t)
 
 	cfg, handled, err := parseCLIArgs([]string{"--auto-connect"})
 	if err != nil || handled {
@@ -523,6 +538,7 @@ func TestAutoConnectImpliesRemote(t *testing.T) {
 // local-representative when it auto-launches FC through a terminal wrapper)
 // configure the LR connection, sitting above the config file and below CLI flags.
 func TestParseCLIArgsEnvOverrides(t *testing.T) {
+	isolateLaunchEnv(t)
 	t.Run("FC_AUTO_CONNECT implies remote and sets the address", func(t *testing.T) {
 		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
 		t.Setenv("FC_AUTO_CONNECT", "1")

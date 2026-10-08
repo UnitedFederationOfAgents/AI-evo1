@@ -265,7 +265,8 @@ func TestExportImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dst.actions) != 6 || len(dst.sequences) != 1 || !strings.Contains(msg, "added") {
+	// The sequence's 8 steps each use a distinct action, all exported with it.
+	if len(dst.actions) != 8 || len(dst.sequences) != 1 || !strings.Contains(msg, "added") {
 		t.Errorf("imported %d actions, %d sequences (%s)", len(dst.actions), len(dst.sequences), msg)
 	}
 	if _, _, err := src.export("sequences", []string{"nope"}); err == nil {

@@ -307,8 +307,11 @@ func TestAddVoiceNoteResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Errorf("expected no files written to the Impls folder, got %+v", entries)
+	// The fixture's own step file lives there; a voice note must add nothing else.
+	for _, e := range entries {
+		if e.Name() != filepath.Base(stepPath) {
+			t.Errorf("expected no files written to the Impls folder besides the step file, got %q", e.Name())
+		}
 	}
 }
 

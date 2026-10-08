@@ -66,11 +66,89 @@ Nothing has been built or tested: `go test` and `tsc` needed approval here, so p
 Your screenshot shows no recording bars at all, even though the hand-off already recorded steps 2–8, so desktop01's local-representative may be running an older build than AC's frontend. Redeploy it before checking the bars. The main changes are in `local-representative/frontend/src/ControlV1.tsx` (copied to AC), `controlrecord.go`, `controlexamples.go`, `controllib.go`, both `index.css` files and the LR README, plus `ianar/lrrecord.go` on the robot side, with new tests in `controlrecord_test.go` and `lrrecord_test.go`.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's fix our control sequences:
+
+✓
+1. Unlock the screen if it is locked
+robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked
+
+    robot: unlock the screen if it is locked, and wake it if it has blanked
+
+the screen was locked; unlocked it
+15.2s
+✓
+2. Launch a new federation-command instance
+launch federation-command as the system tab does, then wait for the new instance to connect under its own name, in remote control
+
+    launch a new federation-command, saved as {{fc}}
+
+federation-command#2 is connected in remote control
+935ms
+✓
+3. Echo "This is the one - <random-chars>" through the remote interface
+send an echo of a marker ending in random characters to that instance only, and wait for its output to come back -- from it and no other instance; saved as {{marker}}
+
+    save 6 random characters as {{marker_token}}
+    save This is the one - {{marker_token}} as {{marker}}
+    show marker command: echo "{{marker}}"
+    send echo "{{marker}}" to {{fc}}
+
+federation-command#2 printed "This is the one - sbyuzk"
+408ms
+✓
+4. Find that terminal with the robot and bring it to local control
+robot: click the line reading the text on screen, press →; then check the instance reports local control
+
+    check {{fc}} has a window on screen
+    robot: check the screen is unlocked, and wake it if it has blanked
+    robot: left-click the line on screen reading "{{marker}}" (waiting up to 10s for it)
+    robot: press right
+    wait for {{fc}} to be in local-control
+
+the screen is awake and unlocked; saw "This is the one sbyuzk" at (287, 610) and left-clicked it via compositor (org.gnome.Mutter.RemoteDesktop); federation-command#2 is in local-control
+44.4s
+✓
+5. Type into it with the robot: echo "found it" into a new file on the desktop
+robot: clear the command line, type the command, press Enter; then check the instance printed the expected line
+
+    robot: press end ctrl+u
+    robot: type "echo "found it" | tee ~/Desktop/found-it-2026-10-08T13-32-38.txt"
+    robot: press enter
+    wait for {{fc}} to print found it
+
+federation-command#2 printed "found it"
+2.9s
+✓
+6. Put the terminal back into remote control
+robot: press ←; then check the instance reports remote control
+
+    robot: press left
+    wait for {{fc}} to be in remote-control
+
+federation-command#2 is in remote-control
+350ms
+✗
+7. Upload that file to the files tab
+node-fetch-file: copy a file from a node into this node's files tab
+
+    fetch ~/Desktop/found-it-2026-10-08T13-32-38.txt from desktop01-itjf
+
+desktop01-itjf: nothing fetched for ~/Desktop/found-it-2026-10-08T13-32-38.txt: /home/jed/Desktop/found-it-2026-10-08T13-32-38.txt: not allowed by control-fetch-allow -- the file has to exist on the node (and, if its control-fetch-allow is set, be allowed by it)
+1ms
+–
+8. Delete the file
+send rm for the file to that instance, and wait for it to report rm's exit status -- failing unless it's 0
+
+    save 6 random characters as {{rm_token}}
+    send rm -- ~/Desktop/found-it-2026-10-08T13-32-38.txt; echo "{{rm_token}} exit=$?" to {{fc}}
+    wait for {{fc}} to print {{rm_token}} exit=0
 
 
-## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+
+
+Recall that we want 'control-fetch-allow' to be enabled by default.
+
+Let's make that adjustment.

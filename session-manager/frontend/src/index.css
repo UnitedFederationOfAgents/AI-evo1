@@ -456,14 +456,62 @@ body {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  margin: 0;
   padding: 16px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #d4d4d4;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
+
+/* The -processed file's JSON event header, as a key/value table. */
+.processed-header-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  background: #202021;
+  border: 1px solid #333;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  align-self: flex-start;
+  min-width: 50%;
+}
+
+.processed-header-table th,
+.processed-header-table td {
+  padding: 4px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #2a2a2b;
+}
+
+.processed-header-table tr:last-child th,
+.processed-header-table tr:last-child td { border-bottom: none; }
+
+.processed-header-table th {
+  color: #888;
+  font-weight: normal;
+  white-space: nowrap;
+}
+
+.processed-header-table td {
+  color: #d4d4d4;
+  word-break: break-all;
+}
+
+.processed-header-processing th,
+.processed-header-processing td { background: #1c1c1d; }
+
+.processed-header-sub {
+  margin-left: 8px;
+  font-size: 10px;
+  color: #888;
+}
+
+/* Command/response coloured by kind rather than IN>>/OUT>> prefixes. */
+.processed-pane-content .transcript-block { margin-top: 0; }
+.processed-pane-content .transcript-block-in .transcript-block-label { color: #4a90d9; }
+.processed-pane-content .transcript-block-out .transcript-block-label { color: #4ec94e; }
+.processed-pane-content .transcript-block-err .transcript-block-label { color: #e07070; }
+.processed-pane-content .transcript-block-in pre { background: #1a1f26; }
+.processed-pane-content .transcript-block-out pre { background: #1a221a; }
 
 .nav-up-btn {
   background: none;

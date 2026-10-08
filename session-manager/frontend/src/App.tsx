@@ -592,8 +592,142 @@ function ProcessedPane({ record, view, onUp }: { record: string; view: Processed
       ) : view.error ? (
         <div className="session-transcript-warning">{view.error}</div>
       ) : (
-        <pre className="processed-pane-content">{view.content}</pre>
+        <ProcessedContent content={view.content} />
       )}
+    </div>
+  )
+}
+
+// Separators/prefixes of a -processed file, mirroring clauditable/pkg/
+// records (WrittenFileSeparator, ResponseSeparator, Input/Output/
+// ErrorPrefix).
+const WRITTEN_RAW_SEPARATOR = '\n----------WRITTEN_RAW----------\n'
+const RESPONSE_SEPARATOR = '\n\n----------RESPONSE----------\n\n'
+const STDERR_MARKER = '[STDERR]\n'
+const BLOCK_PREFIXES: [string, 'in' | 'out' | 'err'][] = [
+  ['IN>> ', 'in'],
+  ['OUT>> ', 'out'],
+  ['ERR>> ', 'err'],
+]
+
+type ProcessedBlock = { kind: 'in' | 'out' | 'err'; text: string }
+
+interface ParsedProcessed {
+  event: Record<string, unknown> | null
+  processing: Record<string, unknown>[]
+  blocks: ProcessedBlock[]
+}
+
+// parseProcessed splits a -processed file (see clauditable's
+// FormatProcessedFile) into its event header, its auto-maintenance
+// processing headers, and command/response blocks with the IN>>/OUT>>/ERR>>
+// prefixes stripped. The written-raw section after WRITTEN_RAW is the full
+// command and response; the prefixed lines before it are only a capped
+// preview of the same, so they're used only when there is no raw section.
+function parseProcessed(content: string): ParsedProcessed {
+  const sep = content.indexOf(WRITTEN_RAW_SEPARATOR)
+  const log = sep >= 0 ? content.slice(0, sep) : content
+  const raw = sep >= 0 ? content.slice(sep + WRITTEN_RAW_SEPARATOR.length) : null
+
+  let event: Record<string, unknown> | null = null
+  const processing: Record<string, unknown>[] = []
+  const preview: ProcessedBlock[] = []
+  for (const line of log.split('\n')) {
+    if (line.startsWith('{')) {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>
+        if (event === null && ('timestamp' in obj || 'event_type' in obj)) event = obj
+        else processing.push(obj)
+        continue
+      } catch {
+        // not JSON after all -- fall through to the prefix checks
+      }
+    }
+    const match = BLOCK_PREFIXES.find(([p]) => line.startsWith(p))
+    if (!match) continue
+    const [prefix, kind] = match
+    const text = line.slice(prefix.length)
+    const last = preview[preview.length - 1]
+    if (last && last.kind === kind) last.text += '\n' + text
+    else preview.push({ kind, text })
+  }
+
+  let blocks = preview
+  if (raw !== null) {
+    const r = raw.indexOf(RESPONSE_SEPARATOR)
+    const command = r >= 0 ? raw.slice(0, r) : raw
+    let response = r >= 0 ? raw.slice(r + RESPONSE_SEPARATOR.length) : ''
+    // FormatRawFile appends stderr after a "[STDERR]" line.
+    let stderr = ''
+    const e = response.startsWith(STDERR_MARKER) ? 0 : response.indexOf('\n' + STDERR_MARKER)
+    if (e >= 0) {
+      stderr = response.slice(e === 0 ? STDERR_MARKER.length : e + 1 + STDERR_MARKER.length)
+      response = response.slice(0, e)
+    }
+    blocks = [{ kind: 'in', text: command.trimEnd() }]
+    if (response.trim()) blocks.push({ kind: 'out', text: response.trimEnd() })
+    if (stderr.trim()) blocks.push({ kind: 'err', text: stderr.trimEnd() })
+  }
+  return { event, processing, blocks }
+}
+
+function formatHeaderValue(key: string, value: unknown): string {
+  if (key === 'duration_ms' && typeof value === 'number') {
+    return value >= 1000 ? `${(value / 1000).toFixed(1)}s (${value}ms)` : `${value}ms`
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+const BLOCK_LABELS = { in: 'command', out: 'response', err: 'error' }
+
+// ProcessedContent renders a -processed file: its JSON event header as a
+// key/value table (processing headers beneath it), then the command and
+// response as colour-coded blocks instead of IN>>/OUT>> prefixed text.
+function ProcessedContent({ content }: { content: string }) {
+  const { event, processing, blocks } = parseProcessed(content)
+  return (
+    <div className="processed-pane-content">
+      {(event || processing.length > 0) && (
+        <table className="processed-header-table">
+          <tbody>
+            {event &&
+              Object.entries(event).map(([k, v]) => (
+                <tr key={k}>
+                  <th>{k}</th>
+                  <td
+                    className={
+                      k === 'exit_code' ? (v === 0 ? 'transcript-exit-ok' : 'transcript-exit-err') : undefined
+                    }
+                  >
+                    {formatHeaderValue(k, v)}
+                  </td>
+                </tr>
+              ))}
+            {processing.map((p, i) => {
+              const { processing_type, ...rest } = p
+              return (
+                <tr key={`p${i}`} className="processed-header-processing">
+                  <th>processing</th>
+                  <td>
+                    <span className="transcript-entry-tag">{String(processing_type ?? '?')}</span>
+                    {Object.entries(rest).map(([k, v]) => (
+                      <span key={k} className="processed-header-sub">
+                        {k} {formatHeaderValue(k, v)}
+                      </span>
+                    ))}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+      {blocks.map((b, i) => (
+        <div key={i} className={`transcript-block transcript-block-${b.kind}`}>
+          <div className="transcript-block-label">{BLOCK_LABELS[b.kind]}</div>
+          <pre>{b.text}</pre>
+        </div>
+      ))}
     </div>
   )
 }

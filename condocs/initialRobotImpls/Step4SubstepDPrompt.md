@@ -21,3 +21,22 @@ Each turn in session-manager's transcript now has an **⤢ expand** button that 
 In our session-manager expanded view let's depict the header jsonl blob as an attractive table.
 
 Let's also strip the IN>> and OUT>> and use colouration to depict command/response.
+
+
+prompt: [`019bcf6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/019bcf6a3d1b92a4174cd0b6fe8bf8936f3354d0) → reply: [`f439fc8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f439fc81551496e796fd24a15d93725a787c3ce5)
+
+## Reply A
+
+I reworked the expanded view in session-manager. The JSON header line now shows as a key/value table, with the exit code coloured and the duration made readable. Any processing headers (e.g. `no_op`) appear as rows beneath it. The command and response no longer carry `IN>>`/`OUT>>`; they're colour-coded blocks, blue for command, green for response, and red for any stderr. Nothing has been built or tested, because the `tsc` type check needed approval here, so please run `make build` in `session-manager` on the host.
+
+One thing you might not expect: when the file has a full written-raw section, I show only that complete command and response. The `IN>>`/`OUT>>` lines are a shortened preview of the same content, so they're used only when that full section is missing. The changes are all in the frontend's `App.tsx` and `index.css`.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

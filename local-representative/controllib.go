@@ -27,9 +27,10 @@ import (
 //     wait for its output or control state, ...), or "robot.<op>", one of
 //     IANAR's sequence-v2 ops, which LR hands to the robot.
 //   - composer: sequences -- ordered steps, each an action with values for
-//     its controls. A sequence can expose controls of its own, choose whose
-//     screens are recorded across a run (record), and mark leading steps to
-//     run before that recording starts (before_recording).
+//     its controls. A sequence can expose controls of its own, and have
+//     recording blocks beside its steps (recordings): each records one
+//     node's screen across a span of steps, up to three side by side (see
+//     controlrecord.go).
 //   - runner: runs a sequence with chosen control values (control.go).
 //
 // Values may refer to controls and other variables as {{name}}: the
@@ -72,24 +73,21 @@ type ControlActionDef struct {
 }
 
 // ControlStepRef is one composer step: an action, an optional label shown
-// in place of the action's name, values for the action's controls, and
-// whether it runs before the sequence's recording starts (leading steps
-// only).
+// in place of the action's name, and values for the action's controls.
 type ControlStepRef struct {
-	Action          string            `json:"action"`
-	Label           string            `json:"label,omitempty"`
-	With            map[string]string `json:"with,omitempty"`
-	BeforeRecording bool              `json:"before_recording,omitempty"`
+	Action string            `json:"action"`
+	Label  string            `json:"label,omitempty"`
+	With   map[string]string `json:"with,omitempty"`
 }
 
 // ControlSequenceDef is a composer sequence.
 type ControlSequenceDef struct {
-	ID          string           `json:"id"`
-	Name        string           `json:"name"`
-	Description string           `json:"description,omitempty"`
-	Controls    []ControlParam   `json:"controls"`
-	Record      []string         `json:"record,omitempty"` // whose screens a run records (see recordLocalRobot)
-	Steps       []ControlStepRef `json:"steps"`
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Controls    []ControlParam       `json:"controls"`
+	Steps       []ControlStepRef     `json:"steps"`
+	Recordings  []ControlRecordBlock `json:"recordings,omitempty"` // whose screens a run records, across which steps (see controlrecord.go)
 }
 
 // ---- Validation ----
@@ -260,24 +258,17 @@ func (q ControlSequenceDef) validate(actions map[string]ControlActionDef) error 
 	if err := ctlValidateControls(q.Controls); err != nil {
 		return fmt.Errorf("sequence %q: %v", q.ID, err)
 	}
-	for _, who := range q.Record {
-		if who != recordLocalRobot {
-			return fmt.Errorf("sequence %q: can't record %q -- only %q (this node's screen, through its robot) so far", q.ID, who, recordLocalRobot)
-		}
-	}
 	if len(q.Steps) == 0 {
 		return fmt.Errorf("sequence %q has no steps", q.ID)
 	}
-	recorded := false
+	if err := checkRecordBlocks(q.Recordings, len(q.Steps)); err != nil {
+		return fmt.Errorf("sequence %q: %v", q.ID, err)
+	}
 	for i, st := range q.Steps {
 		a, ok := actions[st.Action]
 		if !ok {
 			return fmt.Errorf("sequence %q, step %d: no action %q", q.ID, i+1, st.Action)
 		}
-		if st.BeforeRecording && recorded {
-			return fmt.Errorf("sequence %q, step %d: only leading steps can run before the recording starts", q.ID, i+1)
-		}
-		recorded = recorded || !st.BeforeRecording
 		if err := ctlCheckTemplate(st.Label); err != nil {
 			return fmt.Errorf("sequence %q, step %d, label: %v", q.ID, i+1, err)
 		}
@@ -390,21 +381,11 @@ func encodeControlLib(doc controlLibDoc) string {
 			w.line(2, "- id: "+yamlScalar(q.ID))
 			w.field(4, "name", q.Name)
 			w.field(4, "description", q.Description)
-			if len(q.Record) > 0 {
-				items := make([]string, len(q.Record))
-				for i, r := range q.Record {
-					items[i] = yamlScalar(r)
-				}
-				w.line(4, "record: ["+strings.Join(items, ", ")+"]")
-			}
 			writeControls(4, q.Controls)
 			w.line(4, "steps:")
 			for _, st := range q.Steps {
 				w.line(6, "- action: "+yamlScalar(st.Action))
 				w.field(8, "label", st.Label)
-				if st.BeforeRecording {
-					w.line(8, "before_recording: true")
-				}
 				if len(st.With) > 0 {
 					w.line(8, "with:")
 					keys := make([]string, 0, len(st.With))
@@ -417,6 +398,7 @@ func encodeControlLib(doc controlLibDoc) string {
 					}
 				}
 			}
+			encodeRecordBlocks(w, q.Recordings)
 		}
 	}
 	if len(doc.Examples) > 0 {
@@ -625,7 +607,9 @@ func decodeControlSequence(n *yNode) (ControlSequenceDef, error) {
 	if n.kind != yMap {
 		return q, fmt.Errorf("line %d: each sequence should be a mapping, not %s", n.line, n.kind)
 	}
-	if err := ctlOnlyKeys(n, "id", "name", "description", "record", "controls", "steps"); err != nil {
+	// record and before_recording are from before recording blocks (see
+	// legacyRecordBlocks).
+	if err := ctlOnlyKeys(n, "id", "name", "description", "record", "controls", "steps", "recordings"); err != nil {
 		return q, err
 	}
 	var err error
@@ -637,6 +621,7 @@ func decodeControlSequence(n *yNode) (ControlSequenceDef, error) {
 			return q, err
 		}
 	}
+	var record []string
 	if r := n.get("record"); r != nil {
 		items, err := ctlItems(r, "record")
 		if err != nil {
@@ -646,9 +631,18 @@ func decodeControlSequence(n *yNode) (ControlSequenceDef, error) {
 			if it.kind != yScalar {
 				return q, fmt.Errorf("line %d: record lists names, not %s", it.line, it.kind)
 			}
-			q.Record = append(q.Record, it.str)
+			record = append(record, it.str)
 		}
 	}
+	if r := n.get("recordings"); r != nil {
+		if len(record) > 0 {
+			return q, fmt.Errorf("line %d: a sequence has recordings or (as saved before recording blocks) record, not both", r.line)
+		}
+		if q.Recordings, err = decodeRecordBlocks(r); err != nil {
+			return q, err
+		}
+	}
+	var before []bool
 	if q.Controls, err = decodeControlParams(n.get("controls")); err != nil {
 		return q, err
 	}
@@ -671,9 +665,11 @@ func decodeControlSequence(n *yNode) (ControlSequenceDef, error) {
 			if st.Label, err = ctlScalar(it, "label"); err != nil {
 				return q, err
 			}
-			if st.BeforeRecording, err = ctlBool(it, "before_recording"); err != nil {
+			b, err := ctlBool(it, "before_recording")
+			if err != nil {
 				return q, err
 			}
+			before = append(before, b)
 			if w := it.get("with"); w != nil {
 				if st.With, err = ctlStringMap(w, "with"); err != nil {
 					return q, err
@@ -681,6 +677,9 @@ func decodeControlSequence(n *yNode) (ControlSequenceDef, error) {
 			}
 			q.Steps = append(q.Steps, st)
 		}
+	}
+	if len(record) > 0 {
+		q.Recordings = legacyRecordBlocks(record, before)
 	}
 	return q, nil
 }
@@ -1189,7 +1188,11 @@ func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActi
 		}
 		vars[c.Name] = v
 	}
-	seq := controlSequence{id: q.ID, name: q.Name, description: q.Description, record: q.Record, controls: q.Controls}
+	records, err := resolveRecordBlocks(q.Recordings, vars)
+	if err != nil {
+		return controlSequence{}, nil, err
+	}
+	seq := controlSequence{id: q.ID, name: q.Name, description: q.Description, records: records, controls: q.Controls}
 	for _, st := range q.Steps {
 		a, ok := actions[st.Action]
 		if !ok {
@@ -1215,7 +1218,6 @@ func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActi
 		seq.steps = append(seq.steps, controlStep{
 			ControlStepInfo: ControlStepInfo{Label: label, Detail: desc, Do: detail, Action: a.ID},
 			run:             controlActionRunner(a, st, robotOps),
-			beforeRecording: st.BeforeRecording,
 		})
 	}
 	return seq, vars, nil

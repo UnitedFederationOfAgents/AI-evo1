@@ -71,8 +71,8 @@ func TestCaptureTwoNodesExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(q.steps) != 2 || len(q.record) != 0 {
-		t.Fatalf("steps %+v, record %v", q.steps, q.record)
+	if len(q.steps) != 2 || len(q.records) != 0 {
+		t.Fatalf("steps %+v, records %v", q.steps, q.records)
 	}
 	if d := q.steps[0].Do; len(d) != 1 || d[0] != "screenshot lr-a with its robot" {
 		t.Errorf("step 1 does %q", d)

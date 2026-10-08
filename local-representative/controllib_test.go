@@ -117,8 +117,8 @@ func TestSequenceValidation(t *testing.T) {
 		{"fine", ControlSequenceDef{ID: "q", Name: "Q", Steps: []ControlStepRef{{Action: "a", With: map[string]string{"x": "1"}}}}, true},
 		{"missing action", ControlSequenceDef{ID: "q", Name: "Q", Steps: []ControlStepRef{{Action: "b"}}}, false},
 		{"unknown control", ControlSequenceDef{ID: "q", Name: "Q", Steps: []ControlStepRef{{Action: "a", With: map[string]string{"y": "1"}}}}, false},
-		{"late before_recording", ControlSequenceDef{ID: "q", Name: "Q", Steps: []ControlStepRef{{Action: "a"}, {Action: "a", BeforeRecording: true}}}, false},
-		{"other node", ControlSequenceDef{ID: "q", Name: "Q", Record: []string{"elsewhere"}, Steps: []ControlStepRef{{Action: "a"}}}, false},
+		{"recording", ControlSequenceDef{ID: "q", Name: "Q", Steps: []ControlStepRef{{Action: "a"}, {Action: "a"}}, Recordings: []ControlRecordBlock{{Node: "elsewhere", From: 1, To: 2}}}, true},
+		{"recording past the end", ControlSequenceDef{ID: "q", Name: "Q", Steps: []ControlStepRef{{Action: "a"}}, Recordings: []ControlRecordBlock{{Node: "{{this_node}}", From: 1, To: 2}}}, false},
 		{"bad id", ControlSequenceDef{ID: "Q Q", Name: "Q", Steps: []ControlStepRef{{Action: "a"}}}, false},
 		{"no steps", ControlSequenceDef{ID: "q", Name: "Q"}, false},
 	} {

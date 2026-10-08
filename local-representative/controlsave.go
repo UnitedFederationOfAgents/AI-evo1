@@ -120,6 +120,19 @@ func (s *Server) controlRunZip(run ControlRunMsg) ([]byte, error) {
 	}
 	writeValues("output", run.Output)
 	writeValues("values", run.Values)
+	if len(run.Records) > 0 {
+		b.WriteString("\nrecordings:\n")
+		for _, rs := range run.Records {
+			fmt.Fprintf(&b, "  %s, %s: %s", rs.Node, rs.steps(), rs.Status)
+			if rs.Label != "" {
+				fmt.Fprintf(&b, " (%s)", rs.Label)
+			}
+			if rs.Message != "" {
+				fmt.Fprintf(&b, " -- %s", rs.Message)
+			}
+			b.WriteString("\n")
+		}
+	}
 
 	var files []zipEntry
 	if len(run.Recordings) > 0 {
@@ -128,6 +141,9 @@ func (s *Server) controlRunZip(run ControlRunMsg) ([]byte, error) {
 	used := map[string]bool{}
 	for _, rec := range run.Recordings {
 		what := "recording of " + rec.Who + "'s screen"
+		if rec.From > 0 {
+			what += ", " + ControlRecordBlock{From: rec.From, To: rec.To}.steps()
+		}
 		switch {
 		case rec.Image:
 			what = "screenshot of " + rec.Who + "'s screen"

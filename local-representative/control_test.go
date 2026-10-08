@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -171,10 +172,13 @@ func TestRobotRunNeedsRobot(t *testing.T) {
 	}
 }
 
+// TestHandoffSequenceRecordsTheRobotsScreen: one recording block, this
+// node's screen from the launch (step 2) to the end.
 func TestHandoffSequenceRecordsTheRobotsScreen(t *testing.T) {
 	q := exampleSequence(t)
-	if info := q.info(); len(info.Record) != 1 || info.Record[0] != recordLocalRobot {
-		t.Errorf("record = %v, want [%s]", info.Record, recordLocalRobot)
+	want := []ControlRecordBlock{{Node: "test-lr", From: 2, To: 8}}
+	if info := q.info(); !reflect.DeepEqual(info.Recordings, want) {
+		t.Errorf("recordings = %+v, want %+v", info.Recordings, want)
 	}
 }
 
@@ -209,33 +213,31 @@ func TestHandoffSequenceFetchesAndDeletesFoundIt(t *testing.T) {
 // no recording.
 func TestRecordingWithoutRobotIsNotFatal(t *testing.T) {
 	s := newServer("test-lr")
-	r := runningEngine(s)
+	r := recordingRun(s, ControlRecordBlock{Node: "test-lr", From: 1, To: 1})
 	q := exampleSequence(t)
-	r.startRecording(q, recordLocalRobot)
-	r.stopRecording() // nothing to stop
-	if r.rec != "" {
-		t.Errorf("rec = %q", r.rec)
+	if r.startRecord(q, r.records[0]) {
+		t.Fatal("started recording with no robot")
 	}
-	vals := s.control.state().Run.Values
-	if len(vals) != 1 || vals[0].Label != recordingLabel || !strings.Contains(vals[0].Value, "not recording") {
-		t.Errorf("values = %+v", vals)
+	r.finishRecordings() // nothing to stop
+	if r.records[0].rec != "" || r.records[0].done != nil {
+		t.Errorf("record = %+v", r.records[0])
+	}
+	recs := s.control.state().Run.Records
+	if len(recs) != 1 || recs[0].Status != "error" || !strings.Contains(recs[0].Message, "not recording") {
+		t.Errorf("records = %+v", recs)
 	}
 }
 
 // TestHandoffSequenceUnlocksFirst: Revision B -- the sequence begins by
-// unlocking the screen, before the recording starts, and only leading steps
-// run ahead of the recording.
+// unlocking the screen, before the recording starts.
 func TestHandoffSequenceUnlocksFirst(t *testing.T) {
 	q := exampleSequence(t)
-	if len(q.steps) == 0 || !q.steps[0].beforeRecording || !strings.Contains(q.steps[0].Label, "Unlock") {
-		t.Fatalf("first step = %+v, want the unlock, before the recording", q.steps[0].ControlStepInfo)
+	if len(q.steps) == 0 || !strings.Contains(q.steps[0].Label, "Unlock") {
+		t.Fatalf("first step = %+v, want the unlock", q.steps[0].ControlStepInfo)
 	}
-	recorded := false
-	for i, st := range q.steps {
-		if !st.beforeRecording {
-			recorded = true
-		} else if recorded {
-			t.Errorf("step %d (%s) is marked beforeRecording after a recorded step", i+1, st.Label)
+	for _, b := range q.records {
+		if b.covers(1) {
+			t.Errorf("recording %+v records the unlock", b)
 		}
 	}
 }
@@ -286,8 +288,8 @@ func TestSetValueReplaces(t *testing.T) {
 	s := newServer("test-lr")
 	runningEngine(s)
 	s.control.addValue("a", "1")
-	s.control.setValue(recordingLabel, "recording…")
-	s.control.setValue(recordingLabel, "x.webm")
+	s.control.setValue("screen recording", "recording…")
+	s.control.setValue("screen recording", "x.webm")
 	vals := s.control.state().Run.Values
 	if len(vals) != 2 || vals[1].Value != "x.webm" {
 		t.Errorf("values = %+v", vals)

@@ -33,15 +33,15 @@ import (
 // to IANAR ("__robot:run <json>", see ianar/lrrun.go) and wait for its
 // "robot-run-result".
 //
-// A sequence can also have a node's screen recorded from before its first
-// step to after its last (Revision A): IANAR records on
-// "__robot:record-start" and saves the video into the files tab on
-// "__robot:record-stop" (ianar/lrrecord.go). Which sequences record, and
-// where, is the sequence's own choice (ControlSequenceDef.Record). A saved
-// video is listed on the run (ControlRunMsg.Recordings) so the control tab
-// can play it back beside the steps it shows (Revision B). Leading steps
-// marked before_recording -- the example's screen unlock -- run before the
-// recording starts.
+// A sequence can also have nodes' screens recorded (Revision A): IANAR
+// records on "__robot:record-start" and saves the video into the files tab
+// on "__robot:record-stop" (ianar/lrrecord.go). Which screens are recorded,
+// and across which steps, is the sequence's own choice: its recording
+// blocks (ControlSequenceDef.Recordings, Step4Prompt.md), up to three side
+// by side, each one node's screen across a span of steps -- this node's, or
+// another's through agent-coordinator (see controlrecord.go). A saved video
+// is listed on the run (ControlRunMsg.Recordings) so the control tab can
+// play it back beside the steps it shows (Revision B).
 //
 // Steps can reach other nodes' robots too (Revision F): the node-capture op
 // has a node's robot take a native capture into the files tab, relayed
@@ -69,16 +69,17 @@ const (
 	controlRobotStop     = 20 * time.Second // a cancelled robot run stopping (its instruction under way finishing)
 	controlRecordStart   = 15 * time.Second // the robot starting a recording
 	controlRecordSave    = 3 * time.Minute  // the robot stopping and uploading a recording
-	controlRecordLead    = 1 * time.Second  // recorded before the first step
-	controlRecordTail    = 2 * time.Second  // recorded after the last step
+	controlRecordLead    = 1 * time.Second  // recorded before a recording's first step
+	controlRecordTail    = 2 * time.Second  // recorded after a recording's last step
 	controlAskTimeout    = 30 * time.Minute // someone pressing continue (ask-user)
 	controlEchoTimeout   = 5 * time.Second  // an echo typed in local control, and its output, reaching LR
 	controlPoll          = 100 * time.Millisecond
 	controlMaxLogs       = 500 // FC log lines kept for the current run
 )
 
-// recordLocalRobot names, in a sequence's record list, the screen of the
-// node this LR runs on, recorded by its own IANAR -- the only one for now.
+// recordLocalRobot named, in the record list of a sequence saved before
+// recording blocks, the screen of the node this LR runs on (see
+// legacyRecordBlocks).
 const recordLocalRobot = "robot"
 
 // ControlStepInfo describes one step of a control sequence: its label, the
@@ -93,13 +94,13 @@ type ControlStepInfo struct {
 // ControlSequenceInfo describes a sequence the control tab can run, as it
 // would run with its controls' defaults.
 type ControlSequenceInfo struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Controls    []ControlParam    `json:"controls,omitempty"`
-	Steps       []ControlStepInfo `json:"steps"`
-	Record      []string          `json:"record,omitempty"` // whose screens a run records
-	Error       string            `json:"error,omitempty"`  // why it can't be compiled, if it can't
+	ID          string               `json:"id"`
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Controls    []ControlParam       `json:"controls,omitempty"`
+	Steps       []ControlStepInfo    `json:"steps"`
+	Recordings  []ControlRecordBlock `json:"recordings,omitempty"` // whose screens a run records, across which steps
+	Error       string               `json:"error,omitempty"`      // why it can't be compiled, if it can't
 }
 
 // ControlStepResult is one step's live status in a ControlRunMsg, with what
@@ -120,20 +121,21 @@ type ControlValue struct {
 
 // ControlRunMsg is the current (or most recent) run.
 type ControlRunMsg struct {
-	ID         string              `json:"id"`
-	Sequence   string              `json:"sequence"`
-	Name       string              `json:"name"`
-	Controls   map[string]string   `json:"controls,omitempty"` // the values it ran with
-	Status     string              `json:"status"`             // "running" | "success" | "error" | "cancelled"
-	Error      string              `json:"error,omitempty"`
-	StartedAt  int64               `json:"started_at"` // unix ms
-	DurationMs int64               `json:"duration_ms,omitempty"`
-	Steps      []ControlStepResult `json:"steps"`
-	Values     []ControlValue      `json:"values,omitempty"`
-	Recordings []ControlRecording  `json:"recordings,omitempty"`
-	Output     []ControlValue      `json:"output,omitempty"` // what the run brings back (the output op)
-	Prompt     *ControlPrompt      `json:"prompt,omitempty"` // set while a step waits for continue
-	Saved      []ControlSavedRun   `json:"saved,omitempty"`  // where the run was saved to the files tab (controlsave.go)
+	ID         string               `json:"id"`
+	Sequence   string               `json:"sequence"`
+	Name       string               `json:"name"`
+	Controls   map[string]string    `json:"controls,omitempty"` // the values it ran with
+	Status     string               `json:"status"`             // "running" | "success" | "error" | "cancelled"
+	Error      string               `json:"error,omitempty"`
+	StartedAt  int64                `json:"started_at"` // unix ms
+	DurationMs int64                `json:"duration_ms,omitempty"`
+	Steps      []ControlStepResult  `json:"steps"`
+	Values     []ControlValue       `json:"values,omitempty"`
+	Records    []ControlRecordState `json:"records,omitempty"` // the sequence's recording blocks, as they go (controlrecord.go)
+	Recordings []ControlRecording   `json:"recordings,omitempty"`
+	Output     []ControlValue       `json:"output,omitempty"` // what the run brings back (the output op)
+	Prompt     *ControlPrompt       `json:"prompt,omitempty"` // set while a step waits for continue
+	Saved      []ControlSavedRun    `json:"saved,omitempty"`  // where the run was saved to the files tab (controlsave.go)
 }
 
 // ControlPrompt is a step waiting for the person following the run
@@ -147,7 +149,7 @@ type ControlPrompt struct {
 // ControlRecording is a screen recording, a screenshot, or a file fetched
 // from a node, that a run saved into the files tab.
 type ControlRecording struct {
-	Who        string `json:"who"`     // whose screen (recordLocalRobot, or a node's name)
+	Who        string `json:"who"`     // whose screen (a node's name)
 	FileID     string `json:"file_id"` // GET /api/files/<file_id>
 	Name       string `json:"name"`
 	Video      bool   `json:"video"`           // a video the browser can play, rather than a .zip of frames
@@ -156,6 +158,9 @@ type ControlRecording struct {
 	Path       string `json:"path,omitempty"`  // where on Who a fetched file came from
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	Via        string `json:"via,omitempty"`
+	From       int    `json:"from,omitempty"`  // the steps a recording block recorded (1-based)
+	To         int    `json:"to,omitempty"`    // ...through this one
+	Label      string `json:"label,omitempty"` // the block's label
 }
 
 // ControlStateMsg is the payload of "control-state" messages, sent to
@@ -170,30 +175,26 @@ type ControlStateMsg struct {
 }
 
 // controlStep is one step of a compiled control sequence and the code that
-// does it. run returns a short note on what happened. Steps marked
-// beforeRecording (leading ones only) run before the sequence's recording
-// starts.
+// does it. run returns a short note on what happened.
 type controlStep struct {
 	ControlStepInfo
-	run             func(r *controlRun) (string, error)
-	beforeRecording bool
+	run func(r *controlRun) (string, error)
 }
 
 // controlSequence is a sequence compiled to run (see compileControlSequence).
 type controlSequence struct {
 	id, name, description string
 	steps                 []controlStep
-	// record lists the screens recorded across a run, none for no
-	// recording. recordLocalRobot is the only one so far; recording other
-	// nodes (through agent-coordinator) would add names here.
-	record []string
+	// records are the sequence's recording blocks, their nodes filled in
+	// (see controlrecord.go).
+	records []ControlRecordBlock
 	// controls are the sequence's own, so a run can check its node
 	// controls' values (checkNodeControls).
 	controls []ControlParam
 }
 
 func (q controlSequence) info() ControlSequenceInfo {
-	info := ControlSequenceInfo{ID: q.id, Name: q.name, Description: q.description, Record: q.record}
+	info := ControlSequenceInfo{ID: q.id, Name: q.name, Description: q.description, Recordings: q.records}
 	for _, st := range q.steps {
 		info.Steps = append(info.Steps, st.ControlStepInfo)
 	}
@@ -237,6 +238,10 @@ type controlEngine struct {
 	nodeFetches  map[string]chan NodeFetchResult
 	fetchAllow   []string
 
+	// nodeRecs are recordings started or stopped on other nodes through
+	// agent-coordinator, waiting for their answers (see controlrecord.go).
+	nodeRecs map[string]chan NodeRecordResult
+
 	// promptCh is closed when someone presses continue on the run's
 	// prompt, nil while nothing waits for it.
 	promptCh chan struct{}
@@ -256,6 +261,7 @@ func newControlEngine(s *Server) *controlEngine {
 
 		nodeConnects: make(map[string]int),
 		nodeFetches:  make(map[string]chan NodeFetchResult),
+		nodeRecs:     make(map[string]chan NodeRecordResult),
 	}
 }
 
@@ -327,7 +333,7 @@ func (e *controlEngine) sequenceInfos() []ControlSequenceInfo {
 		q, _, err := compileControlSequence(def, actions, nil, robotOps, time.Now(), e.s.lrName)
 		info := q.info()
 		if err != nil {
-			info = ControlSequenceInfo{ID: def.ID, Name: def.Name, Description: def.Description, Record: def.Record, Error: err.Error()}
+			info = ControlSequenceInfo{ID: def.ID, Name: def.Name, Description: def.Description, Recordings: def.Recordings, Error: err.Error()}
 		}
 		info.Controls = def.Controls
 		out = append(out, info)
@@ -355,6 +361,7 @@ func (e *controlEngine) runCopy() *ControlRunMsg {
 	cp := *e.run
 	cp.Steps = append([]ControlStepResult(nil), e.run.Steps...)
 	cp.Values = append([]ControlValue(nil), e.run.Values...)
+	cp.Records = append([]ControlRecordState(nil), e.run.Records...)
 	cp.Recordings = append([]ControlRecording(nil), e.run.Recordings...)
 	cp.Output = append([]ControlValue(nil), e.run.Output...)
 	cp.Saved = append([]ControlSavedRun(nil), e.run.Saved...)
@@ -517,7 +524,7 @@ func (e *controlEngine) handleCommand(raw string) {
 	case "refresh":
 		e.broadcastLibrary()
 		e.broadcast()
-	case "nodes", "node-capture", "node-capture-result", "node-fetch", "node-fetch-result":
+	case "nodes", "node-capture", "node-capture-result", "node-fetch", "node-fetch-result", "node-record", "node-record-result":
 		e.handleNodeCommand(verb, arg) // see controlnodes.go
 	default:
 		log.Printf("control: ignoring unrecognised command %q", raw)
@@ -533,6 +540,9 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 		return err
 	}
 	if err := e.checkNodeControls(q.controls, vars); err != nil {
+		return err
+	}
+	if err := checkRecordNodes(q.records); err != nil {
 		return err
 	}
 	e.mu.Lock()
@@ -551,6 +561,11 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 	for _, st := range q.steps {
 		run.Steps = append(run.Steps, ControlStepResult{ControlStepInfo: st.ControlStepInfo, Status: "pending"})
 	}
+	var records []*runRecord
+	for k, b := range q.records {
+		run.Records = append(run.Records, ControlRecordState{ControlRecordBlock: b, Status: "pending"})
+		records = append(records, &runRecord{ControlRecordBlock: b, idx: k})
+	}
 	e.run = run
 	e.cancelCh = make(chan struct{})
 	e.logs = nil
@@ -559,7 +574,7 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 	e.mu.Unlock()
 
 	e.broadcast()
-	go e.execute(q, &controlRun{e: e, s: e.s, cancel: cancelCh, vars: vars})
+	go e.execute(q, &controlRun{e: e, s: e.s, cancel: cancelCh, vars: vars, records: records})
 	return nil
 }
 
@@ -619,16 +634,10 @@ func (e *controlEngine) continueRun(runID string) error {
 func (e *controlEngine) execute(q controlSequence, r *controlRun) {
 	start := time.Now()
 	log.Printf("control: running %q", q.id)
-	recording := false
 	failed := -1
 	var runErr error
 	for i, st := range q.steps {
-		if !recording && !st.beforeRecording {
-			recording = true
-			for _, who := range q.record {
-				r.startRecording(q, who)
-			}
-		}
+		r.startRecordings(q, i)
 		r.step = i
 		r.stepMark = e.logMark()
 		e.updateStep(i, func(sr *ControlStepResult) { sr.Status = "running" })
@@ -645,10 +654,11 @@ func (e *controlEngine) execute(q controlSequence, r *controlRun) {
 		e.updateStep(i, func(sr *ControlStepResult) {
 			sr.Status, sr.Message, sr.DurationMs = "success", note, took
 		})
+		r.stopRecordings(i)
 	}
 	// However the steps ended -- a failure's recording is the one most
 	// worth watching.
-	r.stopRecording()
+	r.finishRecordings()
 
 	e.mu.Lock()
 	run := e.run
@@ -846,7 +856,7 @@ type controlRun struct {
 	step     int
 	stepMark int               // the FC log position when the current step started
 	vars     map[string]string // built-ins, the sequence's controls, and values saved so far
-	rec      string            // the robot recording under way across the run, "" if none
+	records  []*runRecord      // the sequence's recording blocks (controlrecord.go)
 }
 
 // save stores value under name for later instructions' {{name}}.
@@ -860,93 +870,6 @@ func (r *controlRun) save(name, value string) error {
 	}
 	r.vars[name] = value
 	return nil
-}
-
-// recordingLabel is the run value naming the screen recording.
-const recordingLabel = "screen recording"
-
-// robotRecord sends IANAR a record-start or record-stop for rec and waits
-// for its answer.
-func (r *controlRun) robotRecord(verb, rec, name string, timeout time.Duration) (RobotRecordMsg, error) {
-	s := r.s
-	if s.reprServer == nil || !s.reprServer.IsHealthy("robot") {
-		return RobotRecordMsg{}, errors.New("the robot (ianar) isn't connected to this local-representative")
-	}
-	req, err := json.Marshal(struct {
-		Rec  string `json:"rec"`
-		Name string `json:"name,omitempty"`
-		Save bool   `json:"save,omitempty"`
-	}{rec, name, verb == "record-stop"})
-	if err != nil {
-		return RobotRecordMsg{}, err
-	}
-	ch := make(chan RobotRecordMsg, 1)
-	r.e.mu.Lock()
-	r.e.recs[rec] = ch
-	r.e.mu.Unlock()
-	defer func() {
-		r.e.mu.Lock()
-		delete(r.e.recs, rec)
-		r.e.mu.Unlock()
-	}()
-	s.reprServer.SendCommand("robot", "__robot:"+verb+" "+string(req))
-	select {
-	case res := <-ch:
-		if res.Status == "error" {
-			return res, errors.New(res.Error)
-		}
-		return res, nil
-	case <-time.After(timeout):
-		return RobotRecordMsg{}, fmt.Errorf("the robot didn't answer within %s", timeout)
-	}
-}
-
-// startRecording starts recording who's screen for the run. A recording
-// that can't start is noted, not fatal: the sequence runs regardless.
-func (r *controlRun) startRecording(q controlSequence, who string) {
-	if who != recordLocalRobot {
-		r.e.addValue(recordingLabel, fmt.Sprintf("not recording %q: only this node's robot can record so far", who))
-		return
-	}
-	rec := randomToken(8)
-	if _, err := r.robotRecord("record-start", rec, q.id, controlRecordStart); err != nil {
-		r.e.setValue(recordingLabel, "not recording: "+err.Error())
-		return
-	}
-	r.rec = rec
-	r.e.setValue(recordingLabel, "recording this node's screen…")
-	time.Sleep(controlRecordLead)
-}
-
-// stopRecording stops the run's recording, if any, and notes where it was
-// saved.
-func (r *controlRun) stopRecording() {
-	if r.rec == "" {
-		return
-	}
-	rec := r.rec
-	r.rec = ""
-	time.Sleep(controlRecordTail)
-	r.e.setValue(recordingLabel, "saving the recording…")
-	res, err := r.robotRecord("record-stop", rec, "", controlRecordSave)
-	switch {
-	case err != nil:
-		r.e.setValue(recordingLabel, "failed: "+err.Error())
-	case res.SavedAs != "":
-		r.e.setValue(recordingLabel, fmt.Sprintf("%s (files tab; %s via %s)", res.SavedAs, formatSeconds(res.DurationMs), res.Via))
-		if res.SavedID != "" {
-			r.e.addRecording(ControlRecording{
-				Who:        recordLocalRobot,
-				FileID:     res.SavedID,
-				Name:       res.SavedAs,
-				Video:      isPlayableVideo(res.SavedAs),
-				DurationMs: res.DurationMs,
-				Via:        res.Via,
-			})
-		}
-	default:
-		r.e.setValue(recordingLabel, "recorded but not saved: "+res.SaveError)
-	}
 }
 
 // isPlayableVideo reports whether a saved recording is a video a browser
@@ -1021,8 +944,8 @@ func (r *controlRun) robotRun(name string, steps []robotStep) (string, error) {
 		Name     string      `json:"name"`
 		Steps    []robotStep `json:"steps"`
 		Save     bool        `json:"save"`
-		NoRecord bool        `json:"no_record,omitempty"` // the run's own recording is already under way
-	}{runID, name, steps, true, r.rec != ""})
+		NoRecord bool        `json:"no_record,omitempty"` // a recording block is already recording this node
+	}{runID, name, steps, true, r.recordingHere()})
 	if err != nil {
 		return "", err
 	}

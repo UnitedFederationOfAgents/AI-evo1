@@ -6,7 +6,7 @@ package main
 // as an example now that sequences are data (Revision C), and the actions
 // it is composed of:
 //
-//   - unlock the robot's screen if it is locked (before the recording)
+//   - unlock the robot's screen if it is locked (not recorded)
 //   - launch a new federation-command instance
 //   - echo "This is the one - <random-chars>" through the remote interface
 //   - have the robot find that terminal by the marker and take local control
@@ -16,7 +16,8 @@ package main
 //   - upload that file to the files tab with node-fetch-file
 //   - delete the file, through the remote interface
 //
-// with this node's screen recorded across the run. node-fetch-file takes
+// with this node's screen recorded from the launch to the end, as one
+// recording block (Step4Prompt.md, see controlrecord.go). node-fetch-file takes
 // any file unless this node's control-fetch-allow setting is set; if it is,
 // it has to allow the file (~/Desktop/found-it-*.txt, say).
 //
@@ -180,12 +181,11 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 			ID:          "fc-robot-handoff",
 			Name:        "federation-command: robot hand-off",
 			Description: "Launch a new federation-command, mark it over the remote interface, then have the robot find it, take local control, echo \"found it\" into a new file on the desktop and hand it back; then upload that file to the files tab and delete it.",
-			Record:      []string{recordLocalRobot},
 			Controls: []ControlParam{
 				{Name: "found_file", Label: "Desktop file", Default: "~/Desktop/found-it-{{timestamp}}.txt", Help: "the new file \"found it\" is echoed into (~ is expanded; no spaces)"},
 			},
 			Steps: []ControlStepRef{
-				{Action: "unlock-screen", BeforeRecording: true},
+				{Action: "unlock-screen"},
 				{Action: "launch-fc"},
 				{Action: "echo-marker", Label: `Echo "This is the one - <random-chars>" through the remote interface`},
 				{Action: "robot-take-local", Label: "Find that terminal with the robot and bring it to local control"},
@@ -195,6 +195,7 @@ func exampleControlLibrary() ([]ControlActionDef, []ControlSequenceDef) {
 				{Action: "fetch-node-file", Label: "Upload that file to the files tab", With: map[string]string{"node": "{{this_node}}", "path": "{{found_file}}"}},
 				{Action: "fc-remove-file", Label: "Delete the file", With: map[string]string{"path": "{{found_file}}"}},
 			},
+			Recordings: []ControlRecordBlock{{Node: "{{this_node}}", From: 2, To: 8}},
 		},
 		{
 			ID:          "capture-two-nodes",

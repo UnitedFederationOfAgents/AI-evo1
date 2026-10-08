@@ -16,8 +16,25 @@ export interface ControlSequenceInfo {
   description?: string
   controls?: ControlParam[]
   steps: ControlStepInfo[]
-  record?: string[] // whose screens a run records ("robot": the node's own)
+  recordings?: ControlRecordBlock[] // whose screens a run records, across which steps (nodes as the defaults fill them in)
   error?: string // why it can't be compiled, if it can't
+}
+
+// A recording block (local-representative/controlrecord.go): node's screen
+// recorded from step from to step to (1-based, inclusive). Up to three side
+// by side, never the same node twice at a step. In a sequence's definition
+// node may be a {{reference}} ({{this_node}}, a node control).
+export interface ControlRecordBlock {
+  node: string
+  from: number
+  to: number
+  label?: string
+}
+
+// A recording block's progress in a run.
+export interface ControlRecordState extends ControlRecordBlock {
+  status: string // "pending" | "starting" | "recording" | "saving" | "saved" | "error" | "skipped"
+  message?: string
 }
 
 export interface ControlStepResult extends ControlStepInfo {
@@ -37,6 +54,7 @@ export interface ControlRunMsg {
   duration_ms?: number
   steps: ControlStepResult[]
   values?: { label: string; value: string }[]
+  records?: ControlRecordState[] // the sequence's recording blocks, as they go
   recordings?: ControlRecording[]
   output?: { label: string; value: string }[] // what the run brings back (the output op)
   prompt?: ControlPrompt // set while a step waits for continue
@@ -60,7 +78,7 @@ export interface ControlPrompt {
 // A screen recording, a screenshot, or a file fetched from a node, that a
 // run saved into the node's files tab.
 export interface ControlRecording {
-  who: string // whose screen ("robot": the node's own; else a node's name)
+  who: string // whose screen: a node's name ("robot", from older runs: the node's own)
   file_id: string // <files api>/<file_id>
   name: string
   video: boolean // playable in the browser, rather than a .zip of frames
@@ -69,6 +87,9 @@ export interface ControlRecording {
   path?: string // where on who a fetched file came from
   duration_ms?: number
   via?: string
+  from?: number // the steps a recording block recorded (1-based)
+  to?: number
+  label?: string // the block's label
 }
 
 export interface ControlStateMsg {
@@ -103,7 +124,6 @@ export interface ControlStepRef {
   action: string
   label?: string
   with?: Record<string, string>
-  before_recording?: boolean
 }
 
 export interface ControlSequenceDef {
@@ -111,8 +131,8 @@ export interface ControlSequenceDef {
   name: string
   description?: string
   controls: ControlParam[] | null
-  record?: string[]
   steps: ControlStepRef[]
+  recordings?: ControlRecordBlock[]
 }
 
 export interface ControlOpArg {

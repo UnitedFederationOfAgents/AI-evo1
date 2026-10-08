@@ -222,6 +222,8 @@ func containsString(list []string, s string) bool {
 //	__control:node-capture-result <json NodeCaptureResult>    (as the node asking)
 //	__control:node-fetch <json NodeFetchRequest>              (as the node asked)
 //	__control:node-fetch-result <json NodeFetchResult>        (as the node asking)
+//	__control:node-record <json NodeRecordRequest>            (as the node asked)
+//	__control:node-record-result <json NodeRecordResult>      (as the node asking)
 func (e *controlEngine) handleNodeCommand(verb, arg string) {
 	switch verb {
 	case "nodes":
@@ -275,6 +277,20 @@ func (e *controlEngine) handleNodeCommand(verb, arg string) {
 			default:
 			}
 		}
+	case "node-record":
+		var req NodeRecordRequest
+		if err := json.Unmarshal([]byte(arg), &req); err != nil || req.Req == "" || req.Rec == "" {
+			log.Printf("control: bad node-record request %q: %v", arg, err)
+			return
+		}
+		go e.recordForNode(req) // see controlrecord.go
+	case "node-record-result":
+		var res NodeRecordResult
+		if err := json.Unmarshal([]byte(arg), &res); err != nil {
+			log.Printf("control: bad node-record result %q: %v", arg, err)
+			return
+		}
+		e.noteNodeRecord(res)
 	}
 }
 
@@ -380,12 +396,18 @@ func (e *controlEngine) captureOn(node, name string, timeout time.Duration, canc
 // copyNodeFile copies file id from node's files tab into this one, through
 // agent-coordinator's /host/<node>/* proxy, under name.
 func (s *Server) copyNodeFile(node, id, name string) (FileInfo, error) {
+	return s.copyNodeFileLimit(node, id, name, controlMaxCopy, controlCopyTimeout)
+}
+
+// copyNodeFileLimit is copyNodeFile, keeping up to limit bytes and taking
+// up to timeout -- larger and longer for a recording (controlrecord.go).
+func (s *Server) copyNodeFileLimit(node, id, name string, limit int64, timeout time.Duration) (FileInfo, error) {
 	addr, ok := s.acHTTPAddr()
 	if !ok {
 		return FileInfo{}, errors.New("this local-representative isn't connected to agent-coordinator")
 	}
 	target := "http://" + addr + "/host/" + url.PathEscape(node) + "/api/files/" + url.PathEscape(id)
-	resp, err := s.httpGetWithTimeout(target, controlCopyTimeout)
+	resp, err := s.httpGetWithTimeout(target, timeout)
 	if err != nil {
 		return FileInfo{}, err
 	}
@@ -394,7 +416,7 @@ func (s *Server) copyNodeFile(node, id, name string) (FileInfo, error) {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return FileInfo{}, fmt.Errorf("agent-coordinator answered %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
-	info, err := s.saveFileFrom(name, io.LimitReader(resp.Body, controlMaxCopy))
+	info, err := s.saveFileFrom(name, io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return FileInfo{}, err
 	}

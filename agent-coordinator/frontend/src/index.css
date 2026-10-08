@@ -652,6 +652,44 @@ body {
 .ctl-help code { color: #c8c8a0; }
 .ctl-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border-top: 1px solid #2a2a2a; padding-top: 8px; }
 
+/* Recording blocks: slim lanes to the right of the steps (Step4Prompt.md).
+   A block's pieces reach across the gap between steps so it reads as one bar. */
+.ctl-steps { --ctl-rec-gap: 6px; }
+.ctl-comp-steps { --ctl-rec-gap: 8px; }
+.ctl-comp-step { display: flex; gap: 8px; }
+.ctl-comp-step > .ctl-instr { flex: 1; min-width: 0; }
+.ctl-rec-rail { display: flex; gap: 3px; align-self: stretch; flex-shrink: 0; }
+.ctl-rec-lane { width: 9px; display: flex; flex-direction: column; }
+.ctl-rec-seg { flex: 1; opacity: 0.8; margin-bottom: calc(-1 * var(--ctl-rec-gap, 6px)); }
+.ctl-rec-seg-start { margin-top: 2px; border-top-left-radius: 5px; border-top-right-radius: 5px; }
+.ctl-rec-seg-end { margin-bottom: 2px; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }
+.ctl-rec-seg-click { cursor: pointer; }
+.ctl-rec-seg-selected { opacity: 1; box-shadow: 0 0 0 1px #fff; }
+.ctl-rec-seg.ctl-rec-st-pending, .ctl-rec-seg.ctl-rec-st-starting { opacity: 0.35; }
+.ctl-rec-seg.ctl-rec-st-recording { opacity: 1; animation: ctl-rec-pulse 1.2s ease-in-out infinite; }
+.ctl-rec-seg.ctl-rec-st-saving { opacity: 0.6; }
+.ctl-rec-seg.ctl-rec-st-saved { opacity: 1; }
+.ctl-rec-seg.ctl-rec-st-error { opacity: 0.5; box-shadow: inset 0 0 0 2px #cc4444; }
+.ctl-rec-seg.ctl-rec-st-skipped { opacity: 0.15; }
+@keyframes ctl-rec-pulse { 50% { opacity: 0.55; } }
+.ctl-rec-add {
+  align-self: flex-start; width: 18px; height: 18px; padding: 0; margin-left: 2px;
+  background: none; border: 1px dashed #555; border-radius: 3px; color: #cc4444; font-size: 9px; line-height: 1; cursor: pointer;
+}
+.ctl-rec-add:hover:not(:disabled) { border-color: #cc4444; }
+.ctl-rec-add:disabled { opacity: 0.3; cursor: default; }
+.ctl-rec-swatch { display: inline-block; flex-shrink: 0; width: 9px; height: 14px; border-radius: 3px; }
+.ctl-rec-edit { padding: 2px 4px; border-radius: 3px; }
+.ctl-rec-edit-selected { background: #2a2d2e; }
+.ctl-rec-edit .ctl-select { flex: 0 0 auto; }
+.ctl-rec-legend { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #9c9c9c; }
+.ctl-rec-legend-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-rec-status { color: #888; }
+.ctl-rec-status.ctl-rec-st-recording { color: #cc4444; }
+.ctl-rec-status.ctl-rec-st-saved { color: #4ec94e; }
+.ctl-rec-status.ctl-rec-st-error { color: #cc4444; }
+.ctl-rec-msg { color: #777; overflow-wrap: anywhere; }
+
 /* ---- Ridealong panel ---- */
 
 .ra-panel { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #4a2e6e; border-radius: 6px; padding: 14px 16px; }

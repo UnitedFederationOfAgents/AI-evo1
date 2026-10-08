@@ -8,6 +8,8 @@ import type {
   ControlLibraryMsg,
   ControlOpSpec,
   ControlParam,
+  ControlRecordBlock,
+  ControlRecordState,
   ControlRecording,
   ControlSequenceDef,
   ControlStateMsg,
@@ -25,7 +27,9 @@ import type {
 //             list of instructions: LR's own ops, or robot.<op> for the
 //             robot's
 //   composer: sequences -- actions in order, with values for their controls,
-//             whose screens to record, and which leading steps run first
+//             and slim recording blocks beside them: each records a node's
+//             screen across a span of steps, up to three side by side
+//             (Step4Prompt.md, local-representative/controlrecord.go)
 // Both actions and sequences import from and export to YAML.
 //
 // This file and controlTypes.ts are shared, word for word, by
@@ -97,6 +101,126 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
+// ---- Recording blocks ----
+
+// At most this many recordings side by side at any step (controlrecord.go).
+const MAX_PARALLEL_RECORDINGS = 3
+const REC_COLORS = ['#c586c0', '#4fc1ff', '#dcdcaa', '#4ec9b0', '#ce9178', '#b5cea8']
+const recColor = (k: number) => REC_COLORS[k % REC_COLORS.length]
+
+const covers = (b: ControlRecordBlock, step: number) => b.from <= step && step <= b.to
+const recSteps = (b: { from?: number; to?: number }) => (b.from === b.to ? `step ${b.from}` : `steps ${b.from}–${b.to}`)
+
+// recordLanes puts each block in a lane (column) beside the steps, earliest
+// first into the first lane free by then -- never more lanes than blocks
+// side by side at a step.
+function recordLanes(blocks: ControlRecordBlock[]): { lane: number[]; lanes: number } {
+  const order = blocks.map((_, k) => k).sort((a, b) => blocks[a].from - blocks[b].from || blocks[a].to - blocks[b].to)
+  const ends: number[] = []
+  const lane = blocks.map(() => 0)
+  for (const k of order) {
+    let l = ends.findIndex(end => end < blocks[k].from)
+    if (l < 0) {
+      l = ends.length
+      ends.push(0)
+    }
+    ends[l] = blocks[k].to
+    lane[k] = l
+  }
+  return { lane, lanes: ends.length }
+}
+
+// recordProblems is what saving would refuse (controlrecord.go's
+// checkRecordBlocks), to show while editing.
+function recordProblems(blocks: ControlRecordBlock[], nSteps: number): string[] {
+  const out = new Set<string>()
+  blocks.forEach((b, k) => {
+    if (!b.node.trim()) out.add(`recording ${k + 1} has no node`)
+    if (b.from < 1 || b.to < b.from || b.to > nSteps) out.add(`recording ${k + 1} has to be within steps 1 to ${nSteps}, first to last`)
+  })
+  for (let i = 1; i <= nSteps; i++) {
+    const at = blocks.map((_, k) => k).filter(k => covers(blocks[k], i))
+    if (at.length > MAX_PARALLEL_RECORDINGS) out.add(`step ${i} has ${at.length} recordings; at most ${MAX_PARALLEL_RECORDINGS} can run side by side`)
+    at.forEach((x, j) =>
+      at.slice(j + 1).forEach(y => {
+        const node = blocks[x].node.trim()
+        if (node && node === blocks[y].node.trim()) out.add(`recordings ${x + 1} and ${y + 1} both record ${node} at step ${i}`)
+      }),
+    )
+  }
+  return [...out]
+}
+
+function recTitle(b: ControlRecordBlock, k: number, st?: ControlRecordState): string {
+  let t = `recording ${k + 1}: ${b.node || '(no node)'}'s screen, ${recSteps(b)}`
+  if (b.label) t += ` — ${b.label}`
+  if (st) t += `\n${st.status}${st.message ? `: ${st.message}` : ''}`
+  return t
+}
+
+// RecordRail is one step's slice of the recording lanes beside the steps:
+// a piece of each block covering the step, in its lane, so a block reads as
+// one slim bar from its first step to its last. children (the composer's
+// add button) go after the lanes.
+function RecordRail({ step, blocks, layout, states, selected, onSelect, children }: {
+  step: number // 1-based
+  blocks: ControlRecordBlock[]
+  layout: { lane: number[]; lanes: number }
+  states?: ControlRecordState[]
+  selected?: number | null
+  onSelect?: (k: number) => void
+  children?: ReactNode
+}) {
+  if (layout.lanes === 0 && !children) return null
+  return (
+    <div className="ctl-rec-rail">
+      {Array.from({ length: layout.lanes }, (_, l) => {
+        const k = blocks.findIndex((b, j) => layout.lane[j] === l && covers(b, step))
+        if (k < 0) return <div key={l} className="ctl-rec-lane" />
+        const b = blocks[k]
+        const st = states?.[k]
+        const cls = [
+          'ctl-rec-seg',
+          b.from === step && 'ctl-rec-seg-start',
+          b.to === step && 'ctl-rec-seg-end',
+          st && `ctl-rec-st-${st.status}`,
+          selected === k && 'ctl-rec-seg-selected',
+          onSelect && 'ctl-rec-seg-click',
+        ].filter(Boolean).join(' ')
+        return (
+          <div key={l} className="ctl-rec-lane">
+            <div className={cls} style={{ background: recColor(k) }} title={recTitle(b, k, st)} onClick={onSelect ? () => onSelect(k) : undefined} />
+          </div>
+        )
+      })}
+      {children}
+    </div>
+  )
+}
+
+// RecordLegend lists a sequence's recording blocks (and, in a run, how each
+// is going) under its steps.
+function RecordLegend({ blocks, states, node, thisNode }: { blocks: ControlRecordBlock[]; states?: ControlRecordState[]; node: string; thisNode?: string }) {
+  return (
+    <div className="ctl-rec-legend">
+      {blocks.map((b, k) => {
+        const st = states?.[k]
+        return (
+          <div key={k} className="ctl-rec-legend-row">
+            <span className="ctl-rec-swatch" style={{ background: recColor(k) }} />
+            <span>
+              records {b.node ? `${b.node}${b.node === thisNode ? ` (${node})` : ''}` : '(a node chosen when it runs)'}'s screen, {recSteps(b)}
+              {b.label ? ` — ${b.label}` : ''}
+            </span>
+            {st && <span className={`ctl-rec-status ctl-rec-st-${st.status}`}>{st.status}</span>}
+            {st?.message && <span className="ctl-rec-msg">{st.message}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ---- Runner ----
 
 function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, onCancel, onContinue, fileUrl, node }: ControlV1Props) {
@@ -127,6 +251,10 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
   // A run shows the steps as compiled with its values; otherwise the defaults.
   const steps: (ControlStepInfo & { status?: string; message?: string; duration_ms?: number })[] = thisRun?.steps ?? seq.steps ?? []
   const runError = replies.run && !replies.run.success ? replies.run.error : undefined
+  // The recording blocks beside the steps: as the run fills them in and
+  // follows them, else with the defaults.
+  const recBlocks: ControlRecordBlock[] = thisRun?.records ?? seq.recordings ?? []
+  const recLayout = recordLanes(recBlocks)
 
   return (
     <div className="ctl-v1-view">
@@ -158,11 +286,6 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
       </div>
       {running && !thisRun && run && <div className="ctl-hint">running: {run.name}</div>}
       {seq.description && <div className="ctl-seq-desc">{seq.description}</div>}
-      {seq.record && seq.record.length > 0 && (
-        <div className="ctl-seq-desc">
-          records the screen of: {seq.record.map(w => (w === 'robot' ? `${node} (its robot)` : w)).join(', ')} — saved to the files tab and played back below once the run ends
-        </div>
-      )}
       {seq.error && <div className="ctl-run-error-msg">can't run: {seq.error}</div>}
       {runError && !running && <div className="ctl-run-error-msg">{runError}</div>}
       {controls.length > 0 && (
@@ -217,10 +340,17 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
                 )}
               </div>
               <span className="ctl-step-time">{status !== 'skipped' ? formatMs(st.duration_ms) : ''}</span>
+              <RecordRail step={i + 1} blocks={recBlocks} layout={recLayout} states={thisRun?.records} />
             </li>
           )
         })}
       </ol>
+      {recBlocks.length > 0 && (
+        <>
+          <RecordLegend blocks={recBlocks} states={thisRun?.records} node={node} thisNode={state?.node} />
+          {!thisRun && <div className="ctl-hint">recordings are saved to the files tab and played back below once they stop</div>}
+        </>
+      )}
       {thisRun?.output && thisRun.output.length > 0 && (
         <div className="ctl-output">
           <div className="ctl-output-head">output</div>
@@ -281,6 +411,8 @@ function Recordings({ recordings, fileUrl, node }: { recordings: ControlRecordin
             {rec.file
               ? `${rec.who === 'robot' ? node : rec.who}: ${rec.path ?? 'file'}`
               : rec.who === 'robot' ? `${node}'s screen` : `${rec.who}'s screen`}
+            {rec.from ? ` · ${recSteps(rec)}` : ''}
+            {rec.label ? ` · ${rec.label}` : ''}
             {rec.image ? ' · screenshot' : ''}
             {rec.duration_ms ? ` · ${formatMs(rec.duration_ms)}` : ''}
             {rec.via ? ` · via ${rec.via}` : ''}
@@ -715,7 +847,7 @@ function Definer({ lib, request, replies, connected }: {
 
 // ---- Composer ----
 
-const blankSequence = (): ControlSequenceDef => ({ id: '', name: '', description: '', controls: [], record: [], steps: [] })
+const blankSequence = (): ControlSequenceDef => ({ id: '', name: '', description: '', controls: [], steps: [], recordings: [] })
 
 function Composer({ lib, request, replies, connected, node, nodes }: {
   lib: ControlLibraryMsg
@@ -732,7 +864,12 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
   const save = useRequest(request, replies)
   const pendingId = useRef('')
   const [addAction, setAddAction] = useState('')
+  const [selRec, setSelRec] = useState<number | null>(null)
   const d = ed.draft
+  const recs = d.recordings ?? []
+  const recLayout = recordLanes(recs)
+  const problems = recordProblems(recs, d.steps.length)
+  const nodeControls = (d.controls ?? []).filter(c => c.type === 'node' && c.name)
 
   useEffect(() => {
     const r = save.reply
@@ -741,6 +878,37 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
     if (r.op === 'delete-sequence') ed.settle(sequences.find(q => q.id !== pendingId.current)?.id ?? '')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [save.reply])
+  useEffect(() => {
+    setSelRec(null)
+  }, [ed.selected])
+
+  const setRecs = (fn: (r: ControlRecordBlock[]) => ControlRecordBlock[]) => ed.update(q => ({ ...q, recordings: fn(q.recordings ?? []) }))
+  const setRec = (k: number, patch: Partial<ControlRecordBlock>) => setRecs(r => r.map((b, j) => (j === k ? { ...b, ...patch } : b)))
+  // addRec starts a one-step recording at step (1-based) of the first node
+  // not already recorded there: this node, a node control, a connected node.
+  const addRec = (step: number) => {
+    const taken = new Set(recs.filter(b => covers(b, step)).map(b => b.node.trim()))
+    const who = ['{{this_node}}', ...nodeControls.map(c => `{{${c.name}}}`), ...nodes].find(n => !taken.has(n)) ?? ''
+    setSelRec(recs.length)
+    setRecs(r => [...r, { node: who, from: step, to: step }])
+  }
+  const removeRec = (k: number) => {
+    setSelRec(null)
+    setRecs(r => r.filter((_, j) => j !== k))
+  }
+  // removeStep takes step i (0-based) out, pulling the recordings after it
+  // up a step; one that recorded only that step goes with it.
+  const removeStep = (i: number) => {
+    const n = i + 1
+    setSelRec(null)
+    ed.update(q => ({
+      ...q,
+      steps: q.steps.filter((_, j) => j !== i),
+      recordings: (q.recordings ?? [])
+        .filter(b => !(b.from === n && b.to === n))
+        .map(b => ({ ...b, from: b.from > n ? b.from - 1 : b.from, to: b.to >= n ? b.to - 1 : b.to })),
+    }))
+  }
 
   const setSteps = (fn: (steps: ControlStepRef[]) => ControlStepRef[]) => ed.update(q => ({ ...q, steps: fn(q.steps) }))
   const setStep = (i: number, patch: Partial<ControlStepRef>) => setSteps(s => s.map((st, j) => (j === i ? { ...st, ...patch } : st)))
@@ -762,11 +930,14 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
       list.splice(i + by, 0, st)
       return list
     })
-  const recordsRobot = (d.record ?? []).includes('robot')
   const chosen = addAction || actions[0]?.id || ''
 
   const onSave = () => {
-    const sequence: ControlSequenceDef = { ...d, controls: (d.controls ?? []).filter(c => c.name.trim() !== '') }
+    const sequence: ControlSequenceDef = {
+      ...d,
+      controls: (d.controls ?? []).filter(c => c.name.trim() !== ''),
+      recordings: recs.map(b => ({ ...b, node: b.node.trim(), label: b.label?.trim() || undefined })),
+    }
     pendingId.current = sequence.id
     save.send({ op: 'save-sequence', sequence, previous_id: ed.original?.id ?? '' })
   }
@@ -796,14 +967,6 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
         <Field label="description">
           <input className="ctl-input" value={d.description ?? ''} onChange={e => ed.update(q => ({ ...q, description: e.target.value }))} />
         </Field>
-        <label className="ctl-check">
-          <input
-            type="checkbox"
-            checked={recordsRobot}
-            onChange={e => ed.update(q => ({ ...q, record: e.target.checked ? ['robot'] : [] }))}
-          />
-          record {node}'s screen across the run (saved to the files tab)
-        </label>
       </div>
 
       <div className="ctl-section">
@@ -814,49 +977,60 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
 
       <div className="ctl-section">
         <div className="ctl-section-title">steps</div>
-        <ol className="ctl-instrs">
+        <div className="ctl-hint">
+          The slim blocks to the right of the steps are recordings: each records one node's screen from its first step to its
+          last, up to {MAX_PARALLEL_RECORDINGS} side by side, never the same node twice at a step. ⏺ starts one at that step.
+        </div>
+        <ol className="ctl-instrs ctl-comp-steps">
           {d.steps.map((st, i) => {
             const a = actionById.get(st.action)
-            const canRunFirst = d.steps.slice(0, i).every(p => p.before_recording)
+            const atStep = recs.filter(b => covers(b, i + 1)).length
             return (
-              <li className="ctl-instr" key={i}>
-                <div className="ctl-row">
-                  <span className="ctl-num">{i + 1}.</span>
-                  <span className="ctl-step-action" title={a?.description}>{a ? a.name : `missing action "${st.action}"`}</span>
-                  <button className="ctl-btn ctl-icon-btn" disabled={i === 0} title="move up" onClick={() => moveStep(i, -1)}>↑</button>
-                  <button className="ctl-btn ctl-icon-btn" disabled={i === d.steps.length - 1} title="move down" onClick={() => moveStep(i, 1)}>↓</button>
-                  <button className="ctl-btn ctl-icon-btn" title="remove this step" onClick={() => setSteps(s => s.filter((_, j) => j !== i))}>✕</button>
-                </div>
-                <Field label="label">
-                  <input className="ctl-input" value={st.label ?? ''} placeholder={a?.name ?? ''} onChange={e => setStep(i, { label: e.target.value || undefined })} />
-                </Field>
-                {(a?.controls ?? []).map(c => (
-                  <Field key={c.name} label={c.label || c.name}>
-                    <input
-                      className="ctl-input"
-                      // A node control's value is usually a sequence node control's {{name}}; the
-                      // connected nodes are offered too.
-                      list={c.type === 'node' ? 'ctl-node-list' : undefined}
-                      value={st.with?.[c.name] ?? ''}
-                      placeholder={c.default ? `${c.default} (default)` : c.help ?? ''}
-                      title={c.help}
-                      onChange={e => setWith(i, c.name, e.target.value)}
-                    />
+              <li className="ctl-comp-step" key={i}>
+                <div className="ctl-instr">
+                  <div className="ctl-row">
+                    <span className="ctl-num">{i + 1}.</span>
+                    <span className="ctl-step-action" title={a?.description}>{a ? a.name : `missing action "${st.action}"`}</span>
+                    <button className="ctl-btn ctl-icon-btn" disabled={i === 0} title="move up" onClick={() => moveStep(i, -1)}>↑</button>
+                    <button className="ctl-btn ctl-icon-btn" disabled={i === d.steps.length - 1} title="move down" onClick={() => moveStep(i, 1)}>↓</button>
+                    <button className="ctl-btn ctl-icon-btn" title="remove this step" onClick={() => removeStep(i)}>✕</button>
+                  </div>
+                  <Field label="label">
+                    <input className="ctl-input" value={st.label ?? ''} placeholder={a?.name ?? ''} onChange={e => setStep(i, { label: e.target.value || undefined })} />
                   </Field>
-                ))}
-                {recordsRobot && (canRunFirst || st.before_recording) && (
-                  <label className="ctl-check">
-                    <input type="checkbox" checked={!!st.before_recording} onChange={e => setStep(i, { before_recording: e.target.checked || undefined })} />
-                    run before the recording starts (leading steps only)
-                  </label>
-                )}
+                  {(a?.controls ?? []).map(c => (
+                    <Field key={c.name} label={c.label || c.name}>
+                      <input
+                        className="ctl-input"
+                        // A node control's value is usually a sequence node control's {{name}}; the
+                        // connected nodes are offered too.
+                        list={c.type === 'node' ? 'ctl-node-list' : undefined}
+                        value={st.with?.[c.name] ?? ''}
+                        placeholder={c.default ? `${c.default} (default)` : c.help ?? ''}
+                        title={c.help}
+                        onChange={e => setWith(i, c.name, e.target.value)}
+                      />
+                    </Field>
+                  ))}
+                </div>
+                <RecordRail step={i + 1} blocks={recs} layout={recLayout} selected={selRec} onSelect={setSelRec}>
+                  <button
+                    className="ctl-rec-add"
+                    disabled={atStep >= MAX_PARALLEL_RECORDINGS}
+                    title={atStep >= MAX_PARALLEL_RECORDINGS ? `${MAX_PARALLEL_RECORDINGS} recordings already run at this step` : `start a recording at step ${i + 1}`}
+                    onClick={() => addRec(i + 1)}
+                  >
+                    ⏺
+                  </button>
+                </RecordRail>
               </li>
             )
           })}
           {d.steps.length === 0 && <li className="ctl-empty">No steps yet — add actions below.</li>}
         </ol>
         <datalist id="ctl-node-list">
-          {(d.controls ?? []).filter(c => c.type === 'node' && c.name).map(c => <option key={c.name} value={`{{${c.name}}}`} />)}
+          <option value="{{this_node}}">{node}</option>
+          {nodeControls.map(c => <option key={c.name} value={`{{${c.name}}}`} />)}
           {nodes.map(n => <option key={n} value={n} />)}
         </datalist>
         <div className="ctl-row">
@@ -868,10 +1042,62 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
         <div className="ctl-hint">{actionById.get(chosen)?.description}</div>
       </div>
 
+      <div className="ctl-section">
+        <div className="ctl-section-title">recordings</div>
+        {recs.length === 0 && <div className="ctl-hint">None — the run records no screens. Press ⏺ beside a step to start one there.</div>}
+        {recs.map((b, k) => {
+          const stepOptions = d.steps.map((_, j) => <option key={j} value={j + 1}>{j + 1}</option>)
+          return (
+            <div key={k} className={`ctl-row ctl-rec-edit${selRec === k ? ' ctl-rec-edit-selected' : ''}`} onClick={() => setSelRec(k)}>
+              <span className="ctl-rec-swatch" style={{ background: recColor(k) }} />
+              <input
+                className="ctl-input"
+                list="ctl-node-list"
+                value={b.node}
+                placeholder="node"
+                title={`whose screen: a node connected to agent-coordinator, {{this_node}} (${node}) or a node control's {{name}}`}
+                onChange={e => setRec(k, { node: e.target.value })}
+              />
+              <span className="ctl-hint">steps</span>
+              <select className="ctl-select" value={b.from} title="the first step it records" onChange={e => {
+                const from = Number(e.target.value)
+                setRec(k, { from, to: Math.max(from, b.to) })
+              }}>
+                {stepOptions}
+              </select>
+              <span className="ctl-hint">to</span>
+              <select className="ctl-select" value={b.to} title="the last step it records" onChange={e => {
+                const to = Number(e.target.value)
+                setRec(k, { to, from: Math.min(to, b.from) })
+              }}>
+                {stepOptions}
+              </select>
+              <input className="ctl-input" value={b.label ?? ''} placeholder="label (optional)" onChange={e => setRec(k, { label: e.target.value || undefined })} />
+              <button className="ctl-btn ctl-icon-btn" title="remove this recording" onClick={e => {
+                e.stopPropagation()
+                removeRec(k)
+              }}>✕</button>
+            </div>
+          )
+        })}
+        {problems.map(p => <div key={p} className="ctl-run-error-msg">{p}</div>)}
+        {recs.length > 0 && (
+          <div className="ctl-hint">
+            Each is saved to {node}'s files tab once it stops — another node's is recorded by that node's robot and copied here
+            through agent-coordinator — and played back on the runner. Recordings keep their step numbers when steps move.
+          </div>
+        )}
+      </div>
+
       <BuiltinsHelp lib={lib} />
 
       <div className="ctl-row">
-        <button className="sys-btn sys-btn-launch" disabled={!connected || !ed.dirty || save.pending} onClick={onSave}>
+        <button
+          className="sys-btn sys-btn-launch"
+          disabled={!connected || !ed.dirty || save.pending || problems.length > 0}
+          title={problems.length > 0 ? 'fix the recordings first' : undefined}
+          onClick={onSave}
+        >
           {ed.original ? 'save sequence' : 'create sequence'}
         </button>
         <button className="ctl-btn" disabled={!ed.dirty} onClick={ed.revert}>revert</button>

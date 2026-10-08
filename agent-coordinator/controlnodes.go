@@ -20,7 +20,11 @@ import (
 //     "__control:node-capture-result". A node that isn't connected is
 //     answered for, so the asking run fails at once rather than timing out.
 //   - "node-fetch" (files for node-fetch-file) and its "node-fetch-result"
-//     are relayed the same way.
+//     are relayed the same way, and so are "node-record" and
+//     "node-record-result": starting and stopping a recording of the node's
+//     screen for one of a sequence's recording blocks
+//     (condocs/initialRobotImpls/Step4Prompt.md, see
+//     local-representative/controlrecord.go).
 
 // nodeRequestKinds are the requests one host's control run makes of
 // another node, relayed by relayNodeRequest; each is answered by
@@ -28,6 +32,7 @@ import (
 var nodeRequestKinds = map[string]string{
 	"node-capture": "screenshot",
 	"node-fetch":   "file",
+	"node-record":  "recording",
 }
 
 // connectedHostNames lists the hosts whose local-representative is

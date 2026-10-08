@@ -288,7 +288,8 @@ The **control** tab sequences actions across this host's sub-apps
 (`controllib.go`), the way the robot's sequence-v2 tab works:
 
 - **runner** — pick a sequence, set its controls, run it, and follow each
-  step; a screen recording, if the sequence makes one, plays back below.
+  step, with the sequence's recording blocks beside the steps showing how
+  each recording is going; each recording plays back below once it stops.
   Once a run ends, **save results to files** uploads it into the files tab
   as `lr-control-<sequence>-<time>.zip` (`controlsave.go`), like the
   robot's "Save to file". The zip holds `report.txt` (the controls, each
@@ -302,8 +303,17 @@ The **control** tab sequences actions across this host's sub-apps
   robot's sequence-v2 ops, which LR hands to IANAR (the robot reports its
   ops when it connects).
 - **composer** — sequences: actions in order with values for their
-  controls, whether this node's screen is recorded across the run, and which
-  leading steps run before the recording starts.
+  controls, and slim **recording** blocks to the right of the steps
+  (`controlrecord.go`). Each block records one node's screen from its first
+  step to its last: this node's (`{{this_node}}`), a node control's, or any
+  node connected to agent-coordinator. Blocks may overlap, up to 3 side by
+  side, but a node can't be in two blocks at the same step. Another node's
+  screen is recorded by that node's robot, asked through agent-coordinator
+  (`node-record`), and the video is copied into this files tab. Every
+  recording is gathered on the run and in its saved zip. ⏺ beside a step
+  starts a block there; the recordings list below the steps sets each
+  block's node, steps and label. A library saved before blocks existed
+  (`record: [robot]`, `before_recording`) loads as one block of this node.
 
 Values may refer to controls, built-ins (`{{timestamp}}`, when the run
 started, and `{{this_node}}`, the node running it) and values earlier

@@ -452,6 +452,11 @@ New tests are in `ianar/lrcancel_test.go`. Robot runs started from the robot's o
 [Step 3 Substep N](Step3SubstepNPrompt.md)
 
 
+## <REPLACE-Revision|Retry> N
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep N is now active. Interact with the substep file (Step3SubstepNPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

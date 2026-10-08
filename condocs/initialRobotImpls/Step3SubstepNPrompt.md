@@ -2180,11 +2180,6 @@ Two of the failures came from real bugs in the program code. The other five were
 These tests had probably been failing for a while without anyone seeing them, because `make test` used to stop at the first sub-project that failed.
 
 
-## <REPLACE-Revision|Retry> B
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1791462545 (Thu Oct 8 12:29:05 PM UTC 2026).

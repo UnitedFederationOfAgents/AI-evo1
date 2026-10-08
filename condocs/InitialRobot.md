@@ -64,13 +64,25 @@ Let's also make the federation-command tab able to recognize and handle the mult
 ```
 
 
-### Step 4 - <REPLACE-TITLE>
+### Step 4 - Improve the recording capabilities for our control sequences.
+
+[Step 4 Prompt](initialRobotImpls/Step4Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Now that we have control sequences working nicely we will make the recording capabilities more flexible.
+
+In the composer, to the right of the main 'steps' blocks we will allow much slimmer 'recording' blocks to be created. These blocks may be longer than a single step (one block may span N steps). They may overlap one-another, and there may be up to 3 in parallel.
+
+Each one of these blocks represents a recording being taken on one node involved in the sequence. The same node may not be in two blocks which are side-by-side for any particular step.
+
+These recordings are gathered in the sequence collection.
+
+This will allow us to do things like only record important segments, and to record sequences which are in differing locations.
+
+Let's begin this implementation now.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the fourth step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the fourth step.

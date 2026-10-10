@@ -353,7 +353,7 @@ function useStatusWS() {
 
   return {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
     rebuildRepo, setAutoRebuild, setAutoUpdate,
   }
 }
@@ -2515,7 +2515,7 @@ export default function App() {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
     acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one

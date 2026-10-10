@@ -507,7 +507,7 @@ function useCoordinatorWS() {
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
@@ -3497,7 +3497,7 @@ function GlobalView({
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -3516,6 +3516,7 @@ function LRView({
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
+  importHostFiles: (hostId: string, paths: string[]) => Promise<string | null>
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -4059,7 +4060,7 @@ export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
     sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
@@ -4252,6 +4253,7 @@ export default function App() {
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               uploadFiles={uploadFiles}
+              importHostFiles={importHostFiles}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
               hasHighlighted={!!firstHighlighted}

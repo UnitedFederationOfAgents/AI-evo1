@@ -273,3 +273,26 @@ make[1]: Leaving directory '/workspaces/research/AI-evo1/local-representative'
 make: *** [Makefile:86: deploy-dev-binaries] Error 1
 
 Let's fix that.
+
+
+prompt: [`46baca3`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/46baca3b9e14adfed816c5eb0959a3bf51cccb3d) → reply: [`0ce0cc4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0ce0cc43ea2a4e9a1825c65345fd0c48fb8ecc35)
+
+## Reply G
+
+I fixed the build error, but I couldn't confirm it: `tsc` needed approval here, so please run `make build` again on the host.
+
+**The cause:** in LR's frontend, `importHostFiles` was defined inside the `useStatusWS` hook but never returned from it, so `App` couldn't see it. I added it to the hook's return and to `App`'s destructure in `local-representative/frontend/src/App.tsx`.
+
+**The same bug in AC:** AC's frontend would have failed the same way. Its `importHostFiles` wasn't returned from `useCoordinatorWS`, and `LRView` uses it without receiving it as a prop. I added it to the hook's return and to `App`'s destructure, and passed it down to `LRView` as a typed prop in `agent-coordinator/frontend/src/App.tsx`.
+
+**Condoccer and IANAR:** searching their frontends turned up no other "select from host" code wired up the same broken way, though I haven't compiled either.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

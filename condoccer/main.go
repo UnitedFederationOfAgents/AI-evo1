@@ -133,7 +133,15 @@ type Iteration struct {
 }
 
 var (
-	condocYamlRe         = regexp.MustCompile(`condoc-yaml`)
+	// condocYamlRe matches the commented-out condoc-yaml header exactly as
+	// federation-command writes and recognises it (condocYAMLHeaderRe in
+	// federation-command/condoc.go), so a file that merely mentions
+	// "condoc-yaml" in prose isn't mistaken for a condoc.
+	condocYamlRe         = regexp.MustCompile("(?s)<!--\\s*```condoc-yaml\\n(.*?)```\\s*-->")
+	// snapshotFileRe matches example snapshot files (<file>.snpN.md, see
+	// condocs-examples/*/explanation.md). They copy a real condoc's header at
+	// a point in time but are not live condocs.
+	snapshotFileRe       = regexp.MustCompile(`\.snp\d+\.md$`)
 	completedRe          = regexp.MustCompile(`(?m)^## Condoc Completed\s*$`)
 	humanPromptRe        = regexp.MustCompile(`(?m)^## Human-Prompt\s*$`)
 	replaceTitleRe       = regexp.MustCompile(`(?m)^### Step \d+ - <REPLACE-TITLE>`)
@@ -565,7 +573,7 @@ func findCondocs(root string) ([]CondocInfo, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(d.Name(), ".md") {
+		if !strings.HasSuffix(d.Name(), ".md") || snapshotFileRe.MatchString(d.Name()) {
 			return nil
 		}
 		b, err := os.ReadFile(path)

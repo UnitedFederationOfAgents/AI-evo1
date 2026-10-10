@@ -201,3 +201,28 @@ We see condoc entries that don't make sense.
 Let's fix the condoccer so that non-condoc files like those 'Simple.snX' do not display.
 
 Let's respond with why they were displaying.
+
+
+prompt: [`f29dca5`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f29dca5235071667063b67196c7cb38faa5ad7e4) → reply: [`6f8cd73`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/6f8cd734fe30e60b1ca65c1cb436c48b48adb110)
+
+## Reply H
+
+I've stopped condoccer from listing the `Simple.snpN` files, but none of it has been built or tested. `go test` and `gofmt` needed approval here, so please run `make test` in `condoccer` on the host.
+
+**Why they were showing:** you set the working dir to `/home/jedsall/workspace/research/`, so the scan now covers everything under `AI-evo1`, including `ignored-scratch/AI-sandboxing/discussion/condocs-examples/`. The `Simple.snpN.md` and `CatStory.snpN.md` files there are snapshots of example condocs, each saved at a point in time, so each one has a copy of a real condoc header. Condoccer counted any `.md` file containing the word `condoc-yaml` as a condoc. Each snapshot therefore showed up as its own condoc, at whatever stage it was saved in ("proposed", "awaiting step", and so on). Being gitignored didn't hide them, because the scan doesn't look at `.gitignore`.
+
+**The fix, in `condoccer/main.go`:**
+- **Snapshots are skipped:** files named `<name>.snpN.md` (the naming those examples use) are no longer listed.
+- **A stricter test for what counts as a condoc:** a file must now contain the hidden condoc header written exactly as federation-command writes it. Files that only mention `condoc-yaml` in passing no longer count.
+
+A new test in `condoccer/findcondocs_test.go` checks that only a real condoc is listed, not snapshots or files that just mention the header.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

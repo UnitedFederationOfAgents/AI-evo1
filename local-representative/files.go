@@ -127,7 +127,7 @@ type FileInfo struct {
 	ID         string `json:"id"`   // on-disk filename; also addresses the file
 	Name       string `json:"name"` // original filename as uploaded
 	Size       int64  `json:"size"`
-	Kind       string `json:"kind"`        // "text", "image", or "other" -- selects the wireframe icon
+	Kind       string `json:"kind"`        // "text", "image", "archive", or "other" -- selects the wireframe icon
 	State      string `json:"state"`       // "cached", "held", or "persisted" -- selects the icon's color
 	UploadedAt int64  `json:"uploaded_at"` // unix seconds
 	ExpiresAt  int64  `json:"expires_at"`  // unix seconds; 0 once State is "persisted"
@@ -158,8 +158,8 @@ type FilesStateMsg struct {
 	Files []FileInfo `json:"files"`
 }
 
-// textExtensions / imageExtensions drive classifyKind's very small wireframe
-// icon set for this increment: "text", "image", or "other".
+// textExtensions / imageExtensions / archiveExtensions drive classifyKind's
+// very small wireframe icon set: "text", "image", "archive", or "other".
 var textExtensions = map[string]bool{
 	".txt": true, ".md": true, ".log": true, ".csv": true, ".json": true,
 	".yaml": true, ".yml": true, ".go": true, ".py": true, ".js": true,
@@ -172,6 +172,14 @@ var imageExtensions = map[string]bool{
 	".svg": true, ".bmp": true, ".ico": true,
 }
 
+// archiveExtensions get their own zipper icon (Step4SubstepDPrompt.md
+// Revision D) -- chiefly .zip, which is what the control tab's "save run"
+// uploads, plus the other common bundles. A ".tar.gz" lands here by its ".gz".
+var archiveExtensions = map[string]bool{
+	".zip": true, ".tar": true, ".gz": true, ".tgz": true, ".bz2": true,
+	".xz": true, ".7z": true, ".rar": true,
+}
+
 // classifyKind maps a filename to the files tab's icon kind.
 func classifyKind(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
@@ -180,6 +188,9 @@ func classifyKind(name string) string {
 	}
 	if imageExtensions[ext] {
 		return "image"
+	}
+	if archiveExtensions[ext] {
+		return "archive"
 	}
 	return "other"
 }

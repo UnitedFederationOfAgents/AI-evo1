@@ -1063,7 +1063,8 @@ function formatCountdown(expiresAtSec: number, nowSec: number): string {
 }
 
 // FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
-// this increment supports: text, image, and a catch-all for everything else.
+// the files tab supports: text, image, archive (a zippered page -- see
+// files.go's archiveExtensions), and a catch-all for everything else.
 // Each renders in `currentColor`, so FileIcon's state-driven CSS class is
 // what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
 const FILE_ICON_PATH: Record<string, JSX.Element> = {
@@ -1079,6 +1080,14 @@ const FILE_ICON_PATH: Record<string, JSX.Element> = {
       <rect x="3" y="4" width="18" height="16" rx="1.5" />
       <circle cx="8.5" cy="9.5" r="1.5" />
       <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  archive: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M11 3h1M12 5h1M11 7h1M12 9h1M11 11h1" strokeLinecap="round" />
+      <rect x="10.25" y="13" width="3.5" height="5" rx="0.75" />
+      <path d="M12 15.5v0.5" strokeLinecap="round" />
     </svg>
   ),
   other: (
@@ -1165,6 +1174,15 @@ function markupCopyUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}/markup/copy`
 }
 
+// isReservedFileName mirrors files.go's saveUploadedFile reserved-prefix
+// checks -- a friendlier client-side echo of a rejection the server would
+// otherwise give silently (a rejected file is just dropped from the response).
+function isReservedFileName(name: string): boolean {
+  return name.startsWith('.manifest_') || name.startsWith('.markup_')
+}
+
+const RESERVED_NAME_ERROR = "that name is reserved for the host-cache's own bookkeeping files"
+
 // NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
 // Revision J: "add a 'new text file' button to the files tab ... accepts the
 // name and text (with optional voice input with mic icon when available)").
@@ -1191,11 +1209,8 @@ function NewTextFileDialog({
       setError('name is required')
       return
     }
-    // Mirrors files.go's saveUploadedFile reserved-prefix checks -- a
-    // friendlier client-side echo of a rejection the server would otherwise
-    // give silently (a rejected file is just dropped from the response).
-    if (trimmed.startsWith('.manifest_') || trimmed.startsWith('.markup_')) {
-      setError("that name is reserved for the host-cache's own bookkeeping files")
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
       return
     }
     const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
@@ -1248,6 +1263,266 @@ function NewTextFileDialog({
   )
 }
 
+// ClipboardContent is what the files tab's "new file from clipboard" button
+// (Step4SubstepDPrompt.md Revision D) found in the copy buffer: an image or
+// plain text, already as the Blob the upload will carry, plus the extension
+// its default name gets.
+interface ClipboardContent {
+  kind: 'image' | 'text'
+  blob: Blob
+  ext: string
+  text?: string // kind 'text' only -- shown as the dialog's preview
+}
+
+// CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
+// preference order. Browsers' async clipboard API only ever hands back
+// image/png (whatever was copied gets re-encoded), but a paste event can
+// carry the others when a site or the OS puts them there as-is.
+const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+}
+
+// CLIPBOARD_POLL_MS is how often useClipboardState rechecks the copy buffer
+// while the page is focused. There's no "clipboard changed" event: focus and
+// this page's own copy/cut events catch most changes, and the poll catches
+// the rest (e.g. clipboard-manager or keyboard-shortcut changes made while
+// the page stays focused).
+const CLIPBOARD_POLL_MS = 3000
+
+function textClipboard(text: string): ClipboardContent {
+  return { kind: 'text', blob: new Blob([text], { type: 'text/plain' }), ext: 'txt', text }
+}
+
+// clipboardSupported says whether the page may read the copy buffer itself
+// at all -- the async clipboard API exists only in a secure context (https
+// or localhost), so over plain http only a Ctrl+V paste event can get at it.
+function clipboardSupported(): boolean {
+  return !!(navigator.clipboard?.read || navigator.clipboard?.readText)
+}
+
+// readClipboard reads the copy buffer through the async clipboard API: the
+// first image item wins, then plain text. null means it's empty (or holds
+// only things we don't take, e.g. a copied file); it throws when the read
+// isn't allowed (no secure context, permission denied, page not focused).
+async function readClipboard(): Promise<ClipboardContent | null> {
+  const cb = navigator.clipboard
+  if (cb?.read) {
+    const items = await cb.read()
+    for (const item of items) {
+      const type = Object.keys(CLIPBOARD_IMAGE_EXT).find(t => item.types.includes(t))
+      if (type) return { kind: 'image', blob: await item.getType(type), ext: CLIPBOARD_IMAGE_EXT[type] }
+    }
+    for (const item of items) {
+      if (!item.types.includes('text/plain')) continue
+      const text = await (await item.getType('text/plain')).text()
+      if (text) return textClipboard(text)
+    }
+    return null
+  }
+  if (cb?.readText) {
+    const text = await cb.readText()
+    return text ? textClipboard(text) : null
+  }
+  throw new Error('clipboard API unavailable')
+}
+
+// clipboardFromPaste is readClipboard's counterpart for a paste event's
+// DataTransfer -- no permission needed, so it works even over plain http.
+function clipboardFromPaste(data: DataTransfer): ClipboardContent | null {
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !CLIPBOARD_IMAGE_EXT[item.type]) continue
+    const f = item.getAsFile()
+    if (f) return { kind: 'image', blob: f, ext: CLIPBOARD_IMAGE_EXT[item.type] }
+  }
+  const text = data.getData('text/plain')
+  return text ? textClipboard(text) : null
+}
+
+// ClipboardState is what the "new file from clipboard" button knows about
+// the copy buffer: 'unknown' leaves it enabled (clicking it asks the browser),
+// 'empty' disables it, 'has' enables it.
+type ClipboardState = 'unknown' | 'empty' | 'has'
+
+// useClipboardState watches the copy buffer, but only once the browser has
+// already granted clipboard-read (Chromium, after the first click's prompt,
+// or for localhost). Without that grant a probe would pop a permission
+// prompt -- or, in Firefox/Safari, a "Paste" bubble -- on every check, so the
+// state just stays 'unknown'. The probe only lists the item types; it never
+// pulls the image/text bytes.
+function useClipboardState(): ClipboardState {
+  const [state, setState] = useState<ClipboardState>('unknown')
+  useEffect(() => {
+    if (!navigator.clipboard?.read || !navigator.permissions?.query) return
+    let cancelled = false
+    let granted = false
+    let perm: PermissionStatus | null = null
+    const probe = async () => {
+      if (!granted || document.visibilityState !== 'visible' || !document.hasFocus()) return
+      try {
+        const items = await navigator.clipboard.read()
+        const has = items.some(item => item.types.some(t => t === 'text/plain' || CLIPBOARD_IMAGE_EXT[t]))
+        if (!cancelled) setState(has ? 'has' : 'empty')
+      } catch {
+        // Focus lost mid-read or access revoked -- keep the last answer.
+      }
+    }
+    const onPerm = () => {
+      granted = perm?.state === 'granted'
+      if (granted) void probe()
+      else setState('unknown')
+    }
+    // 'clipboard-read' isn't in every TS lib's PermissionName union.
+    navigator.permissions.query({ name: 'clipboard-read' } as unknown as PermissionDescriptor)
+      .then(p => {
+        if (cancelled) return
+        perm = p
+        p.addEventListener('change', onPerm)
+        onPerm()
+      })
+      .catch(() => { /* Firefox/Safari don't know the name -- stay 'unknown' */ })
+    const onWake = () => { void probe() }
+    // "copy"/"cut" fire before the copy buffer is written, hence the delay.
+    const onCopy = () => { window.setTimeout(onWake, 100) }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    document.addEventListener('copy', onCopy)
+    document.addEventListener('cut', onCopy)
+    const timer = window.setInterval(onWake, CLIPBOARD_POLL_MS)
+    return () => {
+      cancelled = true
+      perm?.removeEventListener('change', onPerm)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      document.removeEventListener('copy', onCopy)
+      document.removeEventListener('cut', onCopy)
+      window.clearInterval(timer)
+    }
+  }, [])
+  return state
+}
+
+// clipboardDefaultName is the naming dialog's starting name, e.g.
+// "clipboard-20261010-142233.png" -- unique enough that accepting it as-is
+// never collides with the last paste.
+function clipboardDefaultName(ext: string): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `clipboard-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+}
+
+// CLIPBOARD_TEXT_PREVIEW caps how much pasted text the naming dialog shows.
+const CLIPBOARD_TEXT_PREVIEW = 2000
+
+// ClipboardFileDialog names a file about to be created from the copy buffer.
+// It opens with the default name's stem (not its extension) selected, so
+// typing replaces just that; a name typed without any extension gets the
+// content's own one back. Like NewTextFileDialog it saves through the plain
+// upload endpoint.
+function ClipboardFileDialog({
+  content,
+  onCreate,
+  onClose,
+}: {
+  content: ClipboardContent
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState(() => clipboardDefaultName(content.ext))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }, [])
+
+  useEffect(() => {
+    if (content.kind !== 'image') return
+    const url = URL.createObjectURL(content.blob)
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [content])
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.${content.ext}`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([content.blob], finalName, { type: content.blob.type })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  const text = content.text ?? ''
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">new {content.kind === 'image' ? 'image' : 'text'} file from clipboard</span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          ref={nameRef}
+          className="new-file-name-input"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !busy) void handleCreate()
+            else if (e.key === 'Escape') onClose()
+          }}
+        />
+        {content.kind === 'image' ? (
+          imageUrl && <img className="clip-file-image" src={imageUrl} alt="clipboard image" />
+        ) : (
+          <pre className="clip-file-text">
+            {text.length > CLIPBOARD_TEXT_PREVIEW
+              ? `${text.slice(0, CLIPBOARD_TEXT_PREVIEW)}\n… (${text.length - CLIPBOARD_TEXT_PREVIEW} more characters)`
+              : text}
+          </pre>
+        )}
+        <div className="clip-file-size">{formatBytes(content.blob.size)}</div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// isEditableTarget says a paste is meant for a text field, not the files tab.
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+}
+
 function FilesPanel({
   state,
   selectedId,
@@ -1263,8 +1538,42 @@ function FilesPanel({
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
+  const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
+  const [clipError, setClipError] = useState<string | null>(null)
+  const clipState = useClipboardState()
   const inputRef = useRef<HTMLInputElement | null>(null)
   const files = state?.files ?? []
+
+  const fromClipboard = async () => {
+    setClipError(null)
+    if (!clipboardSupported()) {
+      setClipError("this page can't read the clipboard over plain http — press Ctrl+V (⌘V) on this tab instead")
+      return
+    }
+    try {
+      const content = await readClipboard()
+      if (content) setClipContent(content)
+      else setClipError('the clipboard has no text or image in it')
+    } catch {
+      setClipError("couldn't read the clipboard — allow clipboard access for this page, or press Ctrl+V (⌘V) on this tab")
+    }
+  }
+
+  // Ctrl+V anywhere on the tab (outside a text field) opens the same naming
+  // dialog -- the one way in over plain http, and a shortcut everywhere else.
+  useEffect(() => {
+    if (!onUpload || newFileOpen || clipContent) return
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || !e.clipboardData) return
+      const content = clipboardFromPaste(e.clipboardData)
+      if (!content) return
+      e.preventDefault()
+      setClipError(null)
+      setClipContent(content)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [onUpload, newFileOpen, clipContent])
 
   return (
     <div className="files-panel">
@@ -1295,12 +1604,27 @@ function FilesPanel({
         </div>
       )}
       {onUpload && (
-        <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
-          + new text file
-        </button>
+        <div className="files-new-row">
+          <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+            + new text file
+          </button>
+          <button
+            type="button"
+            className="files-new-btn"
+            onClick={() => void fromClipboard()}
+            disabled={clipState === 'empty'}
+            title={clipState === 'empty' ? 'the clipboard is empty' : 'create a file from the text or image on the clipboard (or press Ctrl+V on this tab)'}
+          >
+            + new file from clipboard
+          </button>
+        </div>
       )}
+      {clipError && <div className="files-clip-error">{clipError}</div>}
       {newFileOpen && onUpload && (
         <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {clipContent && onUpload && (
+        <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
       )}
       {files.length === 0 ? (
         <div className="files-empty">no files in the host-cache</div>
@@ -1461,8 +1785,8 @@ function FileDetailPane({
 // a grid item or the detail pane's "view" widget (reminiscent of
 // condoccer's substep entry). Images render inline; text is fetched and shown
 // as plain text; anything else falls back to a "use download" notice — this
-// increment's wireframe icon set is deliberately small (text/image/other),
-// and so is its preview set.
+// tab's wireframe icon set is deliberately small (text/image/archive/other),
+// and its preview set smaller still (archives get the download notice too).
 function FileViewer({
   fileId,
   file,

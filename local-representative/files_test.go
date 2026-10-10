@@ -16,12 +16,15 @@ import (
 // TestClassifyKind covers the small wireframe-icon classification set.
 func TestClassifyKind(t *testing.T) {
 	cases := map[string]string{
-		"notes.txt":   "text",
-		"README.md":   "text",
-		"diagram.PNG": "image",
-		"photo.jpeg":  "image",
-		"archive.zip": "other",
-		"noextension": "other",
+		"notes.txt":     "text",
+		"README.md":     "text",
+		"diagram.PNG":   "image",
+		"photo.jpeg":    "image",
+		"archive.zip":   "archive",
+		"run.ZIP":       "archive",
+		"bundle.tar.gz": "archive",
+		"report.pdf":    "other",
+		"noextension":   "other",
 	}
 	for name, want := range cases {
 		if got := classifyKind(name); got != want {

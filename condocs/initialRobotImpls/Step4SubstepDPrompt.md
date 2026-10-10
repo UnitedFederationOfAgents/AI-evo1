@@ -119,3 +119,32 @@ When we use this control it gives us a naming dialog where the filename (but not
 We want to support at least text and images in the copy buffer to start, and we also want to respond with whether there are other sensible types to include. It's not important that we support files because we can just drag them to the upload control.
 
 While we are at it we should add a distinct icon for zip files in the files dialog.
+
+
+prompt: [`a834580`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a8345804478dcbe156f455da3294f9a66dc760a4) → reply: [`5dd8f60`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5dd8f6091242b93e0b07fb5be6f2f856d8d44429)
+
+## Reply D
+
+I added a **+ new file from clipboard** button to local-representative's files tab, next to **+ new text file**, and zip files now have their own zipper icon. None of it has been built or tested: `tsc`, `go test` and `gofmt` all needed approval here, so please run `make build` and `make test` in `local-representative` on the host.
+
+- **The button:** it takes an image or plain text from the clipboard and opens a naming dialog. The default name is `clipboard-<date>-<time>.png` or `.txt`, with the part before the extension selected and ready to type over. The dialog shows a preview and the size. If you type a name with no extension, the right one is added back.
+- **Enabling it only when the clipboard has content:** this only partly works. Browsers have no "clipboard changed" event, so the page checks when it gains focus, when you copy or cut, and every 3 seconds. Those checks only run once the browser has already granted clipboard access, which in practice means Chrome or Edge after your first click. Anywhere else, checking would show a permission prompt or a "Paste" pop-up every time, so the button just stays enabled.
+- **Ctrl+V / ⌘V:** pasting anywhere on the tab (outside a text box) opens the same dialog. That's the only way in if LR is served over plain http, because the page can't read the clipboard directly unless it's on https or localhost. The button tells you this if you click it there.
+- **Zip icon:** besides `.zip`, I gave the same icon to `.tar`, `.gz` (so `.tar.gz`), `.tgz`, `.bz2`, `.xz`, `.7z` and `.rar`. In the code these are a new `"archive"` file kind. The control tab's saved runs now show with it.
+
+**Other types worth adding:**
+- **Rich text (HTML)** is the only other thing browsers reliably expose; it could be saved as `.html`.
+- **Smarter default extensions for copied text**, for example `.json` when it parses as JSON, or `.csv` for tab-separated rows copied from a spreadsheet, which often shows up as rich text too.
+- I'd skip the rest. Browsers re-encode any copied image as PNG, and copied files are better handled by dragging them onto the upload area, as you said.
+
+The changes are in `files.go`, `files_test.go`, and the frontend's `App.tsx`, `types.ts` and `index.css`.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

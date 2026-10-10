@@ -140,11 +140,6 @@ I added a **+ new file from clipboard** button to local-representative's files t
 The changes are in `files.go`, `files_test.go`, and the frontend's `App.tsx`, `types.ts` and `index.css`.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add smart detection of text formats now - at least including (json, yaml, csv, xml, and a few other widely known ones. Nothing too crazy.)

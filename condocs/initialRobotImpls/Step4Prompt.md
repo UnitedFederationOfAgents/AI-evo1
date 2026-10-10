@@ -235,11 +235,10 @@ prompt: [`4cc187a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4
 When condoccer adds a zip as a resource, it now writes a line under the zip's link in the `## Resource N` block, e.g. `(unzipped to 117e9380_run/)`. If the zip holds more than 1GiB once unzipped, it isn't unzipped and the line reads `(too large to unzip: over 1GiB uncompressed)` instead. Before, a too-large zip made the whole add fail; now the zip is still kept and linked. Nothing is built or tested yet because `go test` needed approval here, so please run `make build` and `make test` in `condoccer` on the host. The changes are in `condoccer/resources.go` (with new tests in `resources_test.go`), and `frontend/src/App.tsx` and `index.css` show the line in grey under the zip's link.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Let's adjust our file pickers (for imports, and for upload in AC, LR, and condoccer resources) so that they have an option 'select from host'.
 
+This will open a file picker from the LR host rather than the client.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will preserve the current option to pick the file from the client as well.

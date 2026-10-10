@@ -87,11 +87,10 @@ I've implemented Revision B in condoccer, but none of it has been built or teste
 - **One running agent can still break another.** Two federation-command instances on the same repo still share one working tree, and a resubmit's `git add -A` commits everything in it.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's make a further update now so that working directories survive a restart - a condoccer restart and full restart of LR.
 
+Since we have at most one condoccer per LR we should be able to hold a single variable in the LR<-->ufa-loader interaction.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We'll make the fix and respond with whether we took that path or a simpler one.

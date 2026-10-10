@@ -199,11 +199,11 @@ FC's startup block now begins with a `● started: 2026-10-08 13:45:12 UTC`-styl
 
 [Step 4 Substep D](Step4SubstepDPrompt.md)
 
-## <REPLACE-Revision|Retry> E
+## <REPLACE-Revision|Retry> D
 
 <REPLACE-PROMPT>
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

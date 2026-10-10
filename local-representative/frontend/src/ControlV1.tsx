@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { HostFilePicker } from './HostFilePicker'
 import type {
   ControlActionDef,
   ControlInstruction,
@@ -55,6 +56,7 @@ export interface ControlV1Props {
   onContinue: (run: string) => void // answers a step waiting for continue
   fileUrl: (id: string) => string // a saved recording's URL
   node: string // how to refer to the node: "this node", "this host"
+  hostApi: string // where the node's /api/host-files is: '' on LR, '/host/<id>' through AC
 }
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T
@@ -523,17 +525,37 @@ function ControlsEditor({ controls, onChange }: { controls: ControlParam[]; onCh
 
 // YamlTools exports the selected item (or everything) of one kind as YAML,
 // to download or copy, and imports YAML pasted or picked from a file.
-function YamlTools({ kind, selectedId, request, replies, connected }: {
+function YamlTools({ kind, selectedId, request, replies, connected, node, hostApi }: {
   kind: 'actions' | 'sequences'
   selectedId: string
   request: ControlRequest
   replies: Record<string, ControlLibReply>
   connected: boolean
+  node: string
+  hostApi: string
 }) {
   const exp = useRequest(request, replies)
   const imp = useRequest(request, replies)
   const [importing, setImporting] = useState(false)
   const [text, setText] = useState('')
+  const [pickingHost, setPickingHost] = useState(false)
+  const [hostError, setHostError] = useState('')
+
+  // "select from host": read a YAML file on the node's own host.
+  const fromHost = async (path: string) => {
+    setPickingHost(false)
+    setHostError('')
+    try {
+      const resp = await fetch(`${hostApi}/api/host-files/raw?path=${encodeURIComponent(path)}`)
+      if (!resp.ok) {
+        setHostError((await resp.text()).trim() || `couldn't read ${path} (${resp.status})`)
+        return
+      }
+      setText(await resp.text())
+    } catch (err) {
+      setHostError(String(err))
+    }
+  }
   const textRef = useRef<HTMLTextAreaElement>(null)
   const exported = exp.reply?.success ? exp.reply : undefined
   const one = kind === 'actions' ? 'action' : 'sequence'
@@ -584,16 +606,23 @@ function YamlTools({ kind, selectedId, request, replies, connected }: {
       {importing && (
         <div className="ctl-yaml-box">
           <div className="ctl-hint">
-            Paste YAML exported from a definer or composer, or pick a file. Actions and sequences with the same id are replaced.
+            Paste YAML exported from a definer or composer, or pick a file from this computer or from {node}. Actions and sequences with the same id are replaced.
           </div>
-          <input
-            type="file"
-            accept=".yaml,.yml,text/yaml,text/plain"
-            onChange={e => {
-              const f = e.target.files?.[0]
-              if (f) f.text().then(setText)
-            }}
-          />
+          <div className="ctl-row">
+            <input
+              type="file"
+              accept=".yaml,.yml,text/yaml,text/plain"
+              onChange={e => {
+                const f = e.target.files?.[0]
+                if (f) f.text().then(setText)
+              }}
+            />
+            <button className="ctl-btn" title={`pick a YAML file on ${node}`} onClick={() => setPickingHost(true)}>select from host…</button>
+          </div>
+          {hostError && <div className="ctl-hint ctl-hint-warn">{hostError}</div>}
+          {pickingHost && (
+            <HostFilePicker api={hostApi} title={`import YAML from ${node}`} onPick={paths => void fromHost(paths[0])} onClose={() => setPickingHost(false)} />
+          )}
           <textarea
             className="ctl-textarea"
             value={text}
@@ -675,11 +704,13 @@ function BuiltinsHelp({ lib }: { lib: ControlLibraryMsg }) {
 
 const blankAction = (): ControlActionDef => ({ id: '', name: '', description: '', controls: [], do: [] })
 
-function Definer({ lib, request, replies, connected }: {
+function Definer({ lib, request, replies, connected, node, hostApi }: {
   lib: ControlLibraryMsg
   request: ControlRequest
   replies: Record<string, ControlLibReply>
   connected: boolean
+  node: string
+  hostApi: string
 }) {
   const actions = lib.actions ?? []
   const ops = lib.ops ?? []
@@ -897,7 +928,7 @@ function Definer({ lib, request, replies, connected }: {
       </div>
       <ReplyStatus r={save} working="saving…" />
 
-      <YamlTools kind="actions" selectedId={ed.original?.id ?? ''} request={request} replies={replies} connected={connected} />
+      <YamlTools kind="actions" selectedId={ed.original?.id ?? ''} request={request} replies={replies} connected={connected} node={node} hostApi={hostApi} />
     </div>
   )
 }
@@ -906,13 +937,14 @@ function Definer({ lib, request, replies, connected }: {
 
 const blankSequence = (): ControlSequenceDef => ({ id: '', name: '', description: '', controls: [], steps: [], recordings: [] })
 
-function Composer({ lib, request, replies, connected, node, nodes }: {
+function Composer({ lib, request, replies, connected, node, nodes, hostApi }: {
   lib: ControlLibraryMsg
   request: ControlRequest
   replies: Record<string, ControlLibReply>
   connected: boolean
   node: string
   nodes: string[] // connected to agent-coordinator
+  hostApi: string
 }) {
   const sequences = lib.sequences ?? []
   const actions = lib.actions ?? []
@@ -1199,7 +1231,7 @@ function Composer({ lib, request, replies, connected, node, nodes }: {
       </div>
       <ReplyStatus r={save} working="saving…" />
 
-      <YamlTools kind="sequences" selectedId={ed.original?.id ?? ''} request={request} replies={replies} connected={connected} />
+      <YamlTools kind="sequences" selectedId={ed.original?.id ?? ''} request={request} replies={replies} connected={connected} node={node} hostApi={hostApi} />
     </div>
   )
 }
@@ -1226,9 +1258,9 @@ export function ControlV1(props: ControlV1Props) {
       {lib?.note && <div className="ctl-hint ctl-hint-warn">{lib.note}</div>}
       {view === 'runner' && <Runner {...props} />}
       {view !== 'runner' && !lib && <div className="ctl-empty">{connected ? 'loading the library…' : 'connecting…'}</div>}
-      {lib && view === 'definer' && <Definer lib={lib} request={request} replies={replies} connected={connected} />}
+      {lib && view === 'definer' && <Definer lib={lib} request={request} replies={replies} connected={connected} node={node} hostApi={props.hostApi} />}
       {lib && view === 'composer' && (
-        <Composer lib={lib} request={request} replies={replies} connected={connected} node={node} nodes={props.state?.nodes ?? []} />
+        <Composer lib={lib} request={request} replies={replies} connected={connected} node={node} nodes={props.state?.nodes ?? []} hostApi={props.hostApi} />
       )}
       {lib && view !== 'runner' && (
         <div className="ctl-footer">

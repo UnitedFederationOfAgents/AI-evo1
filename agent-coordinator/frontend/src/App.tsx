@@ -6,6 +6,7 @@ import type {
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
+import { HostFilePicker } from './HostFilePicker'
 import { detectTextFormat } from './textformat'
 import type { ControlV1Props } from './ControlV1'
 
@@ -212,6 +213,23 @@ function useCoordinatorWS() {
       }
     } catch (err) {
       console.error('file upload failed:', err)
+    }
+  }, [])
+
+  // "select from host": a JSON body on the same upload-relay route asks the
+  // host's local-representative to copy files already on that host into its
+  // host-cache (local-representative/hostfiles.go). Returns the error to
+  // show, if any.
+  const importHostFiles = useCallback(async (hostId: string, paths: string[]): Promise<string | null> => {
+    try {
+      const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_paths: paths }),
+      })
+      return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
+    } catch (err) {
+      return String(err)
     }
   }, [])
 
@@ -854,7 +872,7 @@ type ControlSubTab = typeof CONTROL_SUBTABS[number]
 // ControlPanel is a host's control tab: its v1 sub-tab is ControlV1 (shared
 // with local-representative's frontend), over that host's library, with
 // recordings played back through the host's /host/<id>/* proxy.
-function ControlPanel({ hostId, ...props }: Omit<ControlV1Props, 'fileUrl' | 'node'> & { hostId: string }) {
+function ControlPanel({ hostId, ...props }: Omit<ControlV1Props, 'fileUrl' | 'node' | 'hostApi'> & { hostId: string }) {
   const [sub, setSub] = useState<ControlSubTab>('v1')
   return (
     <div className="ctl-panel">
@@ -872,7 +890,7 @@ function ControlPanel({ hostId, ...props }: Omit<ControlV1Props, 'fileUrl' | 'no
             not behind another, and no other view of federation-command's output (its tab here or in
             local-representative) should be showing on that desktop.
           </div>
-          <ControlV1 {...props} fileUrl={id => fileRawUrl(hostId, id)} node="this host" />
+          <ControlV1 {...props} fileUrl={id => fileRawUrl(hostId, id)} node="this host" hostApi={`/host/${encodeURIComponent(hostId)}`} />
         </>
       )}
     </div>
@@ -2165,7 +2183,7 @@ function isEditableTarget(t: EventTarget | null): boolean {
 }
 
 function FilesPanel({
-  files, active, selectedId, onSelect, onEnter, onUpload,
+  files, active, selectedId, onSelect, onEnter, onUpload, hostApi, onHostImport,
 }: {
   files: FileInfo[]
   active: boolean
@@ -2173,9 +2191,12 @@ function FilesPanel({
   onSelect: (id: string) => void
   onEnter: (id: string) => void
   onUpload: (files: FileList | File[]) => void
+  hostApi: string // the host's /host/<id> proxy, for the "select from host" picker
+  onHostImport: (paths: string[]) => Promise<string | null> // the error, if any
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
+  const [hostPickOpen, setHostPickOpen] = useState(false)
   const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
   const [clipError, setClipError] = useState<string | null>(null)
   const clipState = useClipboardState()
@@ -2254,10 +2275,30 @@ function FilesPanel({
         >
           + new file from clipboard
         </button>
+        <button
+          type="button"
+          className="files-new-btn"
+          onClick={() => setHostPickOpen(true)}
+          title="copy files that are already on this host into its files tab"
+        >
+          + select from host
+        </button>
       </div>
       {clipError && <div className="files-clip-error">{clipError}</div>}
       {newFileOpen && (
         <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {hostPickOpen && (
+        <HostFilePicker
+          api={hostApi}
+          multiple
+          title="select from host"
+          onClose={() => setHostPickOpen(false)}
+          onPick={async paths => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport(paths))
+          }}
+        />
       )}
       {clipContent && (
         <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
@@ -3703,6 +3744,8 @@ function LRView({
                   onSelect={setSelectedFileId}
                   onEnter={setViewerFileId}
                   onUpload={f => uploadFiles(host.id, f)}
+                  hostApi={`/host/${encodeURIComponent(host.id)}`}
+                  onHostImport={paths => importHostFiles(host.id, paths)}
                 />
               )}
               {activeTab === 'control' && (

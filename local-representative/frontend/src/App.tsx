@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
 import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 import { ControlV1 } from './ControlV1'
+import { HostFilePicker } from './HostFilePicker'
 import type { ControlV1Props } from './ControlV1'
 import { detectTextFormat } from './textformat'
 
@@ -220,6 +221,22 @@ function useStatusWS() {
     }
   }, [])
 
+  // "select from host": a JSON POST /api/files copies files already on this
+  // host into the host-cache (local-representative/hostfiles.go). Returns
+  // the error to show, if any.
+  const importHostFiles = useCallback(async (paths: string[]): Promise<string | null> => {
+    try {
+      const resp = await fetch('/api/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_paths: paths }),
+      })
+      return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
+    } catch (err) {
+      return String(err)
+    }
+  }, [])
+
   const connect = useCallback(() => {
     const ws = new WebSocket(`ws://${window.location.host}/ws`)
     wsRef.current = ws
@@ -381,7 +398,7 @@ type ControlSubTab = typeof CONTROL_SUBTABS[number]
 
 // ControlPanel is the control tab: its v1 sub-tab is ControlV1 (shared with
 // agent-coordinator's frontend), over this LR's own library.
-function ControlPanel(props: Omit<ControlV1Props, 'fileUrl' | 'node'>) {
+function ControlPanel(props: Omit<ControlV1Props, 'fileUrl' | 'node' | 'hostApi'>) {
   const [sub, setSub] = useState<ControlSubTab>('v1')
   return (
     <div className="ctl-panel">
@@ -399,7 +416,7 @@ function ControlPanel(props: Omit<ControlV1Props, 'fileUrl' | 'node'>) {
             another, and no other view of federation-command's output (its tab here or in
             agent-coordinator) should be showing on that desktop.
           </div>
-          <ControlV1 {...props} fileUrl={fileRawUrl} node="this node" />
+          <ControlV1 {...props} fileUrl={fileRawUrl} node="this node" hostApi="" />
         </>
       )}
     </div>
@@ -1536,15 +1553,18 @@ function FilesPanel({
   onSelect,
   onEnter,
   onUpload,
+  onHostImport,
 }: {
   state: FilesStateMsg | null
   selectedId: string | null
   onSelect: (id: string) => void
   onEnter: (id: string) => void
   onUpload?: (files: FileList | File[]) => void
+  onHostImport?: (paths: string[]) => Promise<string | null> // the error, if any
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
+  const [hostPickOpen, setHostPickOpen] = useState(false)
   const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
   const [clipError, setClipError] = useState<string | null>(null)
   const clipState = useClipboardState()
@@ -1624,11 +1644,33 @@ function FilesPanel({
           >
             + new file from clipboard
           </button>
+          {onHostImport && (
+            <button
+              type="button"
+              className="files-new-btn"
+              onClick={() => setHostPickOpen(true)}
+              title="copy files that are already on this host into the files tab"
+            >
+              + select from host
+            </button>
+          )}
         </div>
       )}
       {clipError && <div className="files-clip-error">{clipError}</div>}
       {newFileOpen && onUpload && (
         <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {hostPickOpen && onHostImport && (
+        <HostFilePicker
+          api=""
+          multiple
+          title="select from host"
+          onClose={() => setHostPickOpen(false)}
+          onPick={async paths => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport(paths))
+          }}
+        />
       )}
       {clipContent && onUpload && (
         <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
@@ -2664,6 +2706,7 @@ export default function App() {
                   onSelect={setSelectedFileId}
                   onEnter={setViewerFileId}
                   onUpload={uploadFiles}
+                  onHostImport={importHostFiles}
                 />
               ) : activeTab === 'control' ? (
                 <ControlPanel

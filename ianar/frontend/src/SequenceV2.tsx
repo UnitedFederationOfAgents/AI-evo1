@@ -12,6 +12,7 @@ import type {
   SequenceV2,
   StepRef,
 } from './types'
+import { HostFilePicker } from './HostFilePicker'
 import { PreviewView, SaveToFile, STEP_ICONS } from './shared'
 import type { SaveStatus, SeqRun, StepStatus } from './shared'
 
@@ -25,6 +26,14 @@ import type { SaveStatus, SeqRun, StepStatus } from './shared'
 // Both actions and sequences import from and export to YAML.
 
 type Request = (type: string, payload: Record<string, unknown>) => string
+
+// basePath is the path prefix this UI is served under (/robot via
+// local-representative, /host/<id>/robot via agent-coordinator, '' directly),
+// derived the same way App.tsx derives the WebSocket URL.
+function basePath(): string {
+  const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+  return dir.endsWith('/') ? dir.slice(0, -1) : dir
+}
 
 // useRequest tracks one library request at a time: the latest sent and its
 // reply, once it arrives.
@@ -106,9 +115,28 @@ function YamlTools({
   const imp = useRequest(request, replies)
   const [importing, setImporting] = useState(false)
   const [text, setText] = useState('')
+  const [pickingHost, setPickingHost] = useState(false)
+  const [hostError, setHostError] = useState('')
   const textRef = useRef<HTMLTextAreaElement>(null)
   const exported = exp.reply?.success ? exp.reply : undefined
   const one = kind === 'actions' ? 'action' : 'sequence'
+
+  // "select from host": read a YAML file on local-representative's host,
+  // through IANAR's passthrough (hostfiles.go).
+  const fromHost = async (path: string) => {
+    setPickingHost(false)
+    setHostError('')
+    try {
+      const resp = await fetch(`${basePath()}/api/host-files/raw?path=${encodeURIComponent(path)}`)
+      if (!resp.ok) {
+        setHostError((await resp.text()).trim() || `couldn't read ${path} (${resp.status})`)
+        return
+      }
+      setText(await resp.text())
+    } catch (err) {
+      setHostError(String(err))
+    }
+  }
 
   const download = () => {
     if (!exported?.yaml) return
@@ -168,17 +196,31 @@ function YamlTools({
       {importing && (
         <div className="seq2-yaml-box">
           <div className="seq2-hint">
-            Paste YAML exported from the definer or composer, or pick a file. Actions and sequences with the same id are
-            replaced.
+            Paste YAML exported from the definer or composer, or pick a file from this computer or from
+            local-representative&apos;s host. Actions and sequences with the same id are replaced.
           </div>
-          <input
-            type="file"
-            accept=".yaml,.yml,text/yaml,text/plain"
-            onChange={(e) => {
-              const f = e.target.files?.[0]
-              if (f) f.text().then(setText)
-            }}
-          />
+          <div className="seq2-row">
+            <input
+              type="file"
+              accept=".yaml,.yml,text/yaml,text/plain"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) f.text().then(setText)
+              }}
+            />
+            <button className="btn-secondary" title="pick a YAML file on local-representative's host" onClick={() => setPickingHost(true)}>
+              Select from host…
+            </button>
+          </div>
+          {hostError && <div className="seq2-hint">{hostError}</div>}
+          {pickingHost && (
+            <HostFilePicker
+              api={basePath()}
+              title="import YAML from host"
+              onPick={(paths) => void fromHost(paths[0])}
+              onClose={() => setPickingHost(false)}
+            />
+          )}
           <textarea
             className="seq2-textarea"
             value={text}

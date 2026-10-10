@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { detectTextFormat } from './textformat'
+import { HostFilePicker } from './HostFilePicker'
 import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
@@ -1968,6 +1969,10 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
+  // "select from host" (Step4Prompt.md Revision F of initialRobotImpls): files
+  // on local-representative's host, by path, in place of uploadFiles.
+  const [hostPaths, setHostPaths] = useState<string[]>([])
+  const [pickingHost, setPickingHost] = useState(false)
   // "Clipboard" source (Step4SubstepDPrompt.md Revision G): what was taken
   // from the copy buffer, and the file name it'll be uploaded under.
   const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
@@ -1984,6 +1989,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const resetResourceForm = () => {
     setResourceType('highlighted')
     setUploadFiles([])
+    setHostPaths([])
     setUploadError('')
     setClipContent(null)
     setClipFileName('')
@@ -2278,10 +2284,11 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
             <span className="action-form-label">Source:</span>
             <select
               value={resourceType}
-              disabled={(resourceType === 'upload' && uploadFiles.length > 0) || (resourceType === 'clipboard' && clipContent !== null)}
+              disabled={(resourceType === 'upload' && (uploadFiles.length > 0 || hostPaths.length > 0)) || (resourceType === 'clipboard' && clipContent !== null)}
               onChange={(e) => {
                 setResourceType(e.target.value as ResourceType)
                 setUploadFiles([])
+                setHostPaths([])
                 setUploadError('')
                 setClipContent(null)
                 setClipFileName('')
@@ -2325,16 +2332,43 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                 <button
                   type="button"
                   className="btn-secondary resource-upload-btn"
-                  title="Choose file(s) to upload"
-                  disabled={uploadFiles.length > 0}
+                  title="Choose file(s) to upload from this computer"
+                  disabled={uploadFiles.length > 0 || hostPaths.length > 0}
                   onClick={() => uploadInputRef.current?.click()}
                 >
                   ⬆
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary resource-upload-btn"
+                  title="Select from host: choose file(s) on local-representative's host"
+                  disabled={uploadFiles.length > 0 || hostPaths.length > 0}
+                  onClick={() => setPickingHost(true)}
+                >
+                  🖥
                 </button>
                 {uploadFiles.length > 0 && (
                   <span className="resource-upload-filenames">
                     {uploadFiles.map((f) => f.name).join(', ')}
                   </span>
+                )}
+                {hostPaths.length > 0 && (
+                  <span className="resource-upload-filenames" title={hostPaths.join('\n')}>
+                    {hostPaths.map((p) => p.slice(p.lastIndexOf('/') + 1)).join(', ')} (from host)
+                  </span>
+                )}
+                {pickingHost && (
+                  <HostFilePicker
+                    api={basePath()}
+                    multiple
+                    title="select from host"
+                    onClose={() => setPickingHost(false)}
+                    onPick={(paths) => {
+                      setPickingHost(false)
+                      setHostPaths(paths)
+                      setUploadError('')
+                    }}
+                  />
                 )}
               </>
             )}
@@ -2378,12 +2412,41 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
             <button
               className="btn-primary"
               disabled={
-                (resourceType === 'upload' && uploadFiles.length === 0) ||
+                (resourceType === 'upload' && uploadFiles.length === 0 && hostPaths.length === 0) ||
                 (resourceType === 'clipboard' && (!clipContent || !clipFileName.trim())) ||
                 (resourceType === 'voice-note' && !resourceDescription.trim()) ||
                 uploading
               }
               onClick={async () => {
+                if (resourceType === 'upload' && hostPaths.length > 0) {
+                  setUploading(true)
+                  setUploadError('')
+                  try {
+                    const resp = await fetch(`${basePath()}/api/host-resource`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        path: info.path,
+                        name: resourceName.trim(),
+                        description: resourceDescription.trim(),
+                        host_paths: hostPaths,
+                      }),
+                    })
+                    if (!resp.ok) {
+                      setUploadError(await resp.text())
+                      return
+                    }
+                    setMode(null)
+                    resetResourceForm()
+                    setResourceName('')
+                    setResourceDescription('')
+                  } catch (err) {
+                    setUploadError(String(err))
+                  } finally {
+                    setUploading(false)
+                  }
+                  return
+                }
                 if (resourceType === 'upload' || resourceType === 'clipboard') {
                   let files = uploadFiles
                   if (resourceType === 'clipboard') {

@@ -237,6 +237,8 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/host-files", s.handleHostFiles)
+	mux.HandleFunc("/api/host-files/raw", s.handleHostFiles)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.

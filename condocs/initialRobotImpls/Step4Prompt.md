@@ -242,3 +242,29 @@ Let's adjust our file pickers (for imports, and for upload in AC, LR, and condoc
 This will open a file picker from the LR host rather than the client.
 
 We will preserve the current option to pick the file from the client as well.
+
+
+prompt: [`10b62d1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/10b62d11aeed9173cc2ce4e077486b17f76f5357) → reply: [`f6c042f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f6c042f208a1df9d3751031d6f0018eea2131c21)
+
+## Reply F
+
+I added a "select from host" option to the file pickers in LR, AC, condoccer and also IANAR's sequence YAML import, which I took to be one of the "imports". Each opens a folder browser over the LR host's filesystem, starting in the LR user's home folder, and the existing pick-from-this-computer option is unchanged. Nothing has been built or tested because `go`, `tsc` and `git` all needed approval here, so please run `make build` and `make test` in `local-representative`, `condoccer` and `ianar`, and `make build` in `agent-coordinator`.
+
+- **Files tab (LR and AC):** a new **+ select from host** button copies the chosen files into the files tab under their own names, as if uploaded. AC sends this through its existing upload relay, so AC's Go code needed no changes.
+- **YAML imports (control tab and IANAR):** a **select from host…** button loads the chosen file into the import box.
+- **Condoccer resources:** a 🖥 button beside the ⬆ upload button. The chosen files are copied from LR into the Impls folder and get the same unzip line as an upload.
+- **Backend:** LR has two new endpoints, `GET /api/host-files` (list a folder) and `GET /api/host-files/raw` (read a file), in the new `local-representative/hostfiles.go`. Copying into the files tab goes through `POST /api/files` and is checked the same way as an upload. Condoccer and IANAR each pass these requests through to their own LR, so they browse that LR's host however their page is reached.
+
+**Decision for you:** the folder listing and file reading endpoints have no access check. Anyone who can reach an LR, directly or through AC, can browse and read any file the LR user can read. I matched `GET /api/files/<id>`, which is also open, and the control tab can already fetch any file now that `control-fetch-allow` defaults to `*`. If AC is ever exposed to the web, these should be locked down. Say if you want that now.
+
+The dialog is one shared `HostFilePicker.tsx`, copied identically into all four frontends, with matching CSS added to each `index.css`. I also refactored condoccer's resource upload so both ways in share one function. New tests are in `local-representative/hostfiles_test.go` and `condoccer/hostfiles_test.go`, and the LR README has a new "Select from host" section.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

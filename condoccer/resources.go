@@ -144,19 +144,29 @@ func (s *Server) addVoiceNoteResource(info CondocInfo, action ActionRequest) err
 // also work unmodified if condoccer were ever reached through
 // agent-coordinator's transparent proxy instead of dialing LR directly.
 func (s *Server) fetchHighlightedFiles(destDir string) ([]resourceLink, error) {
+	base, err := s.lrBase()
+	if err != nil {
+		return nil, err
+	}
+	return fetchAllHighlightedFiles(base, destDir)
+}
+
+// lrBase is the base URL of this condoccer's local-representative's
+// dashboard, from the representable connection's "hello" (see
+// representable.Client.PeerHTTPPort).
+func (s *Server) lrBase() (string, error) {
 	s.reprMu.Lock()
 	client := s.reprClient
 	host := s.reprHost
 	s.reprMu.Unlock()
 	if client == nil {
-		return nil, fmt.Errorf("not connected to local-representative")
+		return "", fmt.Errorf("not connected to local-representative")
 	}
 	lrHTTPPort := client.PeerHTTPPort()
 	if lrHTTPPort == "" {
-		return nil, fmt.Errorf("local-representative has not disclosed its HTTP port")
+		return "", fmt.Errorf("local-representative has not disclosed its HTTP port")
 	}
-	base := "http://" + net.JoinHostPort(host, lrHTTPPort)
-	return fetchAllHighlightedFiles(base, destDir)
+	return "http://" + net.JoinHostPort(host, lrHTTPPort), nil
 }
 
 // highlightedSource is one files tab fetchAllHighlightedFiles reads: Node
@@ -335,14 +345,30 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	condocRel := r.FormValue("path")
-	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
-		http.Error(w, "invalid condoc path", http.StatusBadRequest)
-		return
-	}
 	headers := r.MultipartForm.File["file"]
 	if len(headers) == 0 {
 		http.Error(w, `no file provided (expected multipart field "file")`, http.StatusBadRequest)
+		return
+	}
+	s.writeResourceFiles(w, r.FormValue("path"), r.FormValue("name"), r.FormValue("description"), len(headers),
+		func(i int, destDir string) (resourceLink, string, error) {
+			link, err := saveUploadedResource(headers[i], destDir)
+			return link, headers[i].Filename, err
+		})
+}
+
+// writeResourceFiles is the shared tail of the "Upload" source's two ways
+// in (a browser upload, and "select from host" -- see handleHostResource):
+// it resolves the condoc at condocRel to its active step/substep file the
+// same way addResource does, asserts the .condoc lock for the same reason
+// (writing into the Impls folder is itself a working-tree change
+// local-representative's dev-repo watcher could notice), saves each of the
+// n files with save (label names the file in an error), unzips zips, and
+// inserts the resulting "## Resource N" block. It writes the HTTP reply.
+func (s *Server) writeResourceFiles(w http.ResponseWriter, condocRel, name, description string, n int,
+	save func(i int, destDir string) (link resourceLink, label string, err error)) {
+	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+		http.Error(w, "invalid condoc path", http.StatusBadRequest)
 		return
 	}
 
@@ -372,23 +398,23 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	links := make([]resourceLink, 0, len(headers))
-	for _, fh := range headers {
-		link, err := saveUploadedResource(fh, destDir)
+	links := make([]resourceLink, 0, n)
+	for i := 0; i < n; i++ {
+		link, label, err := save(i, destDir)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("saving %s: %v", fh.Filename, err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("saving %s: %v", label, err), http.StatusInternalServerError)
 			return
 		}
 		note, err := extractZipResource(destDir, link.Filename)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("extracting %s: %v", fh.Filename, err), http.StatusUnprocessableEntity)
+			http.Error(w, fmt.Sprintf("extracting %s: %v", label, err), http.StatusUnprocessableEntity)
 			return
 		}
 		link.Note = note
 		links = append(links, link)
 	}
 
-	if err := insertResourceBlock(targetFile, r.FormValue("name"), r.FormValue("description"), links); err != nil {
+	if err := insertResourceBlock(targetFile, name, description, links); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -407,8 +433,13 @@ func saveUploadedResource(fh *multipart.FileHeader, destDir string) (resourceLin
 		return resourceLink{}, err
 	}
 	defer src.Close()
+	return saveResourceFrom(fh.Filename, src, destDir)
+}
 
-	name := sanitizeFilename(fh.Filename)
+// saveResourceFrom writes filename's content from src into destDir the way
+// saveUploadedResource does.
+func saveResourceFrom(filename string, src io.Reader, destDir string) (resourceLink, error) {
+	name := sanitizeFilename(filename)
 	id := randomID() + "_" + name
 	dst, err := os.OpenFile(filepath.Join(destDir, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {

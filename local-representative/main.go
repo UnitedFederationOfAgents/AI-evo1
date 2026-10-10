@@ -1418,6 +1418,8 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
 	mux.HandleFunc("/api/file-peers", s.handleFilePeers)
+	mux.HandleFunc("/api/host-files", s.handleHostFiles)
+	mux.HandleFunc("/api/host-files/raw", s.handleHostFileRaw)
 	mux.HandleFunc("/api/sessions", s.handleSessionsIndex)
 	mux.HandleFunc("/api/sessions/", s.handleSessionsAPI)
 

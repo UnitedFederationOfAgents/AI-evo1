@@ -460,6 +460,32 @@ widgets, just proxied at `/host/<id>/api/files/<id>`.
 See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md) for how
 this and cross-host (LR↔AC↔LR) transfer fit together.
 
+### Select from host
+
+The file pickers can also pick from this LR's host rather than from the
+browser's machine. Picking from the browser's machine still works as before.
+**+ select from host** in the files tab (here and in agent-coordinator's
+per-host files tab), **select from host…** in the control tab's YAML import,
+the **Select from host…** button in IANAR's sequence YAML import, and the 🖥
+button beside condoccer's "Upload" resource source all open the same folder
+browser over this host's filesystem. It starts in the LR user's home folder,
+and you can type a path or `~/…` to jump.
+
+- `GET /api/host-files?path=<dir>` lists one folder (folders first).
+- `GET /api/host-files/raw?path=<file>` serves one file's bytes; the YAML
+  imports read the chosen file through this.
+- `POST /api/files` with a JSON body `{"host_paths": [...]}` copies those
+  files into the host-cache under their own names, as if uploaded. It's
+  gated exactly like an upload, so agent-coordinator sends it through its
+  upload relay.
+- condoccer and IANAR pass `/api/host-files` through to their own LR, so
+  their pickers browse that LR's host however their UI is reached.
+
+The two reads, like `GET /api/files/<id>`, aren't gated on the proxied
+header. Anyone who can reach this LR, directly or through
+agent-coordinator's `/host/<id>/*` proxy, can browse and read any file the
+LR user can read.
+
 Any image file also gets a **markup** button in its detail pane: a dialog
 with a colour palette and click-drag arrow/rectangle tools plus a
 click-to-place text tool, all drawn directly onto a full-resolution canvas

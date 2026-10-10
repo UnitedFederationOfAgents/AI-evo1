@@ -507,6 +507,13 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A JSON body is "select from host": copy files already on this host
+	// rather than receive their bytes (see hostfiles.go).
+	if ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); ct == "application/json" {
+		s.importHostFiles(w, r)
+		return
+	}
+
 	const maxUploadSize = 64 << 20 // 64MiB per request -- generous for a wireframe-icon MVP
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {

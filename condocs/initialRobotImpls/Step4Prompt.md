@@ -260,11 +260,16 @@ I added a "select from host" option to the file pickers in LR, AC, condoccer and
 The dialog is one shared `HostFilePicker.tsx`, copied identically into all four frontends, with matching CSS added to each `index.css`. I also refactored condoccer's resource upload so both ways in share one function. New tests are in `local-representative/hostfiles_test.go` and `condoccer/hostfiles_test.go`, and the LR README has a new "Select from host" section.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+We have a build error:
 
+src/App.tsx(227,9): error TS6133: 'importHostFiles' is declared but its value is never read.
+src/App.tsx(2709,33): error TS2304: Cannot find name 'importHostFiles'.
+make[1]: *** [Makefile:17: build-frontend] Error 2
+make[1]: Leaving directory '/workspaces/research/AI-evo1/local-representative'
 
-## Human-Prompt
+=== Build failed -- leaving /AI-evo1-dev/bin untouched ===
+make: *** [Makefile:86: deploy-dev-binaries] Error 1
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's fix that.

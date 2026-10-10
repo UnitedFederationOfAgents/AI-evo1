@@ -329,6 +329,9 @@ Values may refer to controls, built-ins (`{{timestamp}}`, when the run
 started, and `{{this_node}}`, the node running it) and values earlier
 instructions saved as `{{name}}`. Actions and sequences import from and export to YAML
 (`format: lr-control-v1`); an exported sequence carries the actions it uses.
+A sequence deleted and re-imported, or imported over (or whose actions an
+import changes), starts afresh: the runner forgets its last run and the
+control values typed for it.
 The library is saved to `--control-library`. The built-in examples
 (`controlexamples.go`) are the original sample sequence, `fc-robot-handoff`,
 `capture-two-nodes` and `you-tell-me`; **restore examples** puts them back.

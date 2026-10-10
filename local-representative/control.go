@@ -101,6 +101,7 @@ type ControlSequenceInfo struct {
 	Steps       []ControlStepInfo    `json:"steps"`
 	Recordings  []ControlRecordBlock `json:"recordings,omitempty"` // whose screens a run records, across which steps
 	Error       string               `json:"error,omitempty"`      // why it can't be compiled, if it can't
+	Rev         int                  `json:"rev,omitempty"`        // which import of it this is (controlLibrary.revs)
 }
 
 // ControlStepResult is one step's live status in a ControlRunMsg, with what
@@ -123,8 +124,11 @@ type ControlValue struct {
 type ControlRunMsg struct {
 	ID       string            `json:"id"`
 	Sequence string            `json:"sequence"`
-	Name     string            `json:"name"`
-	Controls map[string]string `json:"controls,omitempty"` // the values it ran with
+	// SequenceRev is the rev of the sequence it ran (controlLibrary.revs):
+	// it's only the run of a sequence with the same id and rev.
+	SequenceRev int               `json:"sequence_rev,omitempty"`
+	Name        string            `json:"name"`
+	Controls    map[string]string `json:"controls,omitempty"` // the values it ran with
 	// RecordOverride is the runner's override recording, if it ran with
 	// one: a node recorded across the whole run in place of the sequence's
 	// recording blocks, or "none" for no recordings (controlrecord.go).
@@ -188,6 +192,7 @@ type controlStep struct {
 // controlSequence is a sequence compiled to run (see compileControlSequence).
 type controlSequence struct {
 	id, name, description string
+	rev                   int // see controlLibrary.revs
 	steps                 []controlStep
 	// records are the sequence's recording blocks, their nodes filled in
 	// (see controlrecord.go).
@@ -198,7 +203,7 @@ type controlSequence struct {
 }
 
 func (q controlSequence) info() ControlSequenceInfo {
-	info := ControlSequenceInfo{ID: q.id, Name: q.name, Description: q.description, Recordings: q.records}
+	info := ControlSequenceInfo{ID: q.id, Name: q.name, Description: q.description, Recordings: q.records, Rev: q.rev}
 	for _, st := range q.steps {
 		info.Steps = append(info.Steps, st.ControlStepInfo)
 	}
@@ -342,6 +347,7 @@ func (e *controlEngine) sequenceInfos() []ControlSequenceInfo {
 			info = ControlSequenceInfo{ID: def.ID, Name: def.Name, Description: def.Description, Recordings: def.Recordings, Error: err.Error()}
 		}
 		info.Controls = def.Controls
+		info.Rev, _ = e.lib.seqRev(def.ID)
 		out = append(out, info)
 	}
 	return out
@@ -475,10 +481,27 @@ func (e *controlEngine) handleLibRequest(req ControlLibRequest) ControlLibReply 
 	}
 	reply.Success = true
 	if changed {
+		e.dropStaleRun()
 		e.broadcastLibrary()
 		e.broadcast()
 	}
 	return reply
+}
+
+// dropStaleRun forgets the most recent run, once it has finished, if its
+// sequence has since been deleted or replaced by an import (its rev has
+// changed), so none of its results carry over to the sequence there now. A
+// run still going is left to finish; the control tab doesn't show it as
+// the new sequence's either.
+func (e *controlEngine) dropStaleRun() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.run == nil || e.run.Status == "running" {
+		return
+	}
+	if rev, ok := e.lib.seqRev(e.run.Sequence); !ok || rev != e.run.SequenceRev {
+		e.run = nil
+	}
 }
 
 // handleCommand handles agent-coordinator's "__control:" commands:
@@ -574,6 +597,7 @@ func (e *controlEngine) start(id string, values map[string]string, recordOverrid
 	run := &ControlRunMsg{
 		ID:             randomToken(8),
 		Sequence:       q.id,
+		SequenceRev:    q.rev,
 		Name:           q.name,
 		Controls:       values,
 		RecordOverride: recordOverride,

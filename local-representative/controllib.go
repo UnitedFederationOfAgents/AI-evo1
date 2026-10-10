@@ -706,6 +706,34 @@ type controlLibrary struct {
 	sequences []ControlSequenceDef
 	examples  map[string]string // see controlLibDoc.Examples
 	note      string            // a problem loading the file, shown in the UI
+	// revs tell one import of a sequence from another: a sequence added
+	// (imported, or new in the composer), or replaced by an import, gets a
+	// new rev, so a run of an earlier one -- deleted and re-imported, or
+	// imported over -- isn't taken for the new one's (see seqRev).
+	// Sequences loaded from the file are rev 0; kept in memory only, as
+	// runs are.
+	revs    map[string]int
+	lastRev int
+}
+
+// newRev gives sequence id a rev no sequence has had. Called with l.mu
+// held.
+func (l *controlLibrary) newRev(id string) {
+	if l.revs == nil {
+		l.revs = map[string]int{}
+	}
+	l.lastRev++
+	l.revs[id] = l.lastRev
+}
+
+// seqRev returns sequence id's rev, and whether the library has it.
+func (l *controlLibrary) seqRev(id string) (int, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if indexOfControlSequence(l.sequences, id) < 0 {
+		return 0, false
+	}
+	return l.revs[id], true
 }
 
 func ctlExampleKey(kind, id string) string { return kind + "/" + id }
@@ -987,7 +1015,20 @@ func (l *controlLibrary) saveSequence(q ControlSequenceDef, prevID string) error
 	if !replaced {
 		sequences = append(sequences, q)
 	}
-	return l.commit(l.actions, sequences)
+	if err := l.commit(l.actions, sequences); err != nil {
+		return err
+	}
+	switch {
+	case !replaced:
+		l.newRev(q.ID)
+	case prevID != q.ID:
+		// A rename keeps the sequence's rev; its runs are of the old id.
+		if rev, ok := l.revs[prevID]; ok {
+			l.revs[q.ID] = rev
+			delete(l.revs, prevID)
+		}
+	}
+	return nil
 }
 
 func (l *controlLibrary) deleteSequence(id string) error {
@@ -1002,19 +1043,29 @@ func (l *controlLibrary) deleteSequence(id string) error {
 	if len(sequences) == len(l.sequences) {
 		return fmt.Errorf("no sequence %q", id)
 	}
-	return l.commit(l.actions, sequences)
+	if err := l.commit(l.actions, sequences); err != nil {
+		return err
+	}
+	delete(l.revs, id)
+	return nil
 }
 
 // merge adds doc's actions and sequences, replacing any with the same id,
-// and describes what changed.
+// and describes what changed. Each of doc's sequences, and each sequence
+// using an action doc changes, gets a new rev, so nothing from a run of
+// what was there before carries over to it.
 func (l *controlLibrary) merge(doc controlLibDoc) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	actions := append([]ControlActionDef(nil), l.actions...)
 	sequences := append([]ControlSequenceDef(nil), l.sequences...)
 	var added, replaced []string
+	changedActions := map[string]bool{}
 	for _, a := range doc.Actions {
 		if i := indexOfControlAction(actions, a.ID); i >= 0 {
+			if ctlActionPrint(actions[i]) != ctlActionPrint(a) {
+				changedActions[a.ID] = true
+			}
 			actions[i] = a
 			replaced = append(replaced, "action "+a.ID)
 		} else {
@@ -1033,6 +1084,15 @@ func (l *controlLibrary) merge(doc controlLibDoc) (string, error) {
 	}
 	if err := l.commit(actions, sequences); err != nil {
 		return "", err
+	}
+	for _, q := range sequences {
+		renew := indexOfControlSequence(doc.Sequences, q.ID) >= 0
+		for _, st := range q.Steps {
+			renew = renew || changedActions[st.Action]
+		}
+		if renew {
+			l.newRev(q.ID)
+		}
 	}
 	var parts []string
 	if len(added) > 0 {
@@ -1179,8 +1239,11 @@ func (l *controlLibrary) compile(id string, values map[string]string, robotOps [
 	}
 	q := l.sequences[idx]
 	actions := l.actionMap()
+	rev := l.revs[id]
 	l.mu.Unlock()
-	return compileControlSequence(q, actions, values, robotOps, start, node)
+	seq, vars, err := compileControlSequence(q, actions, values, robotOps, start, node)
+	seq.rev = rev
+	return seq, vars, err
 }
 
 func compileControlSequence(q ControlSequenceDef, actions map[string]ControlActionDef, values map[string]string, robotOps []ControlOpSpec, start time.Time, node string) (controlSequence, map[string]string, error) {

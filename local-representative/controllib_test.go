@@ -391,6 +391,78 @@ func TestHandleLibRequest(t *testing.T) {
 	}
 }
 
+// TestReimportStartsAfresh: a sequence deleted and re-imported, or
+// imported over, is a new rev, and the last run of the old one is
+// forgotten once it has finished (Step4Prompt.md Revision H).
+func TestReimportStartsAfresh(t *testing.T) {
+	s := newServer("test-lr")
+	e := s.control
+	const id = "fc-robot-handoff"
+	exp := e.handleLibRequest(ControlLibRequest{Op: "export", Kind: "sequences", IDs: []string{id}})
+	if !exp.Success {
+		t.Fatalf("export: %+v", exp)
+	}
+	finishedRun := func() int {
+		q, _, err := e.lib.compile(id, nil, nil, time.Now(), "test-lr")
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.mu.Lock()
+		e.run = &ControlRunMsg{ID: "r", Sequence: id, SequenceRev: q.rev, Status: "success"}
+		e.mu.Unlock()
+		return q.rev
+	}
+	rev0 := finishedRun()
+
+	// A change to something else keeps the run.
+	if r := e.handleLibRequest(ControlLibRequest{Op: "save-sequence", Sequence: &ControlSequenceDef{ID: "other", Name: "Other", Steps: []ControlStepRef{{Action: "launch-fc"}}}}); !r.Success {
+		t.Fatalf("save other: %+v", r)
+	}
+	if e.runCopy() == nil {
+		t.Error("an unrelated change dropped the run")
+	}
+
+	if r := e.handleLibRequest(ControlLibRequest{Op: "delete-sequence", ID: id}); !r.Success {
+		t.Fatalf("delete: %+v", r)
+	}
+	if e.runCopy() != nil {
+		t.Error("the run of a deleted sequence was kept")
+	}
+	if r := e.handleLibRequest(ControlLibRequest{Op: "import", YAML: exp.YAML}); !r.Success {
+		t.Fatalf("re-import: %+v", r)
+	}
+	rev1, ok := e.lib.seqRev(id)
+	if !ok || rev1 == rev0 {
+		t.Errorf("re-imported rev = %d (%v), was %d", rev1, ok, rev0)
+	}
+	for _, info := range e.state().Sequences {
+		if info.ID == id && info.Rev != rev1 {
+			t.Errorf("state's rev = %d, want %d", info.Rev, rev1)
+		}
+	}
+
+	// Imported over without deleting first: the same.
+	finishedRun()
+	if r := e.handleLibRequest(ControlLibRequest{Op: "import", YAML: exp.YAML}); !r.Success {
+		t.Fatalf("import over: %+v", r)
+	}
+	if e.runCopy() != nil {
+		t.Error("the run of a sequence imported over was kept")
+	}
+
+	// A run still going is left to finish.
+	finishedRun()
+	e.mu.Lock()
+	e.run.Status = "running"
+	e.mu.Unlock()
+	if r := e.handleLibRequest(ControlLibRequest{Op: "import", YAML: exp.YAML}); !r.Success {
+		t.Fatalf("import while running: %+v", r)
+	}
+	if e.runCopy() == nil {
+		t.Error("dropped a run still going")
+	}
+}
+
 // TestRobotOpsDescribeSteps: once IANAR reports its ops, robot steps are
 // described in its words.
 func TestRobotOpsDescribeSteps(t *testing.T) {

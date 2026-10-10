@@ -18,6 +18,7 @@ export interface ControlSequenceInfo {
   steps: ControlStepInfo[]
   recordings?: ControlRecordBlock[] // whose screens a run records, across which steps (nodes as the defaults fill them in)
   error?: string // why it can't be compiled, if it can't
+  rev?: number // which import of it this is: a new one each time it's (re-)imported or added
 }
 
 // A recording block (local-representative/controlrecord.go): node's screen
@@ -46,6 +47,7 @@ export interface ControlStepResult extends ControlStepInfo {
 export interface ControlRunMsg {
   id: string
   sequence: string
+  sequence_rev?: number // the rev of the sequence it ran: only that import's run, not a re-import's
   name: string
   controls?: Record<string, string> // the values it ran with
   record_override?: string // the runner's override recording: a node recorded across the whole run, or "none"

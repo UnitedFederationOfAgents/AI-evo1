@@ -280,9 +280,12 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
     return <div className="ctl-empty">{lib ? 'No sequences yet — build one in the composer.' : 'waiting for control state…'}</div>
   }
   const controls = seq.controls ?? []
-  const vals = values[seq.id] ?? {}
+  // Values typed, and the last run, belong to one import of the sequence:
+  // deleted and re-imported (or imported over), it starts afresh.
+  const seqKey = `${seq.id}#${seq.rev ?? 0}`
+  const vals = values[seqKey] ?? {}
   const valueOf = (c: ControlParam) => vals[c.name] ?? c.default ?? ''
-  const thisRun = run && run.sequence === seq.id ? run : undefined
+  const thisRun = run && run.sequence === seq.id && (run.sequence_rev ?? 0) === (seq.rev ?? 0) ? run : undefined
   // A run shows the steps as compiled with its values; otherwise the defaults.
   const steps: (ControlStepInfo & { status?: string; message?: string; duration_ms?: number })[] = thisRun?.steps ?? seq.steps ?? []
   const runError = replies.run && !replies.run.success ? replies.run.error : undefined
@@ -353,7 +356,7 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
             <div className="ctl-hint ctl-hint-warn">{node} isn't connected to agent-coordinator, so there are no nodes to choose</div>
           )}
           {controls.map(c => {
-            const set = (value: string) => setValues(v => ({ ...v, [seq.id]: { ...(v[seq.id] ?? {}), [c.name]: value } }))
+            const set = (value: string) => setValues(v => ({ ...v, [seqKey]: { ...(v[seqKey] ?? {}), [c.name]: value } }))
             return (
               <Field key={c.name} label={c.label || c.name}>
                 {c.type === 'node' ? (

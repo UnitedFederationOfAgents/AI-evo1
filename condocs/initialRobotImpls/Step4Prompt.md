@@ -293,3 +293,34 @@ I fixed the build error, but I couldn't confirm it: `tsc` needed approval here, 
 We seem to have a caching issue when re-importing the same control sequence but with changes.
 
 Let's ensure that when we re-import a control sequence that has been deleted and re-added that we do not carry forward the results of the previous run or any other state we had from the prior import.
+
+
+prompt: [`8218e6e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8218e6ecd0ecfcecf30619e49bd993a47e5fee16) → reply: [`b36ecec`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/b36ecec8482c78973331ba715cf7400a551f600f)
+
+## Reply H
+
+I fixed the stale-state problem: a control sequence that's deleted and re-imported, or imported over, now starts fresh in the runner. Its last run and the control values typed for it no longer carry over. None of this has been built or tested, because `go test` needed approval here, so please run `make build` and `make test` in `local-representative` and `agent-coordinator` on the host.
+
+**The cause:** LR keeps the most recent run, and the runner showed it for any sequence with the same id. A re-imported sequence picked up the old run, including its old compiled steps, so your changes didn't show. Control values typed in the runner were also stored by id alone.
+
+**The fix:**
+- **Import number:** each sequence now gets a new one each time it's imported, or added new in the composer. Deleting a sequence drops its number.
+- **Changed actions:** an import that changes an action also gives a new number to every sequence that uses that action.
+- **Runs:** every run records the import number of the sequence it ran. The runner only shows a run, and only reuses typed values, when both the id and the number match.
+- **Cleanup:** after a delete or import, LR forgets the last run if it belonged to the old copy and has finished. A run still going is left to finish, but it isn't shown as the new copy's.
+
+Two things to know:
+- Editing and saving a sequence in the composer keeps its number, so its last run still shows there as before.
+- **Restore examples** counts as an import, so it also clears the last run of any example sequence.
+
+The backend changes are in `local-representative/controllib.go` and `control.go`, with a new test `TestReimportStartsAfresh` in `controllib_test.go`. The frontend changes are in `ControlV1.tsx` and `controlTypes.ts`, copied to AC, and I added a short note to the LR README.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -288,11 +288,8 @@ I fixed the build error, but I couldn't confirm it: `tsc` needed approval here, 
 **Condoccer and IANAR:** searching their frontends turned up no other "select from host" code wired up the same broken way, though I haven't compiled either.
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+We seem to have a caching issue when re-importing the same control sequence but with changes.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's ensure that when we re-import a control sequence that has been deleted and re-added that we do not carry forward the results of the previous run or any other state we had from the prior import.

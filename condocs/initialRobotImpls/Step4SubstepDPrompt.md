@@ -152,11 +152,6 @@ prompt: [`e95e356`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e
 Text copied to the clipboard now gets a matching default extension instead of always `.txt`. It recognises JSON, JSON Lines, XML, SVG, HTML, YAML, TOML, CSV, TSV and Markdown, plus shell, Python and JavaScript when the first line names the interpreter (`#!`). Anything it doesn't recognise stays `.txt`. The naming dialog shows what it detected (e.g. "· detected JSON"), and you can still type over the extension. Nothing has been built, type-checked or run, because `esbuild`/`node` and `tsc` needed approval here, so please run `make build` and `make test` in `local-representative` on the host. The detection lives in a new `frontend/src/textformat.ts`, wired in through `App.tsx` and `index.css`, and `files.go` and `files_test.go` now give `.tsv` and `.jsonl` the text icon.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's explain why I am not seeing the new control when I view the files tab for provisioner (from client on 8082).

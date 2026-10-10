@@ -218,11 +218,6 @@ I've stopped condoccer from listing the `Simple.snpN` files, but none of it has 
 A new test in `condoccer/findcondocs_test.go` checks that only a real condoc is listed, not snapshots or files that just mention the header.
 
 
-## <REPLACE-Revision|Retry> I
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1791636114 (Sat Oct 10 12:41:54 PM UTC 2026).

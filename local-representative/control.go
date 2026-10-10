@@ -121,21 +121,25 @@ type ControlValue struct {
 
 // ControlRunMsg is the current (or most recent) run.
 type ControlRunMsg struct {
-	ID         string               `json:"id"`
-	Sequence   string               `json:"sequence"`
-	Name       string               `json:"name"`
-	Controls   map[string]string    `json:"controls,omitempty"` // the values it ran with
-	Status     string               `json:"status"`             // "running" | "success" | "error" | "cancelled"
-	Error      string               `json:"error,omitempty"`
-	StartedAt  int64                `json:"started_at"` // unix ms
-	DurationMs int64                `json:"duration_ms,omitempty"`
-	Steps      []ControlStepResult  `json:"steps"`
-	Values     []ControlValue       `json:"values,omitempty"`
-	Records    []ControlRecordState `json:"records,omitempty"` // the sequence's recording blocks, as they go (controlrecord.go)
-	Recordings []ControlRecording   `json:"recordings,omitempty"`
-	Output     []ControlValue       `json:"output,omitempty"` // what the run brings back (the output op)
-	Prompt     *ControlPrompt       `json:"prompt,omitempty"` // set while a step waits for continue
-	Saved      []ControlSavedRun    `json:"saved,omitempty"`  // where the run was saved to the files tab (controlsave.go)
+	ID       string            `json:"id"`
+	Sequence string            `json:"sequence"`
+	Name     string            `json:"name"`
+	Controls map[string]string `json:"controls,omitempty"` // the values it ran with
+	// RecordOverride is the runner's override recording, if it ran with
+	// one: a node recorded across the whole run in place of the sequence's
+	// recording blocks, or "none" for no recordings (controlrecord.go).
+	RecordOverride string               `json:"record_override,omitempty"`
+	Status         string               `json:"status"` // "running" | "success" | "error" | "cancelled"
+	Error          string               `json:"error,omitempty"`
+	StartedAt      int64                `json:"started_at"` // unix ms
+	DurationMs     int64                `json:"duration_ms,omitempty"`
+	Steps          []ControlStepResult  `json:"steps"`
+	Values         []ControlValue       `json:"values,omitempty"`
+	Records        []ControlRecordState `json:"records,omitempty"` // the sequence's recording blocks, or the override's, as they go (controlrecord.go)
+	Recordings     []ControlRecording   `json:"recordings,omitempty"`
+	Output         []ControlValue       `json:"output,omitempty"` // what the run brings back (the output op)
+	Prompt         *ControlPrompt       `json:"prompt,omitempty"` // set while a step waits for continue
+	Saved          []ControlSavedRun    `json:"saved,omitempty"`  // where the run was saved to the files tab (controlsave.go)
 }
 
 // ControlPrompt is a step waiting for the person following the run
@@ -479,7 +483,7 @@ func (e *controlEngine) handleLibRequest(req ControlLibRequest) ControlLibReply 
 
 // handleCommand handles agent-coordinator's "__control:" commands:
 //
-//	__control:run <sequence id> [<json control values>]
+//	__control:run <sequence id> [--record <node|none>] [<json control values>]
 //	__control:cancel
 //	__control:continue [<run id>]
 //	__control:lib <json ControlLibRequest>
@@ -498,15 +502,22 @@ func (e *controlEngine) handleCommand(raw string) {
 	}
 	switch verb {
 	case "run":
+		// run <sequence> [--record <node|none>] [<control values as JSON>]
 		id, values, _ := strings.Cut(strings.TrimSpace(arg), " ")
+		values = strings.TrimSpace(values)
+		override := ""
+		if rest, ok := strings.CutPrefix(values, "--record "); ok {
+			override, values, _ = strings.Cut(strings.TrimSpace(rest), " ")
+			values = strings.TrimSpace(values)
+		}
 		var controls map[string]string
-		if strings.TrimSpace(values) != "" {
+		if values != "" {
 			if err := json.Unmarshal([]byte(values), &controls); err != nil {
 				reply(ControlLibReply{Op: "run", Error: "bad control values: " + err.Error()})
 				return
 			}
 		}
-		if err := e.start(id, controls); err != nil {
+		if err := e.start(id, controls, override); err != nil {
 			log.Printf("control: remote run %q: %v", id, err)
 			reply(ControlLibReply{Op: "run", Error: err.Error()})
 		}
@@ -534,8 +545,10 @@ func (e *controlEngine) handleCommand(raw string) {
 }
 
 // start begins a run of sequence id, with values for its controls (missing
-// ones take their defaults), in the background.
-func (e *controlEngine) start(id string, values map[string]string) error {
+// ones take their defaults), in the background. recordOverride, if set,
+// replaces the sequence's recording blocks for this run (see
+// overrideRecordBlocks).
+func (e *controlEngine) start(id string, values map[string]string, recordOverride string) error {
 	startedAt := time.Now()
 	q, vars, err := e.lib.compile(id, values, e.getRobotOps(), startedAt, e.s.lrName)
 	if err != nil {
@@ -543,6 +556,12 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 	}
 	if err := e.checkNodeControls(q.controls, vars); err != nil {
 		return err
+	}
+	recordOverride = strings.TrimSpace(recordOverride)
+	if recordOverride != "" {
+		if q.records, err = e.overrideRecordBlocks(recordOverride, len(q.steps)); err != nil {
+			return err
+		}
 	}
 	if err := checkRecordNodes(q.records); err != nil {
 		return err
@@ -553,12 +572,13 @@ func (e *controlEngine) start(id string, values map[string]string) error {
 		return errors.New("a control sequence is already running")
 	}
 	run := &ControlRunMsg{
-		ID:        randomToken(8),
-		Sequence:  q.id,
-		Name:      q.name,
-		Controls:  values,
-		Status:    "running",
-		StartedAt: startedAt.UnixMilli(),
+		ID:             randomToken(8),
+		Sequence:       q.id,
+		Name:           q.name,
+		Controls:       values,
+		RecordOverride: recordOverride,
+		Status:         "running",
+		StartedAt:      startedAt.UnixMilli(),
 	}
 	for _, st := range q.steps {
 		run.Steps = append(run.Steps, ControlStepResult{ControlStepInfo: st.ControlStepInfo, Status: "pending"})

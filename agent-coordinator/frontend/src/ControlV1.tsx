@@ -48,7 +48,9 @@ export interface ControlV1Props {
   replies: Record<string, ControlLibReply>
   request: ControlRequest
   robotHealthy: boolean
-  onRun: (sequence: string, controls: Record<string, string>) => void
+  // recordOverride, if set, replaces the sequence's recordings for the run:
+  // a node recorded across the whole run, or "none" (controlrecord.go).
+  onRun: (sequence: string, controls: Record<string, string>, recordOverride?: string) => void
   onCancel: () => void
   onContinue: (run: string) => void // answers a step waiting for continue
   fileUrl: (id: string) => string // a saved recording's URL
@@ -253,6 +255,12 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
   const nodes = state?.nodes ?? []
   const [selectedId, setSelectedId] = useState('')
   const [values, setValues] = useState<Record<string, Record<string, string>>>({})
+  // The override recording (Step4Prompt.md Revision D): when on, the run
+  // records overrideNode's screen from first step to last (or none), in
+  // place of the sequence's recording blocks. The node defaults to the one
+  // running the sequence.
+  const [overrideOn, setOverrideOn] = useState(false)
+  const [overrideNode, setOverrideNode] = useState('')
   const saveRun = useRequest(request, replies)
   const run = state?.run
   const running = run?.status === 'running'
@@ -278,7 +286,13 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
   const runError = replies.run && !replies.run.success ? replies.run.error : undefined
   // The recording blocks beside the steps: as the run fills them in and
   // follows them, else with the defaults.
-  const recBlocks: ControlRecordBlock[] = thisRun?.records ?? seq.recordings ?? []
+  const primary = state?.node ?? ''
+  const overrideTo = overrideNode || primary
+  const override = overrideOn ? overrideTo : undefined
+  const recBlocks: ControlRecordBlock[] = thisRun?.records
+    ?? (override === undefined ? seq.recordings ?? []
+      : override === 'none' || steps.length === 0 ? []
+      : [{ node: override, from: 1, to: steps.length, label: 'override: the whole run' }])
   const recLayout = recordLanes(recBlocks)
 
   return (
@@ -303,10 +317,28 @@ function Runner({ connected, state, lib, replies, request, robotHealthy, onRun, 
           <button
             className="sys-btn sys-btn-launch"
             disabled={!connected || !!seq.error}
-            onClick={() => onRun(seq.id, Object.fromEntries(controls.map(c => [c.name, valueOf(c)])))}
+            onClick={() => onRun(seq.id, Object.fromEntries(controls.map(c => [c.name, valueOf(c)])), override)}
           >
             run
           </button>
+        )}
+      </div>
+      <div className="ctl-row">
+        <label className="ctl-check" title="record one node's screen across the whole run (or until it stops on a failure), or nothing, in place of the sequence's own recordings">
+          <input type="checkbox" checked={overrideOn} disabled={running} onChange={e => setOverrideOn(e.target.checked)} />
+          override recording
+        </label>
+        {overrideOn && (
+          <select className="ctl-select" value={overrideTo} disabled={running} onChange={e => setOverrideNode(e.target.value)}>
+            {primary && !nodes.includes(primary) && <option value={primary}>{primary} ({node})</option>}
+            {nodes.map(n => (
+              <option key={n} value={n}>{n}{n === primary ? ` (${node})` : ''}</option>
+            ))}
+            <option value="none">none — no recordings</option>
+          </select>
+        )}
+        {thisRun?.record_override && (
+          <span className="ctl-hint">this run's recording was overridden: {thisRun.record_override === 'none' ? 'none' : `${thisRun.record_override}'s screen, the whole run`}</span>
         )}
       </div>
       {running && !thisRun && run && <div className="ctl-hint">running: {run.name}</div>}

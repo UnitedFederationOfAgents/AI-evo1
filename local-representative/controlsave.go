@@ -120,6 +120,9 @@ func (s *Server) controlRunZip(run ControlRunMsg) ([]byte, error) {
 	}
 	writeValues("output", run.Output)
 	writeValues("values", run.Values)
+	if run.RecordOverride != "" {
+		fmt.Fprintf(&b, "\nrecording overridden in the runner: %s\n", run.RecordOverride)
+	}
 	if len(run.Records) > 0 {
 		b.WriteString("\nrecordings:\n")
 		for _, rs := range run.Records {

@@ -48,6 +48,7 @@ export interface ControlRunMsg {
   sequence: string
   name: string
   controls?: Record<string, string> // the values it ran with
+  record_override?: string // the runner's override recording: a node recorded across the whole run, or "none"
   status: string // "running" | "success" | "error" | "cancelled"
   error?: string
   started_at: number // unix ms

@@ -183,9 +183,79 @@ func TestRunStartNeedsRecordingNodes(t *testing.T) {
 	if err := s.control.lib.saveSequence(q, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.control.start("rec", nil); err == nil || !strings.Contains(err.Error(), "no node") {
+	if err := s.control.start("rec", nil, ""); err == nil || !strings.Contains(err.Error(), "no node") {
 		t.Fatalf("start = %v, want a missing node", err)
 	}
+}
+
+// TestOverrideRecordBlocks: the runner's override recording (Revision D)
+// replaces a sequence's blocks with none, or one block of a node across
+// every step -- this node, or one connected to agent-coordinator.
+func TestOverrideRecordBlocks(t *testing.T) {
+	s := newServer("test-lr")
+	e := s.control
+	if got, err := e.overrideRecordBlocks(controlRecordNone, 5); err != nil || len(got) != 0 {
+		t.Errorf("none = %v, %v; want no blocks", got, err)
+	}
+	for _, node := range []string{"test-lr", "{{this_node}}"} {
+		got, err := e.overrideRecordBlocks(node, 5)
+		if err != nil || len(got) != 1 || got[0].Node != "test-lr" || got[0].From != 1 || got[0].To != 5 {
+			t.Errorf("%s = %+v, %v; want test-lr across steps 1–5", node, got, err)
+		}
+	}
+	if _, err := e.overrideRecordBlocks("lr-b", 5); err == nil || !strings.Contains(err.Error(), "agent-coordinator") {
+		t.Errorf("lr-b without agent-coordinator: err = %v", err)
+	}
+	e.setNodes([]string{"lr-b", "test-lr"})
+	if got, err := e.overrideRecordBlocks("lr-b", 3); err != nil || len(got) != 1 || got[0].Node != "lr-b" || got[0].To != 3 {
+		t.Errorf("lr-b = %+v, %v", got, err)
+	}
+	if _, err := e.overrideRecordBlocks("lr-gone", 3); err == nil || !strings.Contains(err.Error(), `"lr-gone"`) {
+		t.Errorf("lr-gone: err = %v", err)
+	}
+}
+
+// TestRunStartOverridesRecordings: overriding with "none" lets a sequence
+// whose own recording has no node run, without recordings; overriding with
+// a node records it across the whole run, in place of the sequence's own.
+func TestRunStartOverridesRecordings(t *testing.T) {
+	s := newServer("test-lr")
+	q := ControlSequenceDef{ID: "rec", Name: "Rec", Controls: []ControlParam{{Name: "where"}},
+		Steps:      []ControlStepRef{{Action: "unlock-screen"}, {Action: "unlock-screen"}},
+		Recordings: []ControlRecordBlock{{Node: "{{where}}", From: 2, To: 2}}}
+	if err := s.control.lib.saveSequence(q, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.control.start("rec", nil, "none"); err != nil {
+		t.Fatalf("start with no recordings: %v", err)
+	}
+	run := s.control.state().Run
+	if run.RecordOverride != "none" || len(run.Records) != 0 {
+		t.Errorf("run = override %q, records %+v; want none", run.RecordOverride, run.Records)
+	}
+	s.control.cancel()
+	waitRunDone(t, s)
+	if err := s.control.start("rec", nil, "test-lr"); err != nil {
+		t.Fatalf("start recording test-lr: %v", err)
+	}
+	recs := s.control.state().Run.Records
+	if len(recs) != 1 || recs[0].Node != "test-lr" || recs[0].From != 1 || recs[0].To != 2 {
+		t.Errorf("records = %+v; want test-lr across steps 1–2", recs)
+	}
+	s.control.cancel()
+	waitRunDone(t, s)
+}
+
+func waitRunDone(t *testing.T, s *Server) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if run := s.control.state().Run; run == nil || run.Status != "running" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the run didn't finish")
 }
 
 // TestLegacyRecordIsOneBlock: a sequence saved before recording blocks

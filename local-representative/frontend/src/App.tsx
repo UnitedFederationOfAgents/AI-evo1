@@ -96,14 +96,14 @@ function useStatusWS() {
   }, [])
 
   // Control tab -- see local-representative/control.go.
-  const runControl = useCallback((sequence: string, controls: Record<string, string>) => {
+  const runControl = useCallback((sequence: string, controls: Record<string, string>, recordOverride?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setControlReplies(prev => {
         const next = { ...prev }
         delete next.run
         return next
       })
-      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence, controls } }))
+      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence, controls, record_override: recordOverride } }))
     }
   }, [])
 

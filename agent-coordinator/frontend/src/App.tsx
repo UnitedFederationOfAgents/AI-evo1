@@ -99,14 +99,14 @@ function useCoordinatorWS() {
   }, [])
 
   // A host's control tab -- see local-representative/control.go.
-  const sendLRControlRun = useCallback((hostId: string, sequence: string, controls: Record<string, string>) => {
+  const sendLRControlRun = useCallback((hostId: string, sequence: string, controls: Record<string, string>, recordOverride?: string) => {
     setHostData(prev => {
       const hs = prev[hostId] ?? emptyHostState()
       const replies = { ...(hs.controlReplies ?? {}) }
       delete replies.run
       return { ...prev, [hostId]: { ...hs, controlReplies: replies } }
     })
-    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence, controls } }))
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence, controls, record_override: recordOverride } }))
   }, [])
 
   // requestLRControl sends a host's definer/composer request and returns the
@@ -3463,7 +3463,7 @@ function LRView({
   data: HostClientState
   sendLRCommand: (hostId: string, cmd: string, fc?: string) => void
   sendLRRidealongCommand: (hostId: string, action: string, fc?: string) => void
-  sendLRControlRun: (hostId: string, sequence: string, controls: Record<string, string>) => void
+  sendLRControlRun: (hostId: string, sequence: string, controls: Record<string, string>, recordOverride?: string) => void
   sendLRControlCancel: (hostId: string) => void
   sendLRControlContinue: (hostId: string, run: string) => void
   requestLRControl: (hostId: string, req: ControlLibRequest) => string
@@ -3717,7 +3717,7 @@ function LRView({
                     replies={data.controlReplies ?? {}}
                     request={req => requestLRControl(host.id, req)}
                     robotHealthy={getServiceStatus('robot') === 'healthy'}
-                    onRun={(seq, controls) => sendLRControlRun(host.id, seq, controls)}
+                    onRun={(seq, controls, recordOverride) => sendLRControlRun(host.id, seq, controls, recordOverride)}
                     onCancel={() => sendLRControlCancel(host.id)}
                     onContinue={run => sendLRControlContinue(host.id, run)}
                   />

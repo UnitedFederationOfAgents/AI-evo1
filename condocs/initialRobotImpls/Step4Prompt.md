@@ -204,3 +204,28 @@ FC's startup block now begins with a `● started: 2026-10-08 13:45:12 UTC`-styl
 Let's make it so the control-sequence runner dialog now supports an 'override recording' control. This control allows the selection of a node (defaults to the primary for the sequence) or 'none'.
 
 When selected this control overrides the recording behaviour established by the composition. It records the full control sequence (or until it stops due to error).
+
+
+prompt: [`f4a2983`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f4a2983569b722c9a32cc173ce7dcf7758b47939) → reply: [`35efcd2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/35efcd2f43aa2e0fbe1f85da82749ed8f64af9a5)
+
+## Reply D
+
+I added an **override recording** control to the control-sequence runner, in both LR's and AC's control tabs. Nothing has been built or tested: `go vet` and `gofmt` needed approval here. Please run `make build` and `make test` in `local-representative` and `agent-coordinator` on the host. I aligned the Go by hand, so gofmt may still want small spacing fixes.
+
+- **The control:** an "override recording" checkbox sits under the run button. When it's ticked, you pick a node, which defaults to the node running the sequence (this node), or **none**. I read "the primary for the sequence" as the node running it; tell me if you meant something else.
+- **What it does:** the choice replaces the composer's recordings for that run only. A node is recorded across every step, and the recording stops early if the run fails or is cancelled. **none** records nothing. The bars beside the steps preview this before you run.
+- **Where it shows:** the run keeps the choice (`record_override`), the runner notes it, and the saved results report includes it.
+- **Checks:** the chosen node has to be this node or one connected to AC, or the run won't start. With **none**, a sequence whose own recording has no node chosen can still run.
+- **How it's sent:** LR takes it in its `control-run` message. AC passes it on as `__control:run <id> --record <node|none> …`, and only adds that when an override is set.
+
+The changes are in `controlrecord.go` (new `overrideRecordBlocks`), `control.go`, `main.go`, `controlsave.go` and the README in local-representative, plus `agent-coordinator/main.go`. The shared `ControlV1.tsx` and `controlTypes.ts` are copied to AC, and both `App.tsx` files pass the choice on. I added two tests to `controlrecord_test.go` and updated the existing `start` calls in three test files.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

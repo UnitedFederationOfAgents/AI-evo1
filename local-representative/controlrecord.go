@@ -246,6 +246,37 @@ func resolveRecordBlocks(blocks []ControlRecordBlock, vars map[string]string, sa
 	return out, nil
 }
 
+// controlRecordNone, as a run's override recording, records nothing.
+const controlRecordNone = "none"
+
+// overrideRecordBlocks is a run's recording blocks when the runner overrides
+// the sequence's own (Step4Prompt.md Revision D): with "none", no
+// recordings; with a node, one recording of its screen across all nSteps
+// steps -- the whole run, or until it stops on a failure or cancel, as
+// finishRecordings stops it then. The node is this node or one connected
+// to agent-coordinator.
+func (e *controlEngine) overrideRecordBlocks(override string, nSteps int) ([]ControlRecordBlock, error) {
+	if override == controlRecordNone {
+		return nil, nil
+	}
+	if override == "{{this_node}}" {
+		override = e.s.lrName
+	}
+	if override != e.s.lrName {
+		nodes := e.getNodes()
+		if !containsString(nodes, override) {
+			if len(nodes) == 0 {
+				return nil, fmt.Errorf("override recording: this local-representative isn't connected to agent-coordinator, so it can't record %s", override)
+			}
+			return nil, fmt.Errorf("override recording: %q isn't connected to agent-coordinator (connected: %s)", override, strings.Join(nodes, ", "))
+		}
+	}
+	if nSteps == 0 {
+		return nil, nil
+	}
+	return []ControlRecordBlock{{Node: override, From: 1, To: nSteps, Label: "override: the whole run"}}, nil
+}
+
 // checkRecordNodes checks each of a run's recordings names a node.
 func checkRecordNodes(blocks []ControlRecordBlock) error {
 	for k, b := range blocks {

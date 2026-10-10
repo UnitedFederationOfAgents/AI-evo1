@@ -1115,13 +1115,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case "lr-control-run":
 			// The host's control tab -- see local-representative/control.go.
 			var payload struct {
-				HostID   string            `json:"host_id"`
-				Sequence string            `json:"sequence"`
-				Controls map[string]string `json:"controls"`
+				HostID         string            `json:"host_id"`
+				Sequence       string            `json:"sequence"`
+				Controls       map[string]string `json:"controls"`
+				RecordOverride string            `json:"record_override"` // a node, "none", or "" for the sequence's own recordings
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
-				payload.HostID != "" && payload.Sequence != "" && !strings.ContainsAny(payload.Sequence, " \n") && s.reprServer != nil {
+				payload.HostID != "" && payload.Sequence != "" && !strings.ContainsAny(payload.Sequence, " \n") &&
+				!strings.ContainsAny(payload.RecordOverride, " \n") && s.reprServer != nil {
 				cmd := "__control:run " + payload.Sequence
+				if payload.RecordOverride != "" {
+					cmd += " --record " + payload.RecordOverride
+				}
 				if len(payload.Controls) > 0 {
 					values, _ := json.Marshal(payload.Controls)
 					cmd += " " + string(values)

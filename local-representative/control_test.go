@@ -44,7 +44,7 @@ func TestControlStateListsSequences(t *testing.T) {
 
 func TestControlStartUnknownSequence(t *testing.T) {
 	s := newServer("test-lr")
-	if err := s.control.start("no-such-sequence", nil); err == nil {
+	if err := s.control.start("no-such-sequence", nil, ""); err == nil {
 		t.Error("start of an unknown sequence succeeded")
 	}
 }

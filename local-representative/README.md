@@ -290,7 +290,10 @@ The **control** tab sequences actions across this host's sub-apps
 - **runner** — pick a sequence, set its controls, run it, and follow each
   step, with the sequence's recording blocks beside the steps showing how
   each recording is going; each recording plays back below once it stops.
-  Once a run ends, **save results to files** uploads it into the files tab
+  **override recording** replaces the sequence's recording blocks for one
+  run: pick a node (by default this one) to record its screen from the first
+  step to the last, or until the run stops on a failure or cancel, or pick
+  **none** to record nothing. Once a run ends, **save results to files** uploads it into the files tab
   as `lr-control-<sequence>-<time>.zip` (`controlsave.go`), like the
   robot's "Save to file". The zip holds `report.txt` (the controls, each
   step's result, the values and output), `run.json`, and a copy of each

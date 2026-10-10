@@ -53,11 +53,11 @@ func TestCheckNodeControls(t *testing.T) {
 // on nodes that aren't connected.
 func TestCaptureTwoNodesNeedsConnectedNodes(t *testing.T) {
 	s := newServer("test-lr")
-	if err := s.control.start("capture-two-nodes", map[string]string{"first_node": "lr-a", "second_node": "lr-b"}); err == nil {
+	if err := s.control.start("capture-two-nodes", map[string]string{"first_node": "lr-a", "second_node": "lr-b"}, ""); err == nil {
 		t.Fatal("started with no nodes connected")
 	}
 	s.control.setNodes([]string{"lr-a", "test-lr"})
-	err := s.control.start("capture-two-nodes", map[string]string{"first_node": "lr-a", "second_node": "lr-b"})
+	err := s.control.start("capture-two-nodes", map[string]string{"first_node": "lr-a", "second_node": "lr-b"}, "")
 	if err == nil || !strings.Contains(err.Error(), `"lr-b"`) {
 		t.Fatalf("err = %v, want lr-b isn't connected", err)
 	}

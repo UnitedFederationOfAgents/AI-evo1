@@ -1171,11 +1171,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "control-run":
 			var payload struct {
-				Sequence string            `json:"sequence"`
-				Controls map[string]string `json:"controls"`
+				Sequence       string            `json:"sequence"`
+				Controls       map[string]string `json:"controls"`
+				RecordOverride string            `json:"record_override"` // a node, "none", or "" for the sequence's own recordings
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
-				if err := s.control.start(payload.Sequence, payload.Controls); err != nil {
+				if err := s.control.start(payload.Sequence, payload.Controls, payload.RecordOverride); err != nil {
 					log.Printf("control-run %q: %v", payload.Sequence, err)
 					s.sendToClient(c, "control-reply", ControlLibReply{Op: "run", Error: err.Error()})
 				}

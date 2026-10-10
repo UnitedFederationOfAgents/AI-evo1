@@ -79,7 +79,7 @@ func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequ
 // info.Phase, so nothing else would otherwise stop local-representative's
 // dev-repo watcher from rebuilding out from under the copy+edit.
 func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action ActionRequest) error {
-	targetFile, err := resourceTargetFile(s.root, info)
+	targetFile, err := resourceTargetFile(s.getRoot(), info)
 	if err != nil {
 		return err
 	}
@@ -88,8 +88,9 @@ func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action
 	// markdown edit: dropping new files into the condoc's Impls folder is
 	// itself a working-tree change local-representative's dev-repo watcher
 	// could notice, same as the file it links from.
-	s.writeCondocLock(fmt.Sprintf("copying resources into %s", info.Name))
-	defer s.removeCondocLock()
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, fmt.Sprintf("copying resources into %s", info.Name))
+	defer s.removeCondocLock(repoRoot)
 
 	links, err := s.fetchHighlightedFiles(implDir(mainPath))
 	if err != nil {
@@ -118,13 +119,14 @@ func (s *Server) addVoiceNoteResource(info CondocInfo, action ActionRequest) err
 		return fmt.Errorf("voice note has no dictated text")
 	}
 
-	targetFile, err := resourceTargetFile(s.root, info)
+	targetFile, err := resourceTargetFile(s.getRoot(), info)
 	if err != nil {
 		return err
 	}
 
-	s.writeCondocLock(fmt.Sprintf("adding a voice-note resource to %s", info.Name))
-	defer s.removeCondocLock()
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, fmt.Sprintf("adding a voice-note resource to %s", info.Name))
+	defer s.removeCondocLock(repoRoot)
 
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, nil)
 }
@@ -341,13 +343,14 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	absPath := filepath.Join(s.root, filepath.FromSlash(condocRel))
-	info, err := detectPhase(s.root, absPath)
+	root := s.getRoot()
+	absPath := filepath.Join(root, filepath.FromSlash(condocRel))
+	info, err := detectPhase(root, absPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	targetFile, err := resourceTargetFile(s.root, info)
+	targetFile, err := resourceTargetFile(root, info)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -356,8 +359,9 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 	// Same lock discipline as addResource: assert it before the first
 	// uploaded byte lands in the Impls folder, not just around the markdown
 	// edit.
-	s.writeCondocLock(fmt.Sprintf("uploading resources into %s", info.Name))
-	defer s.removeCondocLock()
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, fmt.Sprintf("uploading resources into %s", info.Name))
+	defer s.removeCondocLock(repoRoot)
 
 	destDir := implDir(absPath)
 	if err := os.MkdirAll(destDir, 0755); err != nil {
@@ -613,7 +617,7 @@ func (s *Server) handleResourceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := implDir(filepath.Join(s.root, filepath.FromSlash(condocRel)))
+	dir := implDir(filepath.Join(s.getRoot(), filepath.FromSlash(condocRel)))
 	f, err := os.Open(filepath.Join(dir, filename))
 	if err != nil {
 		http.NotFound(w, r)

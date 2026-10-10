@@ -69,3 +69,29 @@ We will add a new 'Set Working Dir' to condoccer to allow us to change the root 
 We will make all condoc locking based in the root of the selected condoc's repo.
 
 We will implement this now and respond with any gaps we've run into that need to be subsequently addressed.
+
+
+prompt: [`89ce900`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/89ce900e23fde114cace9f778f192c02217dffb0) → reply: [`36f6f27`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/36f6f277a98233d3171835827e92f88d249a0645)
+
+## Reply B
+
+I've implemented Revision B in condoccer, but none of it has been built or tested: `go test`, `gofmt` and `tsc` all needed approval here, so please run `make build` and `make test` in `condoccer` on the host. The list view now has a **Set Working Dir** control, so you can change the folder condoccer scans while it runs, and opening a condoc no longer requires that folder to be a git repo. Each condoc's `.condoc` lock, its diffs and its resubmit recovery commit now go to that condoc's own repo, found the same way federation-command finds it. That gives one active condoc per repo instead of one shared lock across everything (`main.go`, `resources.go`, `repr.go`, the frontend's `App.tsx`, `types.ts` and `index.css`, plus new tests in `condoclock_test.go`).
+
+**Gaps still to address:**
+- **Two condocs in the same repo still share one lock.** A condoc reaching a safe point can release the lock while another condoc in that repo is still running. "One per repo" isn't enforced either: nothing stops you handing off a second condoc in the same repo.
+- **Changing the working dir doesn't survive a restart.** local-representative launches condoccer with `--root` on every restart, so the new setting is lost; it needs to be saved or fed back to local-representative.
+- **Locks in the old folder aren't tidied up when you switch.** A lock left in a repo you switch away from is only removed when federation-command next reaches a safe point there.
+- **Condocs outside any git repo** still put their lock at the scan folder, which is the old behaviour and does nothing useful there.
+- **Some folders are still skipped:** the scan ignores folders starting with `.`, so clones under something like `.worktrees/` won't show up.
+- **Other screens show the old folder.** local-representative and agent-coordinator now receive the new working dir, but anything that assumes it is a repo root will be wrong.
+- **One running agent can still break another.** Two federation-command instances on the same repo still share one working tree, and a resubmit's `git add -A` commits everything in it.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

@@ -335,10 +335,11 @@ func (s *Server) pushCondoccerState() {
 	if client == nil {
 		return
 	}
-	infos, _ := findCondocs(s.root)
+	root := s.getRoot()
+	infos, _ := findCondocs(root)
 	client.SendData("condoccer-state", CondoccerStateMsg{
 		HTTPPort: s.httpPort,
-		Root:     s.root,
+		Root:     root,
 		Condocs:  infos,
 	})
 }

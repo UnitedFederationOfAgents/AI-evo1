@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
 
@@ -39,6 +39,13 @@ function useCondocWS() {
   const [devMode, setDevMode] = useState(false)
   const [version, setVersion] = useState('')
   const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
+  // condoccer's working dir (scan root). rootGen bumps only when it actually
+  // changes after the first report, so App can drop back to the condoc list
+  // -- every condoc path is relative to the root, so a deep link into the
+  // old one means nothing anymore.
+  const [root, setRoot] = useState('')
+  const [rootGen, setRootGen] = useState(0)
+  const rootRef = useRef('')
   const [diffFiles, setDiffFiles] = useState<string[]>([])
   const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
   const [fileDiffContent, setFileDiffContent] = useState<string | null>(null)
@@ -90,17 +97,26 @@ function useCondocWS() {
     [send],
   )
 
+  const setWorkingDir = useCallback(
+    (dir: string) => {
+      send('set-root', { root: dir })
+    },
+    [send],
+  )
+
+  // path is the condoc whose repo the diff runs against -- the working dir
+  // may sit above several repos (see condocRepoRoot on the server).
   const getDiff = useCallback(
-    (fromCommit: string, toCommit: string) => {
+    (path: string, fromCommit: string, toCommit: string) => {
       setDiffFilesLoaded(false)
-      send('get-diff', { fromCommit, toCommit })
+      send('get-diff', { path, fromCommit, toCommit })
     },
     [send],
   )
 
   const getFileDiff = useCallback(
-    (fromCommit: string, toCommit: string, file: string) => {
-      send('get-file-diff', { fromCommit, toCommit, file })
+    (path: string, fromCommit: string, toCommit: string, file: string) => {
+      send('get-file-diff', { path, fromCommit, toCommit, file })
     },
     [send],
   )
@@ -176,6 +192,16 @@ function useCondocWS() {
           } else if (msg.type === 'mode-mismatch') {
             const p = msg.payload as ModeMismatchMsg
             setModeMismatch(p.mismatched ? p : null)
+          } else if (msg.type === 'root') {
+            const p = msg.payload as RootMsg
+            if (rootRef.current && rootRef.current !== p.root) {
+              // The server already dropped every subscription.
+              subscribedRef.current = ''
+              setActiveState(null)
+              setRootGen((g) => g + 1)
+            }
+            rootRef.current = p.root
+            setRoot(p.root)
           } else if (msg.type === 'diff-list') {
             const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
             setDiffFiles(p.files ?? [])
@@ -213,6 +239,9 @@ function useCondocWS() {
     devMode,
     version,
     modeMismatch,
+    root,
+    rootGen,
+    setWorkingDir,
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
@@ -227,6 +256,55 @@ function useCondocWS() {
     fileDiffHunks,
     setFileDiffHunks,
   }
+}
+
+// WorkingDirControl ("Set Working Dir") changes the directory condoccer scans
+// for condocs. It can sit above several repos: each condoc's .condoc lock,
+// diffs and resubmit commits always go to that condoc's own repo root.
+function WorkingDirControl({ root, onSet }: { root: string; onSet: (dir: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+
+  if (!editing) {
+    return (
+      <div className="working-dir">
+        <span className="working-dir-label">Working dir</span>
+        <code className="working-dir-path">{root || '…'}</code>
+        <button
+          className="btn-secondary working-dir-btn"
+          onClick={() => { setDraft(root); setEditing(true) }}
+        >
+          Set Working Dir
+        </button>
+      </div>
+    )
+  }
+
+  const submit = () => {
+    const dir = draft.trim()
+    if (dir && dir !== root) onSet(dir)
+    setEditing(false)
+  }
+
+  return (
+    <form
+      className="working-dir"
+      onSubmit={(e) => { e.preventDefault(); submit() }}
+    >
+      <span className="working-dir-label">Working dir</span>
+      <input
+        className="working-dir-input"
+        value={draft}
+        autoFocus
+        spellCheck={false}
+        placeholder="/path/to/dir (absolute, ~/…, or relative to the current one)"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Escape') setEditing(false) }}
+      />
+      <button type="submit" className="btn-primary working-dir-btn">Set</button>
+      <button type="button" className="btn-secondary working-dir-btn" onClick={() => setEditing(false)}>Cancel</button>
+    </form>
+  )
 }
 
 // ---- The Conversationalist mic-capture ----
@@ -2272,6 +2350,9 @@ export default function App() {
     devMode,
     version,
     modeMismatch,
+    root,
+    rootGen,
+    setWorkingDir,
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
@@ -2359,7 +2440,7 @@ export default function App() {
     setFileDiffHunks([])
     setSelectedDiffHunkIdx(null)
     setNavLevel('files-changed')
-    getDiff(fromCommit, toCommit)
+    getDiff(selectedCondocPath ?? '', fromCommit, toCommit)
   }
 
   const handleSelectDiffFile = (file: string) => {
@@ -2368,7 +2449,7 @@ export default function App() {
     setFileDiffHunks([])
     setSelectedDiffHunkIdx(null)
     if (diffFromCommit !== null) {
-      getFileDiff(diffFromCommit, diffToCommit ?? '', file)
+      getFileDiff(selectedCondocPath ?? '', diffFromCommit, diffToCommit ?? '', file)
     }
     setNavLevel('file-diff')
   }
@@ -2489,17 +2570,34 @@ export default function App() {
   useEffect(() => {
     if (connected && initialNav.diffFromCommit !== null && !hashDiffCatchupDone.current) {
       hashDiffCatchupDone.current = true
-      getDiff(initialNav.diffFromCommit, initialNav.diffToCommit ?? '')
+      getDiff(initialNav.condocPath ?? '', initialNav.diffFromCommit, initialNav.diffToCommit ?? '')
     }
-  }, [connected, initialNav.diffFromCommit, initialNav.diffToCommit, getDiff])
+  }, [connected, initialNav.condocPath, initialNav.diffFromCommit, initialNav.diffToCommit, getDiff])
 
   const hashFileDiffCatchupDone = useRef(false)
   useEffect(() => {
     if (connected && initialNav.diffFromCommit !== null && initialNav.selectedDiffFile && !hashFileDiffCatchupDone.current) {
       hashFileDiffCatchupDone.current = true
-      getFileDiff(initialNav.diffFromCommit, initialNav.diffToCommit ?? '', initialNav.selectedDiffFile)
+      getFileDiff(initialNav.condocPath ?? '', initialNav.diffFromCommit, initialNav.diffToCommit ?? '', initialNav.selectedDiffFile)
     }
-  }, [connected, initialNav.diffFromCommit, initialNav.diffToCommit, initialNav.selectedDiffFile, getFileDiff])
+  }, [connected, initialNav.condocPath, initialNav.diffFromCommit, initialNav.diffToCommit, initialNav.selectedDiffFile, getFileDiff])
+
+  // Working dir changed (Set Working Dir, from this tab or another): every
+  // condoc path is relative to it, so whatever we were looking at is gone --
+  // return to the list, which also clears the now-stale hash.
+  useEffect(() => {
+    if (rootGen === 0) return
+    setNavLevel('condoc-list')
+    setSelectedCondocPath(null)
+    setSelectedStepNum(null)
+    setSelectedIterId(null)
+    setSelectedSubstepLetter(null)
+    setSelectedSubstepIterId(null)
+    setDiffFromCommit(null)
+    setDiffToCommit(null)
+    setSelectedDiffFile(null)
+    setSelectedDiffHunkIdx(null)
+  }, [rootGen])
 
   // Staleness: a hash can point at a condoc that's since been renamed,
   // reverted away, or deleted. If we're anywhere but the list and never got
@@ -2626,15 +2724,16 @@ export default function App() {
         )}
 
         {navLevel === 'condoc-list' && (
-          <div className="empty-state">
+          <div className="empty-state empty-state-list">
             <div>
               <span className={`conn-dot ${connected ? 'connected' : 'disconnected'}`} />
               {connected
                 ? condocs.length === 0
-                  ? 'No condocs found — point condoccer at a repository containing condoc files'
+                  ? 'No condocs found — set the working dir to a directory containing condoc files'
                   : 'Select a condoc'
                 : 'Connecting…'}
             </div>
+            {connected && <WorkingDirControl root={root} onSet={(dir) => { setError(null); setWorkingDir(dir) }} />}
           </div>
         )}
 

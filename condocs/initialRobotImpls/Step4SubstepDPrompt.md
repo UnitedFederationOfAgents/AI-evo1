@@ -171,11 +171,8 @@ You're not seeing the button because you're looking at agent-coordinator's files
 **To fix it:** move the clipboard button, the paste handling, the dialog, `textformat.ts`, the related CSS and the archive icon into agent-coordinator's files tab. Uploads there already go through its upload relay, so the new files would reach the right host. Better still, the two apps could share one files tab so they can't drift apart again. Tell me which you'd prefer and I'll make that change next.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+These controls should be present on both LR and AC - let's fix that.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also add an option to the 'add resource' control for condoccer to the same effect.

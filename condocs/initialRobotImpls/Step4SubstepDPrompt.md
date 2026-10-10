@@ -176,3 +176,26 @@ You're not seeing the button because you're looking at agent-coordinator's files
 These controls should be present on both LR and AC - let's fix that.
 
 Let's also add an option to the 'add resource' control for condoccer to the same effect.
+
+
+prompt: [`e660efa`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e660efaa33116bc251018c8e748a60f8681d6e5a) → reply: [`34c8bb0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/34c8bb00fa3ef00f6dc81c828c529b2db112262a)
+
+## Reply G
+
+Agent-coordinator's files tab now has the clipboard controls LR already had, and condoccer's **Add Resources** has a new **Clipboard** source that does the same thing. Nothing has been built or type-checked, because `tsc` needed approval here, so please run `make build` in `agent-coordinator`, `condoccer` and `local-representative` on the host.
+
+- **Agent-coordinator's files tab:** it now has **+ new file from clipboard** beside **+ new text file**, Ctrl+V/⌘V paste anywhere on the tab, the same naming dialog with text-format detection, and the zip icon. New files go through its existing upload relay to the right host. The code is in `App.tsx` and `index.css`, with a one-line comment fix in `types.ts`.
+- **Condoccer's Add Resources:** choose **Clipboard** in the Source list, then click 📋 or press Ctrl+V outside the text boxes. A file-name field appears with the part before the extension selected and ready to type over, plus a preview showing the detected format and size. It's added through the same route an **Upload** uses, so it lands as a normal resource. The code is in `App.tsx` and `index.css`, with a comment update in `types.ts`.
+- **Format detection:** LR, agent-coordinator and condoccer now each have an identical copy of `textformat.ts`, with a note at the top saying to keep all three in step. LR's copy only gained that note.
+
+The clipboard code is still copied rather than shared between the three apps, so a future change has to be made three times.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

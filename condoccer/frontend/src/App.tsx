@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import { detectTextFormat } from './textformat'
 import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
@@ -1698,9 +1699,244 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
   )
 }
 
+// ---- Clipboard resources (Step4SubstepDPrompt.md Revision G) ----
+//
+// The "Clipboard" source of Add Resources does what local-representative's
+// and agent-coordinator's "new file from clipboard" button does (Revisions
+// D/E there): take an image or plain text from the copy buffer, default its
+// name to "clipboard-<date>-<time>.<ext>" (the extension sniffed by
+// detectTextFormat for text), and let the operator rename it before it goes
+// through the same /api/upload-resource route an "Upload" does. The helpers
+// below mirror those apps' own copies.
+
+// ClipboardContent is what was found in the copy buffer, already as the
+// Blob the upload will carry.
+interface ClipboardContent {
+  kind: 'image' | 'text'
+  blob: Blob
+  ext: string
+  text?: string // kind 'text' only -- shown as the preview
+  format?: string // kind 'text' only -- the detected format's label, e.g. "JSON"
+}
+
+// CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
+// preference order. The async clipboard API only ever hands back image/png,
+// but a paste event can carry the others as-is.
+const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+}
+
+// CLIPBOARD_POLL_MS is how often useClipboardState rechecks the copy buffer
+// while the page is focused -- there's no "clipboard changed" event.
+const CLIPBOARD_POLL_MS = 3000
+
+function textClipboard(text: string): ClipboardContent {
+  const f = detectTextFormat(text)
+  return { kind: 'text', blob: new Blob([text], { type: f.mime }), ext: f.ext, text, format: f.label }
+}
+
+// clipboardSupported says whether the page may read the copy buffer itself
+// at all -- the async clipboard API exists only in a secure context (https
+// or localhost), so over plain http only a Ctrl+V paste event can get at it.
+function clipboardSupported(): boolean {
+  return !!(navigator.clipboard?.read || navigator.clipboard?.readText)
+}
+
+// readClipboard reads the copy buffer through the async clipboard API: the
+// first image item wins, then plain text. null means it's empty (or holds
+// only things we don't take); it throws when the read isn't allowed.
+async function readClipboard(): Promise<ClipboardContent | null> {
+  const cb = navigator.clipboard
+  if (cb?.read) {
+    const items = await cb.read()
+    for (const item of items) {
+      const type = Object.keys(CLIPBOARD_IMAGE_EXT).find(t => item.types.includes(t))
+      if (type) return { kind: 'image', blob: await item.getType(type), ext: CLIPBOARD_IMAGE_EXT[type] }
+    }
+    for (const item of items) {
+      if (!item.types.includes('text/plain')) continue
+      const text = await (await item.getType('text/plain')).text()
+      if (text) return textClipboard(text)
+    }
+    return null
+  }
+  if (cb?.readText) {
+    const text = await cb.readText()
+    return text ? textClipboard(text) : null
+  }
+  throw new Error('clipboard API unavailable')
+}
+
+// clipboardFromPaste is readClipboard's counterpart for a paste event's
+// DataTransfer -- no permission needed, so it works even over plain http.
+function clipboardFromPaste(data: DataTransfer): ClipboardContent | null {
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !CLIPBOARD_IMAGE_EXT[item.type]) continue
+    const f = item.getAsFile()
+    if (f) return { kind: 'image', blob: f, ext: CLIPBOARD_IMAGE_EXT[item.type] }
+  }
+  const text = data.getData('text/plain')
+  return text ? textClipboard(text) : null
+}
+
+// ClipboardState is what the "read clipboard" button knows about the copy
+// buffer: 'unknown' leaves it enabled (clicking it asks the browser),
+// 'empty' disables it, 'has' enables it.
+type ClipboardState = 'unknown' | 'empty' | 'has'
+
+// useClipboardState watches the copy buffer while enabled, but only once the
+// browser has already granted clipboard-read -- without that grant every
+// probe would pop a permission prompt or "Paste" bubble, so the state just
+// stays 'unknown'. The probe only lists the item types; it never pulls the
+// bytes.
+function useClipboardState(enabled: boolean): ClipboardState {
+  const [state, setState] = useState<ClipboardState>('unknown')
+  useEffect(() => {
+    if (!enabled || !navigator.clipboard?.read || !navigator.permissions?.query) return
+    let cancelled = false
+    let granted = false
+    let perm: PermissionStatus | null = null
+    const probe = async () => {
+      if (!granted || document.visibilityState !== 'visible' || !document.hasFocus()) return
+      try {
+        const items = await navigator.clipboard.read()
+        const has = items.some(item => item.types.some(t => t === 'text/plain' || CLIPBOARD_IMAGE_EXT[t]))
+        if (!cancelled) setState(has ? 'has' : 'empty')
+      } catch {
+        // Focus lost mid-read or access revoked -- keep the last answer.
+      }
+    }
+    const onPerm = () => {
+      granted = perm?.state === 'granted'
+      if (granted) void probe()
+      else setState('unknown')
+    }
+    // 'clipboard-read' isn't in every TS lib's PermissionName union.
+    navigator.permissions.query({ name: 'clipboard-read' } as unknown as PermissionDescriptor)
+      .then(p => {
+        if (cancelled) return
+        perm = p
+        p.addEventListener('change', onPerm)
+        onPerm()
+      })
+      .catch(() => { /* Firefox/Safari don't know the name -- stay 'unknown' */ })
+    const onWake = () => { void probe() }
+    // "copy"/"cut" fire before the copy buffer is written, hence the delay.
+    const onCopy = () => { window.setTimeout(onWake, 100) }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    document.addEventListener('copy', onCopy)
+    document.addEventListener('cut', onCopy)
+    const timer = window.setInterval(onWake, CLIPBOARD_POLL_MS)
+    return () => {
+      cancelled = true
+      perm?.removeEventListener('change', onPerm)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      document.removeEventListener('copy', onCopy)
+      document.removeEventListener('cut', onCopy)
+      window.clearInterval(timer)
+    }
+  }, [enabled])
+  return state
+}
+
+// clipboardDefaultName is a clipboard resource's starting name, e.g.
+// "clipboard-20261010-142233.png".
+function clipboardDefaultName(ext: string): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `clipboard-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+}
+
+// CLIPBOARD_TEXT_PREVIEW caps how much pasted text the preview shows.
+const CLIPBOARD_TEXT_PREVIEW = 2000
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+// isEditableTarget says a paste is meant for a text field, not the form.
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+}
+
+// ClipboardResourceFields is the "Clipboard" source's part of the Add
+// Resources form: the captured content's file name -- stem (not extension)
+// selected on capture, so typing replaces just that -- and a preview.
+function ClipboardResourceFields({
+  content,
+  fileName,
+  onFileName,
+}: {
+  content: ClipboardContent
+  fileName: string
+  onFileName: (name: string) => void
+}) {
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }, [content])
+
+  useEffect(() => {
+    if (content.kind !== 'image') return
+    const url = URL.createObjectURL(content.blob)
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [content])
+
+  const text = content.text ?? ''
+  return (
+    <div className="clip-resource">
+      <div className="action-form-row">
+        <span className="action-form-label">File:</span>
+        <input
+          ref={nameRef}
+          className="step-form-input"
+          type="text"
+          value={fileName}
+          onChange={(e) => onFileName(e.target.value)}
+        />
+      </div>
+      {content.kind === 'image' ? (
+        imageUrl && <img className="clip-resource-image" src={imageUrl} alt="clipboard image" />
+      ) : (
+        <pre className="clip-resource-text">
+          {text.length > CLIPBOARD_TEXT_PREVIEW
+            ? `${text.slice(0, CLIPBOARD_TEXT_PREVIEW)}\n… (${text.length - CLIPBOARD_TEXT_PREVIEW} more characters)`
+            : text}
+        </pre>
+      )}
+      <div className="clip-resource-size">
+        {content.kind === 'image' ? 'image' : 'text'}
+        {content.format && ` · detected ${content.format}`} · {formatBytes(content.blob.size)}
+      </div>
+    </div>
+  )
+}
+
 // ---- Action panel (for step or substep view) ----
 
 type ActionMode = null | 'revision' | 'retry' | 'revert' | 'substep' | 'add_resource'
+
+type ResourceType = 'highlighted' | 'upload' | 'clipboard' | 'voice-note'
 
 interface ActionPanelProps {
   state: CondocState
@@ -1715,7 +1951,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [fromSel, setFromSel] = useState('start')
   const [revertIter, setRevertIter] = useState('')
   const [substepTitle, setSubstepTitle] = useState('')
-  const [resourceType, setResourceType] = useState<'highlighted' | 'upload' | 'voice-note'>('highlighted')
+  const [resourceType, setResourceType] = useState<ResourceType>('highlighted')
   const { available: tcAvailable } = useContext(TCCaptureContext)
   const [resourceName, setResourceName] = useState('')
   const [resourceDescription, setResourceDescription] = useState('')
@@ -1726,6 +1962,56 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
+  // "Clipboard" source (Step4SubstepDPrompt.md Revision G): what was taken
+  // from the copy buffer, and the file name it'll be uploaded under.
+  const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
+  const [clipFileName, setClipFileName] = useState('')
+  const clipSelected = mode === 'add_resource' && resourceType === 'clipboard'
+  const clipState = useClipboardState(clipSelected)
+
+  const takeClipboard = (content: ClipboardContent) => {
+    setClipContent(content)
+    setClipFileName(clipboardDefaultName(content.ext))
+    setUploadError('')
+  }
+
+  const resetResourceForm = () => {
+    setResourceType('highlighted')
+    setUploadFiles([])
+    setUploadError('')
+    setClipContent(null)
+    setClipFileName('')
+  }
+
+  const fromClipboard = async () => {
+    setUploadError('')
+    if (!clipboardSupported()) {
+      setUploadError("this page can't read the clipboard over plain http — press Ctrl+V (⌘V) outside the text boxes instead")
+      return
+    }
+    try {
+      const content = await readClipboard()
+      if (content) takeClipboard(content)
+      else setUploadError('the clipboard has no text or image in it')
+    } catch {
+      setUploadError("couldn't read the clipboard — allow clipboard access for this page, or press Ctrl+V (⌘V) outside the text boxes")
+    }
+  }
+
+  // With the "Clipboard" source chosen, Ctrl+V anywhere outside a text field
+  // captures the copy buffer -- the one way in over plain http.
+  useEffect(() => {
+    if (!clipSelected) return
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || !e.clipboardData) return
+      const content = clipboardFromPaste(e.clipboardData)
+      if (!content) return
+      e.preventDefault()
+      takeClipboard(content)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [clipSelected])
 
   useEffect(() => {
     setMode(null)
@@ -1735,9 +2021,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
     setSubstepTitle('')
     setResourceName('')
     setResourceDescription('')
-    setResourceType('highlighted')
-    setUploadFiles([])
-    setUploadError('')
+    resetResourceForm()
   }, [info.path, info.stepNum, info.substepLetter])
 
   // Falls back to "Highlighted" if TC availability drops out from under an
@@ -1988,17 +2272,35 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
             <span className="action-form-label">Source:</span>
             <select
               value={resourceType}
-              disabled={resourceType === 'upload' && uploadFiles.length > 0}
+              disabled={(resourceType === 'upload' && uploadFiles.length > 0) || (resourceType === 'clipboard' && clipContent !== null)}
               onChange={(e) => {
-                setResourceType(e.target.value as 'highlighted' | 'upload' | 'voice-note')
+                setResourceType(e.target.value as ResourceType)
                 setUploadFiles([])
                 setUploadError('')
+                setClipContent(null)
+                setClipFileName('')
               }}
             >
               <option value="highlighted">Highlighted</option>
               <option value="upload">Upload</option>
+              <option value="clipboard">Clipboard</option>
               {tcAvailable && <option value="voice-note">Voice Note</option>}
             </select>
+            {resourceType === 'clipboard' && (
+              <button
+                type="button"
+                className="btn-secondary resource-upload-btn"
+                title={
+                  clipState === 'empty'
+                    ? 'the clipboard is empty'
+                    : 'take the text or image on the clipboard (or press Ctrl+V outside the text boxes)'
+                }
+                disabled={clipState === 'empty'}
+                onClick={() => void fromClipboard()}
+              >
+                📋
+              </button>
+            )}
             {resourceType === 'upload' && (
               <>
                 <input
@@ -2031,6 +2333,15 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               </>
             )}
           </div>
+          {resourceType === 'clipboard' && (
+            clipContent ? (
+              <ClipboardResourceFields content={clipContent} fileName={clipFileName} onFileName={setClipFileName} />
+            ) : (
+              <div className="action-status resource-clip-hint">
+                Click 📋 or press Ctrl+V (⌘V) outside the text boxes to take the clipboard's text or image.
+              </div>
+            )
+          )}
           <div className="field-with-mic">
             <input
               className="step-form-input"
@@ -2062,12 +2373,21 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               className="btn-primary"
               disabled={
                 (resourceType === 'upload' && uploadFiles.length === 0) ||
+                (resourceType === 'clipboard' && (!clipContent || !clipFileName.trim())) ||
                 (resourceType === 'voice-note' && !resourceDescription.trim()) ||
                 uploading
               }
               onClick={async () => {
-                if (resourceType === 'upload') {
-                  if (uploadFiles.length === 0) return
+                if (resourceType === 'upload' || resourceType === 'clipboard') {
+                  let files = uploadFiles
+                  if (resourceType === 'clipboard') {
+                    const trimmed = clipFileName.trim()
+                    if (!clipContent || !trimmed) return
+                    // A name typed without any extension gets the content's own one back.
+                    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.${clipContent.ext}`
+                    files = [new File([clipContent.blob], finalName, { type: clipContent.blob.type })]
+                  }
+                  if (files.length === 0) return
                   setUploading(true)
                   setUploadError('')
                   try {
@@ -2075,15 +2395,14 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
                     form.append('path', info.path)
                     if (resourceName.trim()) form.append('name', resourceName.trim())
                     form.append('description', resourceDescription.trim())
-                    for (const f of uploadFiles) form.append('file', f)
+                    for (const f of files) form.append('file', f)
                     const resp = await fetch(`${basePath()}/api/upload-resource`, { method: 'POST', body: form })
                     if (!resp.ok) {
                       setUploadError(await resp.text())
                       return
                     }
                     setMode(null)
-                    setResourceType('highlighted')
-                    setUploadFiles([])
+                    resetResourceForm()
                     setResourceName('')
                     setResourceDescription('')
                   } catch (err) {
@@ -2112,9 +2431,7 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
               className="btn-secondary"
               onClick={() => {
                 setMode(null)
-                setResourceType('highlighted')
-                setUploadFiles([])
-                setUploadError('')
+                resetResourceForm()
               }}
             >
               Cancel

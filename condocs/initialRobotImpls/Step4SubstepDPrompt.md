@@ -155,3 +155,27 @@ Text copied to the clipboard now gets a matching default extension instead of al
 ## Revision F
 
 Let's explain why I am not seeing the new control when I view the files tab for provisioner (from client on 8082).
+
+
+prompt: [`ed81df8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ed81df88105277273ce4bdc5a29ffd301a2c0832) → reply: [`d751319`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d7513191b60e852030ece34fa174987bad779218)
+
+## Reply F
+
+You're not seeing the button because you're looking at agent-coordinator's files tab, and the new control was only ever added to local-representative's files tab. I took "client on 8082" to mean the client host `8082c7f2a286-o3x0`, viewing provisioner01-rfge through agent-coordinator. I didn't change any code for this revision.
+
+- **Two separate copies of the files tab:** agent-coordinator's per-host files tab is its own copy of the code in `agent-coordinator/frontend/src/App.tsx`. Its `FilesPanel` at `agent-coordinator/frontend/src/App.tsx:1890` was copied from local-representative's long ago and has never been kept in step with it. It has the upload area and **+ new text file**, but nothing for the clipboard.
+- **Where Revisions D and E landed:** I only changed `local-representative/frontend/src/App.tsx`. That's where **+ new file from clipboard**, the Ctrl+V handling, the naming dialog and the text-format detection live. local-representative's own build already contains the button.
+- **Zip icon:** agent-coordinator won't show the zip icon either. Its icon lookup has no entry for the new `"archive"` kind, so zip files there get the generic icon.
+- **Viewing provisioner directly:** if you open provisioner's own local-representative page, you'll only see the button once that machine's local-representative is rebuilt from this branch. The changes are only committed on `condoc/InitialRobot-…/main`.
+
+**To fix it:** move the clipboard button, the paste handling, the dialog, `textformat.ts`, the related CSS and the archive icon into agent-coordinator's files tab. Uploads there already go through its upload relay, so the new files would reach the right host. Better still, the two apps could share one files tab so they can't drift apart again. Tell me which you'd prefer and I'll make that change next.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

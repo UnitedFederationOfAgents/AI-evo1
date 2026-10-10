@@ -221,11 +221,8 @@ I added an **override recording** control to the control-sequence runner, in bot
 The changes are in `controlrecord.go` (new `overrideRecordBlocks`), `control.go`, `main.go`, `controlsave.go` and the README in local-representative, plus `agent-coordinator/main.go`. The shared `ControlV1.tsx` and `controlTypes.ts` are copied to AC, and both `App.tsx` files pass the choice on. I added two tests to `controlrecord_test.go` and updated the existing `start` calls in three test files.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Let's adjust condoccer so that when it has a zip resource it will also show (unzipped to <dir>) as a line of text under the zip filename.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+If the zip was too large to unzip then it would instead state that.

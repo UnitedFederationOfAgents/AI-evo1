@@ -32,11 +32,40 @@ I reworked the expanded view in session-manager. The JSON header line now shows 
 One thing you might not expect: when the file has a full written-raw section, I show only that complete command and response. The `IN>>`/`OUT>>` lines are a shortened preview of the same content, so they're used only when that full section is missing. The changes are all in the frontend's `App.tsx` and `index.css`.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's make a condoccer fix next - see the following interaction for context:
+
+agent -r "let's explain: If we are running two FC instances in 'condoc' mode and we run a condoccer in a parent scope of both - what will the effect be in the current implementation?"
+invoking claude in read (files read-only) mode...
+● session: /host-agent-files/agent-records/2026-10-08-provisioner01-rfge-default
+Short answer: watching and driving both condocs works. The rebuild-lock and git-backed features break, because condoccer assumes its `--root` is the git repo root.
+I'm assuming the usual setup: two separate clones or worktrees (say `parent/repoA` and `parent/repoB`), one FC in condoc mode in each, and condoccer started with `--root parent`.
+## What works
+- **Discovery.** `findCondocs` (`condoccer/main.go:554`) walks the whole tree under `--root` and picks up any `.md` file containing `condoc-yaml`. Both repos' condocs show up, with paths like `repoA/condocs/Foo.md`.
+- **Phase detection and UI updates.** `detectPhase` only reads files, and the paths it uses are relative to the main file (`implDir`), so phases, steps, substeps and iterations display correctly for both.
+- **Driving the FCs.** Actions (handoff, completed, revision, retry, substep, revert, add_resource) just append directives or replace placeholders in the right step or substep file. Each FC watches its own file and finds its own repo with `condocFindGitRoot` (`federation-command/condoc.go:317`), so each one sees only its own condoc's actions.
+- **LR / agent-coordinator mirroring.** `pushCondoccerState` reports `Root: parent` and the condoc list relative to it. That's fine.
+## What breaks
+1. **The rebuild lock is effectively gone.** `condocLockPath()` is `s.root/.condoc` (`main.go:1087`), so the lock gets written to `parent/.condoc`.
+   - local-representative only checks `.condoc` at the repo it watches (`local-representative/repowatch.go:160`). Neither repo ever gets locked, so LR can report "rebuild available" in the middle of a handoff in either repo. Preventing exactly that is the lock's only job.
+   - `commitCondocLock` runs `git -C parent add/commit .condoc`. If `parent` isn't a repo, that just logs "git add failed" every time and leaves a stray `parent/.condoc`. If `parent` happens to be inside some other repo, it commits lock churn into that unrelated repo.
+   - FC's `removeCondocLockFile(cs.repoRoot)` deletes `repoX/.condoc`, which never exists. It does nothing, so the lock only comes and goes on condoccer's own poll.
+2. **The two condocs share one lock (a problem even with a single repo).** `updateCondocLock` tracks phases per condoc but toggles a single file. If condoc A reaches `awaiting_action`, the lock is removed while condoc B's agent may still be running, and B's next transition puts it back. With two active FCs this flip-flop becomes the normal case. At parent scope it does no damage only because LR never looks at that file.
+3. **Git-backed UI features fail.** These all run `git -C s.root …` against `parent`:
+   - The diff list and file diffs (`handleGetDiff` / `handleGetFileDiff`, `main.go:972-1048`) fail with "not a git repository". If `parent` is some other repo, they show the wrong repo's history.
+   - **resubmit** (`main.go:928`) runs `git add -A` / `commit` at `parent`. Those errors are silently ignored, and it still appends `!HANDOFF!`. The recovery commit, which is there so FC's `git pull --rebase` succeeds, never happens, so a dirty tree in `repoX` can still break the handoff.
+4. **Some layouts hide condocs.** The walk skips any directory starting with `.`, ending in `Impls`, or named `node_modules`. Worktrees or clones under something like `parent/.worktrees/` won't appear at all.
+## The underlying issue
+condoccer treats `s.root` as both the scan scope and the git repo root. To support a parent scope, it would need to find each condoc's own repo root (the same way FC's `condocFindGitRoot` does). It would then write and commit `.condoc` there and run diff and resubmit against that repo. Ideally the lock would also be tracked per condoc, or at least per repo, rather than one global toggle.
+LR's `procman` currently launches condoccer as a one-per-box singleton with a single `--root`. So the parent-scope setup is exactly what you'd end up with if you wanted one condoccer to cover two clones on the same box.
+If two FCs run condocs in the **same** repo, everything above (except item 3) behaves as it does today: the lock lands in the right place, but item 2's shared-lock flip-flop applies. Both FCs would also be fighting over a single working tree and HEAD (each on its own `condoc/<name>-<ts>/main` branch), which is a separate, bigger problem.
+agent completed successfully
 
 
-## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We want to make the fix such that we now allow one active condoc per-repo, rather than one overall.
+We will add a new 'Set Working Dir' to condoccer to allow us to change the root from which it operates.
+We will make all condoc locking based in the root of the selected condoc's repo.
+
+We will implement this now and respond with any gaps we've run into that need to be subsequently addressed.

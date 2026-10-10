@@ -108,11 +108,14 @@ I took the path you suggested: the working dir is a single `CondoccerRoot` value
 The changes are in `main.go`, `procman.go` and `reststate.go`, with new tests in `reststate_test.go` and `procman_test.go`, plus notes in `docs/DevMode.md` and the LR README.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's do one improvement to the 'files' tab now.
 
+We want to be able to create a file 'from copy buffer' (ideally active only if the copy buffer has content, if that is easy to trigger off of).
 
-## Human-Prompt
+When we use this control it gives us a naming dialog where the filename (but not extension) is highlighted and ready to change, but populated with a default.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We want to support at least text and images in the copy buffer to start, and we also want to respond with whether there are other sensible types to include. It's not important that we support files because we can just drag them to the upload control.
+
+While we are at it we should add a distinct icon for zip files in the files dialog.

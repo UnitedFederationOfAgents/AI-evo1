@@ -587,6 +587,12 @@ body {
   font-size: 12px;
 }
 
+.resource-file-note {
+  color: #888;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
 .resource-image-overlay {
   position: fixed;
   inset: 0;

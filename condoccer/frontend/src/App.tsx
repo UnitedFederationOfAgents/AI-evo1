@@ -615,6 +615,9 @@ function PhaseBadge({ phase }: { phase: Phase }) {
 interface ResourceLink {
   name: string
   filename: string
+  // The indented "(...)" line condoccer writes under a zip's link, e.g.
+  // "unzipped to 117e9380_run/" (see resources.go's extractZipResource).
+  note?: string
 }
 
 interface StepSection {
@@ -717,10 +720,10 @@ function parseStepSections(content: string): StepSection[] {
       label = h.resourceName ? `Resource ${h.resourceNum} | ${h.resourceName}` : `Resource ${h.resourceNum}`
       kind = 'resource'
       resourceLinks = []
-      const linkLineRe = /^- \[(.+?)\]\((.+?)\)\s*$/gm
+      const linkLineRe = /^- \[(.+?)\]\((.+?)\)[ \t]*(?:\n[ \t]+\((.+)\)[ \t]*)?$/gm
       let lm: RegExpExecArray | null
       while ((lm = linkLineRe.exec(cleaned)) !== null) {
-        resourceLinks.push({ name: lm[1], filename: lm[2] })
+        resourceLinks.push({ name: lm[1], filename: lm[2], note: lm[3] })
       }
       sectionContent = cleaned.replace(linkLineRe, '').trim()
     } else {
@@ -853,9 +856,12 @@ function ResourceSectionBody({ sec, condocPath }: { sec: StepSection; condocPath
           return <ResourceTextPreview key={link.filename} url={url} />
         }
         return (
-          <a key={link.filename} className="resource-file-link" href={resourceUrl(condocPath, link.filename, { download: true })}>
-            {link.name}
-          </a>
+          <div key={link.filename}>
+            <a className="resource-file-link" href={resourceUrl(condocPath, link.filename, { download: true })}>
+              {link.name}
+            </a>
+            {link.note && <div className="resource-file-note">({link.note})</div>}
+          </div>
         )
       })}
       {viewing && (

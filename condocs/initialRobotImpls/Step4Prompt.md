@@ -226,3 +226,20 @@ The changes are in `controlrecord.go` (new `overrideRecordBlocks`), `control.go`
 Let's adjust condoccer so that when it has a zip resource it will also show (unzipped to <dir>) as a line of text under the zip filename.
 
 If the zip was too large to unzip then it would instead state that.
+
+
+prompt: [`4cc187a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4cc187af55b2c74c8dff477cde5aacc70f5f157b) → reply: [`02b0017`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/02b00179a4b070850dd9ad386e0fd80eebd9d8b4)
+
+## Reply E
+
+When condoccer adds a zip as a resource, it now writes a line under the zip's link in the `## Resource N` block, e.g. `(unzipped to 117e9380_run/)`. If the zip holds more than 1GiB once unzipped, it isn't unzipped and the line reads `(too large to unzip: over 1GiB uncompressed)` instead. Before, a too-large zip made the whole add fail; now the zip is still kept and linked. Nothing is built or tested yet because `go test` needed approval here, so please run `make build` and `make test` in `condoccer` on the host. The changes are in `condoccer/resources.go` (with new tests in `resources_test.go`), and `frontend/src/App.tsx` and `index.css` show the line in grey under the zip's link.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

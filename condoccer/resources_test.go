@@ -645,8 +645,12 @@ func TestExtractZipResource(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "abcd1234_run.ZIP"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractZipResource(dir, "abcd1234_run.ZIP"); err != nil {
+	note, err := extractZipResource(dir, "abcd1234_run.ZIP")
+	if err != nil {
 		t.Fatalf("extractZipResource: %v", err)
+	}
+	if note != "unzipped to abcd1234_run/" {
+		t.Errorf("note = %q, want %q", note, "unzipped to abcd1234_run/")
 	}
 	for rel, want := range map[string]string{
 		"report.txt":               "all good",
@@ -671,8 +675,8 @@ func TestExtractZipResourceIgnoresNonZip(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractZipResource(dir, "note.txt"); err != nil {
-		t.Fatalf("extractZipResource: %v", err)
+	if note, err := extractZipResource(dir, "note.txt"); err != nil || note != "" {
+		t.Fatalf("extractZipResource = %q, %v; want no note and no error", note, err)
 	}
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
@@ -688,7 +692,7 @@ func TestExtractZipResourceRejectsTraversal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bad.zip"), data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractZipResource(dir, "bad.zip"); err == nil {
+	if _, err := extractZipResource(dir, "bad.zip"); err == nil {
 		t.Fatal("expected an error for a path-traversal entry")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "evil.txt")); !os.IsNotExist(err) {
@@ -706,8 +710,58 @@ func TestExtractZipResourceInvalidZip(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "broken.zip"), []byte("not a zip"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractZipResource(dir, "broken.zip"); err == nil {
+	if _, err := extractZipResource(dir, "broken.zip"); err == nil {
 		t.Fatal("expected an error for an invalid zip")
+	}
+}
+
+// TestExtractZipResourceTooLarge verifies a zip whose contents exceed
+// maxZipExtractSize isn't unpacked and isn't an error either: the note says
+// it was too large, no folder is left behind, and the zip is kept (Revision E
+// of condocs/initialRobotImpls/Step4Prompt.md).
+func TestExtractZipResourceTooLarge(t *testing.T) {
+	old := maxZipExtractSize
+	maxZipExtractSize = 4
+	defer func() { maxZipExtractSize = old }()
+
+	dir := t.TempDir()
+	data := buildZip(t, map[string]string{"big.txt": "more than four bytes"})
+	if err := os.WriteFile(filepath.Join(dir, "big.zip"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	note, err := extractZipResource(dir, "big.zip")
+	if err != nil {
+		t.Fatalf("extractZipResource: %v", err)
+	}
+	if note != "too large to unzip: over 4 bytes uncompressed" {
+		t.Errorf("note = %q", note)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "big")); !os.IsNotExist(err) {
+		t.Error("no extraction folder should be left for a too-large zip")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "big.zip")); err != nil {
+		t.Errorf("the zip itself should be kept: %v", err)
+	}
+}
+
+// TestInsertResourceBlockWritesNote verifies a link's note lands as an
+// indented "(note)" line right under it.
+func TestInsertResourceBlockWritesNote(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Step1Prompt.md")
+	if err := os.WriteFile(path, []byte("# Prompt\n\nDo it.\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	links := []resourceLink{
+		{Name: "run.zip", Filename: "abcd1234_run.zip", Note: "unzipped to abcd1234_run/"},
+		{Name: "x.txt", Filename: "id_x.txt"},
+	}
+	if err := insertResourceBlock(path, "", "", links); err != nil {
+		t.Fatalf("insertResourceBlock: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	want := "- [run.zip](abcd1234_run.zip)\n  (unzipped to abcd1234_run/)\n- [x.txt](id_x.txt)\n"
+	if !strings.Contains(string(got), want) {
+		t.Errorf("block missing %q:\n%s", want, got)
 	}
 }
 
@@ -764,8 +818,12 @@ func TestFetchHighlightedFilesFromExtractsZip(t *testing.T) {
 	defer srv.Close()
 
 	destDir := t.TempDir()
-	if _, err := fetchHighlightedFilesFrom(srv.URL, destDir, nil); err != nil {
+	links, err := fetchHighlightedFilesFrom(srv.URL, destDir, nil)
+	if err != nil {
 		t.Fatalf("fetchHighlightedFilesFrom: %v", err)
+	}
+	if len(links) != 1 || links[0].Note != "unzipped to aaa_seq/" {
+		t.Errorf("links = %+v, want one with note %q", links, "unzipped to aaa_seq/")
 	}
 	got, err := os.ReadFile(filepath.Join(destDir, "aaa_seq", "step-1.jpg"))
 	if err != nil || string(got) != "jpeg bytes" {

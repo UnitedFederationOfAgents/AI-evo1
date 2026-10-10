@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +36,7 @@ import (
 type resourceLink struct {
 	Name     string // original filename, for the link text
 	Filename string // on-disk filename inside the Impls folder (the link target); the host-cache's own <8-hex>_<name> id, kept as-is to stay collision-free
+	Note     string // for a zip, what extractZipResource did with it ("unzipped to <dir>/" or why it wasn't); written as a line under the link
 }
 
 // resourceTargetFile returns the step/substep file that receives a
@@ -268,10 +270,11 @@ func fetchHighlightedFilesFrom(base, destDir string, skip map[string]bool) ([]re
 		if err := downloadFile(base, f.ID, destDir); err != nil {
 			return nil, fmt.Errorf("copying %s: %w", f.Name, err)
 		}
-		if err := extractZipResource(destDir, f.ID); err != nil {
+		note, err := extractZipResource(destDir, f.ID)
+		if err != nil {
 			return nil, fmt.Errorf("extracting %s: %w", f.Name, err)
 		}
-		links = append(links, resourceLink{Name: f.Name, Filename: f.ID})
+		links = append(links, resourceLink{Name: f.Name, Filename: f.ID, Note: note})
 	}
 	return links, nil
 }
@@ -376,10 +379,12 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("saving %s: %v", fh.Filename, err), http.StatusInternalServerError)
 			return
 		}
-		if err := extractZipResource(destDir, link.Filename); err != nil {
+		note, err := extractZipResource(destDir, link.Filename)
+		if err != nil {
 			http.Error(w, fmt.Sprintf("extracting %s: %v", fh.Filename, err), http.StatusUnprocessableEntity)
 			return
 		}
+		link.Note = note
 		links = append(links, link)
 	}
 
@@ -425,69 +430,110 @@ func saveUploadedResource(fh *multipart.FileHeader, destDir string) (resourceLin
 // a folder of the same name, minus the extension, beside it in the Impls
 // folder -- e.g. "117e9380_run.zip" -> "117e9380_run/" -- so an agent
 // working the step can read the contents without needing unzip approval.
+// Revision E of condocs/initialRobotImpls/Step4Prompt.md adds a note under
+// the zip's link in its "## Resource N" block saying where it was unzipped
+// to, or that it was too large to unzip.
 
 // maxZipExtractSize caps the total uncompressed bytes extracted from one
-// zip resource, so a zip bomb can't fill the disk.
-const maxZipExtractSize = 1 << 30 // 1GiB
+// zip resource, so a zip bomb can't fill the disk. A var so tests can lower
+// it.
+var maxZipExtractSize int64 = 1 << 30 // 1GiB
+
+// errZipTooLarge is extractZipEntry's error when a zip's contents run past
+// maxZipExtractSize.
+var errZipTooLarge = errors.New("zip contents too large")
 
 // extractZipResource unpacks filename (already saved in dir) into
-// dir/<filename minus ".zip">/ when it's a zip; any other file is left alone.
-// Entries that would land outside that folder (absolute paths, "..") and
-// symlinks are rejected. On failure the partially-extracted folder is
-// removed, leaving just the zip itself.
-func extractZipResource(dir, filename string) (err error) {
+// dir/<filename minus ".zip">/ when it's a zip; any other file is left alone
+// with an empty note. For a zip, note is the line shown under its link:
+// "unzipped to <dir>/", or "too large to unzip (...)" when its contents
+// exceed maxZipExtractSize -- not an error, since the zip itself is still
+// kept and linked. Entries that would land outside that folder (absolute
+// paths, "..") and symlinks are rejected. On failure, or when too large, the
+// partially-extracted folder is removed, leaving just the zip itself.
+func extractZipResource(dir, filename string) (note string, err error) {
 	ext := filepath.Ext(filename)
 	if !strings.EqualFold(ext, ".zip") || len(filename) == len(ext) {
-		return nil
+		return "", nil
 	}
-	dest := filepath.Join(dir, strings.TrimSuffix(filename, ext))
+	destName := strings.TrimSuffix(filename, ext)
+	dest := filepath.Join(dir, destName)
+	tooLarge := fmt.Sprintf("too large to unzip: over %s uncompressed", formatBytes(maxZipExtractSize))
 
 	zr, err := zip.OpenReader(filepath.Join(dir, filename))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer zr.Close()
 
+	// Check the sizes the zip claims before writing anything; the streaming
+	// limit in extractZipEntry still catches a zip whose headers lie.
+	var claimed uint64
+	for _, zf := range zr.File {
+		claimed += zf.UncompressedSize64
+	}
+	if claimed > uint64(maxZipExtractSize) {
+		return tooLarge, nil
+	}
+
 	if err := os.MkdirAll(dest, 0755); err != nil {
-		return err
+		return "", err
 	}
 	defer func() {
-		if err != nil {
+		if err != nil || note == tooLarge {
 			os.RemoveAll(dest)
 		}
 	}()
 
-	var remaining int64 = maxZipExtractSize
+	remaining := maxZipExtractSize
 	for _, zf := range zr.File {
 		name := filepath.FromSlash(strings.ReplaceAll(zf.Name, "\\", "/"))
 		target := filepath.Join(dest, name)
 		if filepath.IsAbs(name) || (target != dest && !strings.HasPrefix(target, dest+string(filepath.Separator))) {
-			return fmt.Errorf("zip entry %q escapes the extraction folder", zf.Name)
+			return "", fmt.Errorf("zip entry %q escapes the extraction folder", zf.Name)
 		}
 		mode := zf.Mode()
 		switch {
 		case mode.IsDir():
 			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
+				return "", err
 			}
 			continue
 		case !mode.IsRegular():
-			return fmt.Errorf("zip entry %q is not a regular file", zf.Name)
+			return "", fmt.Errorf("zip entry %q is not a regular file", zf.Name)
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return err
+			return "", err
 		}
 		n, err := extractZipEntry(zf, target, remaining)
+		if errors.Is(err, errZipTooLarge) {
+			return tooLarge, nil
+		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		remaining -= n
 	}
-	return nil
+	return "unzipped to " + destName + "/", nil
 }
 
-// extractZipEntry writes one zip entry's bytes to target, failing if it
-// would exceed limit bytes. Returns the number of bytes written.
+// formatBytes renders n in the largest binary unit it fills, e.g. 1<<30 ->
+// "1GiB", for the "too large to unzip" note.
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%dGiB", n>>30)
+	case n >= 1<<20:
+		return fmt.Sprintf("%dMiB", n>>20)
+	case n >= 1<<10:
+		return fmt.Sprintf("%dKiB", n>>10)
+	}
+	return fmt.Sprintf("%d bytes", n)
+}
+
+// extractZipEntry writes one zip entry's bytes to target, failing with
+// errZipTooLarge if it would exceed limit bytes. Returns the number of bytes
+// written.
 func extractZipEntry(zf *zip.File, target string, limit int64) (int64, error) {
 	src, err := zf.Open()
 	if err != nil {
@@ -504,7 +550,7 @@ func extractZipEntry(zf *zip.File, target string, limit int64) (int64, error) {
 		return n, err
 	}
 	if n > limit {
-		return n, fmt.Errorf("zip contents exceed %d bytes", int64(maxZipExtractSize))
+		return n, errZipTooLarge
 	}
 	return n, nil
 }
@@ -548,7 +594,8 @@ func nextResourceNum(content string) int {
 // insertResourceBlock inserts a new "## Resource N" block -- optionally
 // "## Resource N -- <name>" when a display name is given (Revision B; also
 // where the original "## Resource (N)" parens were dropped) -- the optional
-// description followed by a link per file in links -- immediately above the
+// description followed by a link per file in links, each with its Note (if
+// any) as an indented "(note)" line beneath it -- immediately above the
 // file's pending "## <REPLACE-Revision|Retry> X" placeholder (see
 // replaceIterationPlaceholder), with blank-line spacing matching the rest of
 // a step/substep file's sections.
@@ -576,6 +623,9 @@ func insertResourceBlock(path, name, description string, links []resourceLink) e
 	}
 	for _, l := range links {
 		fmt.Fprintf(&b, "- [%s](%s)\n", l.Name, l.Filename)
+		if l.Note != "" {
+			fmt.Fprintf(&b, "  (%s)\n", l.Note)
+		}
 	}
 	b.WriteString("\n")
 

@@ -18,6 +18,8 @@ func TestClassifyKind(t *testing.T) {
 	cases := map[string]string{
 		"notes.txt":     "text",
 		"README.md":     "text",
+		"cells.tsv":     "text",
+		"events.jsonl":  "text",
 		"diagram.PNG":   "image",
 		"photo.jpeg":    "image",
 		"archive.zip":   "archive",

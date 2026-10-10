@@ -165,6 +165,7 @@ var textExtensions = map[string]bool{
 	".yaml": true, ".yml": true, ".go": true, ".py": true, ".js": true,
 	".ts": true, ".tsx": true, ".jsx": true, ".html": true, ".css": true,
 	".sh": true, ".xml": true, ".ini": true, ".toml": true, ".conf": true,
+	".tsv": true, ".jsonl": true,
 }
 
 var imageExtensions = map[string]bool{

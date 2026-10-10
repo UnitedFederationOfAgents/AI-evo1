@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useContext, createContext } f
 import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
 import { ControlV1 } from './ControlV1'
 import type { ControlV1Props } from './ControlV1'
+import { detectTextFormat } from './textformat'
 
 const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -1266,12 +1267,14 @@ function NewTextFileDialog({
 // ClipboardContent is what the files tab's "new file from clipboard" button
 // (Step4SubstepDPrompt.md Revision D) found in the copy buffer: an image or
 // plain text, already as the Blob the upload will carry, plus the extension
-// its default name gets.
+// its default name gets. For text that extension comes from
+// detectTextFormat (Revision E), e.g. "json" or "csv" rather than "txt".
 interface ClipboardContent {
   kind: 'image' | 'text'
   blob: Blob
   ext: string
   text?: string // kind 'text' only -- shown as the dialog's preview
+  format?: string // kind 'text' only -- the detected format's label, e.g. "JSON"
 }
 
 // CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
@@ -1295,7 +1298,8 @@ const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
 const CLIPBOARD_POLL_MS = 3000
 
 function textClipboard(text: string): ClipboardContent {
-  return { kind: 'text', blob: new Blob([text], { type: 'text/plain' }), ext: 'txt', text }
+  const f = detectTextFormat(text)
+  return { kind: 'text', blob: new Blob([text], { type: f.mime }), ext: f.ext, text, format: f.label }
 }
 
 // clipboardSupported says whether the page may read the copy buffer itself
@@ -1480,7 +1484,10 @@ function ClipboardFileDialog({
     <div className="new-file-overlay" onClick={onClose}>
       <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
         <div className="file-detail-header">
-          <span className="file-detail-title">new {content.kind === 'image' ? 'image' : 'text'} file from clipboard</span>
+          <span className="file-detail-title">
+            new {content.kind === 'image' ? 'image' : 'text'} file from clipboard
+            {content.format && <span className="clip-file-format"> · detected {content.format}</span>}
+          </span>
           <button className="file-detail-close" onClick={onClose}>×</button>
         </div>
         <input

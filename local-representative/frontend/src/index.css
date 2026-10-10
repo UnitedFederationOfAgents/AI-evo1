@@ -2271,6 +2271,12 @@ body {
   font-size: 11px;
 }
 
+/* The detected text format beside the dialog title (Revision E). */
+.clip-file-format {
+  color: #888;
+  font-weight: normal;
+}
+
 /* ---- The Conversationalist mic-capture (Step2Prompt.md Revision J) ----
    Mirrors condoccer/index.css's own copy of these same rules -- see
    App.tsx's field-with-mic/.mic-btn/TCCaptureOverlay for the markup they

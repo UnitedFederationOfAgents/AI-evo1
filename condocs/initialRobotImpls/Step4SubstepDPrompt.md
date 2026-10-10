@@ -143,3 +143,20 @@ The changes are in `files.go`, `files_test.go`, and the frontend's `App.tsx`, `t
 ## Revision E
 
 Let's add smart detection of text formats now - at least including (json, yaml, csv, xml, and a few other widely known ones. Nothing too crazy.)
+
+
+prompt: [`e95e356`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e95e3565ff486076c639d2fd8f2b5739b7e4f49a) → reply: [`d7e5451`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d7e5451d28cb121e9c99b0ceb639819a39d74d4c)
+
+## Reply E
+
+Text copied to the clipboard now gets a matching default extension instead of always `.txt`. It recognises JSON, JSON Lines, XML, SVG, HTML, YAML, TOML, CSV, TSV and Markdown, plus shell, Python and JavaScript when the first line names the interpreter (`#!`). Anything it doesn't recognise stays `.txt`. The naming dialog shows what it detected (e.g. "· detected JSON"), and you can still type over the extension. Nothing has been built, type-checked or run, because `esbuild`/`node` and `tsc` needed approval here, so please run `make build` and `make test` in `local-representative` on the host. The detection lives in a new `frontend/src/textformat.ts`, wired in through `App.tsx` and `index.css`, and `files.go` and `files_test.go` now give `.tsv` and `.jsonl` the text icon.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

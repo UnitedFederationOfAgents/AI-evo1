@@ -190,12 +190,14 @@ Agent-coordinator's files tab now has the clipboard controls LR already had, and
 
 The clipboard code is still copied rather than shared between the three apps, so a future change has to be made three times.
 
+## Resource 1 -- StangeCondocs
 
-## <REPLACE-Revision|Retry> H
+We see condoc entries that don't make sense.
 
-<REPLACE-PROMPT>
+- [StangeCondocs.png](3e933baf_StangeCondocs.png)
 
+## Revision H
 
-## Human-Prompt
+Let's fix the condoccer so that non-condoc files like those 'Simple.snX' do not display.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's respond with why they were displaying.

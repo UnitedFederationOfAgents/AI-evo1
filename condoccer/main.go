@@ -1290,16 +1290,36 @@ func (s *Server) removeCondocLock(repoRoot string) {
 // scoped to just this one file, keeps the tree clean without touching
 // whatever else may be mid-edit at the same time.
 func (s *Server) commitCondocLock(repoRoot, message string) {
-	if err := exec.Command("git", "-C", repoRoot, "add", "--", ".condoc").Run(); err != nil {
-		log.Printf("condoc lock: git add failed: %v", err)
+	if out, err := runGitRetryingIndexLock(repoRoot, "add", "--", ".condoc"); err != nil {
+		log.Printf("condoc lock: git add failed: %v\n%s", err, out)
 		return
 	}
-	if exec.Command("git", "-C", repoRoot, "diff", "--cached", "--quiet", "--", ".condoc").Run() == nil {
+	if _, err := runGitRetryingIndexLock(repoRoot, "diff", "--cached", "--quiet", "--", ".condoc"); err == nil {
 		return // nothing staged -- not a git repo, or no-op write of identical content
 	}
-	if err := exec.Command("git", "-C", repoRoot, "commit", "-m", message, "--", ".condoc").Run(); err != nil {
-		log.Printf("condoc lock: git commit failed: %v", err)
+	if out, err := runGitRetryingIndexLock(repoRoot, "commit", "-m", message, "--", ".condoc"); err != nil {
+		log.Printf("condoc lock: git commit failed: %v\n%s", err, out)
 	}
+}
+
+const gitIndexLockAttempts = 10
+const gitIndexLockBackoff = 300 * time.Millisecond
+
+// runGitRetryingIndexLock runs one git command in repoRoot, retrying while
+// another process holds .git/index.lock -- federation-command commits a
+// condoc's prompt/reply content from its own ~1s poll, so its commits can
+// land in the very same second as this lock commit.
+func runGitRetryingIndexLock(repoRoot string, args ...string) ([]byte, error) {
+	var out []byte
+	var err error
+	for attempt := 0; attempt < gitIndexLockAttempts; attempt++ {
+		out, err = exec.Command("git", append([]string{"-C", repoRoot}, args...)...).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "index.lock") {
+			return out, err
+		}
+		time.Sleep(gitIndexLockBackoff)
+	}
+	return out, err
 }
 
 // updateCondocLock reacts to one condoc's phase (possibly) having changed

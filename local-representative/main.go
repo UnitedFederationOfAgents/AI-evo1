@@ -257,8 +257,8 @@ type Server struct {
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
 	condoccerPort string                  // HTTP port a managed condoccer serves on / is proxied from
-	condoccerRoot string                  // repo root a managed condoccer scans (empty: condoccer's default)
-	sessionsPort  string                  // HTTP port a managed session-manager serves on / is proxied from
+	condoccerRoot string                  // working dir a managed condoccer scans (empty: condoccer's default); follows condoccer's own reports, guarded by condoccerMu
+	sessionsPort  string                // HTTP port a managed session-manager serves on / is proxied from
 	convoPort     string                  // HTTP port a managed the-conversationalist serves on / is proxied from
 	robotPort     string                  // HTTP port a managed ianar serves on / is proxied from
 	selfStart     time.Time               // when this LR process started
@@ -523,6 +523,33 @@ func (s *Server) getCondoccerState() *CondoccerStateMsg {
 	s.condoccerMu.RLock()
 	defer s.condoccerMu.RUnlock()
 	return s.condoccerState
+}
+
+// getCondoccerRoot returns the working dir a (re)launched condoccer should be
+// handed as --root: the --condoccer-root flag/config value until condoccer
+// reports otherwise, then whatever it last reported (see setCondoccerRoot).
+// That way a "Set Working Dir" change in condoccer survives condoccer being
+// relaunched by this LR, and, via lrState.CondoccerRoot, this LR itself
+// being restarted -- Step4SubstepDPrompt.md Revision C.
+func (s *Server) getCondoccerRoot() string {
+	s.condoccerMu.RLock()
+	defer s.condoccerMu.RUnlock()
+	return s.condoccerRoot
+}
+
+// setCondoccerRoot records the working dir condoccer reported in its
+// condoccer-state push. An empty report is ignored rather than clearing it.
+func (s *Server) setCondoccerRoot(root string) {
+	if root == "" {
+		return
+	}
+	s.condoccerMu.Lock()
+	changed := s.condoccerRoot != root
+	s.condoccerRoot = root
+	s.condoccerMu.Unlock()
+	if changed {
+		log.Printf("condoccer working dir is now %s (passed as --root on its next launch)", root)
+	}
 }
 
 func (s *Server) getSessionsState() *SessionsStateMsg {
@@ -1665,8 +1692,8 @@ func main() {
 	// auto-rebuild and auto-update halves.
 	prevState, havePrevState := loadPreviousState()
 	if havePrevState {
-		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v from before the restart",
-			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps)
+		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v condoccer-root=%q from before the restart",
+			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps, prevState.CondoccerRoot)
 		prevState.applyToConfig(&cfg)
 	}
 
@@ -1885,6 +1912,7 @@ func main() {
 					s.condoccerMu.Lock()
 					s.condoccerState = &payload
 					s.condoccerMu.Unlock()
+					s.setCondoccerRoot(payload.Root)
 					s.broadcast("condoccer-state", payload)
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("condoccer-state", payload)

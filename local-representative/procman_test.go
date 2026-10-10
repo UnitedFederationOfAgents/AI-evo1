@@ -283,6 +283,12 @@ func TestCondoccerManagedSpec(t *testing.T) {
 	if a := strings.Join(spec.buildArgs(s, "condoccer"), " "); !strings.Contains(a, "--root /repo") {
 		t.Errorf("condoccer buildArgs should pass --root when set: %q", a)
 	}
+	// Once condoccer reports a different working dir ("Set Working Dir"),
+	// its next launch gets that instead -- Step4SubstepDPrompt.md Revision C.
+	s.setCondoccerRoot("/other")
+	if a := strings.Join(spec.buildArgs(s, "condoccer"), " "); !strings.Contains(a, "--root /other") {
+		t.Errorf("condoccer buildArgs should pass condoccer's reported root: %q", a)
+	}
 }
 
 // TestTerminateDetachedDoesNotSignal verifies terminate on a detached instance

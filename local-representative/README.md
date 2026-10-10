@@ -79,7 +79,7 @@ it back once LR is listening again).
 | `--fc-bin` | `fc-bin` | — | explicit path to the `federation-command` binary (default: search next to LR, the dev bin dir, then `$PATH`) |
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
-| `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
+| `--condoccer-root` | `condoccer-root` | — | initial working dir a managed `condoccer` scans (default: condoccer's own `-root`). Once condoccer reports a different one (its **Set Working Dir**), that's used on every later launch, including across an LR restart |
 | `--sessions-port` | `sessions-port` | `8085` | HTTP port a managed `session-manager` serves on; its UI is reverse-proxied at `/sessions/` |
 | `--convo-port` | `convo-port` | `8086` | HTTP port a managed `the-conversationalist` serves on; its UI is reverse-proxied at `/convo/` |
 | `--robot-port` | `robot-port` | `8087` | HTTP port a managed `ianar` serves on; its UI is reverse-proxied at `/robot/` |

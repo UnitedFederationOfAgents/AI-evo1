@@ -94,3 +94,25 @@ Let's make a further update now so that working directories survive a restart - 
 Since we have at most one condoccer per LR we should be able to hold a single variable in the LR<-->ufa-loader interaction.
 
 We'll make the fix and respond with whether we took that path or a simpler one.
+
+
+prompt: [`646ee8a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/646ee8a23ba70a35215fbda2fc425dccf404159c) → reply: [`e39e5a9`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/e39e5a98fb7311327bae131096a3bc082322385c)
+
+## Reply C
+
+I took the path you suggested: the working dir is a single `CondoccerRoot` value in the LR state that ufa-loader carries across a restart. Nothing has been built or tested, because `go test` needed approval here, so please run `make test` in `local-representative` on the host.
+
+- **Condoccer restart:** LR now remembers the working dir condoccer reports, including a **Set Working Dir** change, and passes it as `--root` every time it launches condoccer.
+- **LR restart:** that value goes into the state LR hands to its replacement through ufa-loader and overrides `--condoccer-root`. A cold start, where ufa-loader itself is relaunched, still begins from `--condoccer-root`.
+
+The changes are in `main.go`, `procman.go` and `reststate.go`, with new tests in `reststate_test.go` and `procman_test.go`, plus notes in `docs/DevMode.md` and the LR README.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

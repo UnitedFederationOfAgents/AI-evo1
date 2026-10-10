@@ -128,8 +128,11 @@ var managedApps = map[string]launchSpec{
 				"--port", s.condoccerPort,
 				"--name", "condoccer",
 			}
-			if s.condoccerRoot != "" {
-				args = append(args, "--root", s.condoccerRoot)
+			// --root follows condoccer's last reported working dir (see
+			// getCondoccerRoot), so a "Set Working Dir" change survives a
+			// relaunch.
+			if root := s.getCondoccerRoot(); root != "" {
+				args = append(args, "--root", root)
 			}
 			if s.devMode {
 				// Cascade this LR's dev mode to every instance it launches — see

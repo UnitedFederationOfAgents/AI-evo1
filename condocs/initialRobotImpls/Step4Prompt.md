@@ -200,11 +200,8 @@ FC's startup block now begins with a `● started: 2026-10-08 13:45:12 UTC`-styl
 [Step 4 Substep D](Step4SubstepDPrompt.md)
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's now make it so that the runner for any control sequence allows an 'override recording' control.
 
-
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+This allows the selection of any involved node and collects a recording of the full sequence (or until failure with error). It discard the standard recording setting present in the composition.

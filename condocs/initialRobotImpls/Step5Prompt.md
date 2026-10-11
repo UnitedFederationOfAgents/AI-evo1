@@ -50,11 +50,8 @@ prompt: [`9441c61`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9
 I've connected The Conversationalist's transcription check to the mic icons in AC, LR and condoccer, so a mic now only shows as available when transcription can actually work. TC now reports whether transcription works in the status it sends to LR (and re-sends when that changes). AC counts a host as available only if transcription works there, both for its header icon and each host's mic buttons. LR additionally requires its own TC to have working transcription, since its mics and condoccer's always record through that local TC. None of it has been built or tested: `go test`, `gofmt` and `tsc` all needed approval this session couldn't get. I updated the AC and LR tests for this, and a TC instance still on an older build will show its mics as unavailable until it's rebuilt.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's start with a TTS implementation - let's go with browser synthesis and a simple button beside the notepad.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+(The button looks like a speech balloon with a sound wave in it, similar style to the mic and camera)

@@ -483,21 +483,98 @@ interface NotepadPanelProps {
 }
 
 function NotepadPanel({ connected, text, onChange }: NotepadPanelProps) {
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // speakText reads the textarea's current selection if there is one, else
+  // the whole notepad -- read at click time rather than from `text` so a
+  // selection made just before clicking is what gets spoken.
+  const speakText = useCallback(() => {
+    const el = inputRef.current
+    if (el && el.selectionStart !== el.selectionEnd) {
+      return el.value.slice(el.selectionStart, el.selectionEnd)
+    }
+    return el?.value ?? text
+  }, [text])
+
   return (
     <div className="notepad-panel">
       <div className="notepad-header">
         <span className="notepad-title">Notepad</span>
         <span className="notepad-hint">{connected ? 'shared with all clients' : 'disconnected — read-only'}</span>
       </div>
-      <textarea
-        className="notepad-input"
-        value={text}
-        readOnly={!connected}
-        placeholder="Quick notes — visible to everyone connected."
-        spellCheck={false}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <div className="notepad-body">
+        <textarea
+          ref={inputRef}
+          className="notepad-input"
+          value={text}
+          readOnly={!connected}
+          placeholder="Quick notes — visible to everyone connected."
+          spellCheck={false}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <SpeakButton getText={speakText} disabled={!text.trim()} />
+      </div>
     </div>
+  )
+}
+
+// ---- Speech output (Step5Prompt.md Revision C) ----
+//
+// The first step of docs/ConversationalistSpeechOutput.md's recommendation:
+// the browser's own speechSynthesis, spoken locally in the tab that clicked
+// -- nothing goes through the server or to other clients, unlike the notepad
+// text itself.
+
+// SPEAK_ICON follows the grey-palette wireframe convention of
+// local-representative's/agent-coordinator's MIC_ICON and CAMERA_ICON
+// (Step1SubstepCPrompt.md): a speech balloon with a sound wave in it.
+const SPEAK_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-9l-4 3.5V17H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
+    <path d="M7 9.5v2M9.5 8v5M12 6.5v8M14.5 8.5v4M17 9.5v2" />
+  </svg>
+)
+
+const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
+
+// SpeakButton toggles speaking getText()'s result: click to speak, click
+// again to stop. Renders nothing in a browser without speechSynthesis.
+function SpeakButton({ getText, disabled }: { getText: () => string; disabled: boolean }) {
+  const [speaking, setSpeaking] = useState(false)
+
+  // Don't keep talking after the panel goes away.
+  useEffect(() => () => { if (speechSupported) window.speechSynthesis.cancel() }, [])
+
+  const toggle = useCallback(() => {
+    const synth = window.speechSynthesis
+    if (speaking) {
+      synth.cancel()
+      setSpeaking(false)
+      return
+    }
+    const text = getText().trim()
+    if (!text) return
+    // Clear anything already queued so this utterance starts immediately.
+    synth.cancel()
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => setSpeaking(false)
+    synth.speak(utterance)
+    setSpeaking(true)
+  }, [speaking, getText])
+
+  if (!speechSupported) return null
+  return (
+    <button
+      type="button"
+      className={`speak-btn${speaking ? ' speak-btn-active' : ''}`}
+      disabled={disabled && !speaking}
+      title={speaking ? 'stop speaking' : 'speak the notepad (or its selected text) aloud'}
+      aria-pressed={speaking}
+      onClick={toggle}
+    >
+      {SPEAK_ICON}
+    </button>
   )
 }
 

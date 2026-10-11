@@ -55,3 +55,20 @@ I've connected The Conversationalist's transcription check to the mic icons in A
 Let's start with a TTS implementation - let's go with browser synthesis and a simple button beside the notepad.
 
 (The button looks like a speech balloon with a sound wave in it, similar style to the mic and camera)
+
+
+prompt: [`9883958`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/98839581bb90e7b85cd6f379173d2e2a5cdc60a3) → reply: [`204f4b0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/204f4b08040cdcbbc637fed83f75e5f9b793f065)
+
+## Reply C
+
+I added a speak button beside the notepad that uses the browser's built-in speech: click it to hear the notepad (or just the selected text), and click again to stop. It hasn't been built or tested, because running `tsc` needed approval this session couldn't get. It's `SpeakButton` in `the-conversationalist/frontend/src/App.tsx`: the icon is a speech balloon with sound-wave bars inside, drawn in the same outline style and size as the mic and camera icons, and it turns blue while speaking. It's disabled when the notepad is empty and hidden in browsers that can't do speech. The speech plays only in the tab that clicked; nothing goes to the server or other clients. The styling is in `index.css`, and I added a status note to `docs/ConversationalistSpeechOutput.md` saying this first step is now built.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

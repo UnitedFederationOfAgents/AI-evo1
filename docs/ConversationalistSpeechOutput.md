@@ -3,10 +3,16 @@
 Today The Conversationalist only *listens*: it streams microphone audio from a
 browser tab to AWS Transcribe and shows the text (see
 `the-conversationalist/transcribe.go`). This doc looks at ways it could also
-*speak*, either to a human or to an agent that takes voice input. It only
-compares options. Nothing here is implemented yet.
+*speak*, either to a human or to an agent that takes voice input. It mostly
+compares options; only the first step has been built so far.
 
 (Origin: `condocs/initialRobotImpls/Step5Prompt.md`, Revision A.)
+
+**Status (Revision C):** the browser-`speechSynthesis` starting point is in.
+A speak button beside the notepad (`SpeakButton` in
+`the-conversationalist/frontend/src/App.tsx`) reads the notepad, or its
+selected text, aloud in the tab where it was clicked. Nothing goes through the
+server and other clients don't hear it.
 
 ## The two halves of the problem
 

@@ -83,13 +83,17 @@ Let's begin this implementation now.
 ```
 
 
-### Step 5 - <REPLACE-TITLE>
+### Step 5 - More Distributed Touch-ups
+
+[Step 5 Prompt](initialRobotImpls/Step5Prompt.md)
 
 ```prompt
-<REPLACE-PROMPT>
+Let's add a 'notepad' area under the transcription area in the conversationalist.
+
+This is a quick-notes shared view. The text becomes immediately visible to all clients.
 ```
 
 
 ## Human-Prompt
 
-Add the Title and Prompt then submit the '!HANDOFF!' directive to execute the fifth step, or submit the '!COMPLETED!' directive to complete this condoc.
+The flow of the condoc is now within the fifth step.

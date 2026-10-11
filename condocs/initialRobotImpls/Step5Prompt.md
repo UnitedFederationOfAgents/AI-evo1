@@ -36,11 +36,8 @@ prompt: [`922f8f8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9
 I added the transcription-engine check to the Conversationalist and wrote the speech-output options doc, but none of it has been built or tested: `go test`, `gofmt` and `tsc` all needed approval this session couldn't get. The new `transcribe_status.go` checks at startup, every 5 minutes, after any failed Start, and when someone clicks "Recheck"; if AWS Transcribe can't be reached, the panel says "Transcription unavailable" with the reason and disables Start, and the condoccer capture iframe no longer starts recording on its own. The check confirms the AWS region and credentials (and that AWS accepts them) but deliberately doesn't open a test session, since every Transcribe session is billed — so a missing Transcribe permission still only shows up when Start fails. The doc is `docs/ConversationalistSpeechOutput.md`: it compares ways to produce speech and ways to deliver it to a human or a voice-input agent, and suggests starting with the browser's built-in speech, then moving to AWS Polly.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's wire the transcription engine check in TC to the availability icons throughout.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+(I shouldn't see my mic icons as available if they are not. We want to include AC and LR)

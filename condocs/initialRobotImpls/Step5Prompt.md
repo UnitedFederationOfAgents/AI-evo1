@@ -64,11 +64,8 @@ prompt: [`9883958`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9
 I added a speak button beside the notepad that uses the browser's built-in speech: click it to hear the notepad (or just the selected text), and click again to stop. It hasn't been built or tested, because running `tsc` needed approval this session couldn't get. It's `SpeakButton` in `the-conversationalist/frontend/src/App.tsx`: the icon is a speech balloon with sound-wave bars inside, drawn in the same outline style and size as the mic and camera icons, and it turns blue while speaking. It's disabled when the notepad is empty and hidden in browsers that can't do speech. The speech plays only in the tab that clicked; nothing goes to the server or other clients. The styling is in `index.css`, and I added a status note to `docs/ConversationalistSpeechOutput.md` saying this first step is now built.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's use the same API to output the speech 'application running' moments after TC first starts, regardless of which page the user has navigated to in the TC, LR, or AC UI.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This will only happen when the application starts (or restarts) when the UI is visible - it does not need to cache or wait for the user to go to the tab later.

@@ -316,11 +316,6 @@ Two things to know:
 The backend changes are in `local-representative/controllib.go` and `control.go`, with a new test `TestReimportStartsAfresh` in `controllib_test.go`. The frontend changes are in `ControlV1.tsx` and `controlTypes.ts`, copied to AC, and I added a short note to the LR README.
 
 
-## <REPLACE-Revision|Retry> I
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1791714939 (Sun Oct 11 10:35:39 AM UTC 2026).

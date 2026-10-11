@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -151,6 +152,9 @@ func TestStartTranscriptionNoRegion(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	s := newServer()
+	// The failure kicks off a background availability re-check; keep it off
+	// the real AWS SDK (see transcribe_status_test.go for that check).
+	s.transcribeProbe = func(context.Context) TranscribeStatusMsg { return TranscribeStatusMsg{} }
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 	s.startTranscription(c)
 

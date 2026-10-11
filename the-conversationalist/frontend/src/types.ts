@@ -52,6 +52,20 @@ export interface NotepadMsg {
   rev: number
 }
 
+// TranscribeStatusMsg is the "transcribe-status" WebSocket payload: whether
+// this instance can currently reach its transcription engine (so far only
+// AWS Transcribe -- see transcribe_status.go). Sent on connect and whenever a
+// check finishes; reason explains an "unavailable" state.
+export type TranscribeState = 'checking' | 'available' | 'unavailable'
+
+export interface TranscribeStatusMsg {
+  state: TranscribeState
+  engine: string
+  region?: string
+  reason?: string
+  checked_at?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -59,4 +73,5 @@ export type ServerMsg =
   | { type: 'transcript'; payload: TranscriptMsg }
   | { type: 'save-result'; payload: SaveResultMsg }
   | { type: 'notepad'; payload: NotepadMsg }
+  | { type: 'transcribe-status'; payload: TranscribeStatusMsg }
   | { type: 'error'; payload: string }

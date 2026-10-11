@@ -27,3 +27,20 @@ Let's add a check in the conversationalist to see if it currently has access to 
 If it does not then it should be indicated that this capability is unavailable.
 
 We will also write an 'md' in docs describing possible implementation options to have The Conversationalist *output* speech (speaking to a human user or an agent with a voice input channel). We will only discuss the possibilities here, not yet implement.
+
+
+prompt: [`922f8f8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/922f8f853f9d35e6a68dea9623150053f03ad706) → reply: [`f00f820`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/f00f820037d2ac92b2f52509f221a18194f0f067)
+
+## Reply A
+
+I added the transcription-engine check to the Conversationalist and wrote the speech-output options doc, but none of it has been built or tested: `go test`, `gofmt` and `tsc` all needed approval this session couldn't get. The new `transcribe_status.go` checks at startup, every 5 minutes, after any failed Start, and when someone clicks "Recheck"; if AWS Transcribe can't be reached, the panel says "Transcription unavailable" with the reason and disables Start, and the condoccer capture iframe no longer starts recording on its own. The check confirms the AWS region and credentials (and that AWS accepts them) but deliberately doesn't open a test session, since every Transcribe session is billed — so a missing Transcribe permission still only shows up when Start fails. The doc is `docs/ConversationalistSpeechOutput.md`: it compares ways to produce speech and ways to deliver it to a human or a voice-input agent, and suggests starting with the browser's built-in speech, then moving to AWS Polly.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

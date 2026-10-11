@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -83,6 +84,14 @@ type Server struct {
 	// rather than anything app-managed.
 	awsRegion string
 
+	// Transcription-engine availability (see transcribe_status.go).
+	// transcribeProbe is nil in production (checkTranscribeAccess is used);
+	// tests swap in a stub so they don't depend on real AWS access.
+	transcribeStatusMu sync.Mutex
+	transcribeStatus   TranscribeStatusMsg
+	transcribeChecking bool
+	transcribeProbe    func(ctx context.Context) TranscribeStatusMsg
+
 	// Shared notepad text and its revision counter (see notepad.go).
 	notepadMu   sync.Mutex
 	notepadText string
@@ -135,6 +144,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
 	go s.sendNotepad(c)
+	go s.sendTranscribeStatus(c)
 
 	// Write pump.
 	go func() {
@@ -232,6 +242,11 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 	case "save-transcript":
 		s.saveTranscript(c)
 
+	// Manual "Recheck" of transcription-engine availability: see
+	// transcribe_status.go.
+	case "recheck-transcribe":
+		s.refreshTranscribeStatus()
+
 	// Shared notepad: see notepad.go.
 	case "set-notepad":
 		var p struct {
@@ -325,6 +340,7 @@ func main() {
 	s.devMode = *devMode
 	s.awsRegion = *awsRegion
 	go watchRestartSignal()
+	go s.watchTranscribeStatus()
 
 	if *autoConnect {
 		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",

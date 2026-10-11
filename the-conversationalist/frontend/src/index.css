@@ -188,6 +188,30 @@ body {
 .transcribe-save-success { background: #17301a; color: #4ec94e; }
 .transcribe-save-error   { background: #331a1a; color: #e07070; }
 
+/* Transcription-engine availability (Step5Prompt.md Revision A). */
+.transcribe-availability {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #888;
+}
+
+.transcribe-availability-unavailable {
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 3px;
+  background: #331a1a;
+  color: #e07070;
+}
+
+.transcribe-availability-reason {
+  margin-top: 2px;
+  color: #c09090;
+  word-break: break-word;
+}
+
 /* ---- Notepad panel (initialRobotImpls/Step5Prompt.md) --
    shared quick notes beneath the transcription panel; the transcription
    panel keeps the larger share of the column. */

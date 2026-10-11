@@ -6,6 +6,7 @@ import type {
   ReprStatusMsg,
   SaveResultMsg,
   SelfInfoMsg,
+  TranscribeStatusMsg,
   TranscriptMsg,
 } from './types'
 
@@ -34,6 +35,10 @@ function useConversationalistWS() {
   const [transcript, setTranscript] = useState('')
   const [partialTranscript, setPartialTranscript] = useState('')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: 'idle' })
+  const [transcribeStatus, setTranscribeStatus] = useState<TranscribeStatusMsg>({
+    state: 'checking',
+    engine: 'aws-transcribe',
+  })
   const [notepad, setNotepadText] = useState('')
   // notepadRevRef is the newest server revision this tab has applied, so a
   // stale "notepad" message (e.g. the connect-time snapshot racing a newer
@@ -145,6 +150,8 @@ function useConversationalistWS() {
               notepadRevRef.current = p.rev
               setNotepadText(p.text)
             }
+          } else if (msg.type === 'transcribe-status') {
+            setTranscribeStatus(msg.payload as TranscribeStatusMsg)
           } else if (msg.type === 'error') {
             setSaveStatus({ kind: 'error', message: String(msg.payload) })
           }
@@ -210,6 +217,10 @@ function useConversationalistWS() {
     send('save-transcript', {})
   }, [send])
 
+  const recheckTranscribe = useCallback(() => {
+    send('recheck-transcribe', {})
+  }, [send])
+
   // setNotepad applies a local edit immediately and pushes it to the server,
   // which relays it to every other connected client.
   const setNotepad = useCallback(
@@ -240,6 +251,8 @@ function useConversationalistWS() {
     startRecording,
     stopRecording,
     saveTranscript,
+    transcribeStatus,
+    recheckTranscribe,
     notepad,
     setNotepad,
   }
@@ -356,9 +369,48 @@ interface TranscriptionPanelProps {
   transcript: string
   partialTranscript: string
   saveStatus: SaveStatus
+  transcribeStatus: TranscribeStatusMsg
   onStart: () => void
   onStop: () => void
   onSave: () => void
+  onRecheck: () => void
+}
+
+const TRANSCRIBE_ENGINE_LABELS: Record<string, string> = {
+  'aws-transcribe': 'AWS Transcribe',
+}
+
+// TranscribeAvailability shows whether the server can currently reach its
+// transcription engine (see transcribe_status.go): a quiet one-liner while
+// available or checking, and a prominent "unavailable" notice with the
+// server's reason and a Recheck button otherwise.
+function TranscribeAvailability({ status, connected, onRecheck }: {
+  status: TranscribeStatusMsg
+  connected: boolean
+  onRecheck: () => void
+}) {
+  const engine = TRANSCRIBE_ENGINE_LABELS[status.engine] ?? status.engine
+  if (status.state === 'unavailable') {
+    return (
+      <div className="transcribe-availability transcribe-availability-unavailable">
+        <div>
+          <strong>Transcription unavailable</strong> — {engine} can't be reached
+          {status.reason && <div className="transcribe-availability-reason">{status.reason}</div>}
+        </div>
+        <button className="btn-secondary" disabled={!connected} onClick={onRecheck}>
+          Recheck
+        </button>
+      </div>
+    )
+  }
+  return (
+    <div className={`transcribe-availability transcribe-availability-${status.state}`}>
+      <span className={`conn-dot ${status.state === 'available' ? 'connected' : 'connecting'}`} />
+      {status.state === 'available'
+        ? `${engine} available${status.region ? ` (${status.region})` : ''}`
+        : `checking ${engine} access…`}
+    </div>
+  )
 }
 
 function TranscriptionPanel({
@@ -367,16 +419,25 @@ function TranscriptionPanel({
   transcript,
   partialTranscript,
   saveStatus,
+  transcribeStatus,
   onStart,
   onStop,
   onSave,
+  onRecheck,
 }: TranscriptionPanelProps) {
   const hasTranscript = Boolean(transcript.trim() || partialTranscript.trim())
+  const unavailable = transcribeStatus.state === 'unavailable'
 
   return (
     <div className="transcribe-panel">
+      <TranscribeAvailability status={transcribeStatus} connected={connected} onRecheck={onRecheck} />
       <div className="transcribe-controls">
-        <button className="btn-secondary" disabled={!connected || recording} onClick={onStart}>
+        <button
+          className="btn-secondary"
+          disabled={!connected || recording || unavailable}
+          title={unavailable ? 'transcription is unavailable -- see the notice above' : undefined}
+          onClick={onStart}
+        >
           Start Transcription
         </button>
         <button className="btn-secondary" disabled={!recording} onClick={onStop}>
@@ -393,6 +454,8 @@ function TranscriptionPanel({
             {transcript}
             {partialTranscript && <span className="transcribe-partial"> {partialTranscript}</span>}
           </>
+        ) : unavailable ? (
+          <span className="transcribe-placeholder">Transcription is unavailable on this instance.</span>
         ) : (
           <span className="transcribe-placeholder">Press "Start Transcription" and speak — the transcript appears here.</span>
         )}
@@ -458,16 +521,28 @@ function isCaptureMode(): boolean {
 }
 
 function CaptureApp() {
-  const { connected, recording, transcript, partialTranscript, saveStatus, startRecording, stopRecording } =
-    useConversationalistWS()
+  const {
+    connected,
+    recording,
+    transcript,
+    partialTranscript,
+    saveStatus,
+    transcribeStatus,
+    startRecording,
+    stopRecording,
+    recheckTranscribe,
+  } = useConversationalistWS()
   const startedRef = useRef(false)
+  const unavailable = transcribeStatus.state === 'unavailable'
 
+  // Auto-start once the server has confirmed its transcription engine is
+  // reachable, rather than opening the mic only to have Start fail.
   useEffect(() => {
-    if (connected && !startedRef.current) {
+    if (connected && transcribeStatus.state === 'available' && !startedRef.current) {
       startedRef.current = true
       startRecording()
     }
-  }, [connected, startRecording])
+  }, [connected, transcribeStatus.state, startRecording])
 
   const insertTranscript = useCallback(() => {
     stopRecording()
@@ -492,6 +567,10 @@ function CaptureApp() {
           </>
         ) : saveStatus.kind === 'error' ? (
           <span className="tc-capture-error">{saveStatus.message}</span>
+        ) : unavailable ? (
+          <span className="tc-capture-error">
+            Transcription unavailable{transcribeStatus.reason ? `: ${transcribeStatus.reason}` : ''}
+          </span>
         ) : (
           <span>Connecting…</span>
         )}
@@ -511,7 +590,9 @@ function CaptureApp() {
           Insert Transcript
         </button>
         <button className="btn-secondary" onClick={cancel}>Cancel</button>
-        {saveStatus.kind === 'error' && (
+        {unavailable ? (
+          <button className="btn-secondary" disabled={!connected} onClick={recheckTranscribe}>Recheck</button>
+        ) : saveStatus.kind === 'error' && (
           <button className="btn-secondary" onClick={startRecording}>Retry</button>
         )}
       </div>
@@ -541,6 +622,8 @@ export default function App() {
     startRecording,
     stopRecording,
     saveTranscript,
+    transcribeStatus,
+    recheckTranscribe,
     notepad,
     setNotepad,
   } = useConversationalistWS()
@@ -577,9 +660,11 @@ export default function App() {
           transcript={transcript}
           partialTranscript={partialTranscript}
           saveStatus={saveStatus}
+          transcribeStatus={transcribeStatus}
           onStart={startRecording}
           onStop={stopRecording}
           onSave={saveTranscript}
+          onRecheck={recheckTranscribe}
         />
         <NotepadPanel connected={connected} text={notepad} onChange={setNotepad} />
       </div>

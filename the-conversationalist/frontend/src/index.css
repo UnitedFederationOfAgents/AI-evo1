@@ -188,6 +188,62 @@ body {
 .transcribe-save-success { background: #17301a; color: #4ec94e; }
 .transcribe-save-error   { background: #331a1a; color: #e07070; }
 
+/* ---- Notepad panel (initialRobotImpls/Step5Prompt.md) --
+   shared quick notes beneath the transcription panel; the transcription
+   panel keeps the larger share of the column. */
+
+.notepad-panel {
+  flex: 0 0 35%;
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+  padding: 0 20px 16px;
+  gap: 6px;
+}
+
+.notepad-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.notepad-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #bbb;
+}
+
+.notepad-hint {
+  font-size: 11px;
+  color: #666;
+}
+
+.notepad-input {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #d4d4d4;
+  outline: none;
+}
+
+.notepad-input:focus {
+  border-color: #007acc;
+}
+
+.notepad-input[readonly] {
+  color: #777;
+}
+
 /* ---- Capture mode (Step2Prompt.md) --
    the whole UI shown inside condoccer's small floating iframe (App.tsx's
    CaptureApp) -- no sidebar, no repr footer, just the live transcript and

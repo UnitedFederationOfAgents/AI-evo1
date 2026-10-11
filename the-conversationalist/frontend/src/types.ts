@@ -44,10 +44,19 @@ export interface SaveResultMsg {
   name?: string
 }
 
+// NotepadMsg is the "notepad" WebSocket payload carrying the shared
+// notepad's full current text (see notepad.go) -- sent on connect and
+// whenever another client edits it. rev increments on every accepted edit.
+export interface NotepadMsg {
+  text: string
+  rev: number
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
   | { type: 'transcript'; payload: TranscriptMsg }
   | { type: 'save-result'; payload: SaveResultMsg }
+  | { type: 'notepad'; payload: NotepadMsg }
   | { type: 'error'; payload: string }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ModeMismatchMsg,
+  NotepadMsg,
   ReprStatus,
   ReprStatusMsg,
   SaveResultMsg,
@@ -33,6 +34,14 @@ function useConversationalistWS() {
   const [transcript, setTranscript] = useState('')
   const [partialTranscript, setPartialTranscript] = useState('')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: 'idle' })
+  const [notepad, setNotepadText] = useState('')
+  // notepadRevRef is the newest server revision this tab has applied, so a
+  // stale "notepad" message (e.g. the connect-time snapshot racing a newer
+  // broadcast) can't roll the text back; notepadSeqRef numbers this tab's
+  // own edits so the server can drop any that arrive out of order (see
+  // notepad.go).
+  const notepadRevRef = useRef(0)
+  const notepadSeqRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -77,7 +86,12 @@ function useConversationalistWS() {
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
-      ws.onopen = () => setConnected(true)
+      ws.onopen = () => {
+        // A reconnect may be to a restarted server whose notepad revision
+        // counter started over -- accept whatever it sends next.
+        notepadRevRef.current = 0
+        setConnected(true)
+      }
 
       ws.onclose = () => {
         setConnected(false)
@@ -124,6 +138,12 @@ function useConversationalistWS() {
               setPartialTranscript('')
             } else {
               setSaveStatus({ kind: 'error', message: p.error ?? 'save failed' })
+            }
+          } else if (msg.type === 'notepad') {
+            const p = msg.payload as NotepadMsg
+            if (p.rev >= notepadRevRef.current) {
+              notepadRevRef.current = p.rev
+              setNotepadText(p.text)
             }
           } else if (msg.type === 'error') {
             setSaveStatus({ kind: 'error', message: String(msg.payload) })
@@ -190,6 +210,17 @@ function useConversationalistWS() {
     send('save-transcript', {})
   }, [send])
 
+  // setNotepad applies a local edit immediately and pushes it to the server,
+  // which relays it to every other connected client.
+  const setNotepad = useCallback(
+    (text: string) => {
+      setNotepadText(text)
+      notepadSeqRef.current += 1
+      send('set-notepad', { text, seq: notepadSeqRef.current })
+    },
+    [send],
+  )
+
   return {
     connected,
     reprStatus,
@@ -209,6 +240,8 @@ function useConversationalistWS() {
     startRecording,
     stopRecording,
     saveTranscript,
+    notepad,
+    setNotepad,
   }
 }
 
@@ -373,6 +406,38 @@ function TranscriptionPanel({
   )
 }
 
+// ---- Notepad panel ----
+//
+// A quick-notes area shared by every client connected to this instance
+// (condocs/initialRobotImpls/Step5Prompt.md): each keystroke goes straight to
+// the server and on to every other open tab, last writer wins. Read-only
+// while the WebSocket is down so edits can't silently go nowhere.
+
+interface NotepadPanelProps {
+  connected: boolean
+  text: string
+  onChange: (text: string) => void
+}
+
+function NotepadPanel({ connected, text, onChange }: NotepadPanelProps) {
+  return (
+    <div className="notepad-panel">
+      <div className="notepad-header">
+        <span className="notepad-title">Notepad</span>
+        <span className="notepad-hint">{connected ? 'shared with all clients' : 'disconnected — read-only'}</span>
+      </div>
+      <textarea
+        className="notepad-input"
+        value={text}
+        readOnly={!connected}
+        placeholder="Quick notes — visible to everyone connected."
+        spellCheck={false}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  )
+}
+
 // ---- Capture mode (Step2Prompt.md) ----
 //
 // condoccer embeds this app in an iframe with "?embed=capture" (see
@@ -476,6 +541,8 @@ export default function App() {
     startRecording,
     stopRecording,
     saveTranscript,
+    notepad,
+    setNotepad,
   } = useConversationalistWS()
 
   return (
@@ -514,6 +581,7 @@ export default function App() {
           onStop={stopRecording}
           onSave={saveTranscript}
         />
+        <NotepadPanel connected={connected} text={notepad} onChange={setNotepad} />
       </div>
     </div>
   )

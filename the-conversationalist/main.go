@@ -47,6 +47,10 @@ type wsClient struct {
 	transcribeMu sync.Mutex
 	transcribe   *transcribeSession
 	finalText    strings.Builder
+
+	// notepadSeq is the highest "set-notepad" seq accepted from this tab,
+	// guarded by Server.notepadMu -- see notepad.go.
+	notepadSeq uint64
 }
 
 // Server manages WebSocket clients and this the-conversationalist's
@@ -78,6 +82,11 @@ type Server struct {
 	// Revision D's note that we lean on host-level AWS credentials/config
 	// rather than anything app-managed.
 	awsRegion string
+
+	// Shared notepad text and its revision counter (see notepad.go).
+	notepadMu   sync.Mutex
+	notepadText string
+	notepadRev  uint64
 }
 
 func newServer() *Server {
@@ -125,6 +134,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
+	go s.sendNotepad(c)
 
 	// Write pump.
 	go func() {
@@ -221,6 +231,15 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	case "save-transcript":
 		s.saveTranscript(c)
+
+	// Shared notepad: see notepad.go.
+	case "set-notepad":
+		var p struct {
+			Text string `json:"text"`
+			Seq  uint64 `json:"seq"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setNotepad(c, p.Text, p.Seq)
 	}
 }
 

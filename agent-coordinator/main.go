@@ -200,10 +200,14 @@ type SessionsStateMsg struct {
 // ConvoStateMsg matches the convo-state payload forwarded up from LR
 // (originating at a managed the-conversationalist). HTTPPort is
 // the-conversationalist's own port on the LR box; the coordinator
-// reverse-proxies its UI at /host/<id>/convo/. Grows domain-specific fields
-// in a later step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+// reverse-proxies its UI at /host/<id>/convo/. TranscribeAvailable says
+// whether that instance can currently reach its transcription engine (see
+// the-conversationalist/transcribe_status.go) -- it gates the mic icons, not
+// the convo tab itself.
 type ConvoStateMsg struct {
-	HTTPPort string `json:"http_port"`
+	HTTPPort            string `json:"http_port"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
 }
 
 // RobotStateMsg matches the robot-state payload forwarded up from LR
@@ -270,10 +274,13 @@ type LRSessionsMsg struct {
 
 // LRConvoMsg is the host-scoped "lr-convo-state" message sent to browser
 // clients: whether a managed the-conversationalist's forwarded UI is
-// available on that host -- mirrors LRCondoccerMsg.
+// available on that host -- mirrors LRCondoccerMsg -- and whether that
+// instance can currently transcribe (gating that host's mic icons).
 type LRConvoMsg struct {
-	HostID    string `json:"host_id"`
-	Available bool   `json:"available"`
+	HostID              string `json:"host_id"`
+	Available           bool   `json:"available"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
 }
 
 // LRRobotMsg is the host-scoped "lr-robot-state" message sent to browser
@@ -930,7 +937,12 @@ func convoMsg(hostID string, cv *ConvoStateMsg) LRConvoMsg {
 	if cv == nil || cv.HTTPPort == "" {
 		return LRConvoMsg{HostID: hostID, Available: false}
 	}
-	return LRConvoMsg{HostID: hostID, Available: true}
+	return LRConvoMsg{
+		HostID:              hostID,
+		Available:           true,
+		TranscribeAvailable: cv.TranscribeAvailable,
+		TranscribeReason:    cv.TranscribeReason,
+	}
 }
 
 // robotMsg builds a host-scoped lr-robot-state payload; a nil state means no

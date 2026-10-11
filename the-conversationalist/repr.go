@@ -24,10 +24,16 @@ const (
 // ConvoStateMsg is the "convo-state" data payload the-conversationalist
 // pushes to local-representative (which forwards a copy up to
 // agent-coordinator). It lets the rest of the stack know which port to
-// reverse-proxy the-conversationalist UI from. Grows domain-specific fields
-// in a later step.
+// reverse-proxy the-conversationalist UI from, and whether this instance can
+// currently reach its transcription engine (see transcribe_status.go) --
+// agent-coordinator folds TranscribeAvailable into its aggregate
+// tc-availability, so every mic icon down the chain (AC, LR, condoccer)
+// goes dark when transcription can't actually work (Step5Prompt.md,
+// Revision B).
 type ConvoStateMsg struct {
-	HTTPPort string `json:"http_port"`
+	HTTPPort            string `json:"http_port"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
 }
 
 // ReprStatusMsg is the "repr-status" WebSocket payload pushed to the frontend
@@ -307,8 +313,13 @@ func (s *Server) pushConvoState() {
 	if client == nil {
 		return
 	}
+	s.transcribeStatusMu.Lock()
+	st := s.transcribeStatus
+	s.transcribeStatusMu.Unlock()
 	client.SendData("convo-state", ConvoStateMsg{
-		HTTPPort: s.httpPort,
+		HTTPPort:            s.httpPort,
+		TranscribeAvailable: st.State == "available",
+		TranscribeReason:    st.Reason,
 	})
 }
 

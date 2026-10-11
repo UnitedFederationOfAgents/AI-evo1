@@ -2449,7 +2449,8 @@ function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void
 // TCAvailabilityIndicator sits beside the camera/screenshot icon in the
 // header: illuminated (mic-indicator-active) once agent-coordinator reports
 // at least one the-conversationalist instance available on any connected
-// host. Mirrors agent-coordinator's own copy -- a passive indicator, not a
+// host and this host's own instance can reach its transcription engine (see
+// tcavailability.go's getTCAvailability). Mirrors agent-coordinator's own copy -- a passive indicator, not a
 // control; the actual mic-to-transcribe action lives on condoccer's own text
 // inputs and, as of Step2Prompt.md Revision J, the files tab's new-text-file
 // dialog below -- both driven by the same tcAvailable this indicator reads.
@@ -2457,7 +2458,7 @@ function TCAvailabilityIndicator({ available }: { available: boolean }) {
   return (
     <span
       className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
-      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+      title={available ? 'The Conversationalist is available' : "The Conversationalist transcription is not available on this host"}
     >
       {MIC_ICON}
     </span>

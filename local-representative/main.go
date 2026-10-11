@@ -165,10 +165,13 @@ type SessionsStateMsg struct {
 // ConvoStateMsg is the "convo-state" payload: a managed the-conversationalist
 // pushes it to LR over representable, and LR forwards a copy up to
 // agent-coordinator and out to browser clients so the forwarded 'convo' view
-// has the port to reverse-proxy from. Grows domain-specific fields in a later
-// step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+// has the port to reverse-proxy from, plus whether it can currently reach its
+// transcription engine (see the-conversationalist/transcribe_status.go and
+// tcavailability.go's getTCAvailability).
 type ConvoStateMsg struct {
-	HTTPPort string `json:"http_port"`
+	HTTPPort            string `json:"http_port"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
 }
 
 // RobotStateMsg is the "robot-state" payload: a managed ianar pushes it to
@@ -390,7 +393,8 @@ type Server struct {
 
 	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
 	// available on any host" verdict, relayed down from agent-coordinator's
-	// own aggregate -- see tcavailability.go and
+	// own aggregate (getTCAvailability further gates it on this host's own
+	// TC being able to transcribe) -- see tcavailability.go and
 	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
 	// Step2Prompt.md.
 	tcMu        sync.RWMutex
@@ -1826,6 +1830,7 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("convo-state", empty)
 				}
+				s.pushTCAvailability()
 				s.setModeMismatch("convo", false, "")
 			}
 			return
@@ -1958,6 +1963,7 @@ func main() {
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("convo-state", payload)
 					}
+					s.pushTCAvailability()
 				}
 			}
 			return

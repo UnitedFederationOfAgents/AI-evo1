@@ -27,11 +27,19 @@ func TestAnyConvoAvailable(t *testing.T) {
 	}
 
 	hsB.mu.Lock()
-	hsB.convo = &ConvoStateMsg{HTTPPort: "8090"}
+	hsB.convo = &ConvoStateMsg{HTTPPort: "8090", TranscribeAvailable: false, TranscribeReason: "no AWS credentials found"}
+	hsB.mu.Unlock()
+
+	if s.anyConvoAvailable() {
+		t.Fatal("expected anyConvoAvailable=false while the only reporting TC can't reach its transcription engine")
+	}
+
+	hsB.mu.Lock()
+	hsB.convo = &ConvoStateMsg{HTTPPort: "8090", TranscribeAvailable: true}
 	hsB.mu.Unlock()
 
 	if !s.anyConvoAvailable() {
-		t.Fatal("expected anyConvoAvailable=true once one host (of several) reports a convo-state")
+		t.Fatal("expected anyConvoAvailable=true once one host (of several) reports a transcription-capable convo-state")
 	}
 
 	hsB.mu.Lock()
@@ -61,7 +69,7 @@ func TestBroadcastTCAvailabilityOnlyBroadcastsOnChange(t *testing.T) {
 	hs, _ := s.getOrCreateHost("host-a")
 	hs.mu.Lock()
 	hs.connected = true
-	hs.convo = &ConvoStateMsg{HTTPPort: "8090"}
+	hs.convo = &ConvoStateMsg{HTTPPort: "8090", TranscribeAvailable: true}
 	hs.mu.Unlock()
 
 	s.broadcastTCAvailability() // false -> true: must not panic with a nil reprServer either

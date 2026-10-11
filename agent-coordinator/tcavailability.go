@@ -28,13 +28,15 @@ func tcAvailabilityCommand(available bool) string {
 
 // anyConvoAvailable reports whether at least one connected local-representative
 // is currently forwarding a live the-conversationalist instance -- the "on
-// any host" test from Step2Prompt.md.
+// any host" test from Step2Prompt.md -- that can also reach its
+// transcription engine (condocs/initialRobotImpls/Step5Prompt.md, Revision
+// B): a running TC that can't transcribe mustn't light up any mic icon.
 func (s *Server) anyConvoAvailable() bool {
 	s.hostsMu.RLock()
 	defer s.hostsMu.RUnlock()
 	for _, hs := range s.hostStates {
 		hs.mu.RLock()
-		available := hs.convo != nil
+		available := hs.convo != nil && hs.convo.TranscribeAvailable
 		hs.mu.RUnlock()
 		if available {
 			return true

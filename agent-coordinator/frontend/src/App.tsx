@@ -3603,10 +3603,11 @@ function LRView({
 
   // Drives every MicButton under this host's view (Step2Prompt.md Revision
   // J) via TCCaptureContext, below -- gated on this host's own data.convo
-  // (whether a the-conversationalist instance is actually running there),
-  // not the header's global tcAvailable, since dictation has to reach this
+  // (whether a the-conversationalist instance is actually running there and,
+  // per Step5Prompt.md Revision B, can reach its transcription engine), not
+  // the header's global tcAvailable, since dictation has to reach this
   // specific host's convo instance -- see useTCCapture's doc comment.
-  const tcCapture = useTCCapture(Boolean(data.convo), host.id)
+  const tcCapture = useTCCapture(Boolean(data.convo?.transcribe_available), host.id)
 
   return (
     <TCCaptureContext.Provider value={{ available: tcCapture.available, capture: tcCapture.capture }}>
@@ -4030,7 +4031,7 @@ function TCAvailabilityIndicator({ available }: { available: boolean }) {
   return (
     <span
       className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
-      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist transcription is not available on any connected host'}
     >
       {MIC_ICON}
     </span>

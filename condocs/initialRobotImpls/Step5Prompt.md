@@ -41,3 +41,20 @@ I added the transcription-engine check to the Conversationalist and wrote the sp
 Let's wire the transcription engine check in TC to the availability icons throughout.
 
 (I shouldn't see my mic icons as available if they are not. We want to include AC and LR)
+
+
+prompt: [`9441c61`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9441c619978cc2d92dbe7da6fc27884360eb169b) → reply: [`41945c1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/41945c106d6fd6df5e34d344c6840a5b2edd8390)
+
+## Reply B
+
+I've connected The Conversationalist's transcription check to the mic icons in AC, LR and condoccer, so a mic now only shows as available when transcription can actually work. TC now reports whether transcription works in the status it sends to LR (and re-sends when that changes). AC counts a host as available only if transcription works there, both for its header icon and each host's mic buttons. LR additionally requires its own TC to have working transcription, since its mics and condoccer's always record through that local TC. None of it has been built or tested: `go test`, `gofmt` and `tsc` all needed approval this session couldn't get. I updated the AC and LR tests for this, and a TC instance still on an older build will show its mics as unavailable until it's rebuilt.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

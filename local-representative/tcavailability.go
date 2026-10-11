@@ -37,21 +37,40 @@ func (s *Server) handleTCAvailabilityCommand(cmd string) {
 	s.setTCAvailability(rest == "true")
 }
 
-// getTCAvailability returns the last aggregate verdict relayed down from
-// agent-coordinator (false until the first command arrives).
+// getTCAvailability returns the verdict this LR shows and relays: the last
+// aggregate relayed down from agent-coordinator (false until the first
+// command arrives), further gated on this host's own managed
+// the-conversationalist reporting its transcription engine reachable. The
+// local gate matters because every mic this LR's verdict drives -- its own
+// header and new-text-file dialog, and condoccer's inputs -- captures
+// through this LR's own /convo/ proxy, so another host's working TC doesn't
+// help them (condocs/initialRobotImpls/Step5Prompt.md, Revision B).
 func (s *Server) getTCAvailability() bool {
 	s.tcMu.RLock()
-	defer s.tcMu.RUnlock()
-	return s.tcAvailable
+	aggregate := s.tcAvailable
+	s.tcMu.RUnlock()
+	if !aggregate {
+		return false
+	}
+	cv := s.getConvoState()
+	return cv != nil && cv.HTTPPort != "" && cv.TranscribeAvailable
 }
 
-// setTCAvailability records the aggregate verdict, broadcasts it to this LR's
-// own browser clients, and relays it on down to condoccer.
+// setTCAvailability records the aggregate verdict relayed down from
+// agent-coordinator and pushes the resulting effective verdict out.
 func (s *Server) setTCAvailability(available bool) {
 	s.tcMu.Lock()
 	s.tcAvailable = available
 	s.tcMu.Unlock()
-	s.broadcast("tc-availability", TCAvailabilityMsg{Available: available})
+	s.pushTCAvailability()
+}
+
+// pushTCAvailability broadcasts the current effective verdict to this LR's
+// own browser clients and relays it on down to condoccer -- called whenever
+// either input to getTCAvailability changes (the relayed aggregate, or the
+// local the-conversationalist's convo-state).
+func (s *Server) pushTCAvailability() {
+	s.broadcast("tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 	s.sendTCAvailabilityToCondoccer()
 }
 

@@ -118,6 +118,9 @@ func (s *Server) refreshTranscribeStatus() {
 		} else {
 			log.Printf("transcribe: %s unavailable: %s", st.Engine, st.Reason)
 		}
+		// Re-announce to local-representative so the mic icons up and down
+		// the chain follow the change (Revision B).
+		s.pushConvoState()
 	}
 	s.broadcast("transcribe-status", st)
 }

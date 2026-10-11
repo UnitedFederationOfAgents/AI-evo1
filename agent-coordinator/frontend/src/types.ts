@@ -223,6 +223,12 @@ export interface LRSessionsMsg {
 export interface LRConvoMsg {
   host_id: string
   available: boolean
+  // transcribe_available: whether that host's the-conversationalist can
+  // currently reach its transcription engine -- gates that host's mic icons
+  // (condocs/initialRobotImpls/Step5Prompt.md, Revision B); `available`
+  // alone only means its UI can be embedded.
+  transcribe_available?: boolean
+  transcribe_reason?: string
 }
 
 export interface LRRobotMsg {

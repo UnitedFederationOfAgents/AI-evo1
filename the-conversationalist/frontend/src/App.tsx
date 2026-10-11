@@ -9,6 +9,7 @@ import type {
   TranscribeStatusMsg,
   TranscriptMsg,
 } from './types'
+import { noteTCStart } from './tcannounce'
 
 // ---- WebSocket hook ----
 //
@@ -123,7 +124,12 @@ function useConversationalistWS() {
             // Vite dev server, where HMR already keeps the tab current.
             if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
               window.location.reload()
+              return
             }
+            // Announce a start/restart (Step5Prompt.md Revision D) -- but not
+            // when embedded (LR's/AC's convo tab, condoccer's capture
+            // overlay): the page around the iframe announces it itself.
+            if (window.self === window.top) noteTCStart('local', p.started_at)
           } else if (msg.type === 'mode-mismatch') {
             const p = msg.payload as ModeMismatchMsg
             setModeMismatch(p.mismatched ? p : null)

@@ -89,3 +89,17 @@ func TestTCAvailabilityCommand(t *testing.T) {
 		t.Fatalf("tcAvailabilityCommand(false) = %q", got)
 	}
 }
+
+// TestConvoMsgCarriesStartedAt covers condocs/initialRobotImpls/
+// Step5Prompt.md Revision D: the browser announces a TC start/restart off
+// started_at, so convoMsg must pass it through -- and leave it out once no
+// TC is reporting.
+func TestConvoMsgCarriesStartedAt(t *testing.T) {
+	m := convoMsg("host-a", &ConvoStateMsg{HTTPPort: "8090", StartedAt: 1234})
+	if m.StartedAt != 1234 {
+		t.Fatalf("convoMsg StartedAt = %d, want 1234", m.StartedAt)
+	}
+	if m := convoMsg("host-a", nil); m.StartedAt != 0 || m.Available {
+		t.Fatalf("convoMsg(nil) = %+v, want unavailable with no StartedAt", m)
+	}
+}

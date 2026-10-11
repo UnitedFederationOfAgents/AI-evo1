@@ -29,11 +29,13 @@ const (
 // agent-coordinator folds TranscribeAvailable into its aggregate
 // tc-availability, so every mic icon down the chain (AC, LR, condoccer)
 // goes dark when transcription can't actually work (Step5Prompt.md,
-// Revision B).
+// Revision B). StartedAt (unix ms) identifies this process's start, so LR's
+// and AC's UIs can announce a TC start/restart (Revision D).
 type ConvoStateMsg struct {
 	HTTPPort            string `json:"http_port"`
 	TranscribeAvailable bool   `json:"transcribe_available"`
 	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
 }
 
 // ReprStatusMsg is the "repr-status" WebSocket payload pushed to the frontend
@@ -53,10 +55,12 @@ type ReprStatusMsg struct {
 
 // SelfInfoMsg discloses this instance's own dev-mode status and build
 // version to its frontend (see docs/DevMode.md) -- sent once when a browser
-// client connects.
+// client connects -- plus when this process started (unix ms), which the
+// frontend uses to announce a start/restart (Step5Prompt.md, Revision D).
 type SelfInfoMsg struct {
-	DevMode bool   `json:"dev_mode"`
-	Version string `json:"version"`
+	DevMode   bool   `json:"dev_mode"`
+	Version   string `json:"version"`
+	StartedAt int64  `json:"started_at"`
 }
 
 // ModeMismatchMsg discloses that the connected local-representative's
@@ -320,6 +324,7 @@ func (s *Server) pushConvoState() {
 		HTTPPort:            s.httpPort,
 		TranscribeAvailable: st.State == "available",
 		TranscribeReason:    st.Reason,
+		StartedAt:           s.startedAt.UnixMilli(),
 	})
 }
 

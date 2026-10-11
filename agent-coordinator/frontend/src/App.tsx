@@ -8,6 +8,7 @@ import type {
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
 import { detectTextFormat } from './textformat'
+import { noteTCStart } from './tcannounce'
 import type { ControlV1Props } from './ControlV1'
 
 // Applications the system tab offers a launch button for. `multi` apps are
@@ -438,6 +439,9 @@ function useCoordinatorWS() {
           }
           case 'lr-convo-state': {
             const p = msg.payload as LRConvoMsg
+            // Speak "application running" when any host's TC starts or
+            // restarts -- see tcannounce.ts.
+            noteTCStart(p.host_id, p.started_at)
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), convo: p.available ? p : undefined },

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg } from './types'
+import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
 import type { ControlV1Props } from './ControlV1'
@@ -336,6 +337,11 @@ function useStatusWS() {
             setTCAvailable(payload.available)
             break
           }
+          case 'convo-state':
+            // Speak "application running" when this host's TC starts or
+            // restarts -- see tcannounce.ts.
+            noteTCStart('local', (msg.payload as ConvoStateMsg).started_at)
+            break
         }
       } catch {
         // ignore malformed messages

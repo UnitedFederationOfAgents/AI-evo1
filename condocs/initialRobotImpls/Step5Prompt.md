@@ -69,3 +69,35 @@ I added a speak button beside the notepad that uses the browser's built-in speec
 Let's use the same API to output the speech 'application running' moments after TC first starts, regardless of which page the user has navigated to in the TC, LR, or AC UI.
 
 This will only happen when the application starts (or restarts) when the UI is visible - it does not need to cache or wait for the user to go to the tab later.
+
+
+prompt: [`2da8131`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2da81310eb0c75cbbcbadcb9d814b765c1137767) → reply: [`a0bd19c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a0bd19cd85fefe66bc60c8e3c881bf46720d368e)
+
+## Reply D
+
+I added the startup announcement: about a second after The Conversationalist starts or restarts, any visible TC, LR or AC page says "application running", whichever tab it's on. None of it has been built or tested: `go test`, `gofmt` and `tsc` all needed approval this session couldn't get. I checked the diff by hand only.
+
+- **Start time:** TC now records when its process started and sends it to its own page, and to LR, which passes it up to AC. I updated LR's and AC's Go message structs so they pass it through. Without that, LR would silently drop it.
+- **Speaking:** the speaking logic is in a new `tcannounce.ts`, with an identical copy in each of the three frontends. Each one runs it from its main message handler, so it works on any tab. It speaks once per TC start, and only if that page saw the start happen. That means either the page was already open when TC restarted, or the start is under 60 seconds old. Without the 60-second rule, a page that reloads after a rebuild would never hear it.
+- **When it stays quiet:**
+  - Opening a page while TC has been up longer than 60 seconds says nothing.
+  - A hidden page says nothing, and nothing is queued for later.
+  - TC's page doesn't speak when it's shown inside an LR or AC tab, because the outer page already speaks.
+  - On AC, every host's TC start is announced.
+
+There are three limits you might notice:
+- **Pages you haven't clicked:** browsers only allow speech on a page you've clicked or typed in. A page that just reloaded, such as TC's own page after a rebuild, stays silent until you interact with it. The failure is logged to the browser console.
+- **More than one visible window:** each visible window speaks independently, so you'll hear it more than once.
+- **Clock differences:** the 60-second check compares the TC machine's clock with the browser's, so those clocks need to be roughly in sync.
+
+I added two small Go tests (`TestServerReportsStartedAt` and `TestConvoMsgCarriesStartedAt`) and a Revision D note in `docs/ConversationalistSpeechOutput.md`. To check it, run `make test` and `make build` for the-conversationalist, local-representative and agent-coordinator. Then click once in each page and restart TC.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

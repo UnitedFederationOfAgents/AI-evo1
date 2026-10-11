@@ -167,11 +167,15 @@ type SessionsStateMsg struct {
 // agent-coordinator and out to browser clients so the forwarded 'convo' view
 // has the port to reverse-proxy from, plus whether it can currently reach its
 // transcription engine (see the-conversationalist/transcribe_status.go and
-// tcavailability.go's getTCAvailability).
+// tcavailability.go's getTCAvailability). StartedAt (unix ms) is when that
+// the-conversationalist process started -- passed through so browsers here and
+// on agent-coordinator can announce its start/restart (see
+// the-conversationalist's Server.startedAt).
 type ConvoStateMsg struct {
 	HTTPPort            string `json:"http_port"`
 	TranscribeAvailable bool   `json:"transcribe_available"`
 	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
 }
 
 // RobotStateMsg is the "robot-state" payload: a managed ianar pushes it to

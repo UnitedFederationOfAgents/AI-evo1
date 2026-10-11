@@ -203,11 +203,13 @@ type SessionsStateMsg struct {
 // reverse-proxies its UI at /host/<id>/convo/. TranscribeAvailable says
 // whether that instance can currently reach its transcription engine (see
 // the-conversationalist/transcribe_status.go) -- it gates the mic icons, not
-// the convo tab itself.
+// the convo tab itself. StartedAt (unix ms) is when that the-conversationalist
+// process started, which lets the browser announce its start/restart.
 type ConvoStateMsg struct {
 	HTTPPort            string `json:"http_port"`
 	TranscribeAvailable bool   `json:"transcribe_available"`
 	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
 }
 
 // RobotStateMsg matches the robot-state payload forwarded up from LR
@@ -275,12 +277,14 @@ type LRSessionsMsg struct {
 // LRConvoMsg is the host-scoped "lr-convo-state" message sent to browser
 // clients: whether a managed the-conversationalist's forwarded UI is
 // available on that host -- mirrors LRCondoccerMsg -- and whether that
-// instance can currently transcribe (gating that host's mic icons).
+// instance can currently transcribe (gating that host's mic icons), plus when
+// it started (so the browser can announce a start/restart).
 type LRConvoMsg struct {
 	HostID              string `json:"host_id"`
 	Available           bool   `json:"available"`
 	TranscribeAvailable bool   `json:"transcribe_available"`
 	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
 }
 
 // LRRobotMsg is the host-scoped "lr-robot-state" message sent to browser
@@ -942,6 +946,7 @@ func convoMsg(hostID string, cv *ConvoStateMsg) LRConvoMsg {
 		Available:           true,
 		TranscribeAvailable: cv.TranscribeAvailable,
 		TranscribeReason:    cv.TranscribeReason,
+		StartedAt:           cv.StartedAt,
 	}
 }
 

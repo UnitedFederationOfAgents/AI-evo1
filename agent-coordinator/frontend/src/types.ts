@@ -229,6 +229,10 @@ export interface LRConvoMsg {
   // alone only means its UI can be embedded.
   transcribe_available?: boolean
   transcribe_reason?: string
+  // started_at: when that host's the-conversationalist process started (unix
+  // ms) -- used to announce its start/restart (see tcannounce.ts and
+  // Step5Prompt.md, Revision D).
+  started_at?: number
 }
 
 export interface LRRobotMsg {

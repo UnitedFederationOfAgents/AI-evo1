@@ -14,6 +14,13 @@ A speak button beside the notepad (`SpeakButton` in
 selected text, aloud in the tab where it was clicked. Nothing goes through the
 server and other clients don't hear it.
 
+**Status (Revision D):** the same API now says "application running" shortly
+after The Conversationalist starts or restarts. It plays in any visible TC, LR
+or AC page, whichever tab is open. TC reports its process start time
+(`started_at`) in `self-info` and `convo-state`. Each frontend's
+`tcannounce.ts` speaks once per new start time, and only if that page saw the
+start happen. A hidden page stays quiet and nothing is queued for later.
+
 ## The two halves of the problem
 
 Speech output breaks into two separate choices:

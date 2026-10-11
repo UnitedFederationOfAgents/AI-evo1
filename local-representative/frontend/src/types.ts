@@ -122,6 +122,17 @@ export interface TCAvailabilityMsg {
   available: boolean
 }
 
+// ConvoStateMsg is the "convo-state" payload this LR forwards from its managed
+// the-conversationalist (see main.go). Empty (no http_port) once TC
+// disconnects. Only started_at is read here, to announce a TC start/restart
+// (see tcannounce.ts and condocs/initialRobotImpls/Step5Prompt.md, Revision D).
+export interface ConvoStateMsg {
+  http_port?: string
+  transcribe_available?: boolean
+  transcribe_reason?: string
+  started_at?: number
+}
+
 export interface FileInfo {
   id: string
   name: string

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"representable"
@@ -96,6 +97,13 @@ type Server struct {
 	notepadMu   sync.Mutex
 	notepadText string
 	notepadRev  uint64
+
+	// startedAt is when this process started. Reported (as started_at) in
+	// self-info and convo-state so every UI down the chain -- TC's own, LR's
+	// and AC's -- can tell a fresh start or restart apart from a reconnect to
+	// the same process, and speak "application running" once per start
+	// (condocs/initialRobotImpls/Step5Prompt.md, Revision D).
+	startedAt time.Time
 }
 
 func newServer() *Server {
@@ -105,6 +113,7 @@ func newServer() *Server {
 		},
 		clients:    make(map[*wsClient]bool),
 		reprStatus: "disconnected",
+		startedAt:  time.Now(),
 	}
 }
 
@@ -141,7 +150,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial representable connection status and self-info.
 	go s.sendReprStatus(c)
-	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
+	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version, StartedAt: s.startedAt.UnixMilli()})
 	go s.sendModeMismatch(c)
 	go s.sendNotepad(c)
 	go s.sendTranscribeStatus(c)

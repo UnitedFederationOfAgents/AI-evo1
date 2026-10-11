@@ -12,10 +12,13 @@ export interface ReprStatusMsg {
 }
 
 // SelfInfoMsg discloses this instance's own dev-mode status and build
-// version (see docs/DevMode.md) -- sent once when the WebSocket connects.
+// version (see docs/DevMode.md) -- sent once when the WebSocket connects --
+// and when the server process started (unix ms), used to announce a
+// start/restart (see tcannounce.ts).
 export interface SelfInfoMsg {
   dev_mode: boolean
   version: string
+  started_at?: number
 }
 
 // ModeMismatchMsg discloses that the connected local-representative's

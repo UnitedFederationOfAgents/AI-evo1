@@ -20,11 +20,10 @@ I added the shared notepad under the transcription area in the-conversationalist
 To check it, run `make -C the-conversationalist test` and `make -C the-conversationalist build`, then open two tabs and type in one.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+Let's add a check in the conversationalist to see if it currently has access to its transcription engine (so far only AWS transcribe).
 
+If it does not then it should be indicated that this capability is unavailable.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will also write an 'md' in docs describing possible implementation options to have The Conversationalist *output* speech (speaking to a human user or an agent with a voice input channel). We will only discuss the possibilities here, not yet implement.

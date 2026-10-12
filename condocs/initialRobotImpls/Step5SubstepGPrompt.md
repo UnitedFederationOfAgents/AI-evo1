@@ -86,12 +86,12 @@ I couldn't build, format or test any of this: `go build`, `go test`, `go vet` an
 
 I also fixed a bug in the first version that would have dropped connections. Each message is one line, and representable's reader can't take a line over 64 KiB. But a `worker-state` could carry 64 KB of output per signal, so one long answer would break the dungeon-keeper→LR link, and now the LR→AC link too. dungeon-keeper now keeps each `worker-state` under 48 KiB, trimming older outputs first, then prompts, then the newest output, and both tabs say when the output is only in the signal file. Submitted prompts are now capped at 32 KiB, and the LR README covers the AC relay and these limits.
 
+## Resource 1 -- Worker Failure
 
-## <REPLACE-Revision|Retry> B
+Error
 
-<REPLACE-PROMPT>
+- [WorkerFailure.png](9649b86e_WorkerFailure.png)
 
+## Revision B
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's look at the Worker Failure resource for context and fix the new error.

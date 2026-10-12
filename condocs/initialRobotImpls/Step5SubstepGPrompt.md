@@ -130,11 +130,27 @@ I added a **To Notes** button to the transcription window and the notepad in `th
 The server side is in a new `notes.go`, with tests in `notes_test.go`, plus small changes to `main.go`. The frontend changes are in `App.tsx`, `types.ts` and `index.css`.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Now let's add a mechanism to create temporary principals to keep sub-apps like the conversationalist authenticated to AWS.
 
+We will add the mechanism to ufa-loader.
 
-## Human-Prompt
+If ufa-loader is loaded with no AWS credentials available this is fine - it will silently continue and will not execute the mechanism.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+If ufa-loader is loaded with AWS credentials it will create a user principal with tags for:
+- ufa-host : <host-id>
+- date : <date>
+- app : <loaded sub-app>
+
+Host ID and the date will also be reflected in the principal name.
+
+ufa-loader will also delete temporary principals like this one for previous days if they have not been used within X days (start with 2).
+
+When ufa-loader creates the new identity it will discard the credentials it had at startup and will bring the credentials of the new identity to the environment - so that it passes them on to the loaded sub-app.
+
+The credentials will not be passed on to any persistence such as files/etc.
+
+ufa-loader will succinctly log one line indicating that it has created the new temporary principal when it does so.
+
+For now we will start with high privilege, and we will scale that back subsequently.

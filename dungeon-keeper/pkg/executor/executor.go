@@ -45,29 +45,11 @@ func findClauditable() (string, error) {
 		return "", nil
 	}
 
-	// Check current directory first
-	cwd, _ := os.Getwd()
-	localPath := filepath.Join(cwd, ClauditableBinary)
-	if _, err := os.Stat(localPath); err == nil {
-		return localPath, nil
+	path, err := findBinary(ClauditableBinary)
+	if err != nil {
+		return "", fmt.Errorf("clauditable binary not found in PATH or current directory")
 	}
-
-	// Check directory of executable (for deployed binaries)
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		localPath := filepath.Join(exeDir, ClauditableBinary)
-		if _, err := os.Stat(localPath); err == nil {
-			return localPath, nil
-		}
-	}
-
-	// Check PATH
-	path, err := exec.LookPath(ClauditableBinary)
-	if err == nil {
-		return path, nil
-	}
-
-	return "", fmt.Errorf("clauditable binary not found in PATH or current directory")
+	return path, nil
 }
 
 // Run executes a command wrapped with clauditable.
@@ -179,11 +161,13 @@ func (e *Executor) InvokeAgentWithCapture(agent, model, mode, prompt, workdir st
 }
 
 // findBinary searches for a binary in PATH, current directory, and executable directory.
+// Local candidates must be executable regular files: run from the repo root,
+// "clauditable" and "ambiguous-agent" name source directories, not binaries.
 func findBinary(name string) (string, error) {
 	// Check current directory first
 	cwd, _ := os.Getwd()
 	localPath := filepath.Join(cwd, name)
-	if _, err := os.Stat(localPath); err == nil {
+	if isExecutableFile(localPath) {
 		return localPath, nil
 	}
 
@@ -191,7 +175,7 @@ func findBinary(name string) (string, error) {
 	if exePath, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exePath)
 		localPath := filepath.Join(exeDir, name)
-		if _, err := os.Stat(localPath); err == nil {
+		if isExecutableFile(localPath) {
 			return localPath, nil
 		}
 	}
@@ -203,6 +187,15 @@ func findBinary(name string) (string, error) {
 	}
 
 	return "", fmt.Errorf("binary %s not found", name)
+}
+
+// isExecutableFile reports whether path is a regular file with an execute bit set.
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
 }
 
 // IsClauditableWrapped returns true if commands are being wrapped.

@@ -150,11 +150,60 @@ I removed the once-a-minute check. federation-command now checks the day only wh
 I added a test, `TestRolloverAfterIdleDaysSkipsIntermediateDays`, for the 3-day case. It checks that FC jumps straight to today, records the old default as `follows_from`, and creates no sessions for the days in between. I also updated the rollover note in `docs/DistributedSessionsBrainstorm.md`. To check it, run `make -C federation-command test`.
 
 
-## <REPLACE-Revision|Retry> G
+## Substep G - Bring dungeon-keeper Into Integration
 
-<REPLACE-PROMPT>
+```prompt
+We assess the state of dungeon-keeper in this interaction:
+
+ agent -r "Let's look at ignored-scratch/AI-sandboxing/agent-worker and compare it to our own dungeon-keeper. What is the current state of each?"
+invoking claude in read (files read-only) mode...
+● session: /host-agent-files/agent-records/2026-10-12-provisioner01-rfge-default
+I read both codebases. I couldn't run `go build`, `go test` or `git log` because those commands need approval in this session, so the state below comes from the source and docs. I haven't verified that either one builds or that the tests pass.
+## agent-worker (legacy, in `ignored-scratch/AI-sandboxing`)
+**State: frozen prototype.** It's a single 1,570-line `main.go` daemon with no automated tests, only two sample work units under `tests/manual/`. dungeon-keeper's own docs call it the "legacy `agent-worker`" (`dungeon-keeper/docs/brief-tour.md:3`).
+How it works:
+- Every 10s it checks `/workspaces/slopspaces/input/any/` for folders containing `INSTRUCTION.{json,md}` or `REPORT.{json,md}`. It marks the folder with `PROCESSING.md`, moves the results to `output/content` and `output/records`, and writes a worker record JSON.
+- Each work unit gets a fresh workspace at `/agent/agent-worker/`. `read/default` is a cached copy of the AI-sandboxing repo, `read/workunit` holds the work unit, and `write/primary` is the agent's output area. Output is copied back afterwards and the workspace is wiped.
+- **Real OS isolation:** if it runs as root, the agent runs as a restricted `agent-worker` Unix user (`main.go:1217`). The read space stays root-owned and the write space is chowned to that user. `make setup` creates the user and the sticky-bit directories.
+- It sends `invoke-agent.sh` a prompt that includes a role section loaded from `heuristic-request/roles/<role>/ROLE.md` and a workspace preamble explaining which paths are read-only and which are writable.
+- Extras: daily, weekly and monthly report work units, an `.opencode.json` permission config, and `agentaudit`/`filestory` logging.
+Weak points:
+- Paths are hardcoded, e.g. `/workspaces/workspace/sandbox/AI-sandboxing`.
+- The read-space is built once and never refreshed, even though the comment says it is.
+- The instruction and report code paths are nearly identical copies of each other.
+## dungeon-keeper (ours)
+**State: active successor and much more mature.** It's split into packages (`executor`, `slopspace`, `worksignal`, `readspace`, `writespace`, `types`), has tests in four of them, and has a CI workflow (`dungeon-keeper-test.yml`), a Dockerfile, versioned builds, `--dev-mode`, and restart-on-SIGHUP via ufa-loader.
+How it works:
+- **Work signals:** JSONL files in `/host-agent-files/work/ongoing/`. The first line is a header (agent, model, role, prompt) and later lines are events. Finished signals move to `complete/`. There are two work types: `slopspace` and `in-place`.
+- **Slopspaces:** long-lived and not tied to an agent type. They can be created, deployed (a `rename` into `/agent/<type>/`), returned and deleted, and they keep an iteration count.
+- **Branch isolation:** for writespace repos, `.git` is moved to `writespaces-secure/` and only restored when you run `slopspace write`, which commits and pushes to the new branch.
+- Agents run through `ambiguous-agent`, wrapped by `clauditable` for recording.
+## What dungeon-keeper doesn't carry over from agent-worker
+1. **No OS-level isolation.** The agent runs as the same user as dungeon-keeper. Nothing stops it from reading `/host-agent-files/slopspaces/<id>/writespaces-secure/` (the hidden `.git`) or writing into its own `readspaces/`. The only "read-only" protection is that readspaces are discarded on return.
+2. **Thin prompt.** `FormatPromptForAgent` (`pkg/executor/executor.go:240`) sends just the role name, the working directory and the prompt. `role` is only a label (ROLE.md isn't loaded), and the agent isn't told the read/write rules.
+3. **No report work units, no opencode config, no agentaudit/filestory.** clauditable probably covers the audit and logging part.
+4. **`heuristic-request` is only a deploy path.** Choosing it changes nothing except the directory.
+## Issues spotted in dungeon-keeper
+- **Deploying can delete another slopspace's work.** `Deploy` runs `os.RemoveAll` on `/agent/<type>/{readspaces,writespaces}` without checking `SLOPSPACE_ID` (`pkg/slopspace/slopspace.go:150-152`). If slopspace A is deployed and you run `slopspace deploy B`, A's unreturned writespaces are destroyed. The watch loop checks first; the CLI doesn't.
+- **Readspace repos are lost after the first run.** `Return` throws away the deployed readspaces and recreates them empty. Anything added with `add-readspace` is gone from the second iteration on.
+- **Claiming a signal isn't atomic.** `TakeOwnership` reads, then truncates and rewrites the file. Two watchers on the same agent type could both claim one signal, and a reader could see an empty file mid-write.
+- **A failed run leaves the slopspace deployed.** On agent failure `Return` is skipped, so the next signal silently reuses that slopspace.
+- **Agent calls have no timeout,** and output is only logged after the agent finishes (`CombinedOutput`).
+- **The tour is out of date.** `brief-tour.md:37` tells you to run `make deploy-dependencies-local`, but the Makefile has no such target. Also, `WorkSignalPath` in the slopspace metadata is never set.
+**Bottom line:** dungeon-keeper has replaced agent-worker's workflow model, but not its security model. If sandboxing matters to you, porting the restricted-user setup and the workspace preamble prompt are the two biggest gaps. Of the bugs, I'd fix the `Deploy` overwrite first.
+agent completed successfully
+
+
+
+
+Now let's implement the minimum functionality necessary to have dungeon-keeper become managed by LR and interact. For now we will assume dungeon-keeper is 1-per-host. Dungeon-keeper will not have its own UI and will send signals which are displayed on the 'worker' tab. For now we want a temporary input-field and button that submits work in-place (in /tmp/ for now) from the worker tab, and we want a way to see the output. These will be prompt-only interactions for now where we only generate and collect a response, not resources.
+
+We will also enumerate the next potential fixes in the response to this prompt.
+```
 
 
 ## Human-Prompt
 
 When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+
+!HANDOFF!

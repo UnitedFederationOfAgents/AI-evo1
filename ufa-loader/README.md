@@ -84,8 +84,12 @@ Revision D). Before the first launch of `<binary>`:
    its own environment (`AWS_SESSION_TOKEN`, `AWS_PROFILE`, role and
    container variables, and so on) and sets `AWS_ACCESS_KEY_ID` and
    `AWS_SECRET_ACCESS_KEY` to the new key. Every launch and restart of
-   `<binary>` inherits only those. `AWS_REGION` and the shared-file paths are
-   left alone. The new key exists only in ufa-loader's memory and its
+   `<binary>` inherits only those. `AWS_REGION`, `AWS_DEFAULT_REGION` and the
+   shared-file paths are left alone. If neither region variable is set,
+   the selected profile's `region` from `~/.aws/config` is carried over as
+   `AWS_REGION`, because once `AWS_PROFILE` is cleared the sub-app's SDK
+   can't see that profile any more. The new key exists only in ufa-loader's
+   memory and its
    children's environments; nothing is written to disk.
 
 It logs exactly one line when this happens:

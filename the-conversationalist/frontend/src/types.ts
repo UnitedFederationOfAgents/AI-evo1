@@ -67,6 +67,8 @@ export interface TranscribeStatusMsg {
   region?: string
   reason?: string
   checked_at?: string
+  identity?: string // ARN AWS reports for the credentials in use
+  credential_source?: string // where the server's AWS SDK found them
 }
 
 // NotesSource names which panel's "To Notes" button an "append-notes"

@@ -32,6 +32,12 @@ const (
 	// later flip the indicator without a restart.
 	transcribeCheckInterval = 5 * time.Minute
 	transcribeCheckTimeout  = 15 * time.Second
+
+	// transcribeRetryInterval is the shorter re-check used while the last
+	// result was "unavailable": a brand-new key from ufa-loader's temporary
+	// principal (ufa-loader/awsprincipal) can take a little while to be
+	// accepted, and a failed first check shouldn't hold for 5 minutes.
+	transcribeRetryInterval = 30 * time.Second
 )
 
 // TranscribeStatusMsg is the "transcribe-status" WebSocket payload: the
@@ -44,6 +50,15 @@ type TranscribeStatusMsg struct {
 	Region    string `json:"region,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 	CheckedAt string `json:"checked_at,omitempty"` // RFC 3339; empty until the first check finishes
+
+	// Identity is the ARN AWS says the credentials belong to, and
+	// CredentialSource is where the SDK found them (e.g.
+	// "EnvConfigCredentials", "SharedConfigCredentials"). Together they show
+	// whether a temporary principal from ufa-loader actually reached this
+	// process (Step5SubstepGPrompt.md Revision E). Identity is empty until
+	// AWS has accepted the credentials.
+	Identity         string `json:"identity,omitempty"`
+	CredentialSource string `json:"credential_source,omitempty"`
 }
 
 // checkTranscribeAccess is the default Server.transcribeProbe: it runs the
@@ -72,10 +87,15 @@ func (s *Server) checkTranscribeAccess(ctx context.Context) TranscribeStatusMsg 
 		st.Reason = noCreds
 		return st
 	}
+	st.CredentialSource = creds.Source
 
-	if _, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{}); err != nil {
-		st.Reason = fmt.Sprintf("AWS rejected the configured credentials: %v", err)
+	id, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+	if err != nil {
+		st.Reason = fmt.Sprintf("AWS rejected the configured credentials (key %s from %s): %v", creds.AccessKeyID, creds.Source, err)
 		return st
+	}
+	if id.Arn != nil {
+		st.Identity = *id.Arn
 	}
 
 	st.State = "available"
@@ -112,9 +132,9 @@ func (s *Server) refreshTranscribeStatus() {
 	s.transcribeChecking = false
 	s.transcribeStatusMu.Unlock()
 
-	if prev.State != st.State || prev.Reason != st.Reason {
+	if prev.State != st.State || prev.Reason != st.Reason || prev.Identity != st.Identity {
 		if st.State == "available" {
-			log.Printf("transcribe: %s available (region %s)", st.Engine, st.Region)
+			log.Printf("transcribe: %s available (region %s, as %s via %s)", st.Engine, st.Region, st.Identity, st.CredentialSource)
 		} else {
 			log.Printf("transcribe: %s unavailable: %s", st.Engine, st.Reason)
 		}
@@ -126,11 +146,19 @@ func (s *Server) refreshTranscribeStatus() {
 }
 
 // watchTranscribeStatus runs the availability check at startup and then
-// every transcribeCheckInterval. Run in its own goroutine; never returns.
+// every transcribeCheckInterval, or every transcribeRetryInterval while the
+// last result was "unavailable". Run in its own goroutine; never returns.
 func (s *Server) watchTranscribeStatus() {
 	for {
 		s.refreshTranscribeStatus()
-		time.Sleep(transcribeCheckInterval)
+		s.transcribeStatusMu.Lock()
+		unavailable := s.transcribeStatus.State == "unavailable"
+		s.transcribeStatusMu.Unlock()
+		if unavailable {
+			time.Sleep(transcribeRetryInterval)
+		} else {
+			time.Sleep(transcribeCheckInterval)
+		}
 	}
 }
 

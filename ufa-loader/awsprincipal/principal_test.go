@@ -278,7 +278,7 @@ func TestUserNameFitsIAMLimits(t *testing.T) {
 
 func clearAWSEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range append(credentialEnvVars, "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE") {
+	for _, k := range append(credentialEnvVars, "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_REGION", "AWS_DEFAULT_REGION") {
 		t.Setenv(k, "")
 	}
 	t.Setenv("HOME", t.TempDir())
@@ -349,5 +349,45 @@ func TestApplyToEnvReplacesStartingCredentials(t *testing.T) {
 		if _, set := os.LookupEnv(k); set {
 			t.Errorf("%s still set", k)
 		}
+	}
+}
+
+// TestApplyToEnvCarriesProfileRegion: ApplyToEnv clears AWS_PROFILE, so a
+// region that only lived in that profile has to come across as AWS_REGION,
+// or the sub-application's SDK ends up with no region at all.
+func TestApplyToEnvCarriesProfileRegion(t *testing.T) {
+	clearAWSEnv(t)
+	home := os.Getenv("HOME")
+	os.MkdirAll(filepath.Join(home, ".aws"), 0700)
+	os.WriteFile(filepath.Join(home, ".aws", "config"), []byte("[default]\nregion = us-east-1\n\n[profile dev]\nregion = us-west-2\n"), 0600)
+	t.Setenv("AWS_PROFILE", "dev")
+
+	ApplyToEnv(Credentials{AccessKeyID: "AKIANEW", SecretAccessKey: "new"})
+
+	if got := os.Getenv("AWS_REGION"); got != "us-west-2" {
+		t.Errorf("AWS_REGION = %q, want the dev profile's us-west-2", got)
+	}
+	if _, set := os.LookupEnv("AWS_PROFILE"); set {
+		t.Error("AWS_PROFILE still set")
+	}
+}
+
+// TestApplyToEnvKeepsEnvironmentRegion: a region already in the environment
+// wins over the profile's, and isn't duplicated into AWS_REGION.
+func TestApplyToEnvKeepsEnvironmentRegion(t *testing.T) {
+	clearAWSEnv(t)
+	home := os.Getenv("HOME")
+	os.MkdirAll(filepath.Join(home, ".aws"), 0700)
+	os.WriteFile(filepath.Join(home, ".aws", "config"), []byte("[profile dev]\nregion = us-west-2\n"), 0600)
+	t.Setenv("AWS_PROFILE", "dev")
+	t.Setenv("AWS_DEFAULT_REGION", "eu-central-1")
+
+	ApplyToEnv(Credentials{AccessKeyID: "AKIANEW", SecretAccessKey: "new"})
+
+	if got := os.Getenv("AWS_REGION"); got != "" {
+		t.Errorf("AWS_REGION = %q, want it left empty when AWS_DEFAULT_REGION is set", got)
+	}
+	if got := os.Getenv("AWS_DEFAULT_REGION"); got != "eu-central-1" {
+		t.Errorf("AWS_DEFAULT_REGION = %q, want eu-central-1", got)
 	}
 }

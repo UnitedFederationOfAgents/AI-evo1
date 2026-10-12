@@ -176,3 +176,20 @@ At startup, ufa-loader looks for AWS credentials (environment variables, or stat
 After loading ufa-loader with temporary credentials we see successful creation of the principal, but we do not see the credentials flowing through from LR to the conversationalist. (Or it is missing the privileges for transcribe)
 
 Let's debug this issue.
+
+
+prompt: [`ce1cb7f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ce1cb7fcf57b471239051cb6d78314016fec613e) → reply: [`901984e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/901984e0717532affefee5874904f4112592ea11)
+
+## Reply E
+
+I fixed the most likely cause in the code, but I couldn't confirm it against your live setup or test it: `ps` and `go test` both needed approval this session couldn't get. The code that passes the environment from ufa-loader through LR to the conversationalist looks right, so the new keys should arrive. The bug I found is in ufa-loader's hand-over (`ufa-loader/awsprincipal/creds.go`): it clears `AWS_PROFILE`, which also loses the region if it was only set in that profile, so the conversationalist ends up with keys but no region. ufa-loader now copies that profile's region into `AWS_REGION` when the environment doesn't already set a region; there are two new tests for this and the README is updated. To narrow it down, the conversationalist's availability check now logs which AWS identity and credential source it is using, and shows them on hover. A failed Start logs which identity was refused, and checks retry every 30s instead of 5 minutes while unavailable. Please run `make test` in `ufa-loader` and `the-conversationalist`, then relaunch. If it still fails, the conversationalist's log line will show whether the keys aren't arriving (no `ufa-temp` identity) or the permission is missing (an AccessDenied for the `ufa-temp` identity).
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

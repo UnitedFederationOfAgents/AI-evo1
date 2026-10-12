@@ -70,7 +70,7 @@ func ResolveCredentials() (Credentials, bool) {
 		return env, true
 	}
 
-	profile := firstNonEmpty(os.Getenv("AWS_PROFILE"), os.Getenv("AWS_DEFAULT_PROFILE"), "default")
+	profile := selectedProfile()
 	home, _ := os.UserHomeDir()
 	if c := profileCredentials(sharedFile("AWS_SHARED_CREDENTIALS_FILE", home, "credentials"), profile); c.ok() {
 		return c, true
@@ -90,7 +90,18 @@ func ResolveCredentials() (Credentials, bool) {
 // ApplyToEnv replaces every credential-bearing AWS variable in this
 // process's environment with c, so anything launched afterwards (the
 // sub-application) inherits c and nothing else.
+//
+// Clearing AWS_PROFILE also drops everything else the sub-application's SDK
+// would have read from that profile -- most importantly its region, without
+// which the SDK has no endpoint to call (the-conversationalist reports "no
+// AWS region configured"). So when the environment names no region itself,
+// the selected profile's region is looked up first and carried over as
+// AWS_REGION.
 func ApplyToEnv(c Credentials) {
+	region := ""
+	if os.Getenv("AWS_REGION") == "" && os.Getenv("AWS_DEFAULT_REGION") == "" {
+		region = profileRegion()
+	}
 	for _, k := range credentialEnvVars {
 		os.Unsetenv(k)
 	}
@@ -99,6 +110,30 @@ func ApplyToEnv(c Credentials) {
 	if c.SessionToken != "" {
 		os.Setenv("AWS_SESSION_TOKEN", c.SessionToken)
 	}
+	if region != "" {
+		os.Setenv("AWS_REGION", region)
+	}
+}
+
+// selectedProfile is the shared-config profile an AWS SDK would use:
+// AWS_PROFILE, else AWS_DEFAULT_PROFILE, else "default".
+func selectedProfile() string {
+	return firstNonEmpty(os.Getenv("AWS_PROFILE"), os.Getenv("AWS_DEFAULT_PROFILE"), "default")
+}
+
+// profileRegion returns the region the selected profile sets in the shared
+// config file, or "" if it sets none.
+func profileRegion() string {
+	profile := selectedProfile()
+	home, _ := os.UserHomeDir()
+	cfg := sharedFile("AWS_CONFIG_FILE", home, "config")
+	if r := profileSection(cfg, "profile "+profile)["region"]; r != "" {
+		return r
+	}
+	if profile == "default" {
+		return profileSection(cfg, "default")["region"]
+	}
+	return ""
 }
 
 // sharedFile returns the path named by envVar, else ~/.aws/<name> (or ""
@@ -116,16 +151,27 @@ func sharedFile(envVar, home, name string) string {
 // profileCredentials reads aws_access_key_id / aws_secret_access_key /
 // aws_session_token from section [section] of the INI file at path.
 func profileCredentials(path, section string) Credentials {
+	kv := profileSection(path, section)
+	return Credentials{
+		AccessKeyID:     kv["aws_access_key_id"],
+		SecretAccessKey: kv["aws_secret_access_key"],
+		SessionToken:    kv["aws_session_token"],
+	}
+}
+
+// profileSection returns the key = value pairs (keys lower-cased) in section
+// [section] of the INI file at path; nil if the file can't be read.
+func profileSection(path, section string) map[string]string {
 	if path == "" {
-		return Credentials{}
+		return nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return Credentials{}
+		return nil
 	}
 	defer f.Close()
 
-	var c Credentials
+	kv := map[string]string{}
 	in := false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -144,16 +190,9 @@ func profileCredentials(path, section string) Credentials {
 		if !found {
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(k)) {
-		case "aws_access_key_id":
-			c.AccessKeyID = strings.TrimSpace(v)
-		case "aws_secret_access_key":
-			c.SecretAccessKey = strings.TrimSpace(v)
-		case "aws_session_token":
-			c.SessionToken = strings.TrimSpace(v)
-		}
+		kv[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
 	}
-	return c
+	return kv
 }
 
 func firstNonEmpty(vals ...string) string {

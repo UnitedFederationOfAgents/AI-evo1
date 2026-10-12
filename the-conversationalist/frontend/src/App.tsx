@@ -493,8 +493,11 @@ function TranscribeAvailability({ status, connected, onRecheck }: {
       </div>
     )
   }
+  const who = status.identity
+    ? `as ${status.identity}${status.credential_source ? ` (${status.credential_source})` : ''}`
+    : undefined
   return (
-    <div className={`transcribe-availability transcribe-availability-${status.state}`}>
+    <div className={`transcribe-availability transcribe-availability-${status.state}`} title={who}>
       <span className={`conn-dot ${status.state === 'available' ? 'connected' : 'connecting'}`} />
       {status.state === 'available'
         ? `${engine} available${status.region ? ` (${status.region})` : ''}`

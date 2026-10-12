@@ -109,7 +109,16 @@ func (s *Server) startTranscription(c *wsClient) {
 	})
 	if err != nil {
 		cancel()
-		log.Printf("transcribe: starting AWS Transcribe (region %q): %v", cfg.Region, err)
+		// Name the identity the last availability check saw, so an
+		// AccessDenied here says whose permissions are missing (e.g. a
+		// ufa-loader temporary principal vs the host's own keys).
+		s.transcribeStatusMu.Lock()
+		identity := s.transcribeStatus.Identity
+		s.transcribeStatusMu.Unlock()
+		if identity == "" {
+			identity = "unknown identity"
+		}
+		log.Printf("transcribe: starting AWS Transcribe (region %q, as %s): %v", cfg.Region, identity, err)
 		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: %v", err))
 		go s.refreshTranscribeStatus()
 		return

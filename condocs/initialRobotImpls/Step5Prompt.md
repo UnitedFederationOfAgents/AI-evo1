@@ -93,11 +93,10 @@ There are three limits you might notice:
 I added two small Go tests (`TestServerReportsStartedAt` and `TestConvoMsgCarriesStartedAt`) and a Revision D note in `docs/ConversationalistSpeechOutput.md`. To check it, run `make test` and `make build` for the-conversationalist, local-representative and agent-coordinator. Then click once in each page and restart TC.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+We have an issue to fix with sessions now - when we moved to defaults that include the host ID we introduced a bug where daily defaults no longer cycled with the day.
 
+We want to both fix this bug, and also to introduce a 'follows from' field to session details. This 'follows from' will be applied to the new daily default if it switches while a federation-command instance which has had any activity switches. It may also be applied by calling 'new-session' with a -f argument and specifying the name or ID of the session the new one follows.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will also make it so the default session manager view is viewing the session rather than the session details (so we don't always have to switch the tab when we go to a new session).

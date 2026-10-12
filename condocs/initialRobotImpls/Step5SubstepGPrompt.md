@@ -171,11 +171,8 @@ At startup, ufa-loader looks for AWS credentials (environment variables, or stat
 - **A sub-app that goes quiet loses its user:** cleanup decides by last use, so one that keeps running but makes no AWS calls for 2 days will have its user deleted. IAM's last-used time can also lag by a few hours.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+After loading ufa-loader with temporary credentials we see successful creation of the principal, but we do not see the credentials flowing through from LR to the conversationalist. (Or it is missing the privileges for transcribe)
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's debug this issue.

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ModeMismatchMsg,
   NotepadMsg,
+  NotesResultMsg,
+  NotesSource,
   ReprStatus,
   ReprStatusMsg,
   SaveResultMsg,
@@ -48,6 +50,11 @@ function useConversationalistWS() {
   // notepad.go).
   const notepadRevRef = useRef(0)
   const notepadSeqRef = useRef(0)
+  // notes holds each panel's "To Notes" state (see notes.go);
+  // notesInFlightRef remembers the text each pending request sent, so a
+  // successful "notes-result" can record it as that panel's sent text.
+  const [notes, setNotes] = useState<Record<NotesSource, NotesStatus>>(INITIAL_NOTES)
+  const notesInFlightRef = useRef<Partial<Record<NotesSource, string>>>({})
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -101,6 +108,13 @@ function useConversationalistWS() {
 
       ws.onclose = () => {
         setConnected(false)
+        // A request in flight on the dropped socket will never be answered;
+        // free its button rather than leaving it stuck.
+        notesInFlightRef.current = {}
+        setNotes((n) => ({
+          notepad: { ...n.notepad, pending: false },
+          transcript: { ...n.transcript, pending: false },
+        }))
         setTimeout(connect, 2000)
       }
 
@@ -158,6 +172,17 @@ function useConversationalistWS() {
             }
           } else if (msg.type === 'transcribe-status') {
             setTranscribeStatus(msg.payload as TranscribeStatusMsg)
+          } else if (msg.type === 'notes-result') {
+            const p = msg.payload as NotesResultMsg
+            if (p.source !== 'notepad' && p.source !== 'transcript') return
+            const sentText = notesInFlightRef.current[p.source]
+            delete notesInFlightRef.current[p.source]
+            setNotes((n) => ({
+              ...n,
+              [p.source]: p.success
+                ? { pending: false, sent: sentText, message: `appended to ${p.path ?? 'notes file'}` }
+                : { pending: false, sent: n[p.source].sent, error: p.error ?? 'append failed' },
+            }))
           } else if (msg.type === 'error') {
             setSaveStatus({ kind: 'error', message: String(msg.payload) })
           }
@@ -238,6 +263,18 @@ function useConversationalistWS() {
     [send],
   )
 
+  // sendToNotes asks the server to append text to its notes file. The panel
+  // keeps its text; its button stays disabled until the text differs from
+  // what was last appended (see ToNotesButton).
+  const sendToNotes = useCallback(
+    (source: NotesSource, text: string) => {
+      notesInFlightRef.current[source] = text
+      setNotes((n) => ({ ...n, [source]: { ...n[source], pending: true, error: undefined, message: undefined } }))
+      send('append-notes', { source, text })
+    },
+    [send],
+  )
+
   return {
     connected,
     reprStatus,
@@ -261,6 +298,8 @@ function useConversationalistWS() {
     recheckTranscribe,
     notepad,
     setNotepad,
+    notes,
+    sendToNotes,
   }
 }
 
@@ -277,6 +316,49 @@ function int16ToBase64(samples: Int16Array): string {
 }
 
 type SaveStatus = { kind: 'idle' | 'pending' | 'success' | 'error'; message?: string }
+
+// NotesStatus is one panel's "To Notes" state: sent is the text it last
+// appended successfully, message/error describe the latest attempt.
+type NotesStatus = { pending: boolean; sent?: string; message?: string; error?: string }
+
+const INITIAL_NOTES: Record<NotesSource, NotesStatus> = {
+  notepad: { pending: false },
+  transcript: { pending: false },
+}
+
+// ---- To Notes (Step5SubstepGPrompt.md Revision C) ----
+//
+// ToNotesButton appends text to the server's notes file (~/notes-input.txt
+// by default -- see notes.go) without clearing the panel it sits in. It's
+// only enabled while there's text to send that differs from what this panel
+// last appended, so the same content can't be appended twice in a row.
+
+function ToNotesButton({ connected, text, status, onSend }: {
+  connected: boolean
+  text: string
+  status: NotesStatus
+  onSend: (text: string) => void
+}) {
+  const alreadySent = status.sent !== undefined && text === status.sent
+  const disabled = !connected || status.pending || !text.trim() || alreadySent
+  const title = !text.trim()
+    ? 'nothing to append'
+    : alreadySent
+      ? 'already appended -- edit the text to append again'
+      : 'append this text to the notes file'
+  return (
+    <span className="to-notes">
+      <button className="btn-secondary" disabled={disabled} title={title} onClick={() => onSend(text)}>
+        {status.pending ? 'Appending…' : 'To Notes'}
+      </button>
+      {status.error ? (
+        <span className="to-notes-status to-notes-error">{status.error}</span>
+      ) : alreadySent && status.message ? (
+        <span className="to-notes-status">{status.message}</span>
+      ) : null}
+    </span>
+  )
+}
 
 // ---- representable connect/disconnect widget ----
 
@@ -380,6 +462,8 @@ interface TranscriptionPanelProps {
   onStop: () => void
   onSave: () => void
   onRecheck: () => void
+  notes: NotesStatus
+  onToNotes: (text: string) => void
 }
 
 const TRANSCRIBE_ENGINE_LABELS: Record<string, string> = {
@@ -430,8 +514,12 @@ function TranscriptionPanel({
   onStop,
   onSave,
   onRecheck,
+  notes,
+  onToNotes,
 }: TranscriptionPanelProps) {
   const hasTranscript = Boolean(transcript.trim() || partialTranscript.trim())
+  // What the window shows, partial result included.
+  const shownTranscript = `${transcript} ${partialTranscript}`.trim()
   const unavailable = transcribeStatus.state === 'unavailable'
 
   return (
@@ -452,6 +540,7 @@ function TranscriptionPanel({
         <button className="btn-secondary" disabled={!connected || !hasTranscript} onClick={onSave}>
           Save to File
         </button>
+        <ToNotesButton connected={connected} text={shownTranscript} status={notes} onSend={onToNotes} />
         {recording && <span className="conn-dot connecting transcribe-recording-dot" title="recording" />}
       </div>
       <div className="transcribe-output">
@@ -486,9 +575,11 @@ interface NotepadPanelProps {
   connected: boolean
   text: string
   onChange: (text: string) => void
+  notes: NotesStatus
+  onToNotes: (text: string) => void
 }
 
-function NotepadPanel({ connected, text, onChange }: NotepadPanelProps) {
+function NotepadPanel({ connected, text, onChange, notes, onToNotes }: NotepadPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   // speakText reads the textarea's current selection if there is one, else
@@ -507,6 +598,7 @@ function NotepadPanel({ connected, text, onChange }: NotepadPanelProps) {
       <div className="notepad-header">
         <span className="notepad-title">Notepad</span>
         <span className="notepad-hint">{connected ? 'shared with all clients' : 'disconnected — read-only'}</span>
+        <ToNotesButton connected={connected} text={text} status={notes} onSend={onToNotes} />
       </div>
       <div className="notepad-body">
         <textarea
@@ -709,6 +801,8 @@ export default function App() {
     recheckTranscribe,
     notepad,
     setNotepad,
+    notes,
+    sendToNotes,
   } = useConversationalistWS()
 
   return (
@@ -748,8 +842,16 @@ export default function App() {
           onStop={stopRecording}
           onSave={saveTranscript}
           onRecheck={recheckTranscribe}
+          notes={notes.transcript}
+          onToNotes={(text) => sendToNotes('transcript', text)}
         />
-        <NotepadPanel connected={connected} text={notepad} onChange={setNotepad} />
+        <NotepadPanel
+          connected={connected}
+          text={notepad}
+          onChange={setNotepad}
+          notes={notes.notepad}
+          onToNotes={(text) => sendToNotes('notepad', text)}
+        />
       </div>
     </div>
   )

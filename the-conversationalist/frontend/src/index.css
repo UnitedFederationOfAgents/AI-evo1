@@ -307,6 +307,32 @@ body {
 .speak-btn-active,
 .speak-btn-active:hover:not(:disabled) { color: #4fc1ff; border-color: #007acc; }
 
+/* ---- To Notes (Step5SubstepGPrompt.md Revision C) --
+   App.tsx's ToNotesButton, in the transcription controls row and at the
+   right end of the notepad header, with a one-line result beside it. */
+
+.to-notes {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.notepad-header .to-notes {
+  margin-left: auto;
+  align-self: center;
+}
+
+.to-notes-status {
+  font-size: 11px;
+  color: #4ec94e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.to-notes-error { color: #e07070; }
+
 /* ---- Capture mode (Step2Prompt.md) --
    the whole UI shown inside condoccer's small floating iframe (App.tsx's
    CaptureApp) -- no sidebar, no repr footer, just the live transcript and

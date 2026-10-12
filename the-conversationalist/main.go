@@ -98,6 +98,11 @@ type Server struct {
 	notepadText string
 	notepadRev  uint64
 
+	// notesFile is where the "To Notes" buttons append (see notes.go);
+	// notesMu serializes those appends.
+	notesMu   sync.Mutex
+	notesFile string
+
 	// startedAt is when this process started. Reported (as started_at) in
 	// self-info and convo-state so every UI down the chain -- TC's own, LR's
 	// and AC's -- can tell a fresh start or restart apart from a reconnect to
@@ -113,6 +118,7 @@ func newServer() *Server {
 		},
 		clients:    make(map[*wsClient]bool),
 		reprStatus: "disconnected",
+		notesFile:  defaultNotesFile(),
 		startedAt:  time.Now(),
 	}
 }
@@ -264,6 +270,15 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		}
 		json.Unmarshal(m.Payload, &p)
 		s.setNotepad(c, p.Text, p.Seq)
+
+	// "To Notes" buttons: see notes.go.
+	case "append-notes":
+		var p struct {
+			Source string `json:"source"`
+			Text   string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAppendNotes(c, p.Source, p.Text)
 	}
 }
 
@@ -341,6 +356,7 @@ func main() {
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
 	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role)")
+	notesFile := flag.String("notes-file", "", "file the \"To Notes\" buttons append to (default ~/notes-input.txt)")
 	flag.Parse()
 
 	s := newServer()
@@ -348,6 +364,9 @@ func main() {
 	s.name = *name
 	s.devMode = *devMode
 	s.awsRegion = *awsRegion
+	if *notesFile != "" {
+		s.notesFile = *notesFile
+	}
 	go watchRestartSignal()
 	go s.watchTranscribeStatus()
 

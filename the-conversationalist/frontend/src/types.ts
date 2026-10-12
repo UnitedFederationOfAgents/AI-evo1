@@ -69,6 +69,20 @@ export interface TranscribeStatusMsg {
   checked_at?: string
 }
 
+// NotesSource names which panel's "To Notes" button an "append-notes"
+// request came from (see notes.go).
+export type NotesSource = 'notepad' | 'transcript'
+
+// NotesResultMsg is the "notes-result" WebSocket payload answering an
+// "append-notes" request: whether the text was appended to the notes file
+// at path.
+export interface NotesResultMsg {
+  source: NotesSource
+  success: boolean
+  error?: string
+  path?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -77,4 +91,5 @@ export type ServerMsg =
   | { type: 'save-result'; payload: SaveResultMsg }
   | { type: 'notepad'; payload: NotepadMsg }
   | { type: 'transcribe-status'; payload: TranscribeStatusMsg }
+  | { type: 'notes-result'; payload: NotesResultMsg }
   | { type: 'error'; payload: string }

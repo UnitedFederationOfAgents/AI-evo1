@@ -108,11 +108,10 @@ I fixed the Worker Failure error, but I couldn't build or test the fix: `go test
 **Fix:** in `dungeon-keeper/pkg/executor/executor.go`, the lookup now only accepts a regular file that is marked executable. Directories and non-executable files are skipped, so it falls through to the real binaries in `/AI-evo1-dev/bin/` on your PATH. The clauditable lookup now goes through the same function, and I added a test in `executor_test.go` checking that directories and non-executable files are skipped.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+Let's make another addition to conversationalist:
 
+We'll add a 'to notes' button by both the notepad and the transcription window. This will take the content of the dialog and append it to a file - by default ~/notes-input.txt
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The dialog will not be cleared, but the button will become unavailable until the content changes. The button is only available when there is applicable content.

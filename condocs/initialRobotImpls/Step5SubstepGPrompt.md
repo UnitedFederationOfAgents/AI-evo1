@@ -185,11 +185,6 @@ prompt: [`ce1cb7f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c
 I fixed the most likely cause in the code, but I couldn't confirm it against your live setup or test it: `ps` and `go test` both needed approval this session couldn't get. The code that passes the environment from ufa-loader through LR to the conversationalist looks right, so the new keys should arrive. The bug I found is in ufa-loader's hand-over (`ufa-loader/awsprincipal/creds.go`): it clears `AWS_PROFILE`, which also loses the region if it was only set in that profile, so the conversationalist ends up with keys but no region. ufa-loader now copies that profile's region into `AWS_REGION` when the environment doesn't already set a region; there are two new tests for this and the README is updated. To narrow it down, the conversationalist's availability check now logs which AWS identity and credential source it is using, and shows them on hover. A failed Start logs which identity was refused, and checks retry every 30s instead of 5 minutes while unavailable. Please run `make test` in `ufa-loader` and `the-conversationalist`, then relaunch. If it still fails, the conversationalist's log line will show whether the keys aren't arriving (no `ufa-temp` identity) or the permission is missing (an AccessDenied for the `ufa-temp` identity).
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also make it so that if no region is present that instead of a red error banner we print a yellow warning banner that states we have set the default region to us-east-2 (and do so).

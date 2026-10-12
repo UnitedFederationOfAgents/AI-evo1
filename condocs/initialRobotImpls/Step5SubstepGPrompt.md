@@ -76,10 +76,3 @@ The dungeon-keeper changes are in a new `repr.go`, plus `main.go`, `pkg/types/ty
 ## Revision A
 
 Let's make sure we've implemented the worker UI on both AC and LR.
-
-
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
-
-!HANDOFF!

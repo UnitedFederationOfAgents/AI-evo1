@@ -123,11 +123,10 @@ I fixed the daily-default bug, added a `follows_from` session field with a `new-
 The new logic is in `federation-command/sessions_daily.go`, with tests in `sessions_daily_test.go`. The changes are wired into `main.go`, and I added a note to `docs/DistributedSessionsBrainstorm.md`. To check it, run `make -C federation-command test` and `make -C session-manager build`.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Let's revisit the most recent implementation for a moment - why would federation-command need to poll every minute?
 
+Let's explain if we can just check on-change rather than polling, and fix our implementation if there is no reason not to.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+(If a federation-command were sitting idle for 3 days we would not want it to switch to the intermediary-day sessions, after all)

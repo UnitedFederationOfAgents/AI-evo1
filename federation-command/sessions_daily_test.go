@@ -141,6 +141,40 @@ func TestRolloverDailyDefault(t *testing.T) {
 	}
 }
 
+func TestRolloverAfterIdleDaysSkipsIntermediateDays(t *testing.T) {
+	prevHost := fcHostID
+	fcHostID = "box-a1b2"
+	defer func() { fcHostID = prevHost }()
+	t.Setenv("PATH", t.TempDir())
+
+	dir := t.TempDir()
+	now := time.Now()
+	oldID := fallbackDefaultSessionID(now.AddDate(0, 0, -3), fcHostID)
+	oldDir := filepath.Join(dir, oldID)
+	if err := os.MkdirAll(oldDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	logFile, err := os.OpenFile(filepath.Join(oldDir, "session.jsonl"), os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, logFile: logFile, hadActivity: true}
+	m2, _ := m.rolloverDailyDefault(now)
+	defer m2.logFile.Close()
+
+	if want := fallbackDefaultSessionID(now, fcHostID); m2.sessionID != want {
+		t.Fatalf("session %q, want %q", m2.sessionID, want)
+	}
+	if got := readSessionYAMLField(m2.sessionDir, sessionFollowsFromKey); got != oldID {
+		t.Errorf("follows_from = %q, want %q", got, oldID)
+	}
+	for _, d := range []int{-2, -1} {
+		if _, err := os.Stat(filepath.Join(dir, fallbackDefaultSessionID(now.AddDate(0, 0, d), fcHostID))); !os.IsNotExist(err) {
+			t.Errorf("intermediate day %d's default was created", d)
+		}
+	}
+}
+
 func TestRolloverWithoutActivityLeavesNoFollowsFrom(t *testing.T) {
 	prevHost := fcHostID
 	fcHostID = "box-a1b2"

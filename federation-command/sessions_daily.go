@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // This file keeps federation-command's daily default session in step with
@@ -25,10 +23,15 @@ import (
 //
 //   - main() treats a handed-in daily default from an earlier day as if no
 //     session had been given at all (staleDailyDefault), resolving today's.
-//   - a running FC checks every dailyDefaultCheckInterval and, if it is still
-//     on an earlier day's default, switches to today's (rolloverDailyDefault).
-//     If this instance has run any command since it started or last rolled
-//     over, the new default records the old one as its follows_from.
+//   - a running FC checks when a command is about to run (executeCommand)
+//     and, if it is still on an earlier day's default, switches to today's
+//     first (rolloverDailyDefault). If this instance had run any command since
+//     it started or last rolled over, the new default records the old one as
+//     its follows_from.
+//
+// There is deliberately no timer: the day only matters when something is about
+// to be recorded, and an FC left idle over several days should go straight to
+// the day it's next used, not create a session for each day in between.
 //
 // Explicitly chosen sessions are never touched: only IDs that look like a
 // daily default roll over, and set-session already refuses to select one.
@@ -36,10 +39,6 @@ import (
 // sessionFollowsFromKey is the session.yaml field naming the session a
 // session follows on from.
 const sessionFollowsFromKey = "follows_from"
-
-// dailyDefaultCheckInterval is how often a running FC checks whether its
-// daily default has gone stale.
-const dailyDefaultCheckInterval = time.Minute
 
 // dailyDefaultDay returns the YYYY-MM-DD day a daily default session ID
 // belongs to, and false for any ID that isn't a daily default. Both the
@@ -77,13 +76,6 @@ func resolveDefaultSessionID(recordsPath string, now time.Time) string {
 		}
 	}
 	return fallbackDefaultSessionID(now, fcHostID)
-}
-
-// dailyDefaultTickMsg drives the periodic rollover check.
-type dailyDefaultTickMsg struct{}
-
-func dailyDefaultTickCmd() tea.Cmd {
-	return tea.Tick(dailyDefaultCheckInterval, func(time.Time) tea.Msg { return dailyDefaultTickMsg{} })
 }
 
 // rolloverDailyDefault switches m to today's daily default when m is still

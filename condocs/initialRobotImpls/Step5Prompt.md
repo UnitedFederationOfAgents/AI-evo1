@@ -130,3 +130,31 @@ Let's revisit the most recent implementation for a moment - why would federation
 Let's explain if we can just check on-change rather than polling, and fix our implementation if there is no reason not to.
 
 (If a federation-command were sitting idle for 3 days we would not want it to switch to the intermediary-day sessions, after all)
+
+
+prompt: [`d9fb29f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d9fb29f1f5a201f73e4e0d4a36992dd77532bccc) → reply: [`a705521`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a7055219e623e7e7ff2ed87ac33e5644d8563a1b)
+
+## Reply F
+
+I removed the once-a-minute check. federation-command now checks the day only when it is about to run a command, so the problem you described can't happen. None of it has been built or tested, because `gofmt`, `go vet` and `go test` all needed approval this session couldn't get.
+
+**Why the poll wasn't needed:** the day only matters when something is about to be recorded in a session. If nothing is being recorded, there's no reason to move. The poll also caused your 3-day bug: an idle FC would switch at every midnight and create a default session for each day in between. Nothing in the code needs a timer, so I took it out.
+
+**What changed:**
+- **The check:** at the start of `executeCommand` in `federation-command/main.go`, FC first switches from an earlier day's default to today's if it needs to. The command is then logged in today's session, and the "new day" notice is printed before the command's output. Both local and remote commands go through this path.
+- **`follows_from`:** an FC idle for 3 days goes straight from the old default to today's. If that FC had run any command before it went idle, today's default records the old one as `follows_from`.
+- **Removed:** the timer code in `sessions_daily.go` and its startup and message handling in `main.go`.
+
+**One thing you might notice:** an idle FC keeps reporting yesterday's session to LR until it runs its next command. I think that's correct, since nothing has been recorded today.
+
+I added a test, `TestRolloverAfterIdleDaysSkipsIntermediateDays`, for the 3-day case. It checks that FC jumps straight to today, records the old default as `follows_from`, and creates no sessions for the days in between. I also updated the rollover note in `docs/DistributedSessionsBrainstorm.md`. To check it, run `make -C federation-command test`.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

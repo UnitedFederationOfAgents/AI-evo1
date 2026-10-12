@@ -1114,7 +1114,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd(), tea.SetWindowTitle(fcWindowTitle), dailyDefaultTickCmd()}
+	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd(), tea.SetWindowTitle(fcWindowTitle)}
 	if m.devMode {
 		cmds = append(cmds, tea.Println(devModeStyle.Render(
 			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session")))
@@ -1246,13 +1246,6 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.prevInputLen = 0
 		return m, m.blinker.ResetTick()
-
-	case dailyDefaultTickMsg:
-		newM, notice := m.rolloverDailyDefault(time.Now())
-		if notice == "" {
-			return newM, dailyDefaultTickCmd()
-		}
-		return newM, tea.Batch(tea.Println(notice), dailyDefaultTickCmd())
 
 	case sessionNewDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -3262,6 +3255,9 @@ func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitC
 }
 
 func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
+	// The first command on a new day moves a stale daily default onto
+	// today's before it runs, so it's logged in today's session.
+	m, rolloverNotice := m.rolloverDailyDefault(time.Now())
 	m.hadActivity = true
 
 	// Add to history
@@ -3271,12 +3267,17 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 	appendHistoryEntry(historyFilePath(), line)
 
 	// If dynapane is open, roll it up first then execute.
+	var cmd tea.Cmd
 	if m.dynapane.IsActive() && line != "dynapane demo" {
 		m.pendingCmd = line
-		return m, m.dynapane.StartRollUp()
+		cmd = m.dynapane.StartRollUp()
+	} else {
+		m, cmd = m.executeCommandCore(line)
 	}
-
-	return m.executeCommandCore(line)
+	if rolloverNotice != "" {
+		cmd = tea.Sequence(tea.Println(rolloverNotice), cmd)
+	}
+	return m, cmd
 }
 
 func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {

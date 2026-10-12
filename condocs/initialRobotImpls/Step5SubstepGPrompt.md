@@ -154,3 +154,28 @@ The credentials will not be passed on to any persistence such as files/etc.
 ufa-loader will succinctly log one line indicating that it has created the new temporary principal when it does so.
 
 For now we will start with high privilege, and we will scale that back subsequently.
+
+
+prompt: [`9c28e7f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9c28e7f136d4dc9610d5ad2e5d48d8d67f6e13d9) → reply: [`df468a4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/df468a41bbe6d70f991c260623716513da8319f8)
+
+## Reply D
+
+I added the temporary-principal mechanism to ufa-loader, but I haven't built or tested it: `go test` needed approval this session couldn't get. Please run `make test` and `make build` in `ufa-loader`. The SigV4 tests check against AWS's published example signatures, which I wrote down from memory; if one fails, the expected value in the test may be what's wrong.
+
+At startup, ufa-loader looks for AWS credentials (environment variables, or static keys in `~/.aws/credentials` or `~/.aws/config`). If there are none, it carries on silently. Otherwise it creates an IAM user named `ufa-tmp-<host>-<YYYYMMDD>-<random>`, tagged `ufa-host`, `date` and `app`, with AdministratorAccess and an access key. It removes the startup credential variables from its environment and sets the new key in their place, so every launch of the sub-app gets only the new key; nothing is written to disk. It also deletes temporary users from earlier days that haven't been used for 2 days, and logs one line when it creates a user.
+
+- **Where the code is:** a new package, `ufa-loader/awsprincipal`, with tests against a fake IAM/STS server. `main.go` now has a `-no-aws-principal` flag and `-aws-principal-idle-days`, which defaults to 2. The README has a new "Temporary AWS principals" section.
+- **No AWS SDK:** I signed the requests myself (SigV4) rather than adding aws-sdk-go-v2, because every module that imports ufa-loader would have inherited the SDK as a dependency. Because of this, SSO, `role_arn`, `credential_process` and instance roles aren't supported yet, and ufa-loader treats them as no credentials.
+- **If creation fails:** ufa-loader logs why and passes the original credentials through unchanged, so the sub-app keeps working as before.
+- **Other files changed:** ufa-loader now uses `ufa-hostid` for the host ID. I added `replace ufa-hostid` to the go.mod of condoccer, ianar, the-conversationalist and dungeon-keeper, and `COPY ufa-hostid/` to dungeon-keeper's Dockerfile, which should keep them building.
+- **A sub-app that goes quiet loses its user:** cleanup decides by last use, so one that keeps running but makes no AWS calls for 2 days will have its user deleted. IAM's last-used time can also lag by a few hours.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

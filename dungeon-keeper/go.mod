@@ -11,6 +11,8 @@ require (
 
 replace representable => ../representable
 
+replace ufa-hostid => ../ufa-hostid
+
 replace ufa-loader => ../ufa-loader
 
 replace ufa-version => ../ufa-version

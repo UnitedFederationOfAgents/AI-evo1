@@ -27,18 +27,46 @@ func isolateAWSEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 }
 
-// TestCheckTranscribeAccessNoRegion verifies the availability check reports
-// AWS Transcribe unavailable, with the actionable region message, when no
-// region resolves -- without reaching the network.
+// TestCheckTranscribeAccessNoRegion verifies that when no region resolves the
+// availability check falls back to defaultAWSRegion and reports it as a
+// warning rather than the reason Transcribe is unavailable (Revision F). With
+// no credentials either, it still stops before reaching the network.
 func TestCheckTranscribeAccessNoRegion(t *testing.T) {
 	isolateAWSEnv(t)
 
 	st := newServer().checkTranscribeAccess(context.Background())
-	if st.State != "unavailable" {
-		t.Fatalf("state = %q, want unavailable", st.State)
+	if st.Region != defaultAWSRegion {
+		t.Errorf("region = %q, want %s", st.Region, defaultAWSRegion)
 	}
-	if !strings.Contains(st.Reason, "no AWS region configured") {
-		t.Errorf("reason = %q, want it to mention the missing region", st.Reason)
+	if !strings.Contains(st.Warning, "default region "+defaultAWSRegion) {
+		t.Errorf("warning = %q, want it to mention the default region", st.Warning)
+	}
+	if strings.Contains(st.Reason, "region") {
+		t.Errorf("reason = %q, want the missing region reported only as a warning", st.Reason)
+	}
+}
+
+// TestLoadAWSConfigRegion verifies loadAWSConfig only reports a defaulted
+// region when it actually fell back to defaultAWSRegion.
+func TestLoadAWSConfigRegion(t *testing.T) {
+	isolateAWSEnv(t)
+
+	s := newServer()
+	cfg, defaulted, err := s.loadAWSConfig(context.Background())
+	if err != nil {
+		t.Fatalf("loadAWSConfig: %v", err)
+	}
+	if cfg.Region != defaultAWSRegion || !defaulted {
+		t.Errorf("no region configured: got region %q defaulted=%v, want %s defaulted=true", cfg.Region, defaulted, defaultAWSRegion)
+	}
+
+	t.Setenv("AWS_REGION", "eu-west-1")
+	cfg, defaulted, err = s.loadAWSConfig(context.Background())
+	if err != nil {
+		t.Fatalf("loadAWSConfig: %v", err)
+	}
+	if cfg.Region != "eu-west-1" || defaulted {
+		t.Errorf("AWS_REGION set: got region %q defaulted=%v, want eu-west-1 defaulted=false", cfg.Region, defaulted)
 	}
 }
 
@@ -59,6 +87,9 @@ func TestCheckTranscribeAccessNoCredentials(t *testing.T) {
 	}
 	if !strings.Contains(st.Reason, "credentials") {
 		t.Errorf("reason = %q, want it to mention credentials", st.Reason)
+	}
+	if st.Warning != "" {
+		t.Errorf("warning = %q, want none with --aws-region set", st.Warning)
 	}
 }
 

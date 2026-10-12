@@ -188,3 +188,22 @@ I fixed the most likely cause in the code, but I couldn't confirm it against you
 ## Revision F
 
 Let's also make it so that if no region is present that instead of a red error banner we print a yellow warning banner that states we have set the default region to us-east-2 (and do so).
+
+
+prompt: [`8e37260`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8e3726041f63bc4fb3c8182096e74ff79873d963) → reply: [`4edd4eb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4edd4eb4dac5a2fdd620f6a20153b744dcdde701)
+
+## Reply F
+
+I changed the conversationalist so a missing AWS region now falls back to us-east-2, with a yellow warning instead of the red "unavailable" error. None of it is built or tested: `go test` needed approval this session couldn't get, so please run `make test` and `make build` in `the-conversationalist`.
+
+When no region is configured anywhere, `loadAWSConfig` in `transcribe.go` now uses us-east-2. The availability check passes this on to the page in a new `warning` field, and the transcription panel shows it as a yellow notice saying us-east-2 is being used and how to set a different region. The tests are updated to match: one now expects the default region and the warning, a new one checks the fallback directly, and I removed the old test that expected Start to fail when no region was set.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

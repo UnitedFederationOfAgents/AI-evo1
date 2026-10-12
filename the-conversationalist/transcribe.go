@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"mime/multipart"
@@ -75,14 +74,16 @@ func (s *Server) startTranscription(c *wsClient) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	cfg, err := s.loadAWSConfig(ctx)
+	// A defaulted region isn't reported here: the availability check
+	// already shows it to every tab as a warning (transcribe_status.go).
+	cfg, _, err := s.loadAWSConfig(ctx)
 	if err != nil {
 		cancel()
 		log.Printf("transcribe: %v", err)
 		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: %v", err))
-		// Whatever broke here (e.g. a region removed from the shared
-		// config) also breaks every other tab -- refresh the availability
-		// indicator so they all find out (see transcribe_status.go).
+		// Whatever broke here (e.g. a malformed shared config) also breaks
+		// every other tab -- refresh the availability indicator so they all
+		// find out (see transcribe_status.go).
 		go s.refreshTranscribeStatus()
 		return
 	}
@@ -133,9 +134,13 @@ func (s *Server) startTranscription(c *wsClient) {
 	log.Printf("transcribe: session started")
 }
 
-// errNoAWSRegion is loadAWSConfig's error when the AWS SDK's region
-// resolution comes up empty.
-var errNoAWSRegion = errors.New("no AWS region configured: set AWS_REGION (or AWS_DEFAULT_REGION) in the environment, add a region to the shared AWS config, or start with --aws-region")
+// defaultAWSRegion is the region loadAWSConfig falls back to when none is
+// configured anywhere (Step5SubstepGPrompt.md Revision F).
+const defaultAWSRegion = "us-east-2"
+
+// noRegionWarning is the warning shown (yellow, not as an error) when
+// loadAWSConfig had to fall back to defaultAWSRegion.
+var noRegionWarning = "no AWS region configured, so the default region " + defaultAWSRegion + " is being used: set AWS_REGION (or AWS_DEFAULT_REGION) in the environment, add a region to the shared AWS config, or start with --aws-region to choose another"
 
 // loadAWSConfig resolves the AWS config used both for real transcription
 // sessions (startTranscription) and for the availability check
@@ -146,20 +151,23 @@ var errNoAWSRegion = errors.New("no AWS region configured: set AWS_REGION (or AW
 // and defers the failure to the first call that needs one, which then fails
 // deep inside endpoint/signing resolution with a cryptic SDK error.
 // Credentials (AWS_ACCESS_KEY_ID/SECRET) being set does not imply a region is
-// too, so this checks explicitly and returns errNoAWSRegion instead.
-func (s *Server) loadAWSConfig(ctx context.Context) (aws.Config, error) {
+// too -- e.g. ufa-loader's temporary principal hands over keys only -- so
+// this checks explicitly and falls back to defaultAWSRegion, returning
+// regionDefaulted so callers can warn about it.
+func (s *Server) loadAWSConfig(ctx context.Context) (cfg aws.Config, regionDefaulted bool, err error) {
 	var opts []func(*config.LoadOptions) error
 	if s.awsRegion != "" {
 		opts = append(opts, config.WithRegion(s.awsRegion))
 	}
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
+	cfg, err = config.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
-		return aws.Config{}, fmt.Errorf("loading AWS config: %w", err)
+		return aws.Config{}, false, fmt.Errorf("loading AWS config: %w", err)
 	}
 	if cfg.Region == "" {
-		return aws.Config{}, errNoAWSRegion
+		cfg.Region = defaultAWSRegion
+		regionDefaulted = true
 	}
-	return cfg, nil
+	return cfg, regionDefaulted, nil
 }
 
 // readTranscriptEvents drains sess's AWS Transcribe result stream, pushing

@@ -80,9 +80,9 @@ type Server struct {
 
 	// awsRegion is the AWS region AWS Transcribe streaming sessions are
 	// started in (see transcribe.go). Empty defers to the AWS SDK's own
-	// default region resolution (env/shared config/instance role) -- see
-	// Revision D's note that we lean on host-level AWS credentials/config
-	// rather than anything app-managed.
+	// default region resolution (env/shared config/instance role), then to
+	// defaultAWSRegion with a warning -- see Revision D's note that we lean on
+	// host-level AWS credentials/config rather than anything app-managed.
 	awsRegion string
 
 	// Transcription-engine availability (see transcribe_status.go).
@@ -355,7 +355,7 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
-	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role)")
+	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role -- else "+defaultAWSRegion+")")
 	notesFile := flag.String("notes-file", "", "file the \"To Notes\" buttons append to (default ~/notes-input.txt)")
 	flag.Parse()
 

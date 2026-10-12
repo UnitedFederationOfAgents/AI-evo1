@@ -473,8 +473,24 @@ const TRANSCRIBE_ENGINE_LABELS: Record<string, string> = {
 // TranscribeAvailability shows whether the server can currently reach its
 // transcription engine (see transcribe_status.go): a quiet one-liner while
 // available or checking, and a prominent "unavailable" notice with the
-// server's reason and a Recheck button otherwise.
+// server's reason and a Recheck button otherwise. A server warning (e.g. a
+// defaulted region) shows as a yellow notice above either.
 function TranscribeAvailability({ status, connected, onRecheck }: {
+  status: TranscribeStatusMsg
+  connected: boolean
+  onRecheck: () => void
+}) {
+  return (
+    <>
+      {status.warning && (
+        <div className="transcribe-availability transcribe-availability-warning">{status.warning}</div>
+      )}
+      <TranscribeAvailabilityState status={status} connected={connected} onRecheck={onRecheck} />
+    </>
+  )
+}
+
+function TranscribeAvailabilityState({ status, connected, onRecheck }: {
   status: TranscribeStatusMsg
   connected: boolean
   onRecheck: () => void

@@ -19,7 +19,7 @@ import (
 // StartStreamTranscription call is billed (with a per-request minimum), so
 // the check deliberately stops short of opening a stream. It verifies
 // everything up to that point instead: the AWS config loads, a region is
-// resolved, credentials resolve, and AWS accepts those credentials (STS
+// resolved (or defaulted, with a warning), credentials resolve, and AWS accepts those credentials (STS
 // GetCallerIdentity, which needs no IAM permission and costs nothing). It
 // cannot see a missing transcribe:StartStreamTranscription permission --
 // that still surfaces as a Start error, which re-runs this check.
@@ -59,6 +59,11 @@ type TranscribeStatusMsg struct {
 	// AWS has accepted the credentials.
 	Identity         string `json:"identity,omitempty"`
 	CredentialSource string `json:"credential_source,omitempty"`
+
+	// Warning is a non-fatal problem shown alongside any State -- so far
+	// only noRegionWarning, when no region was configured and
+	// defaultAWSRegion was used instead (Step5SubstepGPrompt.md Revision F).
+	Warning string `json:"warning,omitempty"`
 }
 
 // checkTranscribeAccess is the default Server.transcribeProbe: it runs the
@@ -66,12 +71,15 @@ type TranscribeStatusMsg struct {
 func (s *Server) checkTranscribeAccess(ctx context.Context) TranscribeStatusMsg {
 	st := TranscribeStatusMsg{State: "unavailable", Engine: transcribeEngineName}
 
-	cfg, err := s.loadAWSConfig(ctx)
+	cfg, regionDefaulted, err := s.loadAWSConfig(ctx)
 	if err != nil {
 		st.Reason = err.Error()
 		return st
 	}
 	st.Region = cfg.Region
+	if regionDefaulted {
+		st.Warning = noRegionWarning
+	}
 
 	const noCreds = "no AWS credentials found: configure them in the environment, the shared AWS config/credentials files, or an instance role"
 	if cfg.Credentials == nil {
@@ -132,7 +140,10 @@ func (s *Server) refreshTranscribeStatus() {
 	s.transcribeChecking = false
 	s.transcribeStatusMu.Unlock()
 
-	if prev.State != st.State || prev.Reason != st.Reason || prev.Identity != st.Identity {
+	if prev.State != st.State || prev.Reason != st.Reason || prev.Identity != st.Identity || prev.Warning != st.Warning {
+		if st.Warning != "" {
+			log.Printf("transcribe: warning: %s", st.Warning)
+		}
 		if st.State == "available" {
 			log.Printf("transcribe: %s available (region %s, as %s via %s)", st.Engine, st.Region, st.Identity, st.CredentialSource)
 		} else {

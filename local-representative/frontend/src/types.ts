@@ -192,7 +192,7 @@ export interface WorkerSignalInfo {
   completed_at?: number
   comment?: string
   output?: string
-  output_trimmed?: boolean // only the end of the output is included
+  output_trimmed?: boolean // only the end of the output is included, or none of it if empty
 }
 
 export interface WorkerStateMsg {

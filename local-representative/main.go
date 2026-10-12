@@ -650,6 +650,9 @@ func (s *Server) pushStateToAC() {
 	if rb := s.getRobotState(); rb != nil {
 		ac.SendData("robot-state", *rb)
 	}
+	if wk := s.getWorkerState(); wk != nil {
+		ac.SendData("worker-state", *wk)
+	}
 }
 
 // notifyCloseConn wraps a net.Conn so closing it -- as net/http does once the
@@ -860,12 +863,16 @@ func (s *Server) connectAC(host, port string) {
 
 	// Commands from AC: "__system:" commands drive this LR's own system tab
 	// (launch/terminate managed apps), "__control:" its control tab (see
-	// control.go), and "__fc:<instance> <cmd>" goes to one FC instance (see
-	// fcinstances.go); everything else is forwarded to the default FC
-	// instance.
+	// control.go), "__worker:" its worker tab (see worker.go), and
+	// "__fc:<instance> <cmd>" goes to one FC instance (see fcinstances.go);
+	// everything else is forwarded to the default FC instance.
 	client.SetCommandHandler(func(cmd string) {
 		if strings.HasPrefix(cmd, "__system:") {
 			s.handleSystemCommand(cmd)
+			return
+		}
+		if strings.HasPrefix(cmd, "__worker:") {
+			s.handleWorkerCommand(cmd)
 			return
 		}
 		if strings.HasPrefix(cmd, "__tc-availability:") {

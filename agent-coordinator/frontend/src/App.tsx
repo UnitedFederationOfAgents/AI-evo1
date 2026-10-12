@@ -3,7 +3,7 @@ import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
-  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
+  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -19,6 +19,7 @@ const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
   { name: 'robot', multi: false },
+  { name: 'worker', multi: false },
 ]
 
 interface LogEntry {
@@ -48,6 +49,10 @@ interface HostClientState {
   sessions?: LRSessionsMsg
   convo?: LRConvoMsg
   robot?: LRRobotMsg
+  // The host's worker tab: what its dungeon-keeper last reported, and the
+  // answer to the last prompt submitted from here -- see worker.go.
+  worker?: WorkerStateMsg
+  workerReply?: WorkerReplyMsg
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
@@ -136,6 +141,21 @@ function useCoordinatorWS() {
 
   const sendLRControlContinue = useCallback((hostId: string, run: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-control-continue', payload: { host_id: hostId, run } }))
+  }, [])
+
+  // A host's worker tab prompt box -- see worker.go. Its answer comes back as
+  // lr-worker-reply.
+  const sendLRWorkerSubmit = useCallback((hostId: string, prompt: string) => {
+    const setReply = (workerReply: WorkerReplyMsg | undefined) => setHostData(prev => ({
+      ...prev,
+      [hostId]: { ...(prev[hostId] ?? emptyHostState()), workerReply },
+    }))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setReply(undefined)
+      wsRef.current.send(JSON.stringify({ type: 'lr-worker-submit', payload: { host_id: hostId, prompt } }))
+    } else {
+      setReply({ ok: false, error: 'not connected' })
+    }
   }, [])
 
   const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
@@ -456,6 +476,22 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-worker-state': {
+            const p = msg.payload as LRWorkerMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), worker: p.worker ?? undefined },
+            }))
+            break
+          }
+          case 'lr-worker-reply': {
+            const p = msg.payload as LRWorkerReplyMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), workerReply: p.reply },
+            }))
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
@@ -512,7 +548,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -3499,8 +3535,108 @@ function GlobalView({
   )
 }
 
+// WorkerPanel is a host's worker tab: a temporary prompt box that hands
+// prompt-only work to that host's dungeon-keeper, and the work signals it
+// reports, newest first -- see worker.go. Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
+function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const submit = () => {
+    const text = prompt.trim()
+    if (!text || !healthy) return
+    onSubmit(text)
+    setPrompt('')
+  }
+
+  const signals = state?.signals ?? []
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="worker-submit">
+        <textarea
+          className="worker-prompt"
+          value={prompt}
+          rows={3}
+          placeholder={healthy ? 'prompt for the worker (runs prompt-only, in /tmp)… Ctrl+Enter to submit' : 'the worker is not running on this host — launch it from the system tab'}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit()
+          }}
+          disabled={!healthy}
+        />
+        <button className="worker-submit-btn" onClick={submit} disabled={!healthy || !prompt.trim()}>submit</button>
+      </div>
+      {reply?.error && <div className="worker-error">{reply.error}</div>}
+      {signals.length === 0
+        ? <div className="service-empty">no work signals yet</div>
+        : (
+          <div className="worker-signals">
+            {signals.map(sig => (
+              <WorkerSignalRow
+                key={sig.id || sig.file}
+                signal={sig}
+                open={openId === (sig.id || sig.file)}
+                onToggle={() => setOpenId(openId === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+              />
+            ))}
+          </div>
+        )}
+    </div>
+  )
+}
+
+function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo; open: boolean; onToggle: () => void }) {
+  const when = new Date(signal.created_at).toLocaleString()
+  return (
+    <div className={`worker-signal worker-status-${signal.status}`}>
+      <button className="worker-signal-head" onClick={onToggle} title={signal.file}>
+        <span className="worker-signal-status">{signal.status}</span>
+        <span className="worker-signal-prompt">{signal.prompt}</span>
+        <span className="worker-signal-when">{when}</span>
+      </button>
+      {open && (
+        <div className="worker-signal-body">
+          <div className="worker-signal-detail">
+            {signal.role} · {signal.work_type}{signal.work_location ? ` in ${signal.work_location}` : ''}
+            {signal.mode ? ` · ${signal.mode}` : ''}
+            {signal.agent ? ` · ${signal.agent}` : ''}{signal.model ? ` (${signal.model})` : ''}
+          </div>
+          <pre className="worker-signal-text">{signal.prompt}</pre>
+          {signal.comment && <div className="worker-signal-comment">{signal.comment}</div>}
+          {signal.output
+            ? (
+              <>
+                {signal.output_trimmed && <div className="worker-signal-detail">output is long — showing only the end</div>}
+                <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
+              </>
+            )
+            : signal.output_trimmed
+              ? <div className="worker-signal-detail">output is too long to show here — it's in the signal file {signal.file}</div>
+              : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
   sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
@@ -3514,6 +3650,7 @@ function LRView({
   requestLRControl: (hostId: string, req: ControlLibRequest) => string
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
+  sendLRWorkerSubmit: (hostId: string, prompt: string) => void
   sendLRRestartApp: (hostId: string) => void
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
@@ -3699,7 +3836,7 @@ function LRView({
           <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
             <div className="service-view">
               <div className="service-name">{activeTab}</div>
-              {activeTab === 'federation-command' && (
+              {(activeTab === 'federation-command' || activeTab === 'worker') && (
                 <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
                   <span className="health-dot" />
                   <span className="health-label">{getServiceStatus(activeTab)}</span>
@@ -3769,6 +3906,18 @@ function LRView({
                     onRun={(seq, controls, recordOverride) => sendLRControlRun(host.id, seq, controls, recordOverride)}
                     onCancel={() => sendLRControlCancel(host.id)}
                     onContinue={run => sendLRControlContinue(host.id, run)}
+                  />
+                )
+              )}
+              {activeTab === 'worker' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <WorkerPanel
+                    healthy={getServiceStatus('worker') === 'healthy'}
+                    state={data.worker ?? null}
+                    reply={data.workerReply ?? null}
+                    onSubmit={prompt => sendLRWorkerSubmit(host.id, prompt)}
                   />
                 )
               )}
@@ -4066,7 +4215,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -4252,6 +4401,7 @@ export default function App() {
               requestLRControl={requestLRControl}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
+              sendLRWorkerSubmit={sendLRWorkerSubmit}
               sendLRRestartApp={sendLRRestartApp}
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}

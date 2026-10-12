@@ -28,10 +28,13 @@ const (
 )
 
 // Limits on what one "worker-state" push carries. The full output stays in
-// the signal file; LR only needs enough to show it.
+// the signal file; LR only needs enough to show it. maxStateBytes keeps the
+// whole push under representable's 64 KiB line limit -- see fitState.
 const (
 	maxStateCompleted = 20
-	maxStateOutput    = 64 * 1024
+	maxStateOutput    = 32 * 1024
+	maxStatePrompt    = 4 * 1024
+	maxStateBytes     = 48 * 1024
 )
 
 // submitRole is the role recorded on work submitted from LR's worker tab.
@@ -225,7 +228,49 @@ func (w *Worker) state(busy bool) WorkerStateMsg {
 	complete, _ := w.workSignalMgr.ListComplete()
 	st.Signals = append(st.Signals, w.summarise(ongoing, 0)...)
 	st.Signals = append(st.Signals, w.summarise(complete, maxStateCompleted)...)
+	fitState(&st)
 	return st
+}
+
+// fitState trims st until it marshals to at most maxStateBytes: representable
+// sends each message as one line and its reader (bufio.Scanner) drops the
+// connection on a line over 64 KiB -- on LR's link from here, and again on
+// LR's link up to agent-coordinator, which relays worker-state as-is. Older
+// signals lose their output first; then prompts are shortened; then the
+// newest's output is cut to its end. The full text stays in the signal files.
+func fitState(st *WorkerStateMsg) {
+	size := func() int {
+		b, _ := json.Marshal(st)
+		return len(b)
+	}
+	if size() <= maxStateBytes {
+		return
+	}
+	// Signals are newest first: drop the oldest outputs until it fits or only
+	// the newest's is left.
+	for i := len(st.Signals) - 1; i > 0 && size() > maxStateBytes; i-- {
+		if st.Signals[i].Output != "" {
+			st.Signals[i].Output = ""
+			st.Signals[i].OutputTrimmed = true
+		}
+	}
+	for n := maxStatePrompt; n >= 64 && size() > maxStateBytes; n /= 2 {
+		for i := range st.Signals {
+			if p := st.Signals[i].Prompt; len(p) > n {
+				st.Signals[i].Prompt = p[:n] + "…"
+			}
+		}
+	}
+	if len(st.Signals) > 0 {
+		newest := &st.Signals[0]
+		for newest.Output != "" && size() > maxStateBytes {
+			newest.Output = newest.Output[len(newest.Output)/2:]
+			newest.OutputTrimmed = true
+			if len(newest.Output) < 64 {
+				newest.Output = ""
+			}
+		}
+	}
 }
 
 // summarise reads the given signal files, newest first, keeping at most

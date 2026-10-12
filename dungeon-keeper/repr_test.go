@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"dungeon-keeper/pkg/types"
@@ -92,5 +95,35 @@ func TestStateCarriesOutputOfCompletedSignal(t *testing.T) {
 	}
 	if got.CompletedAt == 0 {
 		t.Error("want a completion time")
+	}
+}
+
+// TestFitStateStaysUnderLineLimit: a worker-state is one representable line,
+// which its reader can't take past 64 KiB.
+func TestFitStateStaysUnderLineLimit(t *testing.T) {
+	big := strings.Repeat("<a & b>\n", maxStateOutput/8)
+	st := WorkerStateMsg{WorkerID: "test"}
+	for i := 0; i < maxStateCompleted; i++ {
+		st.Signals = append(st.Signals, WorkerSignalInfo{ID: fmt.Sprint(i), Prompt: strings.Repeat("p", maxStatePrompt), Output: big})
+	}
+	fitState(&st)
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > maxStateBytes {
+		t.Errorf("worker-state is %d bytes, want at most %d", len(b), maxStateBytes)
+	}
+	if st.Signals[0].Output == "" || !st.Signals[0].OutputTrimmed {
+		t.Error("the newest signal should keep the end of its output")
+	}
+	if last := st.Signals[len(st.Signals)-1]; last.Output != "" || !last.OutputTrimmed {
+		t.Error("the oldest signal's output should be dropped first")
+	}
+
+	small := WorkerStateMsg{Signals: []WorkerSignalInfo{{Prompt: "hi", Output: "hello"}}}
+	fitState(&small)
+	if small.Signals[0].Output != "hello" || small.Signals[0].OutputTrimmed {
+		t.Error("a small state should be left alone")
 	}
 }

@@ -419,6 +419,16 @@ straight away. Click a signal to see its prompt, the agent's output and how it
 finished. The output is also kept in the signal file in
 `/host-agent-files/work/complete/`.
 
+Each `worker-state` is one representable line, which can't go past 64 KiB, so
+dungeon-keeper keeps it under 48 KiB: older signals lose their output first,
+then prompts are shortened, then only the end of the newest output is kept.
+The full text is always in the signal file. Submitted prompts are limited to
+32 KiB for the same reason.
+
+agent-coordinator has the same tab for each host. LR forwards `worker-state`
+up to it, and its submits come down as `__worker:submit <json>`, which LR
+handles like its own and answers with `worker-reply`.
+
 ## Files tab
 
 The **files** tab shows a wireframe-icon view (text / image / other — a small

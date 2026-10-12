@@ -76,3 +76,22 @@ The dungeon-keeper changes are in a new `repr.go`, plus `main.go`, `pkg/types/ty
 ## Revision A
 
 Let's make sure we've implemented the worker UI on both AC and LR.
+
+
+prompt: [`d8dbfd8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d8dbfd854fb28b5013d656ad7d07321393445e54) → reply: [`50ef686`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/50ef68659a0e8b208b8e9cfa2d3cd94ae22e436a)
+
+## Reply A
+
+I couldn't build, format or test any of this: `go build`, `go test`, `go vet` and `gofmt` all needed approval this session couldn't get, so please run `make build` and `make test` in `agent-coordinator`, `local-representative` and `dungeon-keeper`. AC now has the same worker tab as LR for each host: it shows the host's dungeon-keeper signals, has the temporary prompt box, shows a health dot, and `worker` is on AC's system-tab launch list. LR forwards `worker-state` up to AC, and AC sends submits down as `__worker:submit`; LR handles them like its own and answers with `worker-reply` (the AC side is in the new `agent-coordinator/worker.go`, with tests).
+
+I also fixed a bug in the first version that would have dropped connections. Each message is one line, and representable's reader can't take a line over 64 KiB. But a `worker-state` could carry 64 KB of output per signal, so one long answer would break the dungeon-keeper→LR link, and now the LR→AC link too. dungeon-keeper now keeps each `worker-state` under 48 KiB, trimming older outputs first, then prompts, then the newest output, and both tabs say when the output is only in the signal file. Submitted prompts are now capped at 32 KiB, and the LR README covers the AC relay and these limits.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

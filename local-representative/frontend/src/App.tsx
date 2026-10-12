@@ -604,7 +604,9 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
                 <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
               </>
             )
-            : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
+            : signal.output_trimmed
+              ? <div className="worker-signal-detail">output is too long to show here — it's in the signal file {signal.file}</div>
+              : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
         </div>
       )}
     </div>

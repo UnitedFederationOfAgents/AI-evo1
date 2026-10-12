@@ -240,6 +240,50 @@ export interface LRRobotMsg {
   available: boolean
 }
 
+// The per-host worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md,
+// Revision A): what that host's dungeon-keeper reports, relayed through its
+// LR -- see worker.go. Mirrors local-representative/frontend/src/types.ts.
+export interface WorkerSignalInfo {
+  id: string
+  file: string
+  role: string
+  prompt: string
+  agent?: string
+  model?: string
+  mode?: string
+  work_type: string
+  work_location?: string
+  status: string // "pending" | "processing" | "completed" | "failed"
+  created_at: number // unix ms
+  completed_at?: number
+  comment?: string
+  output?: string
+  output_trimmed?: boolean // only the end of the output is included, or none of it if empty
+}
+
+export interface WorkerStateMsg {
+  worker_id: string
+  agent_type: string
+  busy: boolean
+  signals: WorkerSignalInfo[]
+}
+
+export interface WorkerReplyMsg {
+  ok: boolean
+  error?: string
+}
+
+// worker is null until that host reports one, and after it disconnects.
+export interface LRWorkerMsg {
+  host_id: string
+  worker: WorkerStateMsg | null
+}
+
+export interface LRWorkerReplyMsg {
+  host_id: string
+  reply: WorkerReplyMsg
+}
+
 export interface FileInfo {
   id: string
   name: string

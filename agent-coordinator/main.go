@@ -606,11 +606,13 @@ type hostState struct {
 	stateboard *StateboardMsg
 	lrHTTPPort string
 
-	// fcInstances, control and controlLib are relayed to browsers as-is --
-	// see LRFCInstancesMsg, LRControlMsg and LRControlLibraryMsg.
+	// fcInstances, control, controlLib and worker are relayed to browsers
+	// as-is -- see LRFCInstancesMsg, LRControlMsg, LRControlLibraryMsg and
+	// LRWorkerMsg.
 	fcInstances json.RawMessage
 	control     json.RawMessage
 	controlLib  json.RawMessage
+	worker      json.RawMessage
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -857,6 +859,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	fcInstances := hs.fcInstances
 	control := hs.control
 	controlLib := hs.controlLib
+	worker := hs.worker
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -886,6 +889,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	s.sendToClient(c, "lr-sessions-state", sessionsMsg(name, sessions))
 	s.sendToClient(c, "lr-convo-state", convoMsg(name, convo))
 	s.sendToClient(c, "lr-robot-state", robotMsg(name, robot))
+	s.sendToClient(c, "lr-worker-state", workerMsg(name, worker))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
@@ -1194,6 +1198,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" &&
 				!strings.ContainsAny(payload.Run, " \n") && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, strings.TrimSpace("__control:continue "+payload.Run))
+			}
+		case "lr-worker-submit":
+			// The host's worker tab prompt box -- see worker.go.
+			var payload struct {
+				HostID string `json:"host_id"`
+				Prompt string `json:"prompt"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				cmd, err := workerSubmitCommand(payload.Prompt)
+				if err != nil {
+					s.sendToClient(c, "lr-worker-reply", workerReplyMsg(payload.HostID, err))
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
 			}
 		case "lr-launch-app":
 			var payload struct {
@@ -1571,6 +1589,7 @@ func main() {
 			hs.fcInstances = nil
 			hs.control = nil
 			hs.controlLib = nil
+			hs.worker = nil
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
@@ -1586,6 +1605,7 @@ func main() {
 			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-robot-state", LRRobotMsg{HostID: name, Available: false})
+			s.broadcast("lr-worker-state", workerMsg(name, nil))
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
 			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
@@ -1769,6 +1789,14 @@ func main() {
 				hs.mu.Unlock()
 				s.broadcast("lr-robot-state", robotMsg(name, rb))
 			}
+		case "worker-state":
+			// The host's worker tab -- see worker.go.
+			hs.mu.Lock()
+			hs.worker = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-worker-state", workerMsg(name, data))
+		case "worker-reply":
+			s.broadcast("lr-worker-reply", LRWorkerReplyMsg{HostID: name, Reply: data})
 		case "lr-http":
 			var payload LRHTTPMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

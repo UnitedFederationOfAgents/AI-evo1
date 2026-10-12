@@ -37,6 +37,18 @@ func TestSubmitWorkRefusesEmptyPromptAndMissingWorker(t *testing.T) {
 	if err := s.submitWork(WorkerSubmitRequest{Prompt: "hello"}); err == nil {
 		t.Error("submitting with no worker connected should fail")
 	}
+	if err := s.submitWork(WorkerSubmitRequest{Prompt: strings.Repeat("x", maxWorkerPrompt+1)}); err == nil || !strings.Contains(err.Error(), "too long") {
+		t.Errorf("a prompt past the line limit should be refused as too long, got %v", err)
+	}
+}
+
+// TestHandleWorkerCommandWithoutAC: agent-coordinator's submits are answered
+// over the AC link; with none (or a malformed submit) nothing should panic.
+func TestHandleWorkerCommandWithoutAC(t *testing.T) {
+	s := newServer("test-lr")
+	s.handleWorkerCommand(`__worker:submit {"prompt":"hello"}`)
+	s.handleWorkerCommand(`__worker:submit {not json`)
+	s.handleWorkerCommand(`__worker:unknown`)
 }
 
 func TestWorkerStateIsKept(t *testing.T) {

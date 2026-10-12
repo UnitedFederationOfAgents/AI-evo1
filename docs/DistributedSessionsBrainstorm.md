@@ -153,6 +153,8 @@ Brainstorm some aspects of session behaviour to support distributed sessions. Th
 - **`clauditable get-default-session`**: Idempotently creates today's default session (`YYYY-MM-DD-<host>-default`, name `YYYY-MM-DD Default <host>`) and prints the ID.
 - **FC `new-session [name]` / `ufa session new [name]`**: With name argument calls clauditable synchronously and switches. Without argument launches an interactive bash prompt (via `tea.ExecProcess`) then switches on completion via `sessionNewDoneMsg`.
 - **Startup log append**: FC now opens `session.jsonl` with `O_APPEND` instead of truncating, so default sessions accumulate records across FC restarts on the same day.
+- **Daily rollover** (InitialRobot Step 5 Revision E, `federation-command/sessions_daily.go`): a daily default handed back to FC as `--session`/`FC_SESSION` (LR relaunch continuity, or SM's current session) is treated as "default" when it belongs to an earlier day, and a running FC checks once a minute and switches from an earlier day's default to today's. Named sessions are never moved.
+- **`follows_from`** (same revision): an optional `session.yaml` field naming the session this one follows on from. A rollover sets it on the new daily default (to the old default's ID) when that FC instance has run any command since it started or last rolled over; the first such instance wins. FC `new-session -f <session> [name]` / `ufa session new -f <session> [name]` sets it explicitly, where `<session>` is an ID or name (quote names with spaces). Session-manager's Details tab shows it like any other field.
 
 ### InitialDistributedSessions Step 1 Revision A — once-transfer / sync wiring
 

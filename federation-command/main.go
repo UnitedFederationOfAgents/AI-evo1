@@ -413,6 +413,10 @@ type appModel struct {
 	sessionDir   string
 	recordsPath  string
 
+	// hadActivity is set once any command runs, and cleared when the daily
+	// default rolls over -- see sessions_daily.go's rolloverDailyDefault.
+	hadActivity bool
+
 	logFile *os.File
 	encoder *json.Encoder
 
@@ -545,6 +549,7 @@ type ridealongCustomCmdDoneMsg struct {
 type sessionNewDoneMsg struct {
 	exitCode     int
 	newSessionID string
+	followsFrom  string // new-session -f's resolved session ID, "" if none
 	line         string
 	cmdTime      time.Time
 	deltaMs      int64
@@ -1109,7 +1114,7 @@ func (m appModel) Init() tea.Cmd {
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd(), tea.SetWindowTitle(fcWindowTitle)}
+	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd(), tea.SetWindowTitle(fcWindowTitle), dailyDefaultTickCmd()}
 	if m.devMode {
 		cmds = append(cmds, tea.Println(devModeStyle.Render(
 			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session")))
@@ -1242,10 +1247,25 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prevInputLen = 0
 		return m, m.blinker.ResetTick()
 
+	case dailyDefaultTickMsg:
+		newM, notice := m.rolloverDailyDefault(time.Now())
+		if notice == "" {
+			return newM, dailyDefaultTickCmd()
+		}
+		return newM, tea.Batch(tea.Println(notice), dailyDefaultTickCmd())
+
 	case sessionNewDoneMsg:
 		m.lastExitCode = msg.exitCode
 		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		if msg.exitCode == 0 && msg.newSessionID != "" {
+			if err := applyFollowsFrom(m.recordsPath, msg.newSessionID, msg.followsFrom); err != nil {
+				m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 1)
+				if !m.blinker.IsRemoteControlActive() {
+					m.blinker.SetState(BlinkerIdle)
+				}
+				m.prevInputLen = 0
+				return m, tea.Batch(tea.Println(errorStyle.Render("new-session: "+err.Error())), m.blinker.ResetTick())
+			}
 			newM, switchErr := m.switchToSession(msg.newSessionID)
 			if switchErr == nil {
 				newM.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 0)
@@ -2409,9 +2429,21 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
 	}
 
-	// new-session [name] — creates a new named session via clauditable
+	// new-session [-f <session>] [name] — creates a new named session via clauditable
 	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
-		name := stripSurroundingQuotes(strings.TrimSpace(strings.TrimPrefix(line, "new-session")))
+		followsRef, name, parseErr := parseFollowsFlag(strings.TrimPrefix(line, "new-session"))
+		if parseErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+parseErr.Error()), 1)
+		}
+		name = stripSurroundingQuotes(name)
+		followsFrom := ""
+		if followsRef != "" {
+			id, err := resolveSessionRef(m.recordsPath, followsRef)
+			if err != nil {
+				return true, m, seqPrint(errorStyle.Render("new-session: -f: "+err.Error()), 1)
+			}
+			followsFrom = id
+		}
 		if name == "" {
 			name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
 		}
@@ -2428,6 +2460,9 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		newID := strings.TrimSpace(string(out))
 		if newID == "" {
 			return true, m, seqPrint(errorStyle.Render("new-session: clauditable returned empty session ID"), 1)
+		}
+		if err := applyFollowsFrom(m.recordsPath, newID, followsFrom); err != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+err.Error()), 1)
 		}
 		newM, switchErr := m.switchToSession(newID)
 		if switchErr != nil {
@@ -3227,6 +3262,8 @@ func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitC
 }
 
 func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
+	m.hadActivity = true
+
 	// Add to history
 	m.history = append(m.history, line)
 	m.historyIdx = len(m.history)
@@ -3594,10 +3631,9 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(successStyle.Render("session reset to: " + newSessionDir))
 	}
 
-	// new-session [name] — creates a new named session via clauditable
+	// new-session [-f <session>] [name] — creates a new named session via clauditable
 	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
-		name := stripSurroundingQuotes(strings.TrimSpace(strings.TrimPrefix(line, "new-session")))
-		return m.handleNewSession(name, line, cmdTime, deltaMs)
+		return m.handleNewSession(strings.TrimPrefix(line, "new-session"), line, cmdTime, deltaMs)
 	}
 
 	// agent <args>
@@ -3729,9 +3765,28 @@ func (m appModel) switchToSession(newID string) (appModel, error) {
 	return m, nil
 }
 
-// handleNewSession creates a new named session via clauditable.
-// If name is empty, it launches an interactive bash prompt; otherwise calls clauditable synchronously.
-func (m appModel) handleNewSession(name, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+// handleNewSession creates a new named session via clauditable. args is
+// everything after "new-session": an optional "-f <session>" (the name or ID
+// of the session the new one follows, recorded as its follows_from -- see
+// parseFollowsFlag) and then the name. If the name is empty, it launches an
+// interactive bash prompt; otherwise calls clauditable synchronously.
+func (m appModel) handleNewSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	followsRef, name, parseErr := parseFollowsFlag(args)
+	if parseErr != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("new-session: " + parseErr.Error()))
+	}
+	name = stripSurroundingQuotes(name)
+	followsFrom := ""
+	if followsRef != "" {
+		id, err := resolveSessionRef(m.recordsPath, followsRef)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: -f: " + err.Error()))
+		}
+		followsFrom = id
+	}
+
 	clauditablePath, findErr := findBinary("clauditable")
 	if findErr != nil {
 		m.logRecord(line, cmdTime, deltaMs, 1)
@@ -3754,6 +3809,10 @@ func (m appModel) handleNewSession(name, line string, cmdTime time.Time, deltaMs
 		if newID == "" {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("new-session: clauditable returned empty session ID"))
+		}
+		if err := applyFollowsFrom(m.recordsPath, newID, followsFrom); err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: " + err.Error()))
 		}
 		newM, switchErr := m.switchToSession(newID)
 		if switchErr != nil {
@@ -3786,7 +3845,7 @@ func (m appModel) handleNewSession(name, line string, cmdTime time.Time, deltaMs
 				exitCode = 1
 			}
 		}
-		return sessionNewDoneMsg{exitCode: exitCode, newSessionID: newID, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		return sessionNewDoneMsg{exitCode: exitCode, newSessionID: newID, followsFrom: followsFrom, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
 	})
 }
 
@@ -3895,8 +3954,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 
 	default:
 		if sub == "session new" || strings.HasPrefix(sub, "session new ") {
-			name := strings.TrimSpace(strings.TrimPrefix(sub, "session new"))
-			return m.handleNewSession(name, line, cmdTime, deltaMs)
+			return m.handleNewSession(strings.TrimPrefix(sub, "session new"), line, cmdTime, deltaMs)
 		}
 		if sub == "session set" || strings.HasPrefix(sub, "session set ") {
 			args := strings.TrimSpace(strings.TrimPrefix(sub, "session set"))
@@ -4045,7 +4103,9 @@ func ufaSessionHelpText() string {
 		"  ufa session help              show this help",
 		"  ufa session list              list all sessions",
 		"  ufa session select            interactively select a session",
-		"  ufa session new [name]        create a new named session",
+		"  ufa session new [-f <session>] [name]",
+		"                                create a new named session; -f records the",
+		"                                session (name or ID) it follows from",
 		"  ufa session set <id>          switch to an existing session",
 		"  ufa session get               show ID, name, and location of current session",
 		"  ufa session describe [-a]     show full session info; -a for agent description",
@@ -5472,20 +5532,13 @@ func main() {
 	if sessionID == "" {
 		sessionID = os.Getenv(EnvAgentSession)
 	}
-	if sessionID == "" || sessionID == "default" {
-		if clauditablePath, findErr := findBinary("clauditable"); findErr == nil {
-			getCmd := exec.Command(clauditablePath, "get-default-session")
-			getCmd.Env = append(environWithoutClauditableGuard(), EnvAgentRecordsPath+"="+recordsPath)
-			if out, runErr := getCmd.Output(); runErr == nil {
-				if id := strings.TrimSpace(string(out)); id != "" {
-					sessionID = id
-				}
-			}
-		}
-		if sessionID == "" || sessionID == "default" {
-			// Fallback when clauditable is unavailable
-			sessionID = fallbackDefaultSessionID(now, fcHostID)
-		}
+	// A daily default from an earlier day only ever arrives here because
+	// local-representative handed back the session a previous instance (or
+	// session-manager) last reported -- daily defaults can't be chosen
+	// explicitly -- so it means "the default", i.e. today's (see
+	// sessions_daily.go).
+	if sessionID == "" || sessionID == "default" || staleDailyDefault(sessionID, now) {
+		sessionID = resolveDefaultSessionID(recordsPath, now)
 	}
 	sessionDir := filepath.Join(recordsPath, sessionID)
 

@@ -463,7 +463,11 @@ function SessionDetail({
   onExpand,
   onCollapse,
 }: SessionDetailProps) {
-  const [tab, setTab] = useState<DetailTab>('details')
+  // Opens on the transcript (Step5Prompt.md Revision E) so moving to a new
+  // session shows what happened in it without an extra click; whichever tab
+  // is picked afterwards sticks across selections since this component isn't
+  // keyed by id.
+  const [tab, setTab] = useState<DetailTab>('transcript')
   const [renameInput, setRenameInput] = useState('')
   const [renaming, setRenaming] = useState(false)
 
@@ -517,11 +521,11 @@ function SessionDetail({
       </div>
 
       <div className="session-detail-tabs">
-        <button className={`session-tab${tab === 'details' ? ' active' : ''}`} onClick={() => setTab('details')}>
-          Details
-        </button>
         <button className={`session-tab${tab === 'transcript' ? ' active' : ''}`} onClick={() => setTab('transcript')}>
           View
+        </button>
+        <button className={`session-tab${tab === 'details' ? ' active' : ''}`} onClick={() => setTab('details')}>
+          Details
         </button>
       </div>
 

@@ -100,3 +100,34 @@ We have an issue to fix with sessions now - when we moved to defaults that inclu
 We want to both fix this bug, and also to introduce a 'follows from' field to session details. This 'follows from' will be applied to the new daily default if it switches while a federation-command instance which has had any activity switches. It may also be applied by calling 'new-session' with a -f argument and specifying the name or ID of the session the new one follows.
 
 We will also make it so the default session manager view is viewing the session rather than the session details (so we don't always have to switch the tab when we go to a new session).
+
+
+prompt: [`12896c4`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/12896c4aece3d38bd12452c80c32b76ff332e62b) → reply: [`05f7c45`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/05f7c451afb8ae208c0918066303d56525615865)
+
+## Reply E
+
+I fixed the daily-default bug, added a `follows_from` session field with a `new-session -f` flag, and made session-manager open on the View tab. None of it has been built or tested: `go test` and `gofmt` needed approval this session couldn't get, so I only checked it by reading the code.
+
+**On the bug:** I couldn't find any code, before or after the host-ID change, that ever moved a session to the next day. Once federation-command picks today's default, it treats it as an ordinary session ID. It reports that ID to LR, and LR passes it back on every restart. A brand-new instance can also inherit it through session-manager's current session. So a running or restarted instance stayed on the day it first started.
+
+- **Fix:** federation-command now treats a passed-back default from an earlier day as "use today's default". A running instance also checks once a minute and switches from an earlier day's default to today's. Sessions you chose yourself are never moved.
+- **`follows_from`:** it's a new line in `session.yaml`. When the day rolls over and that federation-command instance has run any command, the new default records the old one. `new-session -f <session> [name]` and `ufa session new -f ...` set it to a session you give by ID or name (quote names with spaces). Session-manager's Details tab shows it like any other field.
+- **Session-manager:** the session pane now opens on View, and its tab now comes before Details. The tab you pick stays when you select another session.
+
+**Things you might notice:**
+- **Restarts:** when a restarted instance replaces yesterday's default, it doesn't set `follows_from`. Only a running instance at rollover does.
+- **Session-manager's own current session:** it isn't rolled over. A stale default there is only corrected when federation-command starts with it.
+- **Session-manager's new-session:** it has no follows-from option.
+- **Committed frontend build:** session-manager serves a built copy of the frontend that I couldn't rebuild. The tab change won't show until `make build` is run.
+
+The new logic is in `federation-command/sessions_daily.go`, with tests in `sessions_daily_test.go`. The changes are wired into `main.go`, and I added a note to `docs/DistributedSessionsBrainstorm.md`. To check it, run `make -C federation-command test` and `make -C session-manager build`.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

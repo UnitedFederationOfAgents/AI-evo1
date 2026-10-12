@@ -213,6 +213,26 @@ var managedApps = map[string]launchSpec{
 			return args
 		},
 	},
+	"worker": {
+		binName:   "dungeon-keeper",
+		singleton: true,  // one per host for now (Step5SubstepGPrompt.md)
+		terminal:  false, // a background daemon; it has no UI of its own -- the worker tab shows its signals
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"watch",
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--name", "worker",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
 	"federation-command": {
 		binName:   "federation-command",
 		singleton: false, // federation-command is N-per-host

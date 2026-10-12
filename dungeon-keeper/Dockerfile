@@ -10,6 +10,9 @@ COPY dungeon-keeper/ ./dungeon-keeper/
 COPY clauditable/ ./clauditable/
 COPY ambiguous-agent/ ./ambiguous-agent/
 COPY clod/ ./clod/
+COPY representable/ ./representable/
+COPY ufa-loader/ ./ufa-loader/
+COPY ufa-version/ ./ufa-version/
 
 # Build dungeon-keeper
 WORKDIR /build/dungeon-keeper

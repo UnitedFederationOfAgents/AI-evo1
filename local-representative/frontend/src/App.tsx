@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
 import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -32,6 +32,7 @@ const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
   { name: 'robot', multi: false },
+  { name: 'worker', multi: false },
 ]
 
 interface LogEntry {
@@ -74,6 +75,10 @@ function useStatusWS() {
   // relayed down from agent-coordinator -- see tcavailability.go and
   // Step2Prompt.md. Drives the mic icon beside the camera/screenshot icon.
   const [tcAvailable, setTCAvailable] = useState(false)
+  // The worker tab: what dungeon-keeper last reported, and the answer to
+  // the last prompt submitted from it -- see local-representative/worker.go.
+  const [workerState, setWorkerState] = useState<WorkerStateMsg | null>(null)
+  const [workerReply, setWorkerReply] = useState<WorkerReplyMsg | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<Record<string, string>>({})
@@ -202,6 +207,15 @@ function useStatusWS() {
   const setAutoUpdate = useCallback((enabled: boolean) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'set-auto-update', payload: { enabled } }))
+    }
+  }, [])
+
+  const submitWork = useCallback((prompt: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setWorkerReply(null)
+      wsRef.current.send(JSON.stringify({ type: 'worker-submit', payload: { prompt } }))
+    } else {
+      setWorkerReply({ ok: false, error: 'not connected' })
     }
   }, [])
 
@@ -342,6 +356,12 @@ function useStatusWS() {
             // restarts -- see tcannounce.ts.
             noteTCStart('local', (msg.payload as ConvoStateMsg).started_at)
             break
+          case 'worker-state':
+            setWorkerState(msg.payload as WorkerStateMsg)
+            break
+          case 'worker-reply':
+            setWorkerReply(msg.payload as WorkerReplyMsg)
+            break
         }
       } catch {
         // ignore malformed messages
@@ -358,9 +378,9 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, setAutoUpdate,
+    rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
   }
 }
 
@@ -488,6 +508,103 @@ function FCCommandPanel({
             autoFocus
           />
           <button className="fc-cmd-send" onClick={submit}>run</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// WorkerPanel is the worker tab: a temporary prompt box that hands
+// prompt-only work to this host's dungeon-keeper, and the work signals it
+// reports, newest first -- see local-representative/worker.go.
+function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const submit = () => {
+    const text = prompt.trim()
+    if (!text || !healthy) return
+    onSubmit(text)
+    setPrompt('')
+  }
+
+  const signals = state?.signals ?? []
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="worker-submit">
+        <textarea
+          className="worker-prompt"
+          value={prompt}
+          rows={3}
+          placeholder={healthy ? 'prompt for the worker (runs prompt-only, in /tmp)… Ctrl+Enter to submit' : 'the worker is not running — launch it from the system tab'}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit()
+          }}
+          disabled={!healthy}
+        />
+        <button className="worker-submit-btn" onClick={submit} disabled={!healthy || !prompt.trim()}>submit</button>
+      </div>
+      {reply?.error && <div className="worker-error">{reply.error}</div>}
+      {signals.length === 0
+        ? <div className="service-empty">no work signals yet</div>
+        : (
+          <div className="worker-signals">
+            {signals.map(sig => (
+              <WorkerSignalRow
+                key={sig.id || sig.file}
+                signal={sig}
+                open={openId === (sig.id || sig.file)}
+                onToggle={() => setOpenId(openId === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+              />
+            ))}
+          </div>
+        )}
+    </div>
+  )
+}
+
+function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo; open: boolean; onToggle: () => void }) {
+  const when = new Date(signal.created_at).toLocaleString()
+  return (
+    <div className={`worker-signal worker-status-${signal.status}`}>
+      <button className="worker-signal-head" onClick={onToggle} title={signal.file}>
+        <span className="worker-signal-status">{signal.status}</span>
+        <span className="worker-signal-prompt">{signal.prompt}</span>
+        <span className="worker-signal-when">{when}</span>
+      </button>
+      {open && (
+        <div className="worker-signal-body">
+          <div className="worker-signal-detail">
+            {signal.role} · {signal.work_type}{signal.work_location ? ` in ${signal.work_location}` : ''}
+            {signal.mode ? ` · ${signal.mode}` : ''}
+            {signal.agent ? ` · ${signal.agent}` : ''}{signal.model ? ` (${signal.model})` : ''}
+          </div>
+          <pre className="worker-signal-text">{signal.prompt}</pre>
+          {signal.comment && <div className="worker-signal-comment">{signal.comment}</div>}
+          {signal.output
+            ? (
+              <>
+                {signal.output_trimmed && <div className="worker-signal-detail">output is long — showing only the end</div>}
+                <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
+              </>
+            )
+            : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
         </div>
       )}
     </div>
@@ -2520,9 +2637,9 @@ export default function App() {
   }
   const {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
-    acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -2736,6 +2853,14 @@ export default function App() {
                       <span className="fc-session-tag" title="active session">{fcSession}</span>
                     )}
                   </div>
+                  {activeTab === 'worker' && (
+                    <WorkerPanel
+                      healthy={getStatus('worker') === 'healthy'}
+                      state={workerState}
+                      reply={workerReply}
+                      onSubmit={submitWork}
+                    />
+                  )}
                   {activeTab === 'federation-command' && (
                     <>
                       <FCInstancePicker instances={fcInstances} selected={fc?.key ?? null} onSelect={selectFC} />

@@ -174,3 +174,35 @@ export interface RepoStateMsg {
   // is never rebuilt out from under.
   condoc_locked?: boolean
 }
+
+// The worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md): what the
+// host's dungeon-keeper reports -- see local-representative/worker.go.
+export interface WorkerSignalInfo {
+  id: string
+  file: string
+  role: string
+  prompt: string
+  agent?: string
+  model?: string
+  mode?: string
+  work_type: string
+  work_location?: string
+  status: string // "pending" | "processing" | "completed" | "failed"
+  created_at: number // unix ms
+  completed_at?: number
+  comment?: string
+  output?: string
+  output_trimmed?: boolean // only the end of the output is included
+}
+
+export interface WorkerStateMsg {
+  worker_id: string
+  agent_type: string
+  busy: boolean
+  signals: WorkerSignalInfo[]
+}
+
+export interface WorkerReplyMsg {
+  ok: boolean
+  error?: string
+}

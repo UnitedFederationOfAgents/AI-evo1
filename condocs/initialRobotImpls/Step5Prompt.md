@@ -150,11 +150,11 @@ I removed the once-a-minute check. federation-command now checks the day only wh
 I added a test, `TestRolloverAfterIdleDaysSkipsIntermediateDays`, for the 3-day case. It checks that FC jumps straight to today, records the old default as `follows_from`, and creates no sessions for the days in between. I also updated the rollover note in `docs/DistributedSessionsBrainstorm.md`. To check it, run `make -C federation-command test`.
 
 
-## <REPLACE-Revision|Retry> G
+## Substep G - Bring dungeon-keeper Into Integration
 
-<REPLACE-PROMPT>
+[Step 5 Substep G](Step5SubstepGPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep G is now active. Interact with the substep file (Step5SubstepGPrompt.md).

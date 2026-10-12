@@ -42,6 +42,7 @@ type WorkSignal struct {
 	Prompt       string     `json:"prompt"`
 	Agent        string     `json:"agent"`
 	Model        string     `json:"model"`
+	Mode         string     `json:"mode,omitempty"`   // ambiguous-agent mode: prompt, read, write or execute (blank means execute)
 	Holder       string     `json:"holder,omitempty"` // Current controller ID, blank when waiting
 	Status       WorkStatus `json:"status"`
 	CreatedAt    time.Time  `json:"created_at"`
@@ -55,6 +56,7 @@ type WorkEvent struct {
 	EventID      string    `json:"event_id"`
 	StatusUpdate string    `json:"status_update,omitempty"`
 	Comment      string    `json:"comment,omitempty"`
+	Output       string    `json:"output,omitempty"` // Captured agent output, on the event recorded when the agent finishes
 	Timestamp    time.Time `json:"timestamp"`
 }
 

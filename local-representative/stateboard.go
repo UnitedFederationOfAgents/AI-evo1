@@ -47,6 +47,7 @@ var stateboardApps = []struct{ clientName, label string }{
 	{"sessions", "session-manager"},
 	{"convo", "the-conversationalist"},
 	{"robot", "ianar"},
+	{"worker", "dungeon-keeper"},
 }
 
 // setStateboardKV records one custom key/value pair submitted by a connected

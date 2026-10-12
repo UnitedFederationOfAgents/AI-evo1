@@ -404,6 +404,21 @@ it:
 A robot step's run is given 2 minutes plus the `timeout`s and waits its
 instructions set, so `robot.wait-for-text` with `timeout: 10m` isn't cut off.
 
+## Worker tab
+
+The **worker** tab shows this host's dungeon-keeper, which LR launches as the
+one-per-host `worker` app (system tab, or `auto-launch: worker`). It runs
+`dungeon-keeper watch --auto-connect …`, connects back over representable as
+`worker`, and pushes its work signals (ongoing ones, plus the 20 most recent
+completed) as `worker-state`. dungeon-keeper has no UI of its own.
+
+For now the tab has a temporary prompt box: **submit** (or Ctrl+Enter) sends
+`__worker:submit {"prompt": …}` to dungeon-keeper, which writes an in-place
+work signal for `/tmp` in prompt-only mode (`ambiguous-agent -p`) and starts it
+straight away. Click a signal to see its prompt, the agent's output and how it
+finished. The output is also kept in the signal file in
+`/host-agent-files/work/complete/`.
+
 ## Files tab
 
 The **files** tab shows a wireframe-icon view (text / image / other — a small

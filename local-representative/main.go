@@ -342,6 +342,8 @@ type Server struct {
 	convoState    *ConvoStateMsg
 	robotMu       sync.RWMutex
 	robotState    *RobotStateMsg
+	workerMu      sync.RWMutex
+	workerState   *WorkerStateMsg // kept after dungeon-keeper disconnects, so its signals stay visible
 
 	// Files tab: where uploaded files land, and where "persist" moves them to
 	// (see files.go). listFiles() scans these directly, so no further
@@ -515,6 +517,10 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("robot") {
 		robotStatus = "healthy"
 	}
+	workerStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("worker") {
+		workerStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
@@ -522,7 +528,7 @@ func (s *Server) currentStatus() StatusMsg {
 			{Name: "convo", Status: convoStatus},
 			{Name: "sessions", Status: sessionsStatus},
 			{Name: "robot", Status: robotStatus},
-			{Name: "worker", Status: "healthy"},
+			{Name: "worker", Status: workerStatus},
 		},
 	}
 }
@@ -1117,6 +1123,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if rb := s.getRobotState(); rb != nil {
 			s.sendToClient(c, "robot-state", *rb)
 		}
+		if wk := s.getWorkerState(); wk != nil {
+			s.sendToClient(c, "worker-state", *wk)
+		}
 		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 		for _, mm := range s.currentModeMismatches() {
 			s.sendToClient(c, "mode-mismatch", mm)
@@ -1207,6 +1216,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			var req ControlLibRequest
 			if err := json.Unmarshal(m.Payload, &req); err == nil {
 				s.sendToClient(c, "control-reply", s.control.handleLibRequest(req))
+			}
+		case "worker-submit":
+			// The worker tab's temporary prompt box -- see worker.go.
+			var req WorkerSubmitRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				reply := WorkerReplyMsg{OK: true}
+				if err := s.submitWork(req); err != nil {
+					reply = WorkerReplyMsg{Error: err.Error()}
+				}
+				s.sendToClient(c, "worker-reply", reply)
 			}
 		}
 		switch m.Type {
@@ -1853,6 +1872,14 @@ func main() {
 			}
 			return
 		}
+		if name == "worker" {
+			if state == "disconnected" {
+				// The last worker-state is kept (see Server.workerState); the
+				// worker tab shows the service as unhealthy instead.
+				s.setModeMismatch("worker", false, "")
+			}
+			return
+		}
 		if isFCName(name) {
 			// Each FC instance connects under its own name, so this is one
 			// instance's state change or disconnect -- see fcinstances.go.
@@ -2012,6 +2039,15 @@ func main() {
 				}
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.control.setRobotOps(payload.Ops)
+				}
+			}
+			return
+		}
+		if name == "worker" {
+			if dataType == "worker-state" {
+				var payload WorkerStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.setWorkerState(payload)
 				}
 			}
 			return

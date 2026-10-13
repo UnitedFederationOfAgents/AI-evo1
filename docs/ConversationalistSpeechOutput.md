@@ -176,5 +176,12 @@ Sonic on Bedrock.
    messages, with a `speech-status` availability check that reuses
    `loadAWSConfig`. Once the server holds the audio, both human playback and
    the agent hand-off (delivery 2) become possible.
+
+   *Started (Step5SubstepGPrompt.md Revision I):* a separate Polly button
+   under the notepad's Speak button. `polly.go` signs a `SynthesizeSpeech`
+   call with `loadAWSConfig`'s credentials and returns the whole MP3 as one
+   `polly-audio` message to the tab that asked, which plays it. There is no
+   streaming, no availability check, and only one voice (`--polly-voice`,
+   default Joanna, `--polly-engine`, default standard) so far.
 3. **Later, if needed:** a local engine (D) as another backend behind the
    same interface, and speech-to-speech (E) as a separate mode.

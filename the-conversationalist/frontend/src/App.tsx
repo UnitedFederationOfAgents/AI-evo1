@@ -4,6 +4,7 @@ import type {
   NotepadMsg,
   NotesResultMsg,
   NotesSource,
+  PollyAudioMsg,
   ReprStatus,
   ReprStatusMsg,
   SaveResultMsg,
@@ -55,6 +56,10 @@ function useConversationalistWS() {
   // successful "notes-result" can record it as that panel's sent text.
   const [notes, setNotes] = useState<Record<NotesSource, NotesStatus>>(INITIAL_NOTES)
   const notesInFlightRef = useRef<Partial<Record<NotesSource, string>>>({})
+  // pollyResult is the latest "polly-audio" answer; PollyButton plays it if
+  // its id is the request it's waiting for (see polly.go).
+  const [pollyResult, setPollyResult] = useState<PollyAudioMsg | null>(null)
+  const pollySeqRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -183,6 +188,8 @@ function useConversationalistWS() {
                 ? { pending: false, sent: sentText, message: `appended to ${p.path ?? 'notes file'}` }
                 : { pending: false, sent: n[p.source].sent, error: p.error ?? 'append failed' },
             }))
+          } else if (msg.type === 'polly-audio') {
+            setPollyResult(msg.payload as PollyAudioMsg)
           } else if (msg.type === 'error') {
             setSaveStatus({ kind: 'error', message: String(msg.payload) })
           }
@@ -287,6 +294,17 @@ function useConversationalistWS() {
     [send],
   )
 
+  // requestPolly asks the server to synthesize text with AWS Polly and
+  // returns the request's id; the answer arrives as pollyResult.
+  const requestPolly = useCallback(
+    (text: string) => {
+      pollySeqRef.current += 1
+      send('polly-speak', { id: pollySeqRef.current, text })
+      return pollySeqRef.current
+    },
+    [send],
+  )
+
   return {
     connected,
     reprStatus,
@@ -313,6 +331,8 @@ function useConversationalistWS() {
     setNotepad,
     notes,
     sendToNotes,
+    pollyResult,
+    requestPolly,
   }
 }
 
@@ -478,6 +498,7 @@ interface TranscriptionPanelProps {
   onRecheck: () => void
   notes: NotesStatus
   onToNotes: (text: string) => void
+  onToNotepad: (text: string) => void
 }
 
 const TRANSCRIBE_ENGINE_LABELS: Record<string, string> = {
@@ -550,6 +571,7 @@ function TranscriptionPanel({
   onRecheck,
   notes,
   onToNotes,
+  onToNotepad,
 }: TranscriptionPanelProps) {
   const hasTranscript = Boolean(transcript.trim() || partialTranscript.trim())
   // What the window shows, partial result included.
@@ -575,6 +597,14 @@ function TranscriptionPanel({
           Save to File
         </button>
         <ToNotesButton connected={connected} text={shownTranscript} status={notes} onSend={onToNotes} />
+        <button
+          className="btn-secondary"
+          disabled={!connected || !hasTranscript}
+          title="add the transcript to the end of the shared notepad"
+          onClick={() => onToNotepad(shownTranscript)}
+        >
+          To Notepad
+        </button>
         <button className="btn-secondary" disabled={!connected || !hasTranscript} onClick={onClear}>
           Clear
         </button>
@@ -614,10 +644,13 @@ interface NotepadPanelProps {
   onChange: (text: string) => void
   notes: NotesStatus
   onToNotes: (text: string) => void
+  pollyResult: PollyAudioMsg | null
+  onPolly: (text: string) => number
 }
 
-function NotepadPanel({ connected, text, onChange, notes, onToNotes }: NotepadPanelProps) {
+function NotepadPanel({ connected, text, onChange, notes, onToNotes, pollyResult, onPolly }: NotepadPanelProps) {
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [pollyError, setPollyError] = useState<string | undefined>()
 
   // speakText reads the textarea's current selection if there is one, else
   // the whole notepad -- read at click time rather than from `text` so a
@@ -647,8 +680,19 @@ function NotepadPanel({ connected, text, onChange, notes, onToNotes }: NotepadPa
           spellCheck={false}
           onChange={(e) => onChange(e.target.value)}
         />
-        <SpeakButton getText={speakText} disabled={!text.trim()} />
+        <div className="notepad-speak-buttons">
+          <SpeakButton getText={speakText} disabled={!text.trim()} />
+          <PollyButton
+            connected={connected}
+            getText={speakText}
+            disabled={!text.trim()}
+            result={pollyResult}
+            onRequest={onPolly}
+            onError={setPollyError}
+          />
+        </div>
       </div>
+      {pollyError && <div className="polly-error">{pollyError}</div>}
     </div>
   )
 }
@@ -709,6 +753,120 @@ function SpeakButton({ getText, disabled }: { getText: () => string; disabled: b
       onClick={toggle}
     >
       {SPEAK_ICON}
+    </button>
+  )
+}
+
+// ---- AWS Polly speech (Step5SubstepGPrompt.md Revision I) ----
+//
+// Option B of docs/ConversationalistSpeechOutput.md, as one isolated button
+// under SpeakButton: the server synthesizes the text with Polly (polly.go)
+// and only this tab plays the returned audio.
+
+// POLLY_ICON is SPEAK_ICON's balloon with a "P" in it.
+const POLLY_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-9l-4 3.5V17H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
+    <path d="M10 14V7.5h2.5a2 2 0 0 1 0 4H10" />
+  </svg>
+)
+
+// POLLY_MAX_CHARS matches polly.go's pollyMaxChars.
+const POLLY_MAX_CHARS = 3000
+
+// PollyButton toggles Polly speech of getText()'s result: click to request
+// and play it, click again to cancel the wait or stop playback. A failure
+// is reported through onError and cleared on the next click.
+function PollyButton({ connected, getText, disabled, result, onRequest, onError }: {
+  connected: boolean
+  getText: () => string
+  disabled: boolean
+  result: PollyAudioMsg | null
+  onRequest: (text: string) => number
+  onError: (message?: string) => void
+}) {
+  // waitingId is the request whose answer should be played; 0 when none.
+  const [waitingId, setWaitingId] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const audioRef = useRef<{ audio: HTMLAudioElement; url: string } | null>(null)
+
+  const stopAudio = useCallback(() => {
+    const cur = audioRef.current
+    audioRef.current = null
+    if (cur) {
+      cur.audio.pause()
+      URL.revokeObjectURL(cur.url)
+    }
+    setPlaying(false)
+  }, [])
+
+  // Don't keep talking after the panel goes away.
+  useEffect(() => stopAudio, [stopAudio])
+
+  // A request in flight on a dropped socket will never be answered.
+  useEffect(() => {
+    if (!connected) setWaitingId(0)
+  }, [connected])
+
+  useEffect(() => {
+    if (!result || waitingId === 0 || result.id !== waitingId) return
+    setWaitingId(0)
+    if (result.error || !result.audio) {
+      onError(`Polly: ${result.error ?? 'no audio returned'}`)
+      return
+    }
+    const bytes = Uint8Array.from(atob(result.audio), (ch) => ch.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: result.content_type || 'audio/mpeg' }))
+    const audio = new Audio(url)
+    audio.onended = stopAudio
+    audio.onerror = () => {
+      stopAudio()
+      onError('Polly: the browser could not play the audio')
+    }
+    stopAudio()
+    audioRef.current = { audio, url }
+    setPlaying(true)
+    audio.play().catch((err) => {
+      stopAudio()
+      onError(`Polly: playback failed: ${String(err)}`)
+    })
+  }, [result, waitingId, stopAudio, onError])
+
+  const busy = waitingId !== 0 || playing
+
+  const toggle = useCallback(() => {
+    onError(undefined)
+    if (busy) {
+      setWaitingId(0)
+      stopAudio()
+      return
+    }
+    const text = getText().trim()
+    if (!text) return
+    const chars = [...text].length
+    if (chars > POLLY_MAX_CHARS) {
+      onError(`Polly: ${chars} characters is over its ${POLLY_MAX_CHARS}-character limit -- select a shorter part`)
+      return
+    }
+    setWaitingId(onRequest(text))
+  }, [busy, getText, onRequest, onError, stopAudio])
+
+  return (
+    <button
+      type="button"
+      className={`speak-btn${busy ? ' speak-btn-active' : ''}${waitingId !== 0 ? ' speak-btn-waiting' : ''}`}
+      disabled={!busy && (disabled || !connected)}
+      title={
+        waitingId !== 0
+          ? 'waiting for AWS Polly -- click to cancel'
+          : playing
+            ? 'stop speaking'
+            : 'speak the notepad (or its selected text) aloud with AWS Polly'
+      }
+      aria-pressed={busy}
+      onClick={toggle}
+    >
+      {POLLY_ICON}
     </button>
   )
 }
@@ -841,7 +999,16 @@ export default function App() {
     setNotepad,
     notes,
     sendToNotes,
+    pollyResult,
+    requestPolly,
   } = useConversationalistWS()
+
+  // appendToNotepad adds text to the end of the shared notepad on a line of
+  // its own -- the transcription window's "To Notepad" button (Revision I).
+  const appendToNotepad = (text: string) => {
+    if (!notepad) setNotepad(text)
+    else setNotepad(`${notepad}${notepad.endsWith('\n') ? '' : '\n'}${text}`)
+  }
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
@@ -883,6 +1050,7 @@ export default function App() {
           onRecheck={recheckTranscribe}
           notes={notes.transcript}
           onToNotes={(text) => sendToNotes('transcript', text)}
+          onToNotepad={appendToNotepad}
         />
         <NotepadPanel
           connected={connected}
@@ -890,6 +1058,8 @@ export default function App() {
           onChange={setNotepad}
           notes={notes.notepad}
           onToNotes={(text) => sendToNotes('notepad', text)}
+          pollyResult={pollyResult}
+          onPolly={requestPolly}
         />
       </div>
     </div>

@@ -86,6 +86,17 @@ export interface NotesResultMsg {
   path?: string
 }
 
+// PollyAudioMsg is the "polly-audio" WebSocket payload answering a
+// "polly-speak" request (see polly.go): base64 audio on success, else error.
+// id echoes the request's id.
+export interface PollyAudioMsg {
+  id: number
+  audio?: string
+  content_type?: string
+  voice?: string
+  error?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -95,4 +106,5 @@ export type ServerMsg =
   | { type: 'notepad'; payload: NotepadMsg }
   | { type: 'transcribe-status'; payload: TranscribeStatusMsg }
   | { type: 'notes-result'; payload: NotesResultMsg }
+  | { type: 'polly-audio'; payload: PollyAudioMsg }
   | { type: 'error'; payload: string }

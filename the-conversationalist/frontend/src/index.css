@@ -315,6 +315,26 @@ body {
 .speak-btn-active,
 .speak-btn-active:hover:not(:disabled) { color: #4fc1ff; border-color: #007acc; }
 
+/* ---- AWS Polly (Step5SubstepGPrompt.md Revision I) --
+   App.tsx's PollyButton stacks under SpeakButton; it pulses while waiting
+   for the server's audio, and a failure shows on a line under the notepad. */
+
+.notepad-speak-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.speak-btn-waiting { animation: speak-btn-wait 1s ease-in-out infinite alternate; }
+
+@keyframes speak-btn-wait { from { opacity: 1; } to { opacity: 0.4; } }
+
+.polly-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #e07070;
+}
+
 /* ---- To Notes (Step5SubstepGPrompt.md Revision C) --
    App.tsx's ToNotesButton, in the transcription controls row and at the
    right end of the notepad header, with a one-line result beside it. */

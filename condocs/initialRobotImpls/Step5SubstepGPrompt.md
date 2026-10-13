@@ -251,3 +251,27 @@ Let's add AWS polly support to our TTS.
 For now we will only add an isolated button next to the shared notepad.
 
 Let's also add a button to the transcription area -- "to notepad" -- this brings the transcribed text to the shared notepad area.
+
+
+prompt: [`156814e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/156814e74bca88e3fa0ee44fc0de2c9b2b94518d) → reply: [`566d92a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/566d92abd2e2f3f216ffdeb4017e57331fffed3f)
+
+## Reply I
+
+I added an AWS Polly button next to the shared notepad and a **To Notepad** button to the transcription window in the-conversationalist. None of it is built or tested: `gofmt`, `go vet`, `go test` and `tsc` all needed approval this session couldn't get, so please run `make test` and `make build` in `the-conversationalist`. The Polly button sits under the existing browser Speak button and reads the selected text, or the whole notepad if nothing is selected. The server sends that text to Polly using the same AWS credentials and region as Transcribe, and only the tab that clicked plays the MP3 that comes back. The new code is in `polly.go`, with tests in `polly_test.go`. To Notepad adds the transcript (including the part still being heard) to the end of the notepad on its own line, and leaves the transcription window as it is.
+
+- **No new dependency:** I called Polly by signing the request with the AWS SDK module the app already uses, instead of adding the separate Polly package, which would have needed new `go.sum` entries I couldn't fetch.
+- **Voice:** it's Joanna with the standard engine by default. You can change these with the new `--polly-voice` and `--polly-engine` flags. Whatever AWS identity the app runs as needs the `polly:SynthesizeSpeech` permission.
+- **Limits:** text over Polly's 3,000-character limit is refused with a message suggesting you select a shorter part. Errors from AWS, such as AccessDenied, show in red under the notepad. Clicking the button again cancels the wait or stops playback.
+- **Not done yet:** there's no Polly availability indicator like Transcribe's, and the audio is sent in one piece rather than streamed.
+
+The frontend changes are in `App.tsx`, `types.ts` and `index.css`, and I added a short note on where Polly stands to `docs/ConversationalistSpeechOutput.md`.
+
+
+## <REPLACE-Revision|Retry> J
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

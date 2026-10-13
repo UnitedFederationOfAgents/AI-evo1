@@ -103,6 +103,12 @@ type Server struct {
 	notesMu   sync.Mutex
 	notesFile string
 
+	// Polly voice and engine for the notepad's Polly button (see polly.go).
+	// pollyURL overrides Polly's regional endpoint; only tests set it.
+	pollyVoice  string
+	pollyEngine string
+	pollyURL    string
+
 	// startedAt is when this process started. Reported (as started_at) in
 	// self-info and convo-state so every UI down the chain -- TC's own, LR's
 	// and AC's -- can tell a fresh start or restart apart from a reconnect to
@@ -116,10 +122,12 @@ func newServer() *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:    make(map[*wsClient]bool),
-		reprStatus: "disconnected",
-		notesFile:  defaultNotesFile(),
-		startedAt:  time.Now(),
+		clients:     make(map[*wsClient]bool),
+		reprStatus:  "disconnected",
+		notesFile:   defaultNotesFile(),
+		pollyVoice:  defaultPollyVoice,
+		pollyEngine: defaultPollyEngine,
+		startedAt:   time.Now(),
 	}
 }
 
@@ -282,6 +290,15 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		}
 		json.Unmarshal(m.Payload, &p)
 		s.handleAppendNotes(c, p.Source, p.Text)
+
+	// Notepad's Polly button: see polly.go.
+	case "polly-speak":
+		var p struct {
+			ID   uint64 `json:"id"`
+			Text string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handlePollySpeak(c, p.ID, p.Text)
 	}
 }
 
@@ -360,9 +377,13 @@ func main() {
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
 	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role -- else "+defaultAWSRegion+")")
 	notesFile := flag.String("notes-file", "", "file the \"To Notes\" buttons append to (default ~/notes-input.txt)")
+	pollyVoice := flag.String("polly-voice", defaultPollyVoice, "AWS Polly voice for the notepad's Polly button")
+	pollyEngine := flag.String("polly-engine", defaultPollyEngine, "AWS Polly engine (standard, neural, ...); the voice must support it")
 	flag.Parse()
 
 	s := newServer()
+	s.pollyVoice = *pollyVoice
+	s.pollyEngine = *pollyEngine
 	s.httpPort = *port
 	s.name = *name
 	s.devMode = *devMode

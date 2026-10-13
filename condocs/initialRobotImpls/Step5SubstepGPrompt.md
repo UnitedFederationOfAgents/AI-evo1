@@ -270,3 +270,20 @@ The frontend changes are in `App.tsx`, `types.ts` and `index.css`, and I added a
 ## Revision J
 
 For federation-command let's add the 'session-note' and 'session-resource' aliases for our new session addition commands.
+
+
+prompt: [`4a87da8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4a87da8db1cba115909c550b723e54c836356302) → reply: [`c8e925a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/c8e925a4efd7c6d043269186553c1841b1932072)
+
+## Reply J
+
+I added `session-note <text>` and `session-resource <path> [-name <name>]` to federation-command as aliases for `ufa session note` and `ufa session resource`. They're in `federation-command/main.go`, sit next to the existing `describe-session`/`rename-session` aliases, and call the same handlers, so they behave the same way. `ufa session help` now mentions them too. Nothing is built or tested, because `go build` needed approval this session couldn't get; please run `make test` and `make build` in `federation-command`.
+
+
+## <REPLACE-Revision|Retry> K
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

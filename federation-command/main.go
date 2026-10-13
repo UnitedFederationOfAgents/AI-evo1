@@ -3731,6 +3731,16 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m.handleRenameSession(args, line, cmdTime, deltaMs)
 	}
 
+	// session-note <text> (alias for "ufa session note")
+	if line == "session-note" || strings.HasPrefix(line, "session-note ") {
+		return m.handleSessionNote(strings.TrimPrefix(line, "session-note"), line, cmdTime, deltaMs)
+	}
+
+	// session-resource <path> [-name <name>] (alias for "ufa session resource")
+	if line == "session-resource" || strings.HasPrefix(line, "session-resource ") {
+		return m.handleSessionResource(strings.TrimPrefix(line, "session-resource"), line, cmdTime, deltaMs)
+	}
+
 	// ufa [subcommand...]
 	if line == "ufa" || strings.HasPrefix(line, "ufa ") {
 		return m.handleUFACommand(line, cmdTime, deltaMs)
@@ -4122,6 +4132,7 @@ func ufaSessionHelpText() string {
 		"                                attach a file to the current session",
 		"  ufa session archive           archive all current sessions",
 		"",
+		sessionStyle.Render("note and resource are also available as 'session-note' and 'session-resource'"),
 		sessionStyle.Render("each session has an ID (folder name) and a name stored in session.yaml"),
 		sessionStyle.Render("session IDs ending in '-default' are reserved for daily defaults"),
 	}

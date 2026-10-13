@@ -292,12 +292,14 @@ I added a **Wake Up** button to the robot's Simple tab (`ianar`), but I haven't 
 
 The backend is a new `wakeScreen` in `screenstate.go` plus a `wake-screen` message handled in `robot.go` and `main.go`, with four new tests in `screenstate_test.go`. The frontend changes are in `App.tsx` and `types.ts`.
 
+## Resource 2 -- Wake Up Failure
 
-## <REPLACE-Revision|Retry> L
+Screen
 
-<REPLACE-PROMPT>
+- [screenshot-1791905500637.png (desktop01-itjf)](e22ace3c_screenshot-1791905500637.png)
 
+## Revision L
 
-## Human-Prompt
+The wake up button does not work when the screen is asleep - this is the whole point.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+(If the screen is locked it should unlock it...)

@@ -303,6 +303,17 @@ func (s *Server) saveTranscript(c *wsClient) {
 	s.sendToClient(c, "save-result", SaveResultMsg{Success: true, FileID: uploaded.ID, Name: uploaded.Name})
 }
 
+// clearTranscript discards c's accumulated final transcript -- the
+// transcription window's "Clear" button (Step5SubstepGPrompt.md Revision G).
+// The frontend clears its own copy; this keeps a later saveTranscript from
+// writing out text the user already cleared. A running session keeps going,
+// and its subsequent results accumulate afresh.
+func (s *Server) clearTranscript(c *wsClient) {
+	c.transcribeMu.Lock()
+	c.finalText.Reset()
+	c.transcribeMu.Unlock()
+}
+
 // uploadedFile mirrors the subset of local-representative's FileInfo JSON
 // (local-representative/files.go) this caller reads back.
 type uploadedFile struct {

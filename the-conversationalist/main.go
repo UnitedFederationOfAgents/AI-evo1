@@ -257,6 +257,9 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 	case "save-transcript":
 		s.saveTranscript(c)
 
+	case "clear-transcript":
+		s.clearTranscript(c)
+
 	// Manual "Recheck" of transcription-engine availability: see
 	// transcribe_status.go.
 	case "recheck-transcribe":

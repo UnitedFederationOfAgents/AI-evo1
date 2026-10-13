@@ -141,3 +141,31 @@ func TestStopTranscriptionNoSession(t *testing.T) {
 	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
 	s.stopTranscription(c) // must not panic
 }
+
+// TestClearTranscriptDiscardsAccumulatedText verifies the "Clear" button's
+// clear-transcript (Revision G) empties c.finalText, so a following Save
+// reports "no transcript to save" rather than writing the cleared text.
+func TestClearTranscriptDiscardsAccumulatedText(t *testing.T) {
+	s := newServer()
+	c := &wsClient{send: make(chan []byte, 4), done: make(chan struct{})}
+	c.finalText.WriteString("some transcript text")
+
+	s.clearTranscript(c)
+	if c.finalText.Len() != 0 {
+		t.Fatalf("finalText = %q after clear, want empty", c.finalText.String())
+	}
+
+	s.saveTranscript(c)
+	select {
+	case raw := <-c.send:
+		var m wsMsg
+		json.Unmarshal(raw, &m)
+		var p SaveResultMsg
+		json.Unmarshal(m.Payload, &p)
+		if p.Success || p.Error != "no transcript to save" {
+			t.Errorf("save after clear = %+v, want error %q", p, "no transcript to save")
+		}
+	default:
+		t.Fatal("expected a save-result message to be queued")
+	}
+}

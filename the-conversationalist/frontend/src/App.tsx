@@ -248,6 +248,18 @@ function useConversationalistWS() {
     send('save-transcript', {})
   }, [send])
 
+  // clearTranscript empties the transcription window (Revision G) and the
+  // server's accumulated copy, so a later Save can't write the cleared text.
+  // Recording, if running, carries on into the now-empty window. The To
+  // Notes "last sent" marker resets too, so new text can always be appended.
+  const clearTranscript = useCallback(() => {
+    send('clear-transcript', {})
+    setTranscript('')
+    setPartialTranscript('')
+    setSaveStatus({ kind: 'idle' })
+    setNotes((n) => ({ ...n, transcript: { pending: n.transcript.pending } }))
+  }, [send])
+
   const recheckTranscribe = useCallback(() => {
     send('recheck-transcribe', {})
   }, [send])
@@ -294,6 +306,7 @@ function useConversationalistWS() {
     startRecording,
     stopRecording,
     saveTranscript,
+    clearTranscript,
     transcribeStatus,
     recheckTranscribe,
     notepad,
@@ -461,6 +474,7 @@ interface TranscriptionPanelProps {
   onStart: () => void
   onStop: () => void
   onSave: () => void
+  onClear: () => void
   onRecheck: () => void
   notes: NotesStatus
   onToNotes: (text: string) => void
@@ -532,6 +546,7 @@ function TranscriptionPanel({
   onStart,
   onStop,
   onSave,
+  onClear,
   onRecheck,
   notes,
   onToNotes,
@@ -560,6 +575,9 @@ function TranscriptionPanel({
           Save to File
         </button>
         <ToNotesButton connected={connected} text={shownTranscript} status={notes} onSend={onToNotes} />
+        <button className="btn-secondary" disabled={!connected || !hasTranscript} onClick={onClear}>
+          Clear
+        </button>
         {recording && <span className="conn-dot connecting transcribe-recording-dot" title="recording" />}
       </div>
       <div className="transcribe-output">
@@ -816,6 +834,7 @@ export default function App() {
     startRecording,
     stopRecording,
     saveTranscript,
+    clearTranscript,
     transcribeStatus,
     recheckTranscribe,
     notepad,
@@ -860,6 +879,7 @@ export default function App() {
           onStart={startRecording}
           onStop={stopRecording}
           onSave={saveTranscript}
+          onClear={clearTranscript}
           onRecheck={recheckTranscribe}
           notes={notes.transcript}
           onToNotes={(text) => sendToNotes('transcript', text)}

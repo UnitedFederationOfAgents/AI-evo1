@@ -202,3 +202,28 @@ When no region is configured anywhere, `loadAWSConfig` in `transcribe.go` now us
 ## Revision G
 
 Let's add a 'clear' button to the transcription window in TC. (It clears the dialog)
+
+
+prompt: [`0ac1473`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0ac147354eeefe2549a12b4f83c109476ee7dd97) → reply: [`02b3228`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/02b3228462f0ce83a89eb6dc3f6a2f3dc79893bc)
+
+## Reply G
+
+I added a **Clear** button to the transcription window in TC, but I haven't built or tested it: `go test` needed approval this session couldn't get. Please run `make test` and `make build` in `the-conversationalist`.
+
+- **What it clears:** the window's text, including the partial result still being heard, along with any save message under it.
+- **When you can press it:** only while there's text in the window.
+- **Save to File after a clear:** the button also tells the server to drop its own saved copy of the transcript. Without that, Save to File would still have written out the text you'd cleared.
+- **While recording:** recording keeps going, and new speech fills the empty window.
+- **To Notes:** it forgets what it last sent, so new text can always be appended.
+
+The changes are in `transcribe.go` (a new `clearTranscript`), `main.go` (handling the new `clear-transcript` message) and `frontend/src/App.tsx`. There's a new test in `transcribe_test.go` checking that Save to File after a clear reports "no transcript to save".
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

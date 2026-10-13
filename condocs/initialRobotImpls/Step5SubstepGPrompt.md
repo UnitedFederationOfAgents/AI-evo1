@@ -244,11 +244,10 @@ I added tests in each component and documented the new types and subcommands in 
 One problem remains: a note added on a host that doesn't own the session can disappear from that host's view. The next sync replaces the local `session.jsonl` with the owner's copy, and that copy doesn't have the note. Commands run on a non-owning host have the same problem today.
 
 
-## <REPLACE-Revision|Retry> I
+## Revision I
 
-<REPLACE-PROMPT>
+Let's add AWS polly support to our TTS.
 
+For now we will only add an isolated button next to the shared notepad.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's also add a button to the transcription area -- "to notepad" -- this brings the transcribed text to the shared notepad area.

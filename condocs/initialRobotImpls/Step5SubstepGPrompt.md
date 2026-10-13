@@ -267,11 +267,6 @@ I added an AWS Polly button next to the shared notepad and a **To Notepad** butt
 The frontend changes are in `App.tsx`, `types.ts` and `index.css`, and I added a short note on where Polly stands to `docs/ConversationalistSpeechOutput.md`.
 
 
-## <REPLACE-Revision|Retry> J
+## Revision J
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+For federation-command let's add the 'session-note' and 'session-resource' aliases for our new session addition commands.

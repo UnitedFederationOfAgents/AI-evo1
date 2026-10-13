@@ -417,6 +417,52 @@ body {
 
 .transcript-expand-btn:hover { color: #ccc; border-color: #555; }
 
+/* A resource's "open" link sits just before its "expand". */
+a.transcript-expand-btn { text-decoration: none; }
+.transcript-expand-btn + .transcript-expand-btn { margin-left: 0; }
+
+/* Event type tags -- see App.tsx's EVENT_TYPE_LABELS. */
+.transcript-type-ai_invocation { color: #c9a0ff; }
+.transcript-type-note { color: #e0c060; }
+.transcript-type-resource { color: #60b8e0; }
+
+/* Notes and resources are attached by a person, not run -- set apart by a
+   coloured edge. */
+.transcript-entry-note { border-left: 3px solid #8a7430; }
+.transcript-entry-resource { border-left: 3px solid #306f8a; }
+
+/* ---- Annotate bar (add a note / resource to the session) ---- */
+
+.annotate-bar {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 16px;
+  border-bottom: 1px solid #333;
+}
+
+.annotate-note-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 34px;
+  background: #1a1a1a;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.annotate-note-input:focus { outline: none; border-color: #555; }
+
+.annotate-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* ---- Expanded turn (its -processed file) ---- */
 
 /* Wraps the transcript so it can be hidden, not unmounted, while a turn is

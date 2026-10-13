@@ -25,6 +25,8 @@ export default defineConfig({
         target: 'ws://localhost:8085',
         ws: true,
       },
+      // Attached resources' content (annotations.go's handleResource).
+      '/api': 'http://localhost:8085',
     },
   },
   build: {

@@ -226,3 +226,29 @@ Let's add two new capabilities to session manager - we want to be able to add a 
 These will be a distinct type (a note is just a text resource).
 
 While we're at it let's correctly distinguish an AI invocation from a command execution in the 'type' field. We don't need to make any of these changes retroactively to existing sessions, just to the way they are created going forward.
+
+
+prompt: [`2d496c8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2d496c8376aefb35855a1d89fc7184ae25776fe3) → reply: [`93550b6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/93550b63a7a6c466ae27cd79172871ca489f3e9e)
+
+## Reply H
+
+Sessions now support notes and resources, in both session-manager and federation-command, and new records label AI runs `ai_invocation` instead of `command_execution`. None of it is built or tested: `go test`, `tsc`, `gofmt` and `git status` all needed approval this session couldn't get. Please run `make test` and `make build` in `clauditable`, `session-manager`, `federation-command` and `dungeon-keeper`.
+
+- **One writer:** clauditable has two new subcommands, `add-note` and `add-resource` (in `clauditable/annotate.go`). Each writes a normal record with event type `note` or `resource`, so the existing transcript and sync code pick it up. Notes are redacted like any other record; a resource's file is copied into the session folder. Both session-manager and FC call these subcommands rather than writing the files themselves.
+- **session-manager:** the transcript view has a note box and an **Add Resource…** button (files up to 25 MiB). Each transcript row now shows its type (command, AI, note or resource), and resource rows have an **open** link. If the resource isn't on this host yet, it's pulled from the other host when you open it. Opened files are served in a sandbox, so uploaded HTML can't run scripts on the app's page. The server code is in a new `annotations.go`.
+- **federation-command:** two new commands, `ufa session note <text>` and `ufa session resource <path> [-name <name>]`, in a new `sessions_annotate.go`.
+- **The type field:** clauditable now marks a run `ai_invocation` when `UFA_AGENT` names an agent, and a new `UFA_EVENT_TYPE` variable can override that. dungeon-keeper's agent runs didn't set `UFA_AGENT`, so they would still have been recorded as commands; it now sets the agent, model and type. Existing sessions are unchanged, so their old AI runs still show as "command".
+
+I added tests in each component and documented the new types and subcommands in `clauditable/RECORD_SCHEMAS.md`.
+
+One problem remains: a note added on a host that doesn't own the session can disappear from that host's view. The next sync replaces the local `session.jsonl` with the owner's copy, and that copy doesn't have the note. Commands run on a non-owning host have the same problem today.
+
+
+## <REPLACE-Revision|Retry> I
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

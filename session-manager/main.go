@@ -246,6 +246,24 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	case "archive-sessions":
 		s.handleArchiveSessions(c)
+
+	// Notes and resources attached to a session -- see annotations.go.
+	case "add-note":
+		var p struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAddNote(c, strings.TrimSpace(p.ID), p.Text)
+
+	case "add-resource":
+		var p struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Content string `json:"content"` // base64
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAddResource(c, strings.TrimSpace(p.ID), strings.TrimSpace(p.Name), p.Content)
 	}
 }
 
@@ -254,6 +272,7 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/resource", s.handleResource)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.

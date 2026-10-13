@@ -469,6 +469,14 @@ func reportChainCall(repr *representable.Client, method, target string, start ti
 // empty because its remote peer was unreachable isn't indistinguishable from
 // one that's genuinely empty.
 func (s *Server) triggerSessionSync(id string) (incomplete bool) {
+	return s.triggerSessionSyncGlobs(id, sessionSyncGlobs)
+}
+
+// triggerSessionSyncGlobs is triggerSessionSync for an explicit glob list --
+// annotations.go's handleResource uses it to pull one resource's content,
+// which sessionSyncGlobs leaves out so a transcript view doesn't drag every
+// attached file along.
+func (s *Server) triggerSessionSyncGlobs(id string, globs []string) (incomplete bool) {
 	s.reprMu.Lock()
 	client := s.reprClient
 	host := s.reprHost
@@ -480,7 +488,7 @@ func (s *Server) triggerSessionSync(id string) (incomplete bool) {
 	if port == "" {
 		return false
 	}
-	for _, glob := range sessionSyncGlobs {
+	for _, glob := range globs {
 		if !requestSessionPull(client, host, port, id, glob) {
 			incomplete = true
 		}

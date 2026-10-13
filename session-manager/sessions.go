@@ -561,24 +561,30 @@ type sessionLogEvent struct {
 	DurationMs int64  `json:"duration_ms"`
 	ExitCode   int    `json:"exit_code"`
 	RecordPath string `json:"record_path"`
+
+	Metadata map[string]string `json:"metadata"`
 }
 
 // SessionEntry is one readable turn of a session's transcript: the event
 // header plus its IN>>/OUT>>/ERR>> blocks with prefixes stripped. Record is
 // the turn's record ID (see recordIDFromPath) -- what "view-processed" takes
 // to expand the turn into its full -processed file; empty when the header
-// carries no record_path.
+// carries no record_path. EventType tells a command_execution, an
+// ai_invocation, a note and a resource apart (see clauditable's
+// RECORD_SCHEMAS.md); a resource's Metadata names its file
+// (resource_name/resource_file/resource_size).
 type SessionEntry struct {
-	Timestamp  string `json:"timestamp"`
-	EventType  string `json:"event_type,omitempty"`
-	Agent      string `json:"agent,omitempty"`
-	Model      string `json:"model,omitempty"`
-	DurationMs int64  `json:"duration_ms"`
-	ExitCode   int    `json:"exit_code"`
-	Record     string `json:"record,omitempty"`
-	Input      string `json:"input,omitempty"`
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Timestamp  string            `json:"timestamp"`
+	EventType  string            `json:"event_type,omitempty"`
+	Agent      string            `json:"agent,omitempty"`
+	Model      string            `json:"model,omitempty"`
+	DurationMs int64             `json:"duration_ms"`
+	ExitCode   int               `json:"exit_code"`
+	Record     string            `json:"record,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	Input      string            `json:"input,omitempty"`
+	Output     string            `json:"output,omitempty"`
+	Error      string            `json:"error,omitempty"`
 }
 
 // SessionView is the "view session" response: id/name plus its parsed
@@ -649,6 +655,7 @@ func parseSessionLog(data []byte) []SessionEntry {
 					DurationMs: ev.DurationMs,
 					ExitCode:   ev.ExitCode,
 					Record:     recordIDFromPath(ev.RecordPath),
+					Metadata:   ev.Metadata,
 				}
 				in.Reset()
 				out.Reset()

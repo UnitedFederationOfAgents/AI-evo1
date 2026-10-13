@@ -70,6 +70,7 @@ const (
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
+	EnvUFAEventType            = "UFA_EVENT_TYPE" // Overrides the event_type eventTypeFor would pick
 	EnvUFAVerbosityManagement  = "UFA_VERBOSITY_MANAGEMENT"
 	EnvUFAVerbosityAfterLine   = "UFA_VERBOSITY_AFTER_LINE"
 	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
@@ -109,6 +110,16 @@ func main() {
 	// rename-session <new-name>: update the name field in the current session's session.yaml
 	if os.Args[1] == "rename-session" {
 		os.Exit(runRenameSession(os.Args[2:]))
+	}
+
+	// add-note [text...]: attach a note to the current session (text from stdin when no args)
+	if os.Args[1] == "add-note" {
+		os.Exit(runAddNote(os.Args[2:], os.Stdin))
+	}
+
+	// add-resource [-name <name>] <path>: attach a file to the current session
+	if os.Args[1] == "add-resource" {
+		os.Exit(runAddResource(os.Args[2:]))
 	}
 
 	// If a parent clauditable already set the guard, pass through without recording.
@@ -307,7 +318,7 @@ func main() {
 	record := records.Record{
 		Event: records.Event{
 			Timestamp:  startTime.Format(time.RFC3339),
-			EventType:  "command_execution",
+			EventType:  eventTypeFor(agent, os.Getenv(EnvUFAEventType)),
 			Host:       host,
 			Head:       head,
 			Agent:      agent,
@@ -335,6 +346,20 @@ func main() {
 	}
 
 	os.Exit(exitCode)
+}
+
+// eventTypeFor picks a wrapped command's event_type. override (UFA_EVENT_TYPE)
+// wins when set. Otherwise the run is an AI invocation when an agent was named
+// (UFA_AGENT): ambiguous-agent and federation-command's agent paths set it to
+// the agent, and federation-command sets "none" for its plain shell commands.
+func eventTypeFor(agent, override string) string {
+	if override = strings.TrimSpace(override); override != "" {
+		return override
+	}
+	if agent != "" && agent != "none" {
+		return records.EventTypeAIInvocation
+	}
+	return records.EventTypeCommandExecution
 }
 
 // getEnvOrDefault returns the environment variable value or the default

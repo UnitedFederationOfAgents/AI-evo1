@@ -118,6 +118,7 @@ func (e *Executor) InvokeAgent(agent, model, mode, prompt, workdir string) error
 	}
 
 	cmd := e.Command(ambiguousAgentPath, args...)
+	cmd.Env = append(cmd.Env, agentRecordEnv(agent, model)...)
 	cmd.Dir = workdir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -155,9 +156,24 @@ func (e *Executor) InvokeAgentWithCapture(agent, model, mode, prompt, workdir st
 	}
 
 	cmd := e.Command(ambiguousAgentPath, args...)
+	cmd.Env = append(cmd.Env, agentRecordEnv(agent, model)...)
 	cmd.Dir = workdir
 
 	return cmd.CombinedOutput()
+}
+
+// agentRecordEnv names the agent and model for clauditable's record of an
+// agent run. The outer clauditable (from Command) is the one that records it --
+// ambiguous-agent's own clauditable passes straight through -- so without
+// these it would log the run as a plain command_execution with no agent.
+// UFA_EVENT_TYPE covers a signal that leaves the agent to ambiguous-agent's
+// default.
+func agentRecordEnv(agent, model string) []string {
+	env := []string{"UFA_EVENT_TYPE=ai_invocation", "UFA_AGENT=" + agent}
+	if model != "" {
+		env = append(env, "UFA_MODEL="+model)
+	}
+	return env
 }
 
 // findBinary searches for a binary in PATH, current directory, and executable directory.

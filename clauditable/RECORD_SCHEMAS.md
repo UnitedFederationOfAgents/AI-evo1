@@ -61,7 +61,7 @@ The `Event` structure contains metadata about a command execution. The command i
 | Field | Type | Description |
 |-------|------|-------------|
 | `timestamp` | string | RFC3339 formatted timestamp of when the command started |
-| `event_type` | string | Type of event, typically `"command_execution"` |
+| `event_type` | string | Type of event -- see [Event Types](#event-types) |
 | `host` | string | Host identifier from `UFA_HOST` or `~/.ufa/host.yaml` (optional) |
 | `head` | string | Head identifier from `UFA_HEAD` — the application instance that triggered the session entry (optional) |
 | `agent` | string | Agent identifier from `UFA_AGENT` (optional) |
@@ -70,6 +70,35 @@ The `Event` structure contains metadata about a command execution. The command i
 | `exit_code` | int | The exit code returned by the command |
 | `record_path` | string | Path to the record file (optional) |
 | `metadata` | object | Unstructured key-value pairs from `UFA_METADATA` (optional) |
+
+## Event Types
+
+| `event_type` | Written by | Meaning |
+|--------------|------------|---------|
+| `command_execution` | wrapped command | A plain command (`UFA_AGENT` unset or `none`) |
+| `ai_invocation` | wrapped command | An AI agent run (`UFA_AGENT` names an agent, as ambiguous-agent and federation-command's agent paths set it) |
+| `note` | `clauditable add-note` | Text a person attached to the session; the note is the `IN>>` block |
+| `resource` | `clauditable add-resource` | A file attached to the session; its name is the `IN>>` block |
+
+`UFA_EVENT_TYPE`, when set, overrides the type a wrapped command gets. Records
+written before `ai_invocation` existed carry `command_execution` for agent runs
+too; they are not rewritten.
+
+### Notes and resources
+
+```
+clauditable add-note [text...]                  # text from stdin when no args
+clauditable add-resource [-name <name>] <path>  # name defaults to path's base name
+```
+
+Both act on the current session (`AGENT_SESSION`/`AGENT_RECORDS_PATH`, as for
+a wrapped command) and print the new record ID. Each is written as an
+already-consolidated primary record: `<ts>-raw.txt`, `<ts>-processed.txt` and a
+`session.jsonl` entry. `<ts>` is the latest free second before now, so a
+command starting at the same moment can't take the same ID. A resource's
+content is copied to `<ts>-resource-<name>` (name reduced to
+`[A-Za-z0-9._-]`), and its event carries `resource_name`, `resource_file` and
+`resource_size` in `metadata`.
 
 ## Directory Structure
 

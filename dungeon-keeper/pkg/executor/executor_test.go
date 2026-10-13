@@ -3,6 +3,7 @@ package executor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dungeon-keeper/pkg/types"
@@ -222,6 +223,19 @@ func TestAgentModeMapping(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAgentRecordEnv(t *testing.T) {
+	env := agentRecordEnv("claude", "opus")
+	joined := strings.Join(env, "\n")
+	for _, want := range []string{"UFA_EVENT_TYPE=ai_invocation", "UFA_AGENT=claude", "UFA_MODEL=opus"} {
+		if !contains(joined, want) {
+			t.Errorf("expected %q in %v", want, env)
+		}
+	}
+	if contains(strings.Join(agentRecordEnv("claude", ""), "\n"), "UFA_MODEL=") {
+		t.Error("expected no UFA_MODEL without a model")
 	}
 }
 

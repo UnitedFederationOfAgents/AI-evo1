@@ -60,6 +60,9 @@ export interface SessionInfo {
 // SessionEntry is one readable turn of a session's transcript. record is the
 // turn's record ID (its files' {timestamp} prefix) -- what "view-processed"
 // takes to expand it; absent when the turn's header carries no record_path.
+// event_type is one of EVENT_TYPE_LABELS' keys in App.tsx (older sessions
+// recorded agent runs as command_execution too); a resource's metadata names
+// its file (resource_name/resource_file/resource_size).
 export interface SessionEntry {
   timestamp: string
   event_type?: string
@@ -68,6 +71,7 @@ export interface SessionEntry {
   duration_ms: number
   exit_code: number
   record?: string
+  metadata?: Record<string, string>
   input?: string
   output?: string
   error?: string
@@ -105,6 +109,17 @@ export interface ArchiveResultMsg {
   error?: string
 }
 
+// AnnotationResultMsg is the "annotation-result" payload: the outcome of an
+// add-note/add-resource (see ../annotations.go). record is the new entry's
+// record ID; error is set instead when it failed.
+export interface AnnotationResultMsg {
+  id: string
+  kind: 'note' | 'resource'
+  name?: string
+  record?: string
+  error?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -114,4 +129,5 @@ export type ServerMsg =
   | { type: 'session-view'; payload: SessionView }
   | { type: 'processed-view'; payload: ProcessedView }
   | { type: 'archive-result'; payload: ArchiveResultMsg }
+  | { type: 'annotation-result'; payload: AnnotationResultMsg }
   | { type: 'error'; payload: string }

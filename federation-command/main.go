@@ -4011,6 +4011,12 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			args := strings.TrimSpace(strings.TrimPrefix(sub, "session rename"))
 			return m.handleRenameSession(args, line, cmdTime, deltaMs)
 		}
+		if sub == "session note" || strings.HasPrefix(sub, "session note ") {
+			return m.handleSessionNote(strings.TrimPrefix(sub, "session note"), line, cmdTime, deltaMs)
+		}
+		if sub == "session resource" || strings.HasPrefix(sub, "session resource ") {
+			return m.handleSessionResource(strings.TrimPrefix(sub, "session resource"), line, cmdTime, deltaMs)
+		}
 		if sub == "session select" {
 			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 			if sp == nil {
@@ -4111,6 +4117,9 @@ func ufaSessionHelpText() string {
 		"  ufa session get               show ID, name, and location of current session",
 		"  ufa session describe [-a]     show full session info; -a for agent description",
 		"  ufa session rename [name|-a]  rename current session",
+		"  ufa session note <text>       add a note to the current session",
+		"  ufa session resource <path> [-name <name>]",
+		"                                attach a file to the current session",
 		"  ufa session archive           archive all current sessions",
 		"",
 		sessionStyle.Render("each session has an ID (folder name) and a name stored in session.yaml"),

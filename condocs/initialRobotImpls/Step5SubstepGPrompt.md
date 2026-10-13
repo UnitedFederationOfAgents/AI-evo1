@@ -303,3 +303,31 @@ Screen
 The wake up button does not work when the screen is asleep - this is the whole point.
 
 (If the screen is locked it should unlock it...)
+
+
+prompt: [`9f98ecb`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/9f98ecbaa190f23ab658c355b452222955ff869b) → reply: [`37b6e2a`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/37b6e2a5398d5ec35b4a2a42133f847cb8a8c480)
+
+## Reply L
+
+I changed the robot's **Wake Up** button so it unlocks a locked screen before waking it. I couldn't build or test it: `go test` needed approval this session couldn't get, so please run `make test` and `make build` in `ianar`.
+
+**Why it failed:** by default GNOME also locks a screen that has gone to sleep. Wake Up checked for a locked screen before doing anything and stopped with the "screen is locked" error in your screenshot, so it never woke a sleeping screen.
+
+**What it does now** (in `wakeScreen`, `ianar/screenstate.go`):
+- It unlocks the screen if it's locked, the same way the sequences' `unlock-screen` step does, by asking the login system (logind) to unlock your session. Then it wakes the screen if it has blanked.
+- If the screen locks just as it wakes, which happens when GNOME's lock delay runs out while it's blank, it unlocks it again.
+- It always finishes by sending the wake request and moving the pointer. The pointer move is what turns the monitor back on after an unlock; unlocking alone removes the lock screen but may leave the display dark.
+
+If the unlock itself is refused, that error shows under the buttons. When the screen's lock state can't be read, the result line now says that instead of claiming "the screen wasn't locked"; this also changes what the `unlock-screen` step reports in that case.
+
+I updated the tests in `screenstate_test.go`, adding cases for asleep-and-locked, locking while waking, a refused unlock, and an unreadable screen state. I also updated the button's hover text in `frontend/src/App.tsx`.
+
+
+## <REPLACE-Revision|Retry> M
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

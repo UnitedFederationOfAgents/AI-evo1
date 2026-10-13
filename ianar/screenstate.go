@@ -114,18 +114,23 @@ func ensureScreenAwake() (string, error) {
 }
 
 // wakeScreen is the simple tab's "Wake Up" button (Step5SubstepGPrompt.md
-// Revision K): it runs ensureScreenAwake, and if that found nothing to do it
-// sends the wake request and pointer nudge anyway, so the wake mechanism
-// itself is exercised even on an awake screen. It returns a note on what it
-// did.
+// Revisions K and L). A screen that has gone to sleep is, by GNOME's default,
+// also locked, so it runs unlockScreen (unlock if locked, wake if blanked)
+// rather than ensureScreenAwake, which refuses a locked screen. It then
+// always sends the wake request and pointer nudge: they exercise the wake
+// mechanism on a screen that was already awake, and the nudge's user activity
+// is what powers the monitor back on after an unlock (logind's Unlock drops
+// the lock screen but doesn't turn the display on). It returns a note on what
+// it did.
 func wakeScreen() (string, error) {
-	note, err := ensureScreenAwake()
-	if err != nil || note != "" {
-		return note, err
+	note, err := unlockScreen()
+	if errors.Is(err, errScreenLocked) {
+		// It locked as it woke (GNOME's lock delay ran out while it was
+		// blank), so unlock it now.
+		note, err = unlockScreen()
 	}
-	state := "the screen was already awake"
-	if _, err := screenBlanked(); err != nil {
-		state = "couldn't read whether the screen had blanked"
+	if err != nil {
+		return "", err
 	}
 	var failed []string
 	if err := requestScreenWake(); err != nil {
@@ -135,9 +140,9 @@ func wakeScreen() (string, error) {
 		failed = append(failed, "nudging the pointer: "+err.Error())
 	}
 	if len(failed) > 0 {
-		return "", fmt.Errorf("%s, and waking it anyway failed: %s", state, strings.Join(failed, "; "))
+		return "", fmt.Errorf("%s, but waking it afterwards failed: %s", note, strings.Join(failed, "; "))
 	}
-	return state + "; sent the wake request and pointer nudge anyway", nil
+	return note + "; sent the wake request and pointer nudge", nil
 }
 
 // unlockScreen unlocks a locked screen, then makes sure it is awake
@@ -152,9 +157,13 @@ func unlockScreen() (string, error) {
 		log.Printf("robot: can't tell whether the screen is locked (%v); assuming not", err)
 	}
 	if err != nil || !locked {
+		state := "the screen wasn't locked"
+		if err != nil {
+			state = "couldn't read whether the screen was locked"
+		}
 		note, err := ensureScreenAwake()
 		if err == nil && note == "" {
-			note = "the screen wasn't locked"
+			note = state
 		}
 		return note, err
 	}

@@ -556,7 +556,7 @@ function RobotPanel({
         <button
           className="btn-secondary"
           disabled={!connected || wakeStatus.kind === 'waking'}
-          title="Wake this host's screen if it has blanked (as a sequence's ensure-awake does), or send the wake anyway if it hasn't"
+          title="Unlock this host's screen if it is locked and wake it if it has gone to sleep (as a sequence's unlock-screen does), then send the wake request and pointer nudge"
           onClick={onWakeScreen}
         >
           Wake Up

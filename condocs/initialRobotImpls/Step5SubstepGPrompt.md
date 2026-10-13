@@ -199,11 +199,6 @@ I changed the conversationalist so a missing AWS region now falls back to us-eas
 When no region is configured anywhere, `loadAWSConfig` in `transcribe.go` now uses us-east-2. The availability check passes this on to the page in a new `warning` field, and the transcription panel shows it as a yellow notice saying us-east-2 is being used and how to set a different region. The tests are updated to match: one now expects the default region and the warning, a new one checks the fallback directly, and I removed the old test that expected Start to fail when no region was set.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add a 'clear' button to the transcription window in TC. (It clears the dialog)

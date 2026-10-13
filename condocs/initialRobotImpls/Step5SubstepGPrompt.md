@@ -279,11 +279,6 @@ prompt: [`4a87da8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/4
 I added `session-note <text>` and `session-resource <path> [-name <name>]` to federation-command as aliases for `ufa session note` and `ufa session resource`. They're in `federation-command/main.go`, sit next to the existing `describe-session`/`rename-session` aliases, and call the same handlers, so they behave the same way. `ufa session help` now mentions them too. Nothing is built or tested, because `go build` needed approval this session couldn't get; please run `make test` and `make build` in `federation-command`.
 
 
-## <REPLACE-Revision|Retry> K
+## Revision K
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's add a 'Wake Up' button to robot-->simple to exercise our display wake up directly.

@@ -219,11 +219,10 @@ I added a **Clear** button to the transcription window in TC, but I haven't buil
 The changes are in `transcribe.go` (a new `clearTranscript`), `main.go` (handling the new `clear-transcript` message) and `frontend/src/App.tsx`. There's a new test in `transcribe_test.go` checking that Save to File after a clear reports "no transcript to save".
 
 
-## <REPLACE-Revision|Retry> H
+## Revision H
 
-<REPLACE-PROMPT>
+Let's add two new capabilities to session manager - we want to be able to add a note or a resource to a session. We will also add an interface for this to federation-command.
 
+These will be a distinct type (a note is just a text resource).
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+While we're at it let's correctly distinguish an AI invocation from a command execution in the 'type' field. We don't need to make any of these changes retroactively to existing sessions, just to the way they are created going forward.

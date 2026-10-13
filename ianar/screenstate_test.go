@@ -105,6 +105,43 @@ func TestEnsureScreenAwake(t *testing.T) {
 	})
 }
 
+func TestWakeScreen(t *testing.T) {
+	t.Run("awake still wakes", func(t *testing.T) {
+		stubScreenClock(t)
+		wakes := stubScreenState(t, false, false)
+		note, err := wakeScreen()
+		if err != nil || !strings.Contains(note, "already awake") || *wakes != 1 {
+			t.Errorf("wakeScreen() = %q, %v (woke %d times)", note, err, *wakes)
+		}
+	})
+
+	t.Run("blanked wakes once", func(t *testing.T) {
+		stubScreenClock(t)
+		wakes := stubScreenState(t, false, true)
+		note, err := wakeScreen()
+		if err != nil || !strings.Contains(note, "woke") || *wakes != 1 {
+			t.Errorf("wakeScreen() = %q, %v (woke %d times)", note, err, *wakes)
+		}
+	})
+
+	t.Run("locked", func(t *testing.T) {
+		stubScreenClock(t)
+		wakes := stubScreenState(t, true, true)
+		if _, err := wakeScreen(); !errors.Is(err, errScreenLocked) || *wakes != 0 {
+			t.Errorf("err = %v (woke %d times), want errScreenLocked without waking", err, *wakes)
+		}
+	})
+
+	t.Run("wake refused", func(t *testing.T) {
+		stubScreenClock(t)
+		stubScreenState(t, false, false)
+		requestScreenWake = func() error { return errors.New("refused") }
+		if _, err := wakeScreen(); err == nil || !strings.Contains(err.Error(), "refused") {
+			t.Errorf("err = %v, want the screen saver's refusal", err)
+		}
+	})
+}
+
 func TestUnlockScreen(t *testing.T) {
 	t.Run("not locked", func(t *testing.T) {
 		stubScreenClock(t)

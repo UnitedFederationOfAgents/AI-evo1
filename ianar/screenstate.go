@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -110,6 +111,33 @@ func ensureScreenAwake() (string, error) {
 	}
 	sleep(screenWakeSettle)
 	return "the screen had blanked; woke it first", nil
+}
+
+// wakeScreen is the simple tab's "Wake Up" button (Step5SubstepGPrompt.md
+// Revision K): it runs ensureScreenAwake, and if that found nothing to do it
+// sends the wake request and pointer nudge anyway, so the wake mechanism
+// itself is exercised even on an awake screen. It returns a note on what it
+// did.
+func wakeScreen() (string, error) {
+	note, err := ensureScreenAwake()
+	if err != nil || note != "" {
+		return note, err
+	}
+	state := "the screen was already awake"
+	if _, err := screenBlanked(); err != nil {
+		state = "couldn't read whether the screen had blanked"
+	}
+	var failed []string
+	if err := requestScreenWake(); err != nil {
+		failed = append(failed, "asking the screen saver to wake: "+err.Error())
+	}
+	if err := nudgePointer(); err != nil {
+		failed = append(failed, "nudging the pointer: "+err.Error())
+	}
+	if len(failed) > 0 {
+		return "", fmt.Errorf("%s, and waking it anyway failed: %s", state, strings.Join(failed, "; "))
+	}
+	return state + "; sent the wake request and pointer nudge anyway", nil
 }
 
 // unlockScreen unlocks a locked screen, then makes sure it is awake

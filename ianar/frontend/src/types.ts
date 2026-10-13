@@ -44,6 +44,14 @@ export interface CircleMouseResultMsg {
   error?: string
 }
 
+// WakeScreenResultMsg is the "wake-screen-result" payload reporting what the
+// "Wake Up" button did (see robot.go and screenstate.go's wakeScreen).
+export interface WakeScreenResultMsg {
+  success: boolean
+  message?: string
+  error?: string
+}
+
 // ClipFrame is one sampled frame of a fallback native clip, at_ms after the
 // clip started (see clip.go).
 export interface ClipFrame {
@@ -249,6 +257,7 @@ export type ServerMsg =
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
   | { type: 'capture-result'; payload: CaptureResultMsg }
   | { type: 'circle-mouse-result'; payload: CircleMouseResultMsg }
+  | { type: 'wake-screen-result'; payload: WakeScreenResultMsg }
   | { type: 'clip-result'; payload: ClipResultMsg }
   | { type: 'inspect-result'; payload: InspectResultMsg }
   | { type: 'save-result'; payload: SaveResultMsg }

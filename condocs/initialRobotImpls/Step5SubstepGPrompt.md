@@ -282,3 +282,22 @@ I added `session-note <text>` and `session-resource <path> [-name <name>]` to fe
 ## Revision K
 
 Let's add a 'Wake Up' button to robot-->simple to exercise our display wake up directly.
+
+
+prompt: [`64b9515`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/64b95159bc639cc392a93052e6df44174813f6de) → reply: [`67a2601`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/67a2601939a9aeb160be89e47a7a890c55c02ca5)
+
+## Reply K
+
+I added a **Wake Up** button to the robot's Simple tab (`ianar`), but I haven't built or tested it: `go test` needed approval this session couldn't get, so please run `make test` and `make build` in `ianar`. If the screen has blanked, the button wakes it the same way a sequence's `ensure-awake` does. If the screen is already awake, or its state can't be read, it sends the wake request and pointer nudge anyway, so the wake mechanism still runs. A locked screen fails with the usual "screen is locked" error, and the result appears under the buttons.
+
+The backend is a new `wakeScreen` in `screenstate.go` plus a `wake-screen` message handled in `robot.go` and `main.go`, with four new tests in `screenstate_test.go`. The frontend changes are in `App.tsx` and `types.ts`.
+
+
+## <REPLACE-Revision|Retry> L
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

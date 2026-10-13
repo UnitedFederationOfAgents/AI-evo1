@@ -94,6 +94,25 @@ func (s *Server) handleCircleMouse(c *wsClient) {
 	s.sendToClient(c, "circle-mouse-result", CircleMouseResultMsg{Success: true, Via: via})
 }
 
+// WakeScreenResultMsg is the "wake-screen-result" WebSocket payload
+// reporting what the "Wake Up" button did (see screenstate.go's wakeScreen).
+type WakeScreenResultMsg struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// handleWakeScreen runs wakeScreen and reports the result back to the
+// requesting client as a "wake-screen-result" message.
+func (s *Server) handleWakeScreen(c *wsClient) {
+	note, err := wakeScreen()
+	if err != nil {
+		s.sendToClient(c, "wake-screen-result", WakeScreenResultMsg{Success: false, Error: err.Error()})
+		return
+	}
+	s.sendToClient(c, "wake-screen-result", WakeScreenResultMsg{Success: true, Message: note})
+}
+
 // robotMu serializes every call into robotgo. On Linux robotgo's capture
 // and input functions are thin cgo wrappers around Xlib, which isn't
 // goroutine-safe (robotgo never calls XInitThreads()), and main.go hands

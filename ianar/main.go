@@ -210,6 +210,9 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 	case "clip-native":
 		s.handleClipNative(c)
 
+	case "wake-screen":
+		s.handleWakeScreen(c)
+
 	case "inspect-screen":
 		var p struct {
 			Find string `json:"find"` // optional text to look for; see vision.go

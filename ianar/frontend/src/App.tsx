@@ -14,6 +14,7 @@ import type {
   SeqLibraryMsg,
   SequenceProgressMsg,
   SequenceResultMsg,
+  WakeScreenResultMsg,
 } from './types'
 import { clipPreview, PreviewView, SaveToFile } from './shared'
 import type { Preview, SaveStatus, SeqRun } from './shared'
@@ -24,8 +25,8 @@ import { SequenceV2Panel } from './SequenceV2'
 // Wires up the representable connect/disconnect widget, dev-mode banner, and
 // version-mismatch reload check shared by every sub-app in this repo, plus
 // IANAR's own capture-native/capture-browser/circle-mouse/clip-native/
-// inspect-screen channels (see condocs/InitialRobot.md, robot.go, clip.go and
-// vision.go), the sequence-v2 library and runner (seqv2.go, sequence.go,
+// inspect-screen/wake-screen channels (see condocs/InitialRobot.md, robot.go,
+// clip.go, vision.go and screenstate.go), the sequence-v2 library and runner (seqv2.go, sequence.go,
 // SequenceV2.tsx), and saving any of their
 // results into local-representative's files area (artifacts.go).
 
@@ -33,6 +34,7 @@ type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
 type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
 type ClipStatus = { kind: 'idle' | 'recording' | 'success' | 'error'; message?: string }
 type InspectStatus = { kind: 'idle' | 'reading' | 'success' | 'error'; message?: string }
+type WakeStatus = { kind: 'idle' | 'waking' | 'success' | 'error'; message?: string }
 
 // browserCaptureUnsupportedReason: why the Screen Capture API
 // (getDisplayMedia) is unavailable in this tab, named precisely instead of
@@ -71,6 +73,7 @@ function useRobotWS() {
   const [circleStatus, setCircleStatus] = useState<CircleStatus>({ kind: 'idle' })
   const [clipStatus, setClipStatus] = useState<ClipStatus>({ kind: 'idle' })
   const [inspectStatus, setInspectStatus] = useState<InspectStatus>({ kind: 'idle' })
+  const [wakeStatus, setWakeStatus] = useState<WakeStatus>({ kind: 'idle' })
   const [saves, setSaves] = useState<Record<string, SaveStatus>>({})
   const [seqLib, setSeqLib] = useState<SeqLibraryMsg | null>(null)
   const [seq2Replies, setSeq2Replies] = useState<Record<string, Seq2ReplyMsg>>({})
@@ -169,6 +172,13 @@ function useRobotWS() {
               p.success
                 ? { kind: 'success', message: via }
                 : { kind: 'error', message: (p.error ?? 'circle-mouse failed') + via },
+            )
+          } else if (msg.type === 'wake-screen-result') {
+            const p = msg.payload as WakeScreenResultMsg
+            setWakeStatus(
+              p.success
+                ? { kind: 'success', message: p.message }
+                : { kind: 'error', message: p.error ?? 'wake up failed' },
             )
           } else if (msg.type === 'clip-result') {
             const p = msg.payload as ClipResultMsg
@@ -317,6 +327,11 @@ function useRobotWS() {
     send('circle-mouse', {})
   }, [send])
 
+  const wakeScreen = useCallback(() => {
+    setWakeStatus({ kind: 'waking' })
+    send('wake-screen', {})
+  }, [send])
+
   const clipNative = useCallback(() => {
     setClipStatus({ kind: 'recording' })
     send('clip-native', {})
@@ -378,11 +393,13 @@ function useRobotWS() {
     circleStatus,
     clipStatus,
     inspectStatus,
+    wakeStatus,
     captureNative,
     captureBrowser,
     circleMouse,
     clipNative,
     inspectScreen,
+    wakeScreen,
     saves,
     saveArtifact,
     seqLib,
@@ -475,7 +492,7 @@ function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, 
   )
 }
 
-// ---- Simple tab: capture native / capture browser / circle mouse / native clip / inspect screen ----
+// ---- Simple tab: capture native / capture browser / circle mouse / native clip / wake up / inspect screen ----
 
 interface RobotPanelProps {
   connected: boolean
@@ -487,11 +504,13 @@ interface RobotPanelProps {
   circleStatus: CircleStatus
   clipStatus: ClipStatus
   inspectStatus: InspectStatus
+  wakeStatus: WakeStatus
   onCaptureNative: () => void
   onCaptureBrowser: () => void
   onCircleMouse: () => void
   onClipNative: () => void
   onInspectScreen: (find: string) => void
+  onWakeScreen: () => void
 }
 
 function RobotPanel({
@@ -504,11 +523,13 @@ function RobotPanel({
   circleStatus,
   clipStatus,
   inspectStatus,
+  wakeStatus,
   onCaptureNative,
   onCaptureBrowser,
   onCircleMouse,
   onClipNative,
   onInspectScreen,
+  onWakeScreen,
 }: RobotPanelProps) {
   const [find, setFind] = useState('federation-command')
   const reading = inspectStatus.kind === 'reading'
@@ -531,6 +552,14 @@ function RobotPanel({
         </button>
         <button className="btn-secondary" disabled={!connected || clipStatus.kind === 'recording'} onClick={onClipNative}>
           Native Clip
+        </button>
+        <button
+          className="btn-secondary"
+          disabled={!connected || wakeStatus.kind === 'waking'}
+          title="Wake this host's screen if it has blanked (as a sequence's ensure-awake does), or send the wake anyway if it hasn't"
+          onClick={onWakeScreen}
+        >
+          Wake Up
         </button>
       </div>
       <form
@@ -559,6 +588,9 @@ function RobotPanel({
       {clipStatus.kind === 'recording' && <div className="robot-status">Recording a 4 second clip of the desktop…</div>}
       {clipStatus.kind === 'success' && <div className="robot-status">Clip recorded{clipStatus.message}.</div>}
       {clipStatus.kind === 'error' && <div className="robot-status robot-status-error">{clipStatus.message}</div>}
+      {wakeStatus.kind === 'waking' && <div className="robot-status">Waking the screen…</div>}
+      {wakeStatus.kind === 'success' && <div className="robot-status">Wake up: {wakeStatus.message}.</div>}
+      {wakeStatus.kind === 'error' && <div className="robot-status robot-status-error">{wakeStatus.message}</div>}
       {reading && <div className="robot-status">Capturing the screen and reading its text…</div>}
       {inspectStatus.kind === 'success' && <div className="robot-status">{inspectStatus.message}.</div>}
       {inspectStatus.kind === 'error' && <div className="robot-status robot-status-error">{inspectStatus.message}</div>}
@@ -607,11 +639,13 @@ export default function App() {
     circleStatus,
     clipStatus,
     inspectStatus,
+    wakeStatus,
     captureNative,
     captureBrowser,
     circleMouse,
     clipNative,
     inspectScreen,
+    wakeScreen,
     saves,
     saveArtifact,
     seqLib,
@@ -666,11 +700,13 @@ export default function App() {
             circleStatus={circleStatus}
             clipStatus={clipStatus}
             inspectStatus={inspectStatus}
+            wakeStatus={wakeStatus}
             onCaptureNative={captureNative}
             onCaptureBrowser={captureBrowser}
             onCircleMouse={circleMouse}
             onClipNative={clipNative}
             onInspectScreen={inspectScreen}
+            onWakeScreen={wakeScreen}
           />
         )}
         {tab === 'sequence-v2' && (

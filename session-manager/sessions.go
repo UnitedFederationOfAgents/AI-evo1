@@ -562,6 +562,7 @@ func archiveSessions(recordsPath string) (count int, archiveDir string, err erro
 type sessionLogEvent struct {
 	Timestamp  string `json:"timestamp"`
 	EventType  string `json:"event_type"`
+	Host       string `json:"host"`
 	Agent      string `json:"agent"`
 	Model      string `json:"model"`
 	DurationMs int64  `json:"duration_ms"`
@@ -578,13 +579,15 @@ type sessionLogEvent struct {
 // carries no record_path. EventType tells a command_execution, an
 // ai_invocation, a note and a resource apart (see clauditable's
 // RECORD_SCHEMAS.md); a resource's Metadata names its file
-// (resource_name/resource_file/resource_size). SecondaryHost is set on a
-// turn that so far only exists in that host's secondary log (see
+// (resource_name/resource_file/resource_size). Host is the host the turn ran
+// on, from its header (empty for records that don't name one). SecondaryHost
+// is set on a turn that so far only exists in that host's secondary log (see
 // sessionlog.go). RecordMissing is set when the turn names a record whose
 // processed file isn't on this host.
 type SessionEntry struct {
 	Timestamp     string            `json:"timestamp"`
 	EventType     string            `json:"event_type,omitempty"`
+	Host          string            `json:"host,omitempty"`
 	Agent         string            `json:"agent,omitempty"`
 	Model         string            `json:"model,omitempty"`
 	DurationMs    int64             `json:"duration_ms"`
@@ -701,6 +704,7 @@ func parseSessionLog(data []byte) []SessionEntry {
 				cur = &SessionEntry{
 					Timestamp:  ev.Timestamp,
 					EventType:  ev.EventType,
+					Host:       ev.Host,
 					Agent:      ev.Agent,
 					Model:      ev.Model,
 					DurationMs: ev.DurationMs,

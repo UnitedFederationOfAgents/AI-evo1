@@ -62,7 +62,8 @@ export interface SessionInfo {
 // takes to expand it; absent when the turn's header carries no record_path.
 // event_type is one of EVENT_TYPE_LABELS' keys in App.tsx (older sessions
 // recorded agent runs as command_execution too); a resource's metadata names
-// its file (resource_name/resource_file/resource_size). secondary_host is
+// its file (resource_name/resource_file/resource_size). host is the host the
+// turn ran on (absent for records that don't name one). secondary_host is
 // set on a turn that so far only exists in that host's secondary log -- it
 // hasn't been fused into the owner's session.jsonl yet (see
 // ../sessionlog.go). record_missing is set when the turn's record file isn't
@@ -70,6 +71,7 @@ export interface SessionInfo {
 export interface SessionEntry {
   timestamp: string
   event_type?: string
+  host?: string
   agent?: string
   model?: string
   duration_ms: number

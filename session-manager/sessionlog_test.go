@@ -65,6 +65,29 @@ func TestViewSplicesSecondaryLogByTime(t *testing.T) {
 	}
 }
 
+func TestViewCarriesEachTurnsHost(t *testing.T) {
+	ownerTurn := `{"timestamp":"2026-10-13T14:33:00Z","event_type":"command_execution","host":"provisioner01","record_path":"/r/s/1791902034-raw.txt"}
+IN>> ls
+
+`
+	dir := newSessionDir(t, "provisioner01", map[string]string{
+		"session.jsonl":           ownerTurn,
+		"session.desktop01.jsonl": turnDesktop, // its header names no host
+	})
+	view, err := viewSession(filepath.Dir(dir), "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range view.Entries {
+		got = append(got, e.Input+"@"+e.Host)
+	}
+	want := []string{"ls@provisioner01", "U up?@desktop01"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("entries = %v, want %v", got, want)
+	}
+}
+
 func TestViewDoesNotDuplicateFusedTurns(t *testing.T) {
 	dir := newSessionDir(t, "provisioner01", map[string]string{
 		"session.jsonl":           turnOwnerA + turnDesktop,

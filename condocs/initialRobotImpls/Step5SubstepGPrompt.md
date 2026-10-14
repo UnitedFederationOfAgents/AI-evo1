@@ -399,3 +399,27 @@ I've implemented all seven fixes across clauditable, local-representative, sessi
 ## Revision N
 
 When a session has multiple participants let's display a tag in each interaction beside the 'exit 0' indicating which host that interaction was on.
+
+
+prompt: [`d5b88f0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d5b88f03217c13c1b321512d0ff0bd028628c02a) → reply: [`646b327`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/646b3273e2cef5af563f69daae467b657155a084)
+
+## Reply N
+
+In session-manager, each turn in the transcript now shows a host tag beside `exit 0` once the session has more than one host in it. I couldn't build or test this: `go test` needed approval this session couldn't get, so please run `make test` and `make build` in `session-manager`.
+
+- **Where the host comes from:** clauditable already writes `host` into each turn's header in `session.jsonl`. session-manager now reads it (`sessions.go`). For a turn from another host's log whose header has no host, it uses that log's host instead (`sessionlog.go`).
+- **When the tag appears:** only once the transcript has turns from at least two different hosts. Turns whose record names no host don't get a tag, and that includes older ones.
+- **Notes and resources:** these have no exit code, so the tag sits where `exit 0` would be.
+- **Turns not yet merged:** these still show the "via <host>" tag as well, so they name the host twice.
+
+The frontend changes are in `App.tsx`, `types.ts` and `index.css`. There's a new test, `TestViewCarriesEachTurnsHost`, in `sessionlog_test.go`.
+
+
+## <REPLACE-Revision|Retry> O
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

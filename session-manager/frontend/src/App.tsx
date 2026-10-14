@@ -927,11 +927,13 @@ function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExp
       </div>
     )
   }
+  // Once more than one host has taken part, each turn says which it ran on.
+  const showHost = new Set(entries.map((e) => e.host).filter(Boolean)).size > 1
   return (
     <div className="session-transcript">
       {warning}
       {entries.map((e, i) => (
-        <TranscriptEntry key={i} sessionId={view.id} entry={e} onExpand={onExpand} />
+        <TranscriptEntry key={i} sessionId={view.id} entry={e} showHost={showHost} onExpand={onExpand} />
       ))}
     </div>
   )
@@ -941,14 +943,18 @@ function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExp
 // invocation, a note and a resource apart; notes and resources aren't runs,
 // so they skip duration/exit, and a resource links to its content. A turn
 // carried on from another host's secondary log (not yet fused into the
-// owner's log) gets a dashed left edge and a "via <host>" tag.
+// owner's log) gets a dashed left edge and a "via <host>" tag. With showHost
+// (a session more than one host has taken part in), a host tag beside the
+// exit code names the host the turn ran on.
 function TranscriptEntry({
   sessionId,
   entry: e,
+  showHost,
   onExpand,
 }: {
   sessionId: string
   entry: SessionEntry
+  showHost: boolean
   onExpand: (record: string) => void
 }) {
   const type = e.event_type ?? ''
@@ -982,6 +988,11 @@ function TranscriptEntry({
               exit {e.exit_code}
             </span>
           </>
+        )}
+        {showHost && e.host && (
+          <span className="transcript-entry-tag transcript-host-tag" title={`ran on ${e.host}`}>
+            {e.host}
+          </span>
         )}
         {type === 'resource' && e.record && (
           <a

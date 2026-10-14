@@ -204,7 +204,8 @@ func headerSet(data []byte) map[string]bool {
 
 // spliceSecondaryEntries merges the turns of every secondary log in
 // sessionDir that primary doesn't already have into primary, each tagged
-// with the host it came from. Primary's own order is kept; a secondary turn
+// with the host it came from (which is also its Host if its header doesn't
+// name one). Primary's own order is kept; a secondary turn
 // goes after the primary turns that aren't later than it.
 func spliceSecondaryEntries(sessionDir string, primary []SessionEntry) []SessionEntry {
 	seen := map[string]bool{}
@@ -224,6 +225,9 @@ func spliceSecondaryEntries(sessionDir string, primary []SessionEntry) []Session
 			}
 			seen[e.header] = true
 			e.SecondaryHost = host
+			if e.Host == "" {
+				e.Host = host
+			}
 			extra = append(extra, e)
 		}
 	}

@@ -439,6 +439,7 @@ a.transcript-expand-btn { text-decoration: none; }
 }
 .transcript-secondary-tag { color: #9a9ab0; font-style: italic; }
 .transcript-record-missing { color: #8a8a8a; }
+.transcript-host-tag { color: #7fb0d8; }
 
 /* ---- Annotate bar (add a note / resource to the session) ---- */
 

@@ -417,7 +417,8 @@ type appModel struct {
 	// default rolls over -- see sessions_daily.go's rolloverDailyDefault.
 	hadActivity bool
 
-	logFile *os.File
+	// encoder logs federation-command's own records to the current session
+	// (see sessionlog.go's sessionEncoder).
 	encoder *json.Encoder
 
 	lastCmdTime time.Time
@@ -957,7 +958,7 @@ func (m *appModel) wireModeMismatchHandler() {
 	})
 }
 
-func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder, cfg cliConfig) appModel {
+func newAppModel(recordsPath, sessionID, sessionDir string, cfg cliConfig) appModel {
 	ti := textinput.New()
 	ti.Focus()
 	ti.PromptStyle = lipgloss.NewStyle() // pass-through: prompt is already ANSI-styled
@@ -980,8 +981,7 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 		sessionID:     sessionID,
 		sessionDir:    sessionDir,
 		recordsPath:   recordsPath,
-		logFile:       logFile,
-		encoder:       encoder,
+		encoder:       sessionEncoder(sessionDir),
 		blinker:            NewBlinker(cfg.devMode),
 		remoteCmdCh:        make(chan string, 8),
 		listenerStop:       make(chan struct{}),
@@ -1275,6 +1275,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.prevInputLen = 0
 		return m, m.blinker.ResetTick()
+
+	case sessionCreateConfirmMsg:
+		return m.finishSessionCreateConfirm(msg)
 
 	case sessionRenameDoneMsg:
 		m.lastExitCode = msg.exitCode
@@ -2379,22 +2382,22 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		if strings.HasSuffix(newSessionID, "-default") {
 			return true, m, seqPrint(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"), 1)
 		}
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
+		if !validSessionIDArg(newSessionID) {
+			return true, m, seqPrint(errorStyle.Render(fmt.Sprintf("set-session: invalid session ID %q", newSessionID)), 1)
 		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		// Join an existing session only: creating one needs a confirmation
+		// this context can't ask for (see handleSetSession).
+		if !sessionExistsLocally(m.recordsPath, newSessionID) {
+			m.pullSessionFromPeers(newSessionID)
+		}
+		if !sessionExistsLocally(m.recordsPath, newSessionID) {
+			return true, m, seqPrint(errorStyle.Render(fmt.Sprintf("set-session: session %q not found on this host or any connected host -- create it with new-session, or run set-session interactively to confirm creating it", newSessionID)), 1)
+		}
+		newM, err := m.switchToSession(newSessionID)
 		if err != nil {
 			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
 		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		m.sendSessionState()
-		return true, m, seqPrint(successStyle.Render("session set to: "+newSessionDir), 0)
+		return true, newM, seqPrint(successStyle.Render("session set to: "+newM.sessionDir), 0)
 	}
 	if line == "set-session" {
 		return true, m, seqPrint(errorStyle.Render("usage: set-session <id>"), 1)
@@ -2404,22 +2407,14 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	if line == "clear-session" {
 		now := time.Now()
 		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+		if err := createSessionWithID(m.recordsPath, newSessionID, newSessionID); err != nil {
 			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
 		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		newM, err := m.switchToSession(newSessionID)
 		if err != nil {
 			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
 		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		m.sendSessionState()
-		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
+		return true, newM, seqPrint(successStyle.Render("session reset to: "+newM.sessionDir), 0)
 	}
 
 	// new-session [-f <session>] [name] — creates a new named session via clauditable
@@ -3561,46 +3556,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
-		var newSessionID string
-		if strings.HasPrefix(args, "-n ") {
-			name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
-			if name == "" {
-				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("usage: set-session -n <name>"))
-			}
-			foundID, findErr := findSessionByName(m.recordsPath, name)
-			if findErr != nil {
-				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("set-session: " + findErr.Error()))
-			}
-			newSessionID = foundID
-		} else {
-			newSessionID = args
-		}
-		if strings.HasSuffix(newSessionID, "-default") {
-			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"))
-		}
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
-		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
-		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		m.sendSessionState()
-		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
+		return m.handleSetSession(strings.TrimPrefix(line, "set-session "), "set-session", line, cmdTime, deltaMs)
 	}
 
 	if line == "set-session" {
@@ -3611,25 +3567,17 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	if line == "clear-session" {
 		now := time.Now()
 		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+		if err := createSessionWithID(m.recordsPath, newSessionID, newSessionID); err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("clear-session: " + err.Error()))
 		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		newM, err := m.switchToSession(newSessionID)
 		if err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("clear-session: " + err.Error()))
 		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		m.sendSessionState()
-		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(successStyle.Render("session reset to: " + newSessionDir))
+		newM.logRecord(line, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("session reset to: " + newM.sessionDir))
 	}
 
 	// new-session [-f <session>] [name] — creates a new named session via clauditable
@@ -3758,17 +3706,15 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	})
 }
 
-// switchToSession opens a new session log file and updates all session state.
-// Does not log a command record — callers are responsible for that.
+// switchToSession points the session log at an existing session directory
+// and updates all session state. Does not log a command record — callers are
+// responsible for that.
 func (m appModel) switchToSession(newID string) (appModel, error) {
 	newSessionDir := filepath.Join(m.recordsPath, newID)
-	newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return m, err
+	if info, err := os.Stat(newSessionDir); err != nil || !info.IsDir() {
+		return m, fmt.Errorf("session %q not found", newID)
 	}
-	m.logFile.Close()
-	m.logFile = newLogFile
-	m.encoder = json.NewEncoder(newLogFile)
+	m.encoder = sessionEncoder(newSessionDir)
 	m.sessionID = newID
 	m.sessionDir = newSessionDir
 	os.Setenv(EnvAgentSession, newID)
@@ -3968,50 +3914,7 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			return m.handleNewSession(strings.TrimPrefix(sub, "session new"), line, cmdTime, deltaMs)
 		}
 		if sub == "session set" || strings.HasPrefix(sub, "session set ") {
-			args := strings.TrimSpace(strings.TrimPrefix(sub, "session set"))
-			var id string
-			if strings.HasPrefix(args, "-n ") {
-				name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
-				if name == "" {
-					m.logRecord(line, cmdTime, deltaMs, 1)
-					return m, tea.Println(errorStyle.Render("usage: ufa session set -n <name>"))
-				}
-				foundID, findErr := findSessionByName(m.recordsPath, name)
-				if findErr != nil {
-					m.logRecord(line, cmdTime, deltaMs, 1)
-					return m, tea.Println(errorStyle.Render("set-session: " + findErr.Error()))
-				}
-				id = foundID
-			} else {
-				id = args
-			}
-			if id == "" {
-				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("usage: ufa session set <id> | ufa session set -n <name>"))
-			}
-			if strings.HasSuffix(id, "-default") {
-				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"))
-			}
-			newSessionDir := filepath.Join(m.recordsPath, id)
-			if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
-			}
-			newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-			if err != nil {
-				m.logRecord(line, cmdTime, deltaMs, 1)
-				return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
-			}
-			m.logFile.Close()
-			m.logFile = newLogFile
-			m.encoder = json.NewEncoder(newLogFile)
-			m.sessionID = id
-			m.sessionDir = newSessionDir
-			os.Setenv(EnvAgentSession, id)
-			m.sendSessionState()
-			m.logRecord(line, cmdTime, deltaMs, 0)
-			return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
+			return m.handleSetSession(strings.TrimPrefix(sub, "session set"), "ufa session set", line, cmdTime, deltaMs)
 		}
 		if sub == "session describe" || strings.HasPrefix(sub, "session describe ") {
 			args := strings.TrimSpace(strings.TrimPrefix(sub, "session describe"))
@@ -5571,17 +5474,7 @@ func main() {
 	os.Setenv(EnvAgentRecordsPath, recordsPath)
 	os.Setenv(EnvAgentSession, sessionID)
 
-	logPath := filepath.Join(sessionDir, "session.jsonl")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating session log: %v\n", err)
-		os.Exit(1)
-	}
-	defer logFile.Close()
-
-	encoder := json.NewEncoder(logFile)
-
-	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder, cfg)
+	model := newAppModel(recordsPath, sessionID, sessionDir, cfg)
 
 	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
 

@@ -382,3 +382,25 @@ The fixes we'll actually make are:
 - We must also make sure our resource additions follow the same rules for owner and non-owner nodes as our automatic records. We will implement a lazy exchange here as well, where only small resources are pulled across automatically.
 
 Let's implement these fixes now.
+
+
+prompt: [`2f1a254`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2f1a254bbabfc1715fbe93280487815053a2be50) → reply: [`a975a36`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a975a365a0b02590527f6782bca31c275f77db4b)
+
+## Reply M
+
+I've implemented all seven fixes across clauditable, local-representative, session-manager and federation-command, but none of it has been built or tested: `go build`, `go vet`, `go test`, `gofmt`, `sed` and `python3` all needed approval this session couldn't get, so please run `make test` and `make build` in those four directories. Only the owner (the host named in `session.yaml`) now writes `session.jsonl`; any other host writes `session.<host>.jsonl` and names its record files `{ts}-<host>-…`, with every append locked. local-representative pulls `session.yaml`/`session.jsonl` only from the owner, pulls each secondary log only to the owner, never sends raw or in-progress files, pulls record files once, pulls resources over 256 KiB only when opened, and backs off a peer that keeps failing. session-manager splices secondary turns into the transcript with a dashed "via <host>" tag, fuses them into `session.jsonl` on the owner, prunes them from a non-owner's log once they come back, and shows unreadable lines or records that aren't on this host as warnings instead of failing. federation-command's `set-session` now pulls the session from other hosts first and asks for confirmation before creating one (with an extra warning when the ID's timestamp is in the past), and clauditable no longer writes `session.yaml` for sessions it didn't create.
+
+- **LR crash:** I didn't find what crashed LR. One problem I did fix: under heavy syncing, the network-debug buffer LR sends to agent-coordinator grew past the 64 KiB message limit, which drops LR's connection to AC. It's now trimmed. session-manager also now reports an error to the browser instead of crashing if handling a message panics.
+- **Removed the old "once-transfer":** clauditable no longer asks other hosts for their unmerged records before writing (`distsync.go` and its test are deleted). Secondary logs now carry those records instead.
+- **The session that already forked** isn't repaired automatically. It still needs the recovery steps from the analysis.
+- **Docs:** `clauditable/FILE_PROCESSING_SEQUENCE.md` now describes the owner/secondary scheme. New tests are in each component's `sessionlog_test.go`, plus additions to local-representative's `sessions_test.go`.
+
+
+## <REPLACE-Revision|Retry> N
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

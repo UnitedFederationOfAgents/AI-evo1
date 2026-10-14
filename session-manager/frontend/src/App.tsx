@@ -905,10 +905,19 @@ function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExp
   // other LR-active hosts while refreshing this session just now -- the
   // transcript below (even if non-empty) may be missing turns a reachable
   // peer would have had (see types.ts's SessionView doc comment).
-  const warning = view.sync_incomplete && (
-    <div className="session-transcript-warning">
-      could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
-    </div>
+  const warning = (
+    <>
+      {view.sync_incomplete && (
+        <div className="session-transcript-warning">
+          could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
+        </div>
+      )}
+      {(view.warnings ?? []).map((w, i) => (
+        <div key={i} className="session-transcript-warning">
+          {w}
+        </div>
+      ))}
+    </>
   )
   if (entries.length === 0) {
     return (
@@ -930,7 +939,9 @@ function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExp
 
 // TranscriptEntry is one turn's card. Its type tag tells a command, an AI
 // invocation, a note and a resource apart; notes and resources aren't runs,
-// so they skip duration/exit, and a resource links to its content.
+// so they skip duration/exit, and a resource links to its content. A turn
+// carried on from another host's secondary log (not yet fused into the
+// owner's log) gets a dashed left edge and a "via <host>" tag.
 function TranscriptEntry({
   sessionId,
   entry: e,
@@ -942,10 +953,21 @@ function TranscriptEntry({
 }) {
   const type = e.event_type ?? ''
   const attached = type === 'note' || type === 'resource'
+  const classes = ['transcript-entry']
+  if (attached) classes.push(`transcript-entry-${type}`)
+  if (e.secondary_host) classes.push('transcript-entry-secondary')
   return (
-    <div className={`transcript-entry${attached ? ` transcript-entry-${type}` : ''}`}>
+    <div className={classes.join(' ')}>
       <div className="transcript-entry-header">
         <span className="transcript-entry-time">{e.timestamp}</span>
+        {e.secondary_host && (
+          <span
+            className="transcript-entry-tag transcript-secondary-tag"
+            title={`recorded on ${e.secondary_host}, which doesn't own this session; not yet merged into the owner's log`}
+          >
+            via {e.secondary_host}
+          </span>
+        )}
         {type && (
           <span className={`transcript-entry-tag transcript-type-tag transcript-type-${type}`} title={type}>
             {EVENT_TYPE_LABELS[type] ?? type}
@@ -972,7 +994,7 @@ function TranscriptEntry({
             ↗ open
           </a>
         )}
-        {e.record && (
+        {e.record && !e.record_missing && (
           <button
             className="transcript-expand-btn"
             onClick={() => onExpand(e.record!)}
@@ -980,6 +1002,14 @@ function TranscriptEntry({
           >
             ⤢ expand
           </button>
+        )}
+        {e.record && e.record_missing && (
+          <span
+            className="transcript-entry-tag transcript-record-missing"
+            title={`${e.record}-processed.txt isn't on this host yet`}
+          >
+            record not here
+          </span>
         )}
       </div>
       {e.input && (

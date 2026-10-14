@@ -116,14 +116,9 @@ func TestRolloverDailyDefault(t *testing.T) {
 	if err := os.MkdirAll(oldDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	logFile, err := os.OpenFile(filepath.Join(oldDir, "session.jsonl"), os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, logFile: logFile, hadActivity: true}
+	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, encoder: sessionEncoder(oldDir), hadActivity: true}
 
 	m2, notice := m.rolloverDailyDefault(now)
-	defer m2.logFile.Close()
 	wantID := fallbackDefaultSessionID(now, fcHostID)
 	if m2.sessionID != wantID || notice == "" {
 		t.Fatalf("rollover: session %q (notice %q), want %q", m2.sessionID, notice, wantID)
@@ -154,13 +149,8 @@ func TestRolloverAfterIdleDaysSkipsIntermediateDays(t *testing.T) {
 	if err := os.MkdirAll(oldDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	logFile, err := os.OpenFile(filepath.Join(oldDir, "session.jsonl"), os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, logFile: logFile, hadActivity: true}
+	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, encoder: sessionEncoder(oldDir), hadActivity: true}
 	m2, _ := m.rolloverDailyDefault(now)
-	defer m2.logFile.Close()
 
 	if want := fallbackDefaultSessionID(now, fcHostID); m2.sessionID != want {
 		t.Fatalf("session %q, want %q", m2.sessionID, want)
@@ -188,13 +178,8 @@ func TestRolloverWithoutActivityLeavesNoFollowsFrom(t *testing.T) {
 	if err := os.MkdirAll(oldDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	logFile, err := os.OpenFile(filepath.Join(oldDir, "session.jsonl"), os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, logFile: logFile}
+	m := appModel{sessionID: oldID, sessionDir: oldDir, recordsPath: dir, encoder: sessionEncoder(oldDir)}
 	m2, _ := m.rolloverDailyDefault(now)
-	defer m2.logFile.Close()
 	if got := readSessionYAMLField(m2.sessionDir, sessionFollowsFromKey); got != "" {
 		t.Errorf("follows_from = %q, want none for an idle instance", got)
 	}

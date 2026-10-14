@@ -355,7 +355,7 @@ func TestWriteWrittenFile(t *testing.T) {
 	}
 
 	// Test primary: creates {ts}-raw.txt
-	path, err := writeWrittenFile(sessionDir, 1705312200, true, record)
+	path, err := writeWrittenFile(sessionDir, 1705312200, "", true, record)
 	if err != nil {
 		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestWriteWrittenFile(t *testing.T) {
 		Command: "echo secondary",
 		Stdout:  "secondary\n",
 	}
-	path2, err := writeWrittenFile(sessionDir, 1705312260, false, record2)
+	path2, err := writeWrittenFile(sessionDir, 1705312260, "", false, record2)
 	if err != nil {
 		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestConsolidatePrimaryToJSONL(t *testing.T) {
 	os.WriteFile(filepath.Join(sessionDir, "1705312800-s-raw.txt"), []byte(secondary.FormatWrittenFile()), 0644)
 	os.WriteFile(filepath.Join(sessionDir, "1705312860-raw.txt"), []byte(primary.FormatWrittenFile()), 0644)
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
@@ -627,7 +627,7 @@ func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
 	// Simulate the producer already having written its own raw + processed
 	// files via writeWrittenFile, with a sentinel processed marker that would
 	// NOT be present if consolidation reprocessed the raw content itself.
-	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312860, "", true, primary); err != nil {
 		t.Fatalf("writeWrittenFile failed: %v", err)
 	}
 	processedPath := filepath.Join(sessionDir, "1705312860-processed.txt")
@@ -640,7 +640,7 @@ func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
 		t.Fatalf("failed to mark processed file: %v", err)
 	}
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
@@ -655,14 +655,12 @@ func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
 	}
 }
 
-// TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary verifies the
-// distributed-sessions case: a "{ts}-s-processed.txt" with no local
-// "{ts}-s-raw.txt" sibling -- exactly what local-representative's
-// once-transfer leaves behind after pulling a remote LR-active host's record
-// in (see distsync.go) -- is folded into session.jsonl and promoted to
-// "{ts}-processed.txt" on its own, with no raw file ever appearing locally
-// for it (the pre-redaction raw content never crosses hosts -- see
-// FILE_PROCESSING_SEQUENCE.md).
+// TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary verifies that a
+// "{ts}-s-processed.txt" with no "{ts}-s-raw.txt" sibling is folded into
+// session.jsonl and promoted to "{ts}-processed.txt" on its own, with no raw
+// file ever appearing for it. (Remote records no longer arrive this way --
+// "-s-" files aren't synced, see sessionlog.go -- but consolidation still
+// handles a lone processed file.)
 func TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary(t *testing.T) {
 	tmpDir := t.TempDir()
 	session := "test-session"
@@ -692,11 +690,11 @@ func TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary(t *testing.T) {
 		Command: "echo primary",
 		Stdout:  "primary\n",
 	}
-	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312860, "", true, primary); err != nil {
 		t.Fatalf("writeWrittenFile failed: %v", err)
 	}
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
@@ -748,7 +746,7 @@ func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
 		Command: "echo secondary",
 		Stdout:  "secondary\n",
 	}
-	if _, err := writeWrittenFile(sessionDir, 1705312800, false, secondary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312800, "", false, secondary); err != nil {
 		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
 	}
 	secondaryProcessedPath := filepath.Join(sessionDir, "1705312800-s-processed.txt")
@@ -772,11 +770,11 @@ func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
 		Command: "echo primary",
 		Stdout:  "primary\n",
 	}
-	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312860, "", true, primary); err != nil {
 		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
 	}
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 

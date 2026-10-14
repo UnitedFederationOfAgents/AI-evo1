@@ -62,7 +62,11 @@ export interface SessionInfo {
 // takes to expand it; absent when the turn's header carries no record_path.
 // event_type is one of EVENT_TYPE_LABELS' keys in App.tsx (older sessions
 // recorded agent runs as command_execution too); a resource's metadata names
-// its file (resource_name/resource_file/resource_size).
+// its file (resource_name/resource_file/resource_size). secondary_host is
+// set on a turn that so far only exists in that host's secondary log -- it
+// hasn't been fused into the owner's session.jsonl yet (see
+// ../sessionlog.go). record_missing is set when the turn's record file isn't
+// on this host, so it can't be expanded.
 export interface SessionEntry {
   timestamp: string
   event_type?: string
@@ -75,6 +79,8 @@ export interface SessionEntry {
   input?: string
   output?: string
   error?: string
+  secondary_host?: string
+  record_missing?: boolean
 }
 
 // SessionView is the "session-view" payload: a session's transcript parsed
@@ -82,11 +88,13 @@ export interface SessionEntry {
 // local-representative's pre-view sync couldn't actually reach one of the
 // other LR-active hosts (Step1SubstepBPrompt.md Revision G) -- the transcript
 // may be missing turns a reachable peer would have had, so it's not
-// necessarily "genuinely empty/short".
+// necessarily "genuinely empty/short". warnings describe log content that
+// couldn't be shown (unreadable lines, records not on this host).
 export interface SessionView {
   id: string
   name: string
   entries: SessionEntry[]
+  warnings?: string[]
   sync_incomplete?: boolean
 }
 

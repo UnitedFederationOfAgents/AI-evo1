@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +24,9 @@ import (
 // (list/file, below) any peer LR uses to discover and fetch a host's
 // clauditable session files, and the pull that actually reaches out to every
 // other LR-active host and fetches them, on behalf of a same-host caller
-// (clauditable, before a primary write -- see clauditable/distsync.go; or
-// session-manager, before rendering a session view -- see
-// session-manager/repr.go's triggerSessionSync).
+// (session-manager, before rendering a session view -- see
+// session-manager/repr.go's triggerSessionSync), following the session's
+// ownership rules (see handleSessionsPull).
 //
 // No new agent-coordinator route is needed for the reads: a GET reaching
 // this LR through AC's transparent "/host/<id>/*" passthrough is served the
@@ -303,7 +305,8 @@ func (s *Server) indexSessionsFrom(acBase, hostID string) []RemoteSessionEntry {
 // pattern (filepath.Match; an empty glob matches everything, an invalid one
 // matches nothing), each with its size and sha256 so a puller can tell --
 // without fetching the bytes -- whether it already has the current version
-// (see handleSessionsPull's mode=sync).
+// (see handleSessionsPull). Files that never cross hosts (see
+// syncableSessionFile) aren't listed.
 func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request, sessionID string) {
 	glob := r.URL.Query().Get("glob")
 	dir := filepath.Join(s.recordsPath, sessionID)
@@ -320,6 +323,9 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request, sess
 			continue
 		}
 		name := e.Name()
+		if !syncableSessionFile(name) {
+			continue
+		}
 		if glob != "" {
 			if ok, err := filepath.Match(glob, name); err != nil || !ok {
 				continue
@@ -340,10 +346,11 @@ func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request, sess
 }
 
 // handleSessionsFile answers GET /api/sessions/<id>/file/<name>: one session
-// file's raw bytes, ungated on proxiedHeader -- same reasoning as files.go's
-// handleFileRaw.
+// file's bytes, ungated on proxiedHeader -- same reasoning as files.go's
+// handleFileRaw. Files that never cross hosts (raw records, in-progress
+// files -- see syncableSessionFile) are 404.
 func (s *Server) handleSessionsFile(w http.ResponseWriter, r *http.Request, sessionID, name string) {
-	if !validSessionPathSegment(name) {
+	if !validSessionPathSegment(name) || !syncableSessionFile(name) {
 		http.NotFound(w, r)
 		return
 	}
@@ -363,19 +370,33 @@ func (s *Server) handleSessionsFile(w http.ResponseWriter, r *http.Request, sess
 	http.ServeContent(w, r, name, info.ModTime(), f)
 }
 
-// handleSessionsPull answers POST /api/sessions/<id>/pull?glob=<pattern>&mode=once|sync:
+// handleSessionsPull answers POST /api/sessions/<id>/pull?glob=<pattern>[&max_size=<bytes>]:
 // this LR reaching out, as a client, to every other host agent-coordinator
 // currently shows as connected, pulling <id>'s files matching glob into its
-// own AGENT_RECORDS_PATH.
+// own AGENT_RECORDS_PATH. What is pulled from whom follows the session's
+// ownership (session.yaml's owner -- see clauditable/sessionlog.go):
 //
-//   - mode=once (the default) never re-fetches a file it already has a local
-//     copy of by name, regardless of content -- see clauditable/distsync.go's
-//     triggerOnceTransfer, used for "-s-processed" records ahead of a primary
-//     write. Once transferred, a record is never re-transferred.
-//   - mode=sync compares checksums (via handleSessionsList's reported sha256)
-//     and only fetches when missing or different -- see
-//     session-manager/repr.go's triggerSessionSync, used for
-//     "session.jsonl"/"-processed" records ahead of rendering a session view.
+//   - session.yaml and session.jsonl are only ever written by the owner, so
+//     they're only pulled from the owner (re-fetched when the checksum
+//     differs), and never by the owner itself. Before this, every host
+//     pulled them from every other host, so two hosts each holding their own
+//     copy kept overwriting each other.
+//   - A non-owner's secondary log, session.<host>.jsonl, is only pulled by
+//     the owner, and only from the host that writes it, so the owner's
+//     session-manager can fuse it into session.jsonl.
+//   - Record and resource files never change once written, so they're
+//     fetched once by name and never re-fetched. max_size, when set, leaves
+//     larger ones behind for an explicit request (session-manager's resource
+//     "open").
+//   - Raw, in-progress and unconsolidated files never cross hosts at all
+//     (see syncableSessionFile).
+//
+// Pulls for one session are serialized, and a peer that keeps failing is
+// skipped for a while (see peerPullAllowed) instead of being retried on
+// every request; a skipped peer counts as an error.
+//
+// The mode query parameter of earlier versions is accepted and ignored: the
+// rules above decide per file.
 //
 // Refused when it arrives through agent-coordinator's transparent
 // passthrough: a pull is this host acting as a client on its own behalf,
@@ -387,7 +408,7 @@ func (s *Server) handleSessionsPull(w http.ResponseWriter, r *http.Request, sess
 		return
 	}
 	glob := r.URL.Query().Get("glob")
-	once := r.URL.Query().Get("mode") != "sync"
+	maxSize, _ := strconv.ParseInt(r.URL.Query().Get("max_size"), 10, 64)
 
 	acAddr, ok := s.acHTTPAddr()
 	if !ok {
@@ -400,10 +421,29 @@ func (s *Server) handleSessionsPull(w http.ResponseWriter, r *http.Request, sess
 	}
 	acBase := "http://" + acAddr
 
+	unlock := s.lockSessionPull(sessionID)
+	defer unlock()
+
 	hosts := s.listPeerHosts(acBase)
+	dir := filepath.Join(s.recordsPath, sessionID)
+	owner, hasYAML := readSessionOwner(dir)
+	if !hasYAML {
+		owner = s.findSessionOwner(acBase, hosts, sessionID)
+	}
+	// The owner goes first, so a session.yaml pulled in from it is what the
+	// rest of the pull is judged by.
+	sort.SliceStable(hosts, func(i, j int) bool { return hosts[i] == owner && hosts[j] != owner })
+
 	fetched, errs := 0, 0
 	for _, hostID := range hosts {
-		n, ok := s.pullSessionFilesFrom(acBase, hostID, sessionID, glob, once)
+		if !s.peerPullAllowed(hostID) {
+			errs++
+			continue
+		}
+		policy := s.pullPolicyFor(dir, owner)
+		policy.maxSize = maxSize
+		n, ok := s.pullSessionFilesFrom(acBase, hostID, sessionID, glob, policy)
+		s.notePeerPull(hostID, ok)
 		fetched += n
 		if !ok {
 			errs++
@@ -411,6 +451,232 @@ func (s *Server) handleSessionsPull(w http.ResponseWriter, r *http.Request, sess
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(SessionPullResultMsg{Hosts: len(hosts), Fetched: fetched, Errors: errs})
+}
+
+// sessionPullPolicy is what pullSessionFilesFrom may take from a peer.
+type sessionPullPolicy struct {
+	self    string // this host's ID
+	owner   string // the session's owner; "" when unknown
+	isOwner bool   // this host owns the session
+	maxSize int64  // > 0: leave record/resource files larger than this behind
+}
+
+// pullPolicyFor works out sessionPullPolicy from the local session.yaml,
+// falling back to discoveredOwner (see findSessionOwner) while there isn't
+// one yet. A session.yaml with no owner field predates ownership and belongs
+// to whichever host has it -- the same rule clauditable writes by.
+func (s *Server) pullPolicyFor(dir, discoveredOwner string) sessionPullPolicy {
+	p := sessionPullPolicy{self: s.lrName, owner: discoveredOwner}
+	if owner, hasYAML := readSessionOwner(dir); hasYAML {
+		p.owner = owner
+		p.isOwner = owner == "" || owner == s.lrName
+	}
+	return p
+}
+
+// allows reports whether file, listed by hostID, may be taken from it at
+// all, and if so whether a local copy that already exists is refreshed when
+// its checksum differs (true) or left alone (false).
+func (p sessionPullPolicy) allows(hostID string, file SessionFileInfo) (allowed, refresh bool) {
+	if !syncableSessionFile(file.Name) {
+		return false, false
+	}
+	switch {
+	case file.Name == sessionYAMLName || file.Name == primaryLogName:
+		if p.isOwner {
+			return false, false
+		}
+		// From the owner it's authoritative. With the owner unknown or not
+		// reachable, another host's copy is only good enough to materialize
+		// a session we don't have at all.
+		return true, hostID == p.owner
+	case isSecondaryLogName(file.Name):
+		return p.isOwner && file.Name == secondaryLogNameFor(hostID), true
+	}
+	if p.maxSize > 0 && file.Size > p.maxSize {
+		return false, false
+	}
+	return true, false
+}
+
+// findSessionOwner asks each peer for its session.yaml when this host has
+// none yet, returning the owner a peer names itself as, else any owner a
+// peer names, else "".
+func (s *Server) findSessionOwner(acBase string, hosts []string, sessionID string) string {
+	named := ""
+	for _, hostID := range hosts {
+		fileURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/file/%s",
+			acBase, url.PathEscape(hostID), url.PathEscape(sessionID), sessionYAMLName)
+		resp, err := s.httpGetWithTimeout(fileURL, sessionsDiscoverHTTPTimeout)
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != http.StatusOK {
+			continue
+		}
+		owner := parseSessionOwner(string(data))
+		if owner == hostID {
+			return owner
+		}
+		if named == "" {
+			named = owner
+		}
+	}
+	return named
+}
+
+// lockSessionPull serializes pulls of one session, so two callers can't
+// fetch the same files into the same directory at once. Returns the unlock.
+func (s *Server) lockSessionPull(sessionID string) func() {
+	s.sessionSync.mu.Lock()
+	if s.sessionSync.locks == nil {
+		s.sessionSync.locks = map[string]*sync.Mutex{}
+	}
+	l := s.sessionSync.locks[sessionID]
+	if l == nil {
+		l = &sync.Mutex{}
+		s.sessionSync.locks[sessionID] = l
+	}
+	s.sessionSync.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
+// Peer backoff: after a failed pull from a host, further pulls from it are
+// skipped for peerBackoffBase, doubling with each consecutive failure up to
+// peerBackoffMax. A success clears it.
+const (
+	peerBackoffBase = 2 * time.Second
+	peerBackoffMax  = 2 * time.Minute
+)
+
+// sessionSyncState is handleSessionsPull's bookkeeping across requests.
+type sessionSyncState struct {
+	mu      sync.Mutex
+	locks   map[string]*sync.Mutex // per session ID
+	backoff map[string]peerBackoff // per host ID
+}
+
+type peerBackoff struct {
+	failures int
+	until    time.Time
+}
+
+// peerPullAllowed reports whether hostID isn't currently backed off.
+func (s *Server) peerPullAllowed(hostID string) bool {
+	s.sessionSync.mu.Lock()
+	defer s.sessionSync.mu.Unlock()
+	return time.Now().After(s.sessionSync.backoff[hostID].until)
+}
+
+// notePeerPull records a pull's outcome for hostID's backoff.
+func (s *Server) notePeerPull(hostID string, ok bool) {
+	s.sessionSync.mu.Lock()
+	defer s.sessionSync.mu.Unlock()
+	if s.sessionSync.backoff == nil {
+		s.sessionSync.backoff = map[string]peerBackoff{}
+	}
+	if ok {
+		delete(s.sessionSync.backoff, hostID)
+		return
+	}
+	b := s.sessionSync.backoff[hostID]
+	b.failures++
+	delay := peerBackoffBase << min(b.failures-1, 10)
+	if delay > peerBackoffMax {
+		delay = peerBackoffMax
+	}
+	b.until = time.Now().Add(delay)
+	s.sessionSync.backoff[hostID] = b
+	if b.failures > 1 {
+		log.Printf("sessions pull: host %s failed %d times in a row; skipping it for %s", hostID, b.failures, delay)
+	}
+}
+
+// Session file names with sync rules of their own -- see handleSessionsPull.
+const (
+	sessionYAMLName = "session.yaml"
+	primaryLogName  = "session.jsonl"
+)
+
+// syncableSessionFile reports whether name may cross hosts at all. Raw
+// record files ({ts}-raw.txt, -s-raw.txt) can hold unredacted secrets and
+// are often verbose, so they stay where they were written. "-writing.txt"
+// files exist only while a command runs, and a "-s-processed.txt" is a
+// record not yet consolidated on its own host -- both change underneath a
+// transfer. Dot-files and ".pulling" files are this LR's own temporaries.
+func syncableSessionFile(name string) bool {
+	switch {
+	case strings.HasPrefix(name, "."), strings.Contains(name, ".pulling"):
+		return false
+	case strings.HasSuffix(name, "-raw.txt"),
+		strings.HasSuffix(name, "-writing.txt"),
+		strings.HasSuffix(name, "-s-processed.txt"):
+		return false
+	}
+	return true
+}
+
+// isSecondaryLogName reports whether name is a non-owner's
+// session.<host>.jsonl.
+func isSecondaryLogName(name string) bool {
+	if name == primaryLogName {
+		return false
+	}
+	mid, ok := strings.CutPrefix(name, "session.")
+	if !ok {
+		return false
+	}
+	tag, ok := strings.CutSuffix(mid, ".jsonl")
+	return ok && tag != ""
+}
+
+// secondaryLogNameFor and hostFileTag mirror clauditable/sessionlog.go's
+// secondaryLogName/hostFileTag: the log hostID appends to in a session it
+// doesn't own.
+func secondaryLogNameFor(hostID string) string {
+	return "session." + hostFileTag(hostID) + ".jsonl"
+}
+
+func hostFileTag(hostID string) string {
+	var b strings.Builder
+	for _, r := range hostID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	tag := strings.Trim(b.String(), ".-")
+	if tag == "" {
+		tag = "unknown"
+	}
+	if strings.HasSuffix(tag, "-s") {
+		tag += "_"
+	}
+	return tag
+}
+
+// readSessionOwner returns sessionDir's session.yaml owner field, and
+// whether session.yaml exists -- mirroring clauditable/sessionlog.go.
+func readSessionOwner(sessionDir string) (owner string, hasYAML bool) {
+	data, err := os.ReadFile(filepath.Join(sessionDir, sessionYAMLName))
+	if err != nil {
+		return "", false
+	}
+	return parseSessionOwner(string(data)), true
+}
+
+func parseSessionOwner(yaml string) string {
+	for _, line := range strings.Split(yaml, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "owner: "); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // acHTTPAddr returns agent-coordinator's "host:port" HTTP address, and
@@ -468,8 +734,8 @@ func (s *Server) listPeerHosts(acBase string) []string {
 
 // pullSessionFilesFrom lists sessionID's files matching glob on hostID
 // (through agent-coordinator's transparent "/host/<id>/*" proxy) and fetches
-// whichever ones "once" (never re-fetch an already-present name) or "sync"
-// (re-fetch on a checksum mismatch or absence) says are worth pulling,
+// whichever ones policy allows (see sessionPullPolicy.allows) -- missing
+// ones, plus, for the files that change, ones whose checksum differs --
 // writing each straight into this LR's own AGENT_RECORDS_PATH. Returns how
 // many files were actually fetched, and whether hostID was actually reachable
 // and fully pulled -- ok is false on a listing failure (network error,
@@ -477,7 +743,7 @@ func (s *Server) listPeerHosts(acBase string) []string {
 // or when any individual file fetch failed, so handleSessionsPull's caller
 // can tell "0 fetched because there was nothing new" apart from "0 fetched
 // because hostID couldn't be reached at all" (see SessionPullResultMsg).
-func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, once bool) (fetched int, ok bool) {
+func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, policy sessionPullPolicy) (fetched int, ok bool) {
 	listURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/list?glob=%s",
 		acBase, url.PathEscape(hostID), url.PathEscape(sessionID), url.QueryEscape(glob))
 	resp, err := s.httpGetWithTimeout(listURL, sessionsPullHTTPTimeout)
@@ -495,25 +761,28 @@ func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, on
 		log.Printf("sessions pull: decoding listing from host %s: %v", hostID, err)
 		return 0, false
 	}
-	if len(msg.Files) == 0 {
-		return 0, true
-	}
-
 	dir := filepath.Join(s.recordsPath, sessionID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("sessions pull: creating session directory: %v", err)
-		return 0, false
-	}
-
 	ok = true
 	for _, file := range msg.Files {
+		if !validSessionPathSegment(file.Name) {
+			continue
+		}
+		allowed, refresh := policy.allows(hostID, file)
+		if !allowed {
+			continue
+		}
 		localPath := filepath.Join(dir, file.Name)
-		if once {
-			if _, err := os.Stat(localPath); err == nil {
-				continue // already have it -- once-transfer never re-fetches
+		if _, err := os.Stat(localPath); err == nil {
+			if !refresh {
+				continue // never changes once written, or not this host's to refresh
 			}
-		} else if localSum, err := fileSHA256(localPath); err == nil && localSum == file.SHA256 {
-			continue // sync: unchanged -- checksum match avoids a needless re-fetch
+			if localSum, err := fileSHA256(localPath); err == nil && localSum == file.SHA256 {
+				continue // unchanged -- checksum match avoids a needless re-fetch
+			}
+		}
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("sessions pull: creating session directory: %v", err)
+			return fetched, false
 		}
 
 		fileURL := fmt.Sprintf("%s/host/%s/api/sessions/%s/file/%s",
@@ -528,8 +797,9 @@ func (s *Server) pullSessionFilesFrom(acBase, hostID, sessionID, glob string, on
 	return fetched, ok
 }
 
-// fetchSessionFile downloads fileURL into localPath, via a same-directory
-// temp-then-rename so a reader never sees a partially-written file.
+// fetchSessionFile downloads fileURL into localPath, via a uniquely-named
+// same-directory temp file and a rename, so a reader never sees a
+// partially-written file and two fetches can't write into one temp file.
 func (s *Server) fetchSessionFile(fileURL, localPath string) error {
 	resp, err := s.httpGetWithTimeout(fileURL, sessionsPullHTTPTimeout)
 	if err != nil {
@@ -540,11 +810,11 @@ func (s *Server) fetchSessionFile(fileURL, localPath string) error {
 		return fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 
-	tmp := localPath + ".pulling"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	out, err := os.CreateTemp(filepath.Dir(localPath), "."+filepath.Base(localPath)+".pulling-*")
 	if err != nil {
 		return err
 	}
+	tmp := out.Name()
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		out.Close()
 		os.Remove(tmp)
@@ -554,7 +824,15 @@ func (s *Server) fetchSessionFile(fileURL, localPath string) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, localPath)
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, localPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // httpGetWithTimeout issues a GET bounded by timeout -- see

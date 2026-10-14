@@ -22,6 +22,9 @@ import (
 // in place. A resource's content is copied alongside as
 // {record}-resource-{name}. session-manager and federation-command both add
 // notes/resources by running these subcommands, so this is the one writer.
+// They follow the same ownership rules as wrapped commands (see
+// sessionlog.go): on a host that doesn't own the session, the files are
+// {record}-<host>-... and the entry goes to that host's secondary log.
 
 // runAddNote is "clauditable add-note [text...]": the note is args joined by
 // spaces, or stdin when there are no args. Prints the new record ID.
@@ -36,12 +39,12 @@ func runAddNote(args []string, stdin io.Reader) int {
 		text = string(data)
 	}
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
-	ts, err := addNote(recordsPath, getSession(), text)
+	id, err := addNote(recordsPath, getSession(), text)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable add-note: %v\n", err)
 		return 1
 	}
-	fmt.Println(ts)
+	fmt.Println(id)
 	return 0
 }
 
@@ -64,34 +67,35 @@ func runAddResource(args []string) int {
 		return 1
 	}
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
-	ts, err := addResource(recordsPath, getSession(), paths[0], name)
+	id, err := addResource(recordsPath, getSession(), paths[0], name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable add-resource: %v\n", err)
 		return 1
 	}
-	fmt.Println(ts)
+	fmt.Println(id)
 	return 0
 }
 
-// addNote records text as a note in session.
-func addNote(recordsPath, session, text string) (int64, error) {
+// addNote records text as a note in session. Returns the record ID.
+func addNote(recordsPath, session, text string) (string, error) {
 	text = strings.TrimRight(text, "\n")
 	if strings.TrimSpace(text) == "" {
-		return 0, errors.New("note is empty")
+		return "", errors.New("note is empty")
 	}
 	record := annotationRecord(records.EventTypeNote)
 	record.Command = text
 	return writeAnnotation(recordsPath, session, &record, nil)
 }
 
-// addResource copies srcPath into session as a resource named name.
-func addResource(recordsPath, session, srcPath, name string) (int64, error) {
+// addResource copies srcPath into session as a resource named name. Returns
+// the record ID.
+func addResource(recordsPath, session, srcPath, name string) (string, error) {
 	info, err := os.Stat(srcPath)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	if !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s is not a regular file", srcPath)
+		return "", fmt.Errorf("%s is not a regular file", srcPath)
 	}
 	if strings.TrimSpace(name) == "" {
 		name = filepath.Base(srcPath)
@@ -100,8 +104,8 @@ func addResource(recordsPath, session, srcPath, name string) (int64, error) {
 
 	record := annotationRecord(records.EventTypeResource)
 	record.Command = name
-	return writeAnnotation(recordsPath, session, &record, func(sessionDir string, ts int64) error {
-		file := fmt.Sprintf("%d%s%s", ts, records.ResourceFileInfix, safe)
+	return writeAnnotation(recordsPath, session, &record, func(sessionDir, id string) error {
+		file := id + records.ResourceFileInfix + safe
 		size, err := copyFile(srcPath, filepath.Join(sessionDir, file))
 		if err != nil {
 			return fmt.Errorf("copying resource: %w", err)
@@ -135,34 +139,39 @@ func annotationRecord(eventType string) records.Record {
 }
 
 // writeAnnotation writes record into session as an already-consolidated
-// primary: {ts}-raw.txt, {ts}-processed.txt (redacted like any other record),
-// then its session log entry appended to session.jsonl in a single write.
-// prepare, when set, runs once ts is reserved and before anything is
-// formatted (add-resource copies its file there). Returns the record ID.
-func writeAnnotation(recordsPath, session string, record *records.Record, prepare func(sessionDir string, ts int64) error) (int64, error) {
+// primary: {record}-raw.txt, {record}-processed.txt (redacted like any other
+// record), then its session log entry appended to this host's session log
+// (session.jsonl on the owner, its secondary log elsewhere) in a single
+// locked write. Today's default session is created if needed; any other
+// session must already exist here. prepare, when set, runs once the record
+// ID is reserved and before anything is formatted (add-resource copies its
+// file there). Returns the record ID: "{ts}" on the owner, "{ts}-<host>"
+// elsewhere.
+func writeAnnotation(recordsPath, session string, record *records.Record, prepare func(sessionDir, id string) error) (string, error) {
 	sessionDir := filepath.Join(recordsPath, session)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return 0, fmt.Errorf("creating session directory: %w", err)
-	}
-	name := session
 	if session == defaultSessionID() {
-		name = defaultSessionName()
+		if err := ensureSession(recordsPath, session, defaultSessionName()); err != nil {
+			return "", err
+		}
+	} else if _, err := os.Stat(sessionDir); err != nil {
+		return "", fmt.Errorf("session %q not found on this host", session)
 	}
-	_ = writeSessionYAMLIfAbsent(sessionDir, session, name)
+	target := writeTargetFor(sessionDir)
 
-	ts, rawFile, err := reserveRecordID(sessionDir, time.Now().Unix()-1)
+	ts, rawFile, err := reserveRecordID(sessionDir, time.Now().Unix()-1, target.tag)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
+	id := recordPrefix(ts, target.tag)
 	rawPath := rawFile.Name()
-	fail := func(err error) (int64, error) {
+	fail := func(err error) (string, error) {
 		rawFile.Close()
 		os.Remove(rawPath)
-		return 0, err
+		return "", err
 	}
 
 	if prepare != nil {
-		if err := prepare(sessionDir, ts); err != nil {
+		if err := prepare(sessionDir, id); err != nil {
 			return fail(err)
 		}
 	}
@@ -176,40 +185,35 @@ func writeAnnotation(recordsPath, session string, record *records.Record, prepar
 	}
 	if err := rawFile.Close(); err != nil {
 		os.Remove(rawPath)
-		return 0, fmt.Errorf("writing raw file: %w", err)
+		return "", fmt.Errorf("writing raw file: %w", err)
 	}
-	if err := writeProcessedFile(sessionDir, ts, true, content); err != nil {
-		return 0, fmt.Errorf("writing processed file: %w", err)
+	if err := writeProcessedFile(sessionDir, ts, target.tag, true, content); err != nil {
+		return "", fmt.Errorf("writing processed file: %w", err)
 	}
 
-	processed, err := os.ReadFile(filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", ts)))
+	processed, err := os.ReadFile(filepath.Join(sessionDir, id+"-processed.txt"))
 	if err != nil {
-		return 0, fmt.Errorf("reading processed file: %w", err)
+		return "", fmt.Errorf("reading processed file: %w", err)
 	}
 	entry := records.ExtractSessionLogFromWrittenFile(string(processed))
 	entry = strings.TrimRight(entry, "\n") + "\n\n"
-	f, err := os.OpenFile(filepath.Join(sessionDir, "session.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return 0, fmt.Errorf("opening session.jsonl: %w", err)
+	if err := appendSessionLog(target.logPath, []byte(entry)); err != nil {
+		return "", fmt.Errorf("appending to %s: %w", filepath.Base(target.logPath), err)
 	}
-	defer f.Close()
-	if _, err := f.WriteString(entry); err != nil {
-		return 0, fmt.Errorf("appending to session.jsonl: %w", err)
-	}
-	return ts, nil
+	return id, nil
 }
 
 // reserveRecordID claims a record ID (a unix second) for a note/resource by
-// exclusively creating its {ts}-raw.txt, returning that file open for writing.
-// It starts at start and walks backwards past any second some other record
-// already uses: wrapped commands take the current second when they start, so
-// a free past second can't later be claimed by one of them.
-func reserveRecordID(sessionDir string, start int64) (int64, *os.File, error) {
+// exclusively creating its {ts}{tag}-raw.txt, returning that file open for
+// writing. It starts at start and walks backwards past any second some other
+// record already uses: wrapped commands take the current second when they
+// start, so a free past second can't later be claimed by one of them.
+func reserveRecordID(sessionDir string, start int64, tag string) (int64, *os.File, error) {
 	for ts := start; ts > start-3600; ts-- {
 		if recordIDInUse(sessionDir, ts) {
 			continue
 		}
-		f, err := os.OpenFile(filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", ts)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		f, err := os.OpenFile(filepath.Join(sessionDir, recordPrefix(ts, tag)+"-raw.txt"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 		if err == nil {
 			return ts, f, nil
 		}

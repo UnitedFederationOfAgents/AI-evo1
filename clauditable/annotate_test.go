@@ -1,13 +1,13 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"clauditable/pkg/records"
+	ufahostid "ufa-hostid"
 )
 
 func TestEventTypeFor(t *testing.T) {
@@ -54,8 +54,18 @@ func readSessionLogEvents(t *testing.T, sessionDir string) []*records.Event {
 	return events
 }
 
-func TestAddNote(t *testing.T) {
+// newOwnedSession creates session s1 owned by this host, as new-session would.
+func newOwnedSession(t *testing.T) string {
+	t.Helper()
 	recordsPath := t.TempDir()
+	if err := ensureSession(recordsPath, "s1", "S1"); err != nil {
+		t.Fatal(err)
+	}
+	return recordsPath
+}
+
+func TestAddNote(t *testing.T) {
+	recordsPath := newOwnedSession(t)
 	ts, err := addNote(recordsPath, "s1", "remember the milk\nand the eggs\n")
 	if err != nil {
 		t.Fatalf("addNote: %v", err)
@@ -63,12 +73,9 @@ func TestAddNote(t *testing.T) {
 	sessionDir := filepath.Join(recordsPath, "s1")
 
 	for _, suffix := range []string{"-raw.txt", "-processed.txt"} {
-		if _, err := os.Stat(filepath.Join(sessionDir, fmt.Sprintf("%d%s", ts, suffix))); err != nil {
-			t.Errorf("expected %d%s: %v", ts, suffix, err)
+		if _, err := os.Stat(filepath.Join(sessionDir, ts+suffix)); err != nil {
+			t.Errorf("expected %s%s: %v", ts, suffix, err)
 		}
-	}
-	if _, err := os.Stat(filepath.Join(sessionDir, "session.yaml")); err != nil {
-		t.Errorf("expected session.yaml to be created: %v", err)
 	}
 
 	events := readSessionLogEvents(t, sessionDir)
@@ -78,8 +85,8 @@ func TestAddNote(t *testing.T) {
 	if events[0].EventType != records.EventTypeNote {
 		t.Errorf("event_type = %q, want %q", events[0].EventType, records.EventTypeNote)
 	}
-	if !strings.HasSuffix(events[0].RecordPath, fmt.Sprintf("%d-raw.txt", ts)) {
-		t.Errorf("record_path = %q, want it to name %d-raw.txt", events[0].RecordPath, ts)
+	if !strings.HasSuffix(events[0].RecordPath, "/"+ts+"-raw.txt") {
+		t.Errorf("record_path = %q, want it to name %s-raw.txt", events[0].RecordPath, ts)
 	}
 
 	log, _ := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
@@ -92,19 +99,61 @@ func TestAddNote(t *testing.T) {
 }
 
 func TestAddNoteRejectsEmpty(t *testing.T) {
-	if _, err := addNote(t.TempDir(), "s1", "  \n"); err == nil {
+	if _, err := addNote(newOwnedSession(t), "s1", "  \n"); err == nil {
 		t.Error("expected an error for a blank note")
 	}
 }
 
-func TestAddNoteRedactsProcessedButNotRaw(t *testing.T) {
+// A session that doesn't exist on this host isn't created by a note: that
+// would claim it for this host (see sessionlog.go).
+func TestAddNoteRejectsUnknownSession(t *testing.T) {
 	recordsPath := t.TempDir()
+	if _, err := addNote(recordsPath, "s1", "hello"); err == nil {
+		t.Error("expected an error for a session that isn't here")
+	}
+	if _, err := os.Stat(filepath.Join(recordsPath, "s1")); !os.IsNotExist(err) {
+		t.Errorf("the session directory should not have been created: %v", err)
+	}
+}
+
+// On a host that doesn't own the session, a note goes to that host's
+// secondary log under host-tagged file names, and session.jsonl is untouched.
+func TestAddNoteOnNonOwnerUsesSecondaryLog(t *testing.T) {
+	recordsPath := t.TempDir()
+	sessionDir := filepath.Join(recordsPath, "s1")
+	os.MkdirAll(sessionDir, 0755)
+	os.WriteFile(filepath.Join(sessionDir, "session.yaml"), []byte("id: s1\nname: S1\nowner: some-other-host\n"), 0644)
+
+	id, err := addNote(recordsPath, "s1", "from elsewhere")
+	if err != nil {
+		t.Fatalf("addNote: %v", err)
+	}
+	tag := hostFileTag(ufahostid.GetHostID())
+	if !strings.HasSuffix(id, "-"+tag) {
+		t.Errorf("record ID = %q, want it to end in -%s", id, tag)
+	}
+	for _, suffix := range []string{"-raw.txt", "-processed.txt"} {
+		if _, err := os.Stat(filepath.Join(sessionDir, id+suffix)); err != nil {
+			t.Errorf("expected %s%s: %v", id, suffix, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(sessionDir, "session.jsonl")); !os.IsNotExist(err) {
+		t.Error("a non-owner must not write session.jsonl")
+	}
+	log, err := os.ReadFile(filepath.Join(sessionDir, secondaryLogName(ufahostid.GetHostID())))
+	if err != nil || !strings.Contains(string(log), "IN>> from elsewhere") {
+		t.Errorf("secondary log = %q, %v; want the note", log, err)
+	}
+}
+
+func TestAddNoteRedactsProcessedButNotRaw(t *testing.T) {
+	recordsPath := newOwnedSession(t)
 	ts, err := addNote(recordsPath, "s1", "key is AKIAABCDEFGHIJKLMNOP")
 	if err != nil {
 		t.Fatalf("addNote: %v", err)
 	}
 	sessionDir := filepath.Join(recordsPath, "s1")
-	processed, _ := os.ReadFile(filepath.Join(sessionDir, fmt.Sprintf("%d-processed.txt", ts)))
+	processed, _ := os.ReadFile(filepath.Join(sessionDir, ts+"-processed.txt"))
 	if strings.Contains(string(processed), "AKIAABCDEFGHIJKLMNOP") {
 		t.Error("processed file should be redacted")
 	}
@@ -112,14 +161,14 @@ func TestAddNoteRedactsProcessedButNotRaw(t *testing.T) {
 	if strings.Contains(string(log), "AKIAABCDEFGHIJKLMNOP") {
 		t.Error("session.jsonl should be redacted")
 	}
-	raw, _ := os.ReadFile(filepath.Join(sessionDir, fmt.Sprintf("%d-raw.txt", ts)))
+	raw, _ := os.ReadFile(filepath.Join(sessionDir, ts+"-raw.txt"))
 	if !strings.Contains(string(raw), "AKIAABCDEFGHIJKLMNOP") {
 		t.Error("raw file should keep the original text")
 	}
 }
 
 func TestAddResource(t *testing.T) {
-	recordsPath := t.TempDir()
+	recordsPath := newOwnedSession(t)
 	src := filepath.Join(t.TempDir(), "diagram.png")
 	if err := os.WriteFile(src, []byte("not really a png"), 0644); err != nil {
 		t.Fatal(err)
@@ -129,7 +178,7 @@ func TestAddResource(t *testing.T) {
 		t.Fatalf("addResource: %v", err)
 	}
 	sessionDir := filepath.Join(recordsPath, "s1")
-	file := fmt.Sprintf("%d-resource-My-Diagram--v2-.png", ts)
+	file := ts + "-resource-My-Diagram--v2-.png"
 	data, err := os.ReadFile(filepath.Join(sessionDir, file))
 	if err != nil {
 		t.Fatalf("expected resource copy %s: %v", file, err)
@@ -149,7 +198,7 @@ func TestAddResource(t *testing.T) {
 }
 
 func TestAddResourceDefaultsNameAndRejectsDirectory(t *testing.T) {
-	recordsPath := t.TempDir()
+	recordsPath := newOwnedSession(t)
 	srcDir := t.TempDir()
 	if _, err := addResource(recordsPath, "s1", srcDir, ""); err == nil {
 		t.Error("expected an error for a directory")
@@ -160,7 +209,7 @@ func TestAddResourceDefaultsNameAndRejectsDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(recordsPath, "s1", fmt.Sprintf("%d-resource-notes.txt", ts))); err != nil {
+	if _, err := os.Stat(filepath.Join(recordsPath, "s1", ts+"-resource-notes.txt")); err != nil {
 		t.Errorf("expected the resource to be named after its file: %v", err)
 	}
 }
@@ -169,7 +218,7 @@ func TestReserveRecordIDSkipsUsedSeconds(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "1000-writing.txt"), nil, 0644)
 	os.WriteFile(filepath.Join(dir, "999-s-processed.txt"), nil, 0644)
-	ts, f, err := reserveRecordID(dir, 1000)
+	ts, f, err := reserveRecordID(dir, 1000, "")
 	if err != nil {
 		t.Fatalf("reserveRecordID: %v", err)
 	}
@@ -178,7 +227,7 @@ func TestReserveRecordIDSkipsUsedSeconds(t *testing.T) {
 		t.Errorf("ts = %d, want 998", ts)
 	}
 	// 998 is now taken too.
-	ts, f, err = reserveRecordID(dir, 1000)
+	ts, f, err = reserveRecordID(dir, 1000, "")
 	if err != nil {
 		t.Fatalf("reserveRecordID: %v", err)
 	}
@@ -189,7 +238,7 @@ func TestReserveRecordIDSkipsUsedSeconds(t *testing.T) {
 }
 
 func TestTwoNotesBothLand(t *testing.T) {
-	recordsPath := t.TempDir()
+	recordsPath := newOwnedSession(t)
 	a, err := addNote(recordsPath, "s1", "first")
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +248,7 @@ func TestTwoNotesBothLand(t *testing.T) {
 		t.Fatal(err)
 	}
 	if a == b {
-		t.Errorf("both notes got record ID %d", a)
+		t.Errorf("both notes got record ID %s", a)
 	}
 	if n := len(readSessionLogEvents(t, filepath.Join(recordsPath, "s1"))); n != 2 {
 		t.Errorf("expected 2 events, got %d", n)

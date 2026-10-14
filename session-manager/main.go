@@ -4,11 +4,13 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -163,6 +165,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
+	// Each message runs in its own goroutine, where a panic would take the
+	// whole process down -- e.g. on session data this code didn't expect.
+	// Report it to the client instead.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("handling %q: panic: %v\n%s", m.Type, r, debug.Stack())
+			s.sendToClient(c, "error", fmt.Sprintf("%s: internal error: %v", m.Type, r))
+		}
+	}()
 	switch m.Type {
 	case "connect":
 		// Manual connect: the widget lets an instance started without

@@ -212,9 +212,9 @@ func findResourceFile(recordsPath, id, record string) string {
 
 // handleResource answers GET /api/resource?session=<id>&record=<record> with
 // that resource's content, pulling it from another host first if it isn't
-// here yet (the transcript's sync deliberately leaves resource content
-// behind -- see sessionSyncGlobs). It's served sandboxed (CSP "sandbox",
-// nosniff) since it's arbitrary uploaded content on this UI's origin.
+// here yet (the transcript's sync only takes small resources along -- see
+// sessionSyncGlobs). It's served sandboxed (CSP "sandbox", nosniff) since
+// it's arbitrary uploaded content on this UI's origin.
 func (s *Server) handleResource(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("session")
 	record := r.URL.Query().Get("record")
@@ -224,7 +224,7 @@ func (s *Server) handleResource(w http.ResponseWriter, r *http.Request) {
 	}
 	file := findResourceFile(s.recordsPath, id, record)
 	if file == "" {
-		s.triggerSessionSyncGlobs(id, []string{record + resourceFileInfix + "*"})
+		s.triggerSessionSyncGlobs(id, []sessionSyncGlob{{glob: record + resourceFileInfix + "*"}})
 		file = findResourceFile(s.recordsPath, id, record)
 	}
 	if file == "" {

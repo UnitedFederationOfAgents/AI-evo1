@@ -27,19 +27,18 @@ func TestTriggerSessionSyncNoClientIsANoOp(t *testing.T) {
 // wiring described in docs/DistributedSessionsBrainstorm.md: once connected
 // to local-representative (which discloses its own HTTP port over
 // representable's "hello" message -- see representable.Client.PeerHTTPPort),
-// triggerSessionSync POSTs a sync pull for each of sessionSyncGlobs
-// ("session.jsonl", "session.yaml", "*-processed.txt") to that host's
-// "/api/sessions/<id>/pull".
+// triggerSessionSync POSTs a pull for each of sessionSyncGlobs to that host's
+// "/api/sessions/<id>/pull", with max_size only on the resource glob.
 func TestTriggerSessionSyncPostsAllGlobsToPeerHTTPPort(t *testing.T) {
 	var mu sync.Mutex
 	var gotPaths []string
 	var gotGlobs []string
-	var gotModes []string
+	var gotMaxSizes []string
 	lr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		gotPaths = append(gotPaths, r.URL.Path)
 		gotGlobs = append(gotGlobs, r.URL.Query().Get("glob"))
-		gotModes = append(gotModes, r.URL.Query().Get("mode"))
+		gotMaxSizes = append(gotMaxSizes, r.URL.Query().Get("max_size"))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(sessionPullResultMsg{})
@@ -78,11 +77,15 @@ func TestTriggerSessionSyncPostsAllGlobsToPeerHTTPPort(t *testing.T) {
 		if p != "/api/sessions/my-session/pull" {
 			t.Errorf("request %d path = %q, want /api/sessions/my-session/pull", i, p)
 		}
-		if gotModes[i] != "sync" {
-			t.Errorf("request %d mode = %q, want sync", i, gotModes[i])
+		wantMax := ""
+		if gotGlobs[i] == "*-resource-*" {
+			wantMax = "262144"
+		}
+		if gotMaxSizes[i] != wantMax {
+			t.Errorf("request %d (%s) max_size = %q, want %q", i, gotGlobs[i], gotMaxSizes[i], wantMax)
 		}
 	}
-	wantGlobs := map[string]bool{"session.jsonl": false, "session.yaml": false, "*-processed.txt": false}
+	wantGlobs := map[string]bool{"session.jsonl": false, "session.yaml": false, "session.*.jsonl": false, "*-processed.txt": false, "*-resource-*": false}
 	for _, g := range gotGlobs {
 		if _, ok := wantGlobs[g]; !ok {
 			t.Errorf("unexpected glob %q", g)
@@ -143,7 +146,7 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ok := requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess with spaces", "*-processed.txt"); !ok {
+	if ok := requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess with spaces", "*-processed.txt", 0); !ok {
 		t.Errorf("requestSessionPull = false, want true (no errors reported)")
 	}
 
@@ -154,8 +157,8 @@ func TestRequestSessionPullBuildsExpectedURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.Get("glob") != "*-processed.txt" || q.Get("mode") != "sync" {
-		t.Errorf("query = %q, want glob=*-processed.txt&mode=sync", gotQuery)
+	if q.Get("glob") != "*-processed.txt" || q.Has("max_size") {
+		t.Errorf("query = %q, want glob=*-processed.txt and no max_size", gotQuery)
 	}
 }
 
@@ -176,7 +179,7 @@ func TestRequestSessionPullReportsIncompleteOnUpstreamErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ok := requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess-1", "session.jsonl"); ok {
+	if ok := requestSessionPull(nil, lrURL.Hostname(), lrURL.Port(), "sess-1", "session.jsonl", 0); ok {
 		t.Errorf("requestSessionPull = true, want false (local-representative reported an unreachable peer)")
 	}
 }

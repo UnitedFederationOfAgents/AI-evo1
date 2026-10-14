@@ -431,6 +431,15 @@ a.transcript-expand-btn { text-decoration: none; }
 .transcript-entry-note { border-left: 3px solid #8a7430; }
 .transcript-entry-resource { border-left: 3px solid #306f8a; }
 
+/* A turn carried on from another host's secondary log, not yet fused into
+   the owner's session.jsonl -- deliberately quiet. */
+.transcript-entry.transcript-entry-secondary {
+  border-left: 2px dashed #6a6a78;
+  opacity: 0.9;
+}
+.transcript-secondary-tag { color: #9a9ab0; font-style: italic; }
+.transcript-record-missing { color: #8a8a8a; }
+
 /* ---- Annotate bar (add a note / resource to the session) ---- */
 
 .annotate-bar {

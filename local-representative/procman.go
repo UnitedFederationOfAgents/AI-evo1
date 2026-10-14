@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -701,8 +702,34 @@ func (s *Server) broadcastChainCall() {
 	st := s.chainCallState()
 	s.broadcast("chain-call-state", st)
 	if ac := s.getACClient(); ac != nil {
-		ac.SendData("chain-call-state", st)
+		ac.SendData("chain-call-state", trimChainCallForAC(st))
 	}
+}
+
+// maxChainCallACBytes bounds the chain-call-state copy sent up to
+// agent-coordinator. Each representable message is one line, and its reader
+// drops the connection on a line over 64 KiB; a full 400-entry buffer of
+// session-pull URLs is well over that, so a burst of session syncing used to
+// cut this LR off from agent-coordinator.
+const maxChainCallACBytes = 48 << 10
+
+// trimChainCallForAC drops the oldest entries until st marshals to under
+// maxChainCallACBytes.
+func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
+	entries := st.Entries
+	for len(entries) > 0 {
+		data, err := json.Marshal(ChainCallStateMsg{Entries: entries})
+		if err == nil && len(data) <= maxChainCallACBytes {
+			break
+		}
+		// Drop roughly the excess share at once rather than one at a time.
+		drop := 1
+		if err == nil {
+			drop = max(1, len(entries)*(len(data)-maxChainCallACBytes)/len(data))
+		}
+		entries = entries[min(drop, len(entries)):]
+	}
+	return ChainCallStateMsg{Entries: entries}
 }
 
 // handleSystemCommand executes a system-tab action requested remotely by

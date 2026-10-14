@@ -396,6 +396,7 @@ type Server struct {
 	// change at runtime via the "connect to AC" widget.
 	recordsPath string
 	acHTTPPort  string
+	sessionSync sessionSyncState
 
 	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
 	// available on any host" verdict, relayed down from agent-coordinator's

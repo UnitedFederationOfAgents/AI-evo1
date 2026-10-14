@@ -323,11 +323,62 @@ If the unlock itself is refused, that error shows under the buttons. When the sc
 I updated the tests in `screenstate_test.go`, adding cases for asleep-and-locked, locking while waking, a refused unlock, and an unreadable screen state. I also updated the button's hover text in `frontend/src/App.tsx`.
 
 
-## <REPLACE-Revision|Retry> M
+## Revision M
 
-<REPLACE-PROMPT>
+We are taking a moment to fix an issue we're having with session manager. See the following exchange for context:
+
+## What happened
+
+Your distributed session forked. desktop01's `set-session` didn't join the existing session. It created a new, empty one with the same name. When the two copies were later synced, desktop01's copy overwrote provisioner01's index of the session.
+
+I couldn't read the session manager (SM) or file-exchange code, because `/AI-evo1-dev` is outside what I'm allowed to read. So this comes only from the files in this session's directory, as seen from provisioner01. It's a strong lead, not a confirmed root cause.
+
+**Evidence from this directory:**
+
+1. **`session.yaml` was replaced.** The directory name says the session was created at 14:30:48, but `session.yaml` says `created: 2026-10-13T17:22:49Z` and `owner: desktop01-itjf`. That timestamp is when the session was first used on desktop01, not when it began.
+2. **The index lost provisioner01's entries.** provisioner01 still has all its early records (`1791902034`, `…2540`, `…2898` with `launches.txt`, `…2966`, from 14:33 to 14:49Z). None of them appear in `session.jsonl`. The file starts with desktop01's `set-session` at 17:21:48Z, and then today's "U up?" from provisioner01 was added to the end.
+3. **desktop01 never had the old records.** Its agent run at 17:33 said "the only earlier attempt in this session died on an expired OAuth token." At that point desktop01's copy of the directory held none of provisioner01's files. So `/host-agent-files` isn't really shared: each node has its own copy, and something syncs them.
+4. **The sync only went one way.** desktop01's processed files arrived here, but their `record_path` targets (`1791912169-raw.txt`, `1791912822-raw.txt`) never did. provisioner01's older files apparently never reached desktop01.
+5. **Something rewrote the files a minute after the last processing.** `session.yaml` and both of desktop01's processed files were all written at 17:36:12–13, about 50 seconds after the last processing at 17:35:21. That fits SM on desktop01 pushing its whole copy, which may be when you saw the thrashing.
+
+## Likely causes of the thrashing and crash
+
+- **Whole-file sync with "latest change wins."** Both nodes add lines to their own `session.jsonl`, so the two copies never match. Each sync sees a newer, different file and sends it back, and the two nodes keep overwriting each other.
+- **Files that are missing on one node.** Records point to `-raw.txt` files that only exist on the other node. If SM tries to fetch a missing file and the peer doesn't have it either, it can retry forever.
+- **Lines SM may not be able to parse.** Only 11 of the 46 lines in `session.jsonl` are JSON; the other 35 are `IN>>`/`OUT>>` transcript text. If that's intended, fine. If SM's viewer reads the file strictly as JSON lines, or assumes every `record_path` exists, either could explain the crash.
+- **Possible in-progress files.** A `*-writing.txt` file exists while an agent run is in progress; one is here right now for this run. If the exchange syncs those, they change mid-transfer and add more churn.
+
+## Fixes
+
+**Now, to recover the session (I didn't change anything; this run was read-only):**
+1. Stop SM and the file exchange on desktop01 so it stops overwriting provisioner01's copy.
+2. Back up this directory on both nodes.
+3. Copy desktop01's `1791912169-raw.txt` and `1791912822-raw.txt` here.
+4. Rebuild `session.jsonl` from every record's first line, sorted by timestamp, and restore `session.yaml` to the original creation time and owner.
+5. Push the repaired directory to desktop01 in one direction only, then restart SM there.
+
+**Proposed Structural fixes:**
+1. **`set-session` should never create a session silently.** If the name doesn't exist locally, it should ask the other nodes and pull their copy first. Creating a session should be its own explicit command. A name with a past timestamp is a clear sign it already exists.
+2. **Stop syncing `session.jsonl` as a shared file.** The individual record files never change once written, so treat them as the source of truth and have each node rebuild the index locally by sorting them. Alternatively, give each host its own log (`session.<host>.jsonl`) and merge them when reading.
+3. **Put the host in record filenames.** For example `1791912169-desktop01-raw.txt`, so two nodes writing in the same second can't collide.
+4. **Make the file exchange safer.** Compare file contents (hashes) instead of modification times. Don't send a file back to the node it came from. Skip `*-writing.txt` and other temporary files. Back off after repeated failures instead of retrying in a tight loop.
+5. **Make SM tolerate bad data.** A non-JSON line or a missing `record_path` should show as a warning in the viewer, not crash SM.
+6. **Decide whether raw files are synced.** If they stay local to one node, `record_path` shouldn't point at them; point it at the processed file instead.
 
 
-## Human-Prompt
+---- End Context ----
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Note: One clarification - it actually crashed LR itself (perhaps as well as SM)
+
+
+
+The fixes we'll actually make are:
+- (from 1) We will make set-session never silently create a session. We will follow the proposed fix and also make it so that set-session always prompts for confirm on creation of a new session from FC.
+- (from 2) We will continue to sync session.jsonl but non-owner hosts should never be writing here. We will not switch to a paradigm where and non-owner host writes session.host.jsonl *from the point where it sees first divergence from session.jsonl*. This file may come and go as things catch up and fall behind. Session-manager will be smart enough to splice the two for the viewer and will give a subtle visual cue to make it clear when we are carrying on from a secondary. Only the owner node will sync secondaries back, and only the owner node will properly fuse them back into the primary session.jsonl.
+- (from 3) raw/processed files on non-owner nodes will now include host ID to prevent conflicts. Not owner nodes.
+- (from 4) Implement as proposed.
+- (from 5) Implement as proposed.
+- (from 6) Raw files should never be synced automatically (or at all at this point). They may be sensitive or overly verbose.
+- We must also make sure our resource additions follow the same rules for owner and non-owner nodes as our automatic records. We will implement a lazy exchange here as well, where only small resources are pulled across automatically.
+
+Let's implement these fixes now.

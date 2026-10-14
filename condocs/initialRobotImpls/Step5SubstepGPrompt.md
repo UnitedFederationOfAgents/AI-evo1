@@ -420,3 +420,24 @@ The frontend changes are in `App.tsx`, `types.ts` and `index.css`. There's a new
 Right now we have it so the 'files-->select from host' control has the 'open' button is disabled whenever our cursor is on a folder rather than a file.
 
 Let's adjust that so that it changes to 'to zip' when we have the a folder selected. If we select that control then it will upload the folder content as a zip.
+
+
+prompt: [`d3472a1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/d3472a11450dffd3783ec2ffcb90f1019ab65309) → reply: [`dcc7cdf`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/dcc7cdf2e2d938ad1d50b2eb1a0aaca59c2db62c)
+
+## Reply O
+
+In the files tab's **select from host** picker (in both LR and AC), clicking a folder now selects it, and the button changes from **select** to **to zip**. Pressing it zips the folder on the host and adds it to the files tab as `<folder>.zip`. I couldn't build or test this: `go test` needed approval this session couldn't get, so please run `make test` and `make build` in `local-representative` and `agent-coordinator`.
+
+- **Opening a folder:** since a single click now selects a folder, you open one by double-clicking it. The other places that use this picker (the YAML imports and condoccer) aren't changed and still open a folder on a single click.
+- **The zip:** LR's `hostfiles.go` handles it through a new `host_folders` field on the same `POST /api/files` route, so AC's upload relay passes it through with no AC server change. Symlinks and unreadable files are skipped. I added limits so picking something like the home folder can't fill the disk: it refuses folders over 512 MiB or 20,000 files.
+- **Other changes:** the picker is updated in `HostFilePicker.tsx`, and all four copies are still identical. I also changed both apps' `App.tsx`, added two tests to `hostfiles_test.go`, and added a short note to LR's README.
+
+
+## <REPLACE-Revision|Retry> P
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

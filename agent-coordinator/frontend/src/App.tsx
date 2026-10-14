@@ -239,14 +239,14 @@ function useCoordinatorWS() {
 
   // "select from host": a JSON body on the same upload-relay route asks the
   // host's local-representative to copy files already on that host into its
-  // host-cache (local-representative/hostfiles.go). Returns the error to
-  // show, if any.
-  const importHostFiles = useCallback(async (hostId: string, paths: string[]): Promise<string | null> => {
+  // host-cache (local-representative/hostfiles.go); folders are zipped into
+  // it. Returns the error to show, if any.
+  const importHostFiles = useCallback(async (hostId: string, paths: string[], folders: string[] = []): Promise<string | null> => {
     try {
       const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/files`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host_paths: paths }),
+        body: JSON.stringify({ host_paths: paths, host_folders: folders }),
       })
       return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
     } catch (err) {
@@ -2232,7 +2232,7 @@ function FilesPanel({
   onEnter: (id: string) => void
   onUpload: (files: FileList | File[]) => void
   hostApi: string // the host's /host/<id> proxy, for the "select from host" picker
-  onHostImport: (paths: string[]) => Promise<string | null> // the error, if any
+  onHostImport: (paths: string[], folders?: string[]) => Promise<string | null> // the error, if any
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
@@ -2337,6 +2337,10 @@ function FilesPanel({
           onPick={async paths => {
             setHostPickOpen(false)
             setClipError(await onHostImport(paths))
+          }}
+          onZipFolder={async dir => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport([], [dir]))
           }}
         />
       )}
@@ -3657,7 +3661,7 @@ function LRView({
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
-  importHostFiles: (hostId: string, paths: string[]) => Promise<string | null>
+  importHostFiles: (hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -3888,7 +3892,7 @@ function LRView({
                   onEnter={setViewerFileId}
                   onUpload={f => uploadFiles(host.id, f)}
                   hostApi={`/host/${encodeURIComponent(host.id)}`}
-                  onHostImport={paths => importHostFiles(host.id, paths)}
+                  onHostImport={(paths, folders) => importHostFiles(host.id, paths, folders)}
                 />
               )}
               {activeTab === 'control' && (

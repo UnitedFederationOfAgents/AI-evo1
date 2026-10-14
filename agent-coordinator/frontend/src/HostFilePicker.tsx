@@ -9,6 +9,10 @@ import { useCallback, useEffect, useState } from 'react'
 // identical. api is '' on LR itself, '/host/<id>' through agent-coordinator,
 // and condoccer's or ianar's own base path in theirs (they pass the listing
 // through to their LR).
+//
+// With onZipFolder (Step5SubstepGPrompt.md Revision O), a click on a folder
+// selects it instead of opening it (double-click opens), and the select
+// button becomes "to zip" while a folder is selected.
 
 interface HostFileEntry {
   name: string
@@ -39,11 +43,12 @@ function formatSize(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
-export function HostFilePicker({ api, multiple = false, title = 'select from host', onPick, onClose }: {
+export function HostFilePicker({ api, multiple = false, title = 'select from host', onPick, onZipFolder, onClose }: {
   api: string
   multiple?: boolean
   title?: string
   onPick: (paths: string[]) => void
+  onZipFolder?: (path: string) => void
   onClose: () => void
 }) {
   const [listing, setListing] = useState<HostDirListing | null>(null)
@@ -52,6 +57,8 @@ export function HostFilePicker({ api, multiple = false, title = 'select from hos
   const [loading, setLoading] = useState(false)
   const [showHidden, setShowHidden] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
+  // The selected folder, for "to zip"; it and selected are never both set.
+  const [folder, setFolder] = useState<string | null>(null)
 
   const open = useCallback(async (path: string) => {
     setLoading(true)
@@ -65,6 +72,7 @@ export function HostFilePicker({ api, multiple = false, title = 'select from hos
       const l = (await resp.json()) as HostDirListing
       setListing(l)
       setPathInput(l.path)
+      setFolder(null)
     } catch (err) {
       setError(String(err))
     } finally {
@@ -81,11 +89,17 @@ export function HostFilePicker({ api, multiple = false, title = 'select from hos
   }, [onClose])
 
   const toggle = (p: string) => {
+    setFolder(null)
     if (!multiple) {
       setSelected(s => (s[0] === p ? [] : [p]))
       return
     }
     setSelected(s => (s.includes(p) ? s.filter(x => x !== p) : [...s, p]))
+  }
+
+  const toggleFolder = (p: string) => {
+    setSelected([])
+    setFolder(f => (f === p ? null : p))
   }
 
   const entries = (listing?.entries ?? []).filter(e => showHidden || !e.name.startsWith('.'))
@@ -118,14 +132,16 @@ export function HostFilePicker({ api, multiple = false, title = 'select from hos
           {listing && entries.length === 0 && <div className="hfp-empty">this folder is empty</div>}
           {listing && entries.map(e => {
             const p = joinHostPath(listing.path, e.name)
-            const isSel = selected.includes(p)
+            const isSel = e.dir ? folder === p : selected.includes(p)
             return (
               <div
                 key={e.name}
                 className={`hfp-entry${e.dir ? ' hfp-entry-dir' : ''}${isSel ? ' hfp-entry-selected' : ''}`}
-                title={p}
-                onClick={() => (e.dir ? void open(p) : toggle(p))}
-                onDoubleClick={() => { if (!e.dir && !multiple) onPick([p]) }}
+                title={e.dir && onZipFolder ? `${p}\ndouble-click to open` : p}
+                onClick={() => (e.dir ? (onZipFolder ? toggleFolder(p) : void open(p)) : toggle(p))}
+                onDoubleClick={() => {
+                  if (e.dir) { if (onZipFolder) void open(p) } else if (!multiple) onPick([p])
+                }}
               >
                 <span className="hfp-entry-icon">{e.dir ? '📁' : isSel ? '☑' : '📄'}</span>
                 <span className="hfp-entry-name">{e.name}{e.dir ? '/' : ''}</span>
@@ -135,13 +151,23 @@ export function HostFilePicker({ api, multiple = false, title = 'select from hos
           })}
         </div>
         <div className="hfp-footer">
-          <span className="hfp-selection" title={selected.join('\n')}>
-            {selected.length === 0 ? (multiple ? 'click files to select them' : 'click a file to select it') : selected.map(baseName).join(', ')}
+          <span className="hfp-selection" title={folder ?? selected.join('\n')}>
+            {folder
+              ? `${baseName(folder)}/ (zipped as ${baseName(folder) || 'root'}.zip)`
+              : selected.length === 0
+                ? (multiple ? 'click files to select them' : 'click a file to select it') + (onZipFolder ? ', or a folder to zip it' : '')
+                : selected.map(baseName).join(', ')}
           </span>
           <button type="button" className="hfp-btn" onClick={onClose}>cancel</button>
-          <button type="button" className="hfp-btn hfp-btn-primary" disabled={selected.length === 0} onClick={() => onPick(selected)}>
-            select{selected.length > 1 ? ` ${selected.length}` : ''}
-          </button>
+          {folder && onZipFolder ? (
+            <button type="button" className="hfp-btn hfp-btn-primary" title={`zip ${folder} and upload it`} onClick={() => onZipFolder(folder)}>
+              to zip
+            </button>
+          ) : (
+            <button type="button" className="hfp-btn hfp-btn-primary" disabled={selected.length === 0} onClick={() => onPick(selected)}>
+              select{selected.length > 1 ? ` ${selected.length}` : ''}
+            </button>
+          )}
         </div>
       </div>
     </div>

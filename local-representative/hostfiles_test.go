@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -139,6 +140,69 @@ func TestHostImportGatedLikeUpload(t *testing.T) {
 	s.handleFilesAPI(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("relayed import: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHostImportZipsFolder: a host_folders entry lands in the host-cache as
+// "<folder>.zip" holding the folder's contents, relative to it.
+func TestHostImportZipsFolder(t *testing.T) {
+	s := newTestFileServer(t)
+	dir := filepath.Join(t.TempDir(), "proj")
+	os.MkdirAll(filepath.Join(dir, "sub", "empty"), 0o755)
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("alpha"), 0o644)
+	os.WriteFile(filepath.Join(dir, "sub", "b.txt"), []byte("beta"), 0o644)
+	os.Symlink(filepath.Join(dir, "a.txt"), filepath.Join(dir, "link.txt"))
+
+	b, _ := json.Marshal(hostImportRequest{HostFolders: []string{dir}})
+	req := httptest.NewRequest(http.MethodPost, "/api/files", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	files := s.listFiles()
+	if len(files) != 1 || files[0].Name != "proj.zip" {
+		t.Fatalf("listFiles() = %+v", files)
+	}
+	zr, err := zip.OpenReader(filepath.Join(s.fileCacheDir, files[0].ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	got := map[string]string{}
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		got[f.Name] = string(data)
+	}
+	want := map[string]string{"a.txt": "alpha", "sub/": "", "sub/b.txt": "beta", "sub/empty/": ""}
+	if len(got) != len(want) {
+		t.Fatalf("zip entries = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("zip entry %q = %q, want %q (all: %v)", k, got[k], v, got)
+		}
+	}
+}
+
+// TestHostImportZipRefusesFile: host_folders must name a folder.
+func TestHostImportZipRefusesFile(t *testing.T) {
+	s := newTestFileServer(t)
+	p := filepath.Join(t.TempDir(), "notes.txt")
+	os.WriteFile(p, []byte("x"), 0o644)
+	b, _ := json.Marshal(hostImportRequest{HostFolders: []string{p}})
+	req := httptest.NewRequest(http.MethodPost, "/api/files", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleFilesAPI(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "not a folder") {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 

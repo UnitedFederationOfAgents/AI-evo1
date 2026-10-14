@@ -506,6 +506,13 @@ and you can type a path or `~/…` to jump.
   files into the host-cache under their own names, as if uploaded. It's
   gated exactly like an upload, so agent-coordinator sends it through its
   upload relay.
+- In the files tab's picker (here and in agent-coordinator), clicking a
+  folder selects it rather than opening it (double-click opens it), and the
+  select button becomes **to zip**. That sends `{"host_folders": [...]}` on
+  the same route, which zips the folder into the host-cache as
+  `<folder>.zip`. Symlinks and unreadable entries are skipped, and a folder
+  over 512 MiB or 20,000 files is refused. The other pickers still open a
+  folder on a single click.
 - condoccer and IANAR pass `/api/host-files` through to their own LR, so
   their pickers browse that LR's host however their UI is reached.
 

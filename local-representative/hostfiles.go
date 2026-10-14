@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"mime"
 	"net/http"
@@ -184,33 +187,45 @@ func (s *Server) handleHostFileRaw(w http.ResponseWriter, r *http.Request) {
 }
 
 // hostImportRequest is POST /api/files' JSON body: host paths to copy into
-// the host-cache.
+// the host-cache, and host folders to zip into it (Step5SubstepGPrompt.md
+// Revision O: the picker's "to zip" button).
 type hostImportRequest struct {
-	HostPaths []string `json:"host_paths"`
+	HostPaths   []string `json:"host_paths"`
+	HostFolders []string `json:"host_folders,omitempty"`
 }
 
 // importHostFiles handles a POST /api/files whose body is JSON rather than
 // multipart: each of host_paths is copied into the host-cache under its own
-// name, as if it had been uploaded. It runs behind handleFileUpload's gate,
-// so it's allowed from a direct client or agent-coordinator's upload relay
-// (which forwards the body and Content-Type untouched). Files that can't be
-// read are logged and skipped; it fails only if none were saved.
+// name, as if it had been uploaded, and each of host_folders is saved there
+// as "<folder>.zip". It runs behind handleFileUpload's gate, so it's allowed
+// from a direct client or agent-coordinator's upload relay (which forwards
+// the body and Content-Type untouched). Paths that can't be read are logged
+// and skipped; it fails only if nothing was saved.
 func (s *Server) importHostFiles(w http.ResponseWriter, r *http.Request) {
 	var req hostImportRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "invalid host import: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if len(req.HostPaths) == 0 {
-		http.Error(w, "no host_paths provided", http.StatusBadRequest)
+	if len(req.HostPaths) == 0 && len(req.HostFolders) == 0 {
+		http.Error(w, "no host_paths or host_folders provided", http.StatusBadRequest)
 		return
 	}
-	saved := make([]FileInfo, 0, len(req.HostPaths))
+	saved := make([]FileInfo, 0, len(req.HostPaths)+len(req.HostFolders))
 	var errs []string
 	for _, p := range req.HostPaths {
 		info, err := s.importHostFile(p)
 		if err != nil {
 			log.Printf("files: import of host file %q failed: %v", p, err)
+			errs = append(errs, err.Error())
+			continue
+		}
+		saved = append(saved, info)
+	}
+	for _, p := range req.HostFolders {
+		info, err := s.importHostFolder(p)
+		if err != nil {
+			log.Printf("files: zip of host folder %q failed: %v", p, err)
 			errs = append(errs, err.Error())
 			continue
 		}
@@ -233,4 +248,115 @@ func (s *Server) importHostFile(p string) (FileInfo, error) {
 	}
 	defer f.Close()
 	return s.saveFileFrom(filepath.Base(f.Name()), f)
+}
+
+// Limits on a zipped host folder, so picking something like the home folder
+// fails instead of filling the host-cache's disk.
+const (
+	maxHostZipBytes = 512 << 20 // total size of the files read into the zip
+	maxHostZipFiles = 20000
+)
+
+// importHostFolder zips one host folder into the host-cache as
+// "<folder>.zip". The zip is streamed straight into the host-cache file;
+// if it fails partway, saveFileFrom removes what was written.
+func (s *Server) importHostFolder(p string) (FileInfo, error) {
+	dir, err := resolveHostPath(p)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	if !info.IsDir() {
+		return FileInfo{}, fmt.Errorf("%s is not a folder", dir)
+	}
+	name := filepath.Base(dir)
+	if name == string(filepath.Separator) || name == "." {
+		name = "root"
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		pw.CloseWithError(zipHostFolder(pw, dir))
+	}()
+	saved, err := s.saveFileFrom(name+".zip", pr)
+	pr.Close() // stops the zipper if saving failed first
+	return saved, err
+}
+
+// zipHostFolder writes dir's contents to w as a zip, with paths relative to
+// dir. Symlinks, sockets and the like are skipped rather than followed, and
+// so are files and subfolders that can't be read; it fails only past the
+// maxHostZip limits or if w does.
+func zipHostFolder(w io.Writer, dir string) error {
+	zw := zip.NewWriter(w)
+	var total int64
+	files, skipped := 0, 0
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			skipped++
+			if d != nil && d.IsDir() && path != dir {
+				return fs.SkipDir
+			}
+			if path == dir {
+				return err
+			}
+			return nil
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			_, err := zw.Create(rel + "/")
+			return err
+		}
+		if !d.Type().IsRegular() {
+			skipped++
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			skipped++
+			return nil
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			skipped++
+			return nil
+		}
+		files++
+		total += info.Size()
+		if files > maxHostZipFiles {
+			return fmt.Errorf("%s has more than %d files to zip", dir, maxHostZipFiles)
+		}
+		if total > maxHostZipBytes {
+			return fmt.Errorf("%s holds more than %d MiB to zip", dir, maxHostZipBytes>>20)
+		}
+		hdr, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		hdr.Name = rel
+		hdr.Method = zip.Deflate
+		dst, err := zw.CreateHeader(hdr)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(dst, f)
+		return err
+	})
+	if walkErr != nil {
+		return walkErr
+	}
+	if skipped > 0 {
+		log.Printf("files: zipping %s skipped %d unreadable or non-regular entries", dir, skipped)
+	}
+	return zw.Close()
 }

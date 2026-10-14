@@ -237,14 +237,14 @@ function useStatusWS() {
   }, [])
 
   // "select from host": a JSON POST /api/files copies files already on this
-  // host into the host-cache (local-representative/hostfiles.go). Returns
-  // the error to show, if any.
-  const importHostFiles = useCallback(async (paths: string[]): Promise<string | null> => {
+  // host into the host-cache (local-representative/hostfiles.go); folders
+  // are zipped into it. Returns the error to show, if any.
+  const importHostFiles = useCallback(async (paths: string[], folders: string[] = []): Promise<string | null> => {
     try {
       const resp = await fetch('/api/files', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host_paths: paths }),
+        body: JSON.stringify({ host_paths: paths, host_folders: folders }),
       })
       return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
     } catch (err) {
@@ -1685,7 +1685,7 @@ function FilesPanel({
   onSelect: (id: string) => void
   onEnter: (id: string) => void
   onUpload?: (files: FileList | File[]) => void
-  onHostImport?: (paths: string[]) => Promise<string | null> // the error, if any
+  onHostImport?: (paths: string[], folders?: string[]) => Promise<string | null> // the error, if any
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
@@ -1794,6 +1794,10 @@ function FilesPanel({
           onPick={async paths => {
             setHostPickOpen(false)
             setClipError(await onHostImport(paths))
+          }}
+          onZipFolder={async dir => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport([], [dir]))
           }}
         />
       )}

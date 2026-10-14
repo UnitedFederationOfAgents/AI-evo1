@@ -396,11 +396,6 @@ I've implemented all seven fixes across clauditable, local-representative, sessi
 - **Docs:** `clauditable/FILE_PROCESSING_SEQUENCE.md` now describes the owner/secondary scheme. New tests are in each component's `sessionlog_test.go`, plus additions to local-representative's `sessions_test.go`.
 
 
-## <REPLACE-Revision|Retry> N
+## Revision N
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+When a session has multiple participants let's display a tag in each interaction beside the 'exit 0' indicating which host that interaction was on.

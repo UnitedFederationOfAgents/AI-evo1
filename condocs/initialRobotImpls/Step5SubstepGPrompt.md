@@ -415,11 +415,8 @@ In session-manager, each turn in the transcript now shows a host tag beside `exi
 The frontend changes are in `App.tsx`, `types.ts` and `index.css`. There's a new test, `TestViewCarriesEachTurnsHost`, in `sessionlog_test.go`.
 
 
-## <REPLACE-Revision|Retry> O
+## Revision O
 
-<REPLACE-PROMPT>
+Right now we have it so the 'files-->select from host' control has the 'open' button is disabled whenever our cursor is on a folder rather than a file.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's adjust that so that it changes to 'to zip' when we have the a folder selected. If we select that control then it will upload the folder content as a zip.

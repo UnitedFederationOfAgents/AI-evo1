@@ -471,6 +471,38 @@ function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void
 
 type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' | 'file-diff'
 
+// Top-level tab on the condoc list, one per control scheme (see the
+// condoc-yaml `controlScheme` field). 'same-repo' is everything condoccer
+// has done so far -- condocs whose state lives in the scanned repo itself.
+// 'slopspace' is a placeholder until that mode is implemented -- see
+// condocs/SlopspaceCondocs.md.
+type ControlSchemeTab = 'same-repo' | 'slopspace'
+
+const CONTROL_SCHEME_TABS: { id: ControlSchemeTab; label: string }[] = [
+  { id: 'same-repo', label: 'Same-Repo' },
+  { id: 'slopspace', label: 'Slopspace' },
+]
+
+// "Hide Completed" on the same-repo tab -- on by default, remembered across
+// reloads.
+const HIDE_COMPLETED_KEY = 'condoccer.hideCompleted'
+
+function loadHideCompleted(): boolean {
+  try {
+    return localStorage.getItem(HIDE_COMPLETED_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+function saveHideCompleted(hide: boolean) {
+  try {
+    localStorage.setItem(HIDE_COMPLETED_KEY, String(hide))
+  } catch {
+    // Storage unavailable (e.g. sandboxed iframe) -- just don't persist.
+  }
+}
+
 // ---- URL-hash resume (browser pickup strategy) ----
 //
 // The nav state above lives only in useState, so a refresh used to always
@@ -482,6 +514,7 @@ type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' 
 // to the same condoc/step/iteration/diff pane.
 //
 // Formats:
+//   #/slopspace                    (condoc list, slopspace tab)
 //   #/condoc/<enc(path)>
 //   #/condoc/<enc(path)>/step/<num>[/iter/<id>]
 //   #/condoc/<enc(path)>/step/<num>/substep[/iter/<id>]
@@ -489,6 +522,9 @@ type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' 
 
 interface NavHashState {
   navLevel: NavLevel
+  // Only meaningful at the condoc-list level: every deeper level is a
+  // same-repo condoc.
+  tab: ControlSchemeTab
   condocPath: string | null
   stepNum: number | null
   iterId: string | null
@@ -501,7 +537,7 @@ interface NavHashState {
 }
 
 function hashFromNav(s: NavHashState): string {
-  if (s.navLevel === 'condoc-list' || !s.condocPath) return ''
+  if (s.navLevel === 'condoc-list' || !s.condocPath) return s.tab === 'slopspace' ? '#/slopspace' : ''
   let h = `#/condoc/${encodeURIComponent(s.condocPath)}`
   if (s.navLevel === 'condoc' || s.stepNum === null) return h
 
@@ -528,6 +564,7 @@ function hashFromNav(s: NavHashState): string {
 function emptyNavHashState(): NavHashState {
   return {
     navLevel: 'condoc-list',
+    tab: 'same-repo',
     condocPath: null,
     stepNum: null,
     iterId: null,
@@ -544,6 +581,10 @@ function navFromHash(hash: string): NavHashState {
   const result = emptyNavHashState()
   const trimmed = hash.replace(/^#\/?/, '')
   if (!trimmed) return result
+  if (trimmed === 'slopspace') {
+    result.tab = 'slopspace'
+    return result
+  }
 
   const parts = trimmed.split('/')
   let i = 0
@@ -1158,6 +1199,10 @@ function parseHunkLineNumber(header: string): number | null {
 
 interface SidebarProps {
   navLevel: NavLevel
+  tab: ControlSchemeTab
+  onSelectTab: (tab: ControlSchemeTab) => void
+  hideCompleted: boolean
+  onSetHideCompleted: (hide: boolean) => void
   condocs: CondocInfo[]
   activeState: CondocState | null
   selectedCondocPath: string | null
@@ -1192,6 +1237,10 @@ interface SidebarProps {
 
 function Sidebar({
   navLevel,
+  tab,
+  onSelectTab,
+  hideCompleted,
+  onSetHideCompleted,
   condocs,
   activeState,
   selectedCondocPath,
@@ -1236,16 +1285,50 @@ function Sidebar({
   )
 
   if (navLevel === 'condoc-list') {
+    const visibleCondocs = hideCompleted ? condocs.filter((c) => c.phase !== 'completed') : condocs
+    const hiddenCount = condocs.length - visibleCondocs.length
+
     return (
       <div className="sidebar">
         <div className="sidebar-header">
           <h1>Condoccer{version && <span className="app-version-tag">{version}</span>}</h1>
         </div>
+        <div className="scheme-tabs" role="tablist">
+          {CONTROL_SCHEME_TABS.map((t) => (
+            <button
+              key={t.id}
+              role="tab"
+              aria-selected={tab === t.id}
+              className={`scheme-tab${tab === t.id ? ' selected' : ''}`}
+              onClick={() => onSelectTab(t.id)}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {tab === 'slopspace' ? (
+          <div className="nav-list">
+            <div className="nav-empty">Slopspace condocs are not supported yet.</div>
+          </div>
+        ) : (
+        <>
+        <label className="list-filter">
+          <input
+            type="checkbox"
+            checked={hideCompleted}
+            onChange={(e) => onSetHideCompleted(e.target.checked)}
+          />
+          Hide Completed
+          {hideCompleted && hiddenCount > 0 && <span className="list-filter-count">({hiddenCount} hidden)</span>}
+        </label>
         <div className="nav-list">
           {condocs.length === 0 && (
             <div className="nav-empty">No condocs found in this repository.</div>
           )}
-          {condocs.map((c) => (
+          {condocs.length > 0 && visibleCondocs.length === 0 && (
+            <div className="nav-empty">All condocs are completed.</div>
+          )}
+          {visibleCondocs.map((c) => (
             <div
               key={c.path}
               className={`nav-item${selectedCondocPath === c.path ? ' selected' : ''}`}
@@ -1259,6 +1342,8 @@ function Sidebar({
             </div>
           ))}
         </div>
+        </>
+        )}
         {reprFooter}
       </div>
     )
@@ -2760,6 +2845,8 @@ export default function App() {
   const initialNav = useRef(navFromHash(window.location.hash)).current
 
   const [navLevel, setNavLevel] = useState<NavLevel>(initialNav.navLevel)
+  const [tab, setTab] = useState<ControlSchemeTab>(initialNav.tab)
+  const [hideCompleted, setHideCompleted] = useState(loadHideCompleted)
   const [selectedCondocPath, setSelectedCondocPath] = useState<string | null>(initialNav.condocPath)
   const [selectedStepNum, setSelectedStepNum] = useState<number | null>(initialNav.stepNum)
   const [selectedIterId, setSelectedIterId] = useState<string | null>(initialNav.iterId)
@@ -2781,6 +2868,11 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
 
   const tcCapture = useTCCapture(tcAvailable, reprHost, reprHTTPPort)
+
+  const handleSetHideCompleted = (hide: boolean) => {
+    setHideCompleted(hide)
+    saveHideCompleted(hide)
+  }
 
   const handleSelectCondoc = (path: string) => {
     setSelectedCondocPath(path)
@@ -2911,6 +3003,7 @@ export default function App() {
   useEffect(() => {
     const hash = hashFromNav({
       navLevel,
+      tab,
       condocPath: selectedCondocPath,
       stepNum: selectedStepNum,
       iterId: selectedIterId,
@@ -2935,7 +3028,7 @@ export default function App() {
     // Dispatch one by hand so same-origin listeners stay in sync.
     window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: window.location.href }))
   }, [
-    navLevel, selectedCondocPath, selectedStepNum, selectedIterId, selectedSubstepIterId,
+    navLevel, tab, selectedCondocPath, selectedStepNum, selectedIterId, selectedSubstepIterId,
     diffReturnLevel, diffFromCommit, diffToCommit, selectedDiffFile, selectedDiffHunkIdx,
   ])
 
@@ -3062,6 +3155,10 @@ export default function App() {
       >
         <Sidebar
           navLevel={navLevel}
+          tab={tab}
+          onSelectTab={setTab}
+          hideCompleted={hideCompleted}
+          onSetHideCompleted={handleSetHideCompleted}
           condocs={condocs}
           activeState={activeState}
           selectedCondocPath={selectedCondocPath}
@@ -3109,7 +3206,13 @@ export default function App() {
           </div>
         )}
 
-        {navLevel === 'condoc-list' && (
+        {navLevel === 'condoc-list' && tab === 'slopspace' && (
+          <div className="empty-state empty-state-list">
+            <div>Slopspace mode is coming soon.</div>
+          </div>
+        )}
+
+        {navLevel === 'condoc-list' && tab === 'same-repo' && (
           <div className="empty-state empty-state-list">
             <div>
               <span className={`conn-dot ${connected ? 'connected' : 'disconnected'}`} />

@@ -138,6 +138,46 @@ body {
 
 .nav-up-btn:hover { color: #999; }
 
+.scheme-tabs {
+  display: flex;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+.scheme-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #777;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 7px 4px;
+  cursor: pointer;
+}
+
+.scheme-tab:hover { color: #aaa; }
+
+.scheme-tab.selected {
+  color: #cccccc;
+  border-bottom-color: #007acc;
+}
+
+.list-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #999;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.list-filter-count { color: #555; }
+
 .nav-list {
   flex: 1;
   min-height: 0; /* same shrink-to-fit fix as .detail-view, so the repr-footer below stays visible */

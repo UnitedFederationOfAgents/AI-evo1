@@ -155,11 +155,6 @@ I added a test, `TestRolloverAfterIdleDaysSkipsIntermediateDays`, for the 3-day 
 [Step 5 Substep G](Step5SubstepGPrompt.md)
 
 
-## <REPLACE-Revision|Retry> G
+## Step Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+This step was completed at 1792092294 (Thu Oct 15 07:24:54 PM UTC 2026).

@@ -3,6 +3,7 @@ package executor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dungeon-keeper/pkg/types"
@@ -151,6 +152,29 @@ func TestFindBinaryLocal(t *testing.T) {
 	}
 }
 
+func TestFindBinarySkipsDirectoriesAndNonExecutables(t *testing.T) {
+	// Run from the repo root, "clauditable" is a source directory, not the binary.
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	if err := os.Mkdir(filepath.Join(tmpDir, "dk-test-dir-binary"), 0755); err != nil {
+		t.Fatalf("failed to create directory: %v", err)
+	}
+	if path, err := findBinary("dk-test-dir-binary"); err == nil {
+		t.Errorf("expected directory to be skipped, got %s", path)
+	}
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "dk-test-noexec"), []byte("#!/bin/bash\n"), 0644); err != nil {
+		t.Fatalf("failed to create file: %v", err)
+	}
+	if path, err := findBinary("dk-test-noexec"); err == nil {
+		t.Errorf("expected non-executable file to be skipped, got %s", path)
+	}
+}
+
 func TestFindBinaryNotFound(t *testing.T) {
 	_, err := findBinary("definitely-not-a-real-binary-12345")
 	if err == nil {
@@ -199,6 +223,19 @@ func TestAgentModeMapping(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAgentRecordEnv(t *testing.T) {
+	env := agentRecordEnv("claude", "opus")
+	joined := strings.Join(env, "\n")
+	for _, want := range []string{"UFA_EVENT_TYPE=ai_invocation", "UFA_AGENT=claude", "UFA_MODEL=opus"} {
+		if !contains(joined, want) {
+			t.Errorf("expected %q in %v", want, env)
+		}
+	}
+	if contains(strings.Join(agentRecordEnv("claude", ""), "\n"), "UFA_MODEL=") {
+		t.Error("expected no UFA_MODEL without a model")
 	}
 }
 

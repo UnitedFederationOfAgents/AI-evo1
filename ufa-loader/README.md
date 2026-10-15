@@ -31,6 +31,8 @@ non-flag argument, so `ufa-loader`'s own flags must come before `<binary>`.
 | --- | --- | --- |
 | `-max-restarts` | `0` (unlimited) | stop relaunching after this many restarts |
 | `-restart-delay` | `500ms` | pause before relaunching, giving an in-flight binary replacement time to land on disk |
+| `-no-aws-principal` | `false` | skip the temporary AWS principal (below) and pass whatever AWS credentials ufa-loader started with straight through |
+| `-aws-principal-idle-days` | `2` | delete temporary AWS principals from previous days once they've gone unused this many days |
 | `-version` | — | print `ufa-loader`'s own version and exit instead of launching `<binary>`. Since flag parsing stops at the first non-flag argument, `ufa-loader --version` reports the loader's version; `ufa-loader <binary> --version` runs `<binary>` with `--version` instead, which reports *its* version (see "Versioning" in `docs/DevMode.md`) |
 
 `ufa-loader` forwards `SIGINT`/`SIGTERM` it receives to the running child and
@@ -45,6 +47,61 @@ whether asking for a restart can be expected to actually come back up —
 without needing to know anything else about how it was invoked.
 `local-representative` uses this to grey out its system tab's **restart**
 control when it isn't running under `ufa-loader`.
+
+## Temporary AWS principals
+
+So that sub-applications such as `the-conversationalist` don't run on the
+host's long-lived AWS credentials, ufa-loader gives each launch its own
+temporary IAM user ([`awsprincipal`](awsprincipal/principal.go); see
+[`condocs/initialRobotImpls/Step5SubstepGPrompt.md`](../condocs/initialRobotImpls/Step5SubstepGPrompt.md)
+Revision D). Before the first launch of `<binary>`:
+
+1. **Starting credentials.** It looks for AWS credentials:
+   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (plus `AWS_SESSION_TOKEN`), or
+   static keys for the selected profile (`AWS_PROFILE`, else `default`) in
+   `~/.aws/credentials` or `~/.aws/config`. If there aren't any, it does
+   nothing and logs nothing. SSO, `role_arn`, `credential_process` and
+   instance or container roles aren't supported yet, so they count as "no
+   credentials".
+2. **Create.** Using those credentials, it creates IAM user
+   `ufa-tmp-<host-id>-<YYYYMMDD>-<6 random chars>` under path `/ufa-temp/`,
+   tagged `ufa-host=<host-id>`, `date=<YYYY-MM-DD>` (UTC) and
+   `app=<binary's base name>`. It attaches `AdministratorAccess` (high
+   privilege for now; this will be scaled back) and creates an access key,
+   then waits up to 30s for STS to accept the new key. The random suffix
+   lets several loaders on one host on the same day each get their own
+   user. If any step fails, the half-built user is deleted, a line says
+   why, and the starting credentials are passed through unchanged.
+3. **Clean up.** Still using the starting credentials, it deletes users under
+   `/ufa-temp/` that have a `ufa-host` tag and a `date` tag before today,
+   and that haven't been used for `-aws-principal-idle-days` days. "Used"
+   means the most recent access-key use IAM reports, or the user's creation
+   if no key was ever used. Their access keys and attached policies are
+   removed first. Note that IAM's last-used time can lag by a few hours, and
+   a long-running sub-app that makes no AWS calls for that long will lose
+   its principal.
+4. **Hand over.** It removes every credential-bearing `AWS_*` variable from
+   its own environment (`AWS_SESSION_TOKEN`, `AWS_PROFILE`, role and
+   container variables, and so on) and sets `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY` to the new key. Every launch and restart of
+   `<binary>` inherits only those. `AWS_REGION`, `AWS_DEFAULT_REGION` and the
+   shared-file paths are left alone. If neither region variable is set,
+   the selected profile's `region` from `~/.aws/config` is carried over as
+   `AWS_REGION`, because once `AWS_PROFILE` is cleared the sub-app's SDK
+   can't see that profile any more. The new key exists only in ufa-loader's
+   memory and its
+   children's environments; nothing is written to disk.
+
+It logs exactly one line when this happens:
+
+```
+ufa-loader: created temporary AWS principal ufa-tmp-devbox-ab12-20261012-x7k2qp for the-conversationalist (removed 1 stale)
+```
+
+Only the `aws` partition's global IAM and STS endpoints are used. Requests
+are signed by a small built-in SigV4 implementation instead of
+aws-sdk-go-v2, because every module that imports `ufa-loader/restartsignal`
+inherits ufa-loader's module requirements.
 
 ## Carrying state across a restart
 

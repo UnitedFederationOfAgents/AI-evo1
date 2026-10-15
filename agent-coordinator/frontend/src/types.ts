@@ -1,3 +1,5 @@
+import type { ControlStateMsg, ControlLibraryMsg, ControlLibReply } from './controlTypes'
+
 export interface Host {
   id: string
   label: string
@@ -19,15 +21,60 @@ export interface LRStateMsg {
   services?: ServiceStatus[]
 }
 
+// fc is the federation-command instance on that host the message is about --
+// see local-representative/fcinstances.go. Absent from an older LR.
 export interface LRFCStateMsg {
   host_id: string
+  fc?: string
   state: string // "remote-control", "local-control", or ""
 }
 
 export interface LRFCLogMsg {
   host_id: string
+  fc?: string
   line: string
   kind?: string // "cmd" or "output"
+}
+
+// FCInstanceInfo is one federation-command instance connected to a host's LR.
+export interface FCInstanceInfo {
+  key: string
+  label: string // "#2", "@fc-ab12"
+  instance_id?: string
+  head?: string
+  state: string
+  session?: string
+  ridealong?: Omit<LRRidealongMsg, 'host_id'>
+  condoc?: Omit<LRCondocMsg, 'host_id'>
+}
+
+export interface LRFCInstancesMsg {
+  host_id: string
+  instances: FCInstanceInfo[]
+}
+
+// A host's control tab -- see local-representative/control.go and
+// controlTypes.ts (shared with local-representative's frontend).
+export type {
+  ControlStepInfo, ControlSequenceInfo, ControlStepResult, ControlRunMsg, ControlRecording, ControlStateMsg,
+  ControlLibraryMsg, ControlLibReply, ControlLibRequest,
+} from './controlTypes'
+
+export interface LRControlMsg {
+  host_id: string
+  control: ControlStateMsg | null // null once the host disconnects
+}
+
+export interface LRControlLibraryMsg {
+  host_id: string
+  library: ControlLibraryMsg | null // null once the host disconnects
+}
+
+// A host's answer to a library request ("lr-control-lib"), or to a run that
+// couldn't start.
+export interface LRControlReplyMsg {
+  host_id: string
+  reply: ControlLibReply
 }
 
 export interface LRRidealongMsg {
@@ -176,13 +223,72 @@ export interface LRSessionsMsg {
 export interface LRConvoMsg {
   host_id: string
   available: boolean
+  // transcribe_available: whether that host's the-conversationalist can
+  // currently reach its transcription engine -- gates that host's mic icons
+  // (condocs/initialRobotImpls/Step5Prompt.md, Revision B); `available`
+  // alone only means its UI can be embedded.
+  transcribe_available?: boolean
+  transcribe_reason?: string
+  // started_at: when that host's the-conversationalist process started (unix
+  // ms) -- used to announce its start/restart (see tcannounce.ts and
+  // Step5Prompt.md, Revision D).
+  started_at?: number
+}
+
+export interface LRRobotMsg {
+  host_id: string
+  available: boolean
+}
+
+// The per-host worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md,
+// Revision A): what that host's dungeon-keeper reports, relayed through its
+// LR -- see worker.go. Mirrors local-representative/frontend/src/types.ts.
+export interface WorkerSignalInfo {
+  id: string
+  file: string
+  role: string
+  prompt: string
+  agent?: string
+  model?: string
+  mode?: string
+  work_type: string
+  work_location?: string
+  status: string // "pending" | "processing" | "completed" | "failed"
+  created_at: number // unix ms
+  completed_at?: number
+  comment?: string
+  output?: string
+  output_trimmed?: boolean // only the end of the output is included, or none of it if empty
+}
+
+export interface WorkerStateMsg {
+  worker_id: string
+  agent_type: string
+  busy: boolean
+  signals: WorkerSignalInfo[]
+}
+
+export interface WorkerReplyMsg {
+  ok: boolean
+  error?: string
+}
+
+// worker is null until that host reports one, and after it disconnects.
+export interface LRWorkerMsg {
+  host_id: string
+  worker: WorkerStateMsg | null
+}
+
+export interface LRWorkerReplyMsg {
+  host_id: string
+  reply: WorkerReplyMsg
 }
 
 export interface FileInfo {
   id: string
   name: string
   size: number
-  kind: string // "text" | "image" | "other" -- selects the wireframe icon
+  kind: string // "text" | "image" | "archive" | "other" -- selects the wireframe icon
   state: string // "cached" | "held" | "persisted" -- selects the icon's color
   uploaded_at: number // unix seconds
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"

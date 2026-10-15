@@ -343,6 +343,16 @@ process it doesn't own; see
 [`condocs/initialDistributedDevelopmentImpls/Step4Prompt.md`](../condocs/initialDistributedDevelopmentImpls/Step4Prompt.md)
 Revision I.
 
+condoccer's working dir rides along the same way. LR keeps the root condoccer
+last reported in its `condoccer-state` push, which picks up a **Set Working
+Dir** change made in condoccer's UI, and passes it as `--root` whenever it
+launches condoccer. That covers both a managed restart and LR's own restart,
+where it travels as `lrState.CondoccerRoot` and overrides `--condoccer-root`.
+A cold start (ufa-loader itself relaunched) still begins from
+`--condoccer-root`; see
+[`condocs/initialRobotImpls/Step4SubstepDPrompt.md`](../condocs/initialRobotImpls/Step4SubstepDPrompt.md)
+Revision C.
+
 ## Dev-repo watcher
 
 [`--dev-repo`](../local-representative/repowatch.go) — Step 3 of

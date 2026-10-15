@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"clauditable/pkg/records"
 	ufahostid "ufa-hostid"
@@ -22,14 +23,17 @@ func TestGetSession(t *testing.T) {
 		}
 	})
 
-	// Test without environment variable (should use YYYY-MM-DD-default format)
+	// Test without environment variable (should use YYYY-MM-DD-<host>-default format)
 	t.Run("without AGENT_SESSION", func(t *testing.T) {
 		os.Unsetenv(EnvAgentSession)
 
 		session := getSession()
-		// Should match YYYY-MM-DD-default
-		if !strings.HasSuffix(session, "-default") || len(session) != 18 || session[4] != '-' || session[7] != '-' {
-			t.Errorf("expected YYYY-MM-DD-default format, got '%s'", session)
+		want := defaultSessionIDFor(time.Now(), ufahostid.GetHostID())
+		if session != want {
+			t.Errorf("expected %q, got %q", want, session)
+		}
+		if !strings.HasSuffix(session, "-default") || session[4] != '-' || session[7] != '-' {
+			t.Errorf("expected YYYY-MM-DD-<host>-default format, got '%s'", session)
 		}
 	})
 
@@ -43,6 +47,25 @@ func TestGetSession(t *testing.T) {
 			t.Errorf("expected '-default' suffix for AGENT_SESSION=default, got '%s'", session)
 		}
 	})
+}
+
+func TestDefaultSessionIDIncludesHost(t *testing.T) {
+	day := time.Date(2026, 10, 6, 12, 0, 0, 0, time.Local)
+
+	if got, want := defaultSessionIDFor(day, "box-a1b2"), "2026-10-06-box-a1b2-default"; got != want {
+		t.Errorf("defaultSessionIDFor = %q, want %q", got, want)
+	}
+	// Different hosts on the same day must get different default sessions.
+	if defaultSessionIDFor(day, "host-a") == defaultSessionIDFor(day, "host-b") {
+		t.Error("expected distinct default session IDs for distinct hosts")
+	}
+	// Host IDs are sanitized so the ID stays a single safe directory name.
+	if got, want := defaultSessionIDFor(day, "a/b c"), "2026-10-06-a-b-c-default"; got != want {
+		t.Errorf("defaultSessionIDFor(unsafe host) = %q, want %q", got, want)
+	}
+	if got, want := defaultSessionIDFor(day, ".."), "2026-10-06-unknown-default"; got != want {
+		t.Errorf("defaultSessionIDFor(\"..\") = %q, want %q", got, want)
+	}
 }
 
 func TestCheckIsPrimary(t *testing.T) {
@@ -332,7 +355,7 @@ func TestWriteWrittenFile(t *testing.T) {
 	}
 
 	// Test primary: creates {ts}-raw.txt
-	path, err := writeWrittenFile(sessionDir, 1705312200, true, record)
+	path, err := writeWrittenFile(sessionDir, 1705312200, "", true, record)
 	if err != nil {
 		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
 	}
@@ -388,7 +411,7 @@ func TestWriteWrittenFile(t *testing.T) {
 		Command: "echo secondary",
 		Stdout:  "secondary\n",
 	}
-	path2, err := writeWrittenFile(sessionDir, 1705312260, false, record2)
+	path2, err := writeWrittenFile(sessionDir, 1705312260, "", false, record2)
 	if err != nil {
 		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
 	}
@@ -526,7 +549,7 @@ func TestConsolidatePrimaryToJSONL(t *testing.T) {
 	os.WriteFile(filepath.Join(sessionDir, "1705312800-s-raw.txt"), []byte(secondary.FormatWrittenFile()), 0644)
 	os.WriteFile(filepath.Join(sessionDir, "1705312860-raw.txt"), []byte(primary.FormatWrittenFile()), 0644)
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
@@ -604,7 +627,7 @@ func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
 	// Simulate the producer already having written its own raw + processed
 	// files via writeWrittenFile, with a sentinel processed marker that would
 	// NOT be present if consolidation reprocessed the raw content itself.
-	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312860, "", true, primary); err != nil {
 		t.Fatalf("writeWrittenFile failed: %v", err)
 	}
 	processedPath := filepath.Join(sessionDir, "1705312860-processed.txt")
@@ -617,7 +640,7 @@ func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
 		t.Fatalf("failed to mark processed file: %v", err)
 	}
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
@@ -632,14 +655,12 @@ func TestConsolidatePrimaryToJSONLUsesProducersProcessedFile(t *testing.T) {
 	}
 }
 
-// TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary verifies the
-// distributed-sessions case: a "{ts}-s-processed.txt" with no local
-// "{ts}-s-raw.txt" sibling -- exactly what local-representative's
-// once-transfer leaves behind after pulling a remote LR-active host's record
-// in (see distsync.go) -- is folded into session.jsonl and promoted to
-// "{ts}-processed.txt" on its own, with no raw file ever appearing locally
-// for it (the pre-redaction raw content never crosses hosts -- see
-// FILE_PROCESSING_SEQUENCE.md).
+// TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary verifies that a
+// "{ts}-s-processed.txt" with no "{ts}-s-raw.txt" sibling is folded into
+// session.jsonl and promoted to "{ts}-processed.txt" on its own, with no raw
+// file ever appearing for it. (Remote records no longer arrive this way --
+// "-s-" files aren't synced, see sessionlog.go -- but consolidation still
+// handles a lone processed file.)
 func TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary(t *testing.T) {
 	tmpDir := t.TempDir()
 	session := "test-session"
@@ -669,11 +690,11 @@ func TestConsolidatePrimaryToJSONLFoldsRemoteOriginSecondary(t *testing.T) {
 		Command: "echo primary",
 		Stdout:  "primary\n",
 	}
-	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312860, "", true, primary); err != nil {
 		t.Fatalf("writeWrittenFile failed: %v", err)
 	}
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 
@@ -725,7 +746,7 @@ func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
 		Command: "echo secondary",
 		Stdout:  "secondary\n",
 	}
-	if _, err := writeWrittenFile(sessionDir, 1705312800, false, secondary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312800, "", false, secondary); err != nil {
 		t.Fatalf("writeWrittenFile (secondary) failed: %v", err)
 	}
 	secondaryProcessedPath := filepath.Join(sessionDir, "1705312800-s-processed.txt")
@@ -733,7 +754,14 @@ func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected secondary producer to have written its own processed file: %v", err)
 	}
-	if err := os.WriteFile(secondaryProcessedPath, append(sentinel, []byte("\nSENTINEL-FROM-SECONDARY\n")...), 0644); err != nil {
+	// Mark the session-log part (before the separator) -- only that part is folded
+	// into session.jsonl, so a marker appended to the end would never show up.
+	sepIdx := strings.Index(string(sentinel), records.WrittenFileSeparator)
+	if sepIdx < 0 {
+		t.Fatalf("secondary processed file has no %q separator", records.WrittenFileSeparator)
+	}
+	marked := string(sentinel[:sepIdx]) + "SENTINEL-FROM-SECONDARY\n" + string(sentinel[sepIdx:])
+	if err := os.WriteFile(secondaryProcessedPath, []byte(marked), 0644); err != nil {
 		t.Fatalf("failed to mark secondary processed file: %v", err)
 	}
 
@@ -742,11 +770,11 @@ func TestConsolidatePrimaryToJSONLPromotesLocalSecondary(t *testing.T) {
 		Command: "echo primary",
 		Stdout:  "primary\n",
 	}
-	if _, err := writeWrittenFile(sessionDir, 1705312860, true, primary); err != nil {
+	if _, err := writeWrittenFile(sessionDir, 1705312860, "", true, primary); err != nil {
 		t.Fatalf("writeWrittenFile (primary) failed: %v", err)
 	}
 
-	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860); err != nil {
+	if err := consolidatePrimaryToJSONL(tmpDir, session, 1705312860, ownerTarget(tmpDir, session)); err != nil {
 		t.Fatalf("consolidatePrimaryToJSONL failed: %v", err)
 	}
 

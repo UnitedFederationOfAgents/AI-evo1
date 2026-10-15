@@ -1,7 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
+import { noteTCStart } from './tcannounce'
+import { ControlV1 } from './ControlV1'
+import { HostFilePicker } from './HostFilePicker'
+import type { ControlV1Props } from './ControlV1'
+import { detectTextFormat } from './textformat'
 
-const TABS = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker', 'system', 'files'] as const
+const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -12,7 +17,7 @@ type Tab = typeof TABS[number]
 // embedded app's own UI (including its own "DEV MODE" border, when that
 // sub-app runs in dev mode) fills the space instead of floating in a
 // padded, header-topped box.
-const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo'])
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
 
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
 // Step5Prompt.md Revision M): how many recently-visited tabs we keep around
@@ -26,6 +31,8 @@ const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'condoccer', multi: false },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
+  { name: 'robot', multi: false },
+  { name: 'worker', multi: false },
 ]
 
 interface LogEntry {
@@ -33,13 +40,30 @@ interface LogEntry {
   text: string
 }
 
+// The FC instance an fc-* message without an fc field is about: an older
+// federation-command connected under the bare app name.
+const FC_DEFAULT_KEY = 'federation-command'
+
+function fcStateLabel(state: string): string {
+  return state === '' ? '-- disconnected --'
+    : state === 'remote-control' ? '-- remote control --'
+    : state === 'local-control' ? '-- local control --'
+    : `-- ${state} --`
+}
+
 function useStatusWS() {
   const [connected, setConnected] = useState(false)
   const [services, setServices] = useState<ServiceStatus[]>([])
-  const [fcState, setFcState] = useState<string>('')
-  const [fcLog, setFcLog] = useState<LogEntry[]>([])
-  const [ridealongState, setRidealongState] = useState<RidealongStateMsg | null>(null)
-  const [condocState, setCondocState] = useState<CondocStateMsg | null>(null)
+  // Every connected federation-command instance, and each one's log, keyed
+  // by instance -- see local-representative/fcinstances.go.
+  const [fcInstances, setFcInstances] = useState<FCInstanceInfo[]>([])
+  const [fcLogs, setFcLogs] = useState<Record<string, LogEntry[]>>({})
+  const [controlState, setControlState] = useState<ControlStateMsg | null>(null)
+  // The control tab's library and the replies to its requests, by request
+  // id -- see local-representative/controllib.go.
+  const [controlLibrary, setControlLibrary] = useState<ControlLibraryMsg | null>(null)
+  const [controlReplies, setControlReplies] = useState<Record<string, ControlLibReply>>({})
+  const controlReqSeq = useRef(0)
   const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
   const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
   const [repoState, setRepoState] = useState<RepoStateMsg>({ watched: false, dirty: false, rebuild_ready: false, building: false, auto_rebuild: false })
@@ -51,25 +75,66 @@ function useStatusWS() {
   // relayed down from agent-coordinator -- see tcavailability.go and
   // Step2Prompt.md. Drives the mic icon beside the camera/screenshot icon.
   const [tcAvailable, setTCAvailable] = useState(false)
+  // The worker tab: what dungeon-keeper last reported, and the answer to
+  // the last prompt submitted from it -- see local-representative/worker.go.
+  const [workerState, setWorkerState] = useState<WorkerStateMsg | null>(null)
+  const [workerReply, setWorkerReply] = useState<WorkerReplyMsg | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const fcStateRef = useRef<string>('')
+  const fcStateRef = useRef<Record<string, string>>({})
 
-  const sendCommand = useCallback((cmd: string) => {
+  // fc names the instance to send to; LR picks its default one without it.
+  const sendCommand = useCallback((cmd: string, fc?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'command',
-        payload: { cmd },
+        payload: { cmd, fc },
       }))
     }
   }, [])
 
-  const sendRidealongCommand = useCallback((action: string) => {
+  const sendRidealongCommand = useCallback((action: string, fc?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         type: 'ridealong-command',
-        payload: { action },
+        payload: { action, fc },
       }))
+    }
+  }, [])
+
+  // Control tab -- see local-representative/control.go.
+  const runControl = useCallback((sequence: string, controls: Record<string, string>, recordOverride?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setControlReplies(prev => {
+        const next = { ...prev }
+        delete next.run
+        return next
+      })
+      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence, controls, record_override: recordOverride } }))
+    }
+  }, [])
+
+  // requestControl sends a definer/composer request and returns the id its
+  // "control-reply" will carry. Unsent (not connected), it fails at once.
+  const requestControl = useCallback((r: ControlLibRequest): string => {
+    const req = `c${++controlReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-lib', payload: { ...r, req } }))
+    } else {
+      setControlReplies(prev => ({ ...prev, [req]: { req, op: r.op, success: false, error: 'not connected' } }))
+    }
+    return req
+  }, [])
+
+  const cancelControl = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-cancel', payload: {} }))
+    }
+  }, [])
+
+  const continueControl = useCallback((run: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-continue', payload: { run } }))
     }
   }, [])
 
@@ -145,6 +210,15 @@ function useStatusWS() {
     }
   }, [])
 
+  const submitWork = useCallback((prompt: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setWorkerReply(null)
+      wsRef.current.send(JSON.stringify({ type: 'worker-submit', payload: { prompt } }))
+    } else {
+      setWorkerReply({ ok: false, error: 'not connected' })
+    }
+  }, [])
+
   // File upload is a plain HTTP POST (not a websocket command) so the browser
   // can stream the multipart body directly to /api/files.
   const uploadFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -159,6 +233,22 @@ function useStatusWS() {
       }
     } catch (err) {
       console.error('file upload failed:', err)
+    }
+  }, [])
+
+  // "select from host": a JSON POST /api/files copies files already on this
+  // host into the host-cache (local-representative/hostfiles.go); folders
+  // are zipped into it. Returns the error to show, if any.
+  const importHostFiles = useCallback(async (paths: string[], folders: string[] = []): Promise<string | null> => {
+    try {
+      const resp = await fetch('/api/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_paths: paths, host_folders: folders }),
+      })
+      return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
+    } catch (err) {
+      return String(err)
     }
   }, [])
 
@@ -188,40 +278,38 @@ function useStatusWS() {
             setServices((msg.payload as StatusMsg).services)
             break
           case 'fc-state': {
-            const raw = (msg.payload as FCStateMsg).state
-            const newSt = raw === 'disconnected' ? '' : raw
-            const prevSt = fcStateRef.current
-            fcStateRef.current = newSt
-            setFcState(newSt)
+            // Only marks transitions in that instance's log -- its current
+            // state comes with fc-instances.
+            const p = msg.payload as FCStateMsg
+            const key = p.fc || FC_DEFAULT_KEY
+            const newSt = p.state === 'disconnected' ? '' : p.state
+            const prevSt = fcStateRef.current[key] ?? ''
+            fcStateRef.current[key] = newSt
             if (prevSt !== newSt) {
-              const label =
-                newSt === '' ? '-- disconnected --'
-                : newSt === 'remote-control' ? '-- remote control --'
-                : newSt === 'local-control' ? '-- local control --'
-                : `-- ${newSt} --`
-              setFcLog(prev => [...prev, { kind: 'state', text: label }])
+              setFcLogs(prev => ({ ...prev, [key]: [...(prev[key] ?? []), { kind: 'state', text: fcStateLabel(newSt) }] }))
             }
             break
           }
           case 'fc-log': {
-            const logPayload = msg.payload as FCLogMsg
-            setFcLog(prev => [
-              ...prev.slice(-199),
-              {
-                kind: logPayload.kind === 'output' ? 'output' : 'cmd',
-                text: logPayload.line,
-              },
-            ])
+            const p = msg.payload as FCLogMsg
+            const key = p.fc || FC_DEFAULT_KEY
+            const entry: LogEntry = { kind: p.kind === 'output' ? 'output' : 'cmd', text: p.line }
+            setFcLogs(prev => ({ ...prev, [key]: [...(prev[key] ?? []).slice(-199), entry] }))
             break
           }
-          case 'ridealong-state': {
-            const payload = msg.payload as RidealongStateMsg
-            setRidealongState(payload.active ? payload : null)
+          case 'fc-instances':
+            // Ridealong and condoc state arrive per instance in here too.
+            setFcInstances((msg.payload as FCInstancesMsg).instances ?? [])
             break
-          }
-          case 'condoc-state': {
-            const payload = msg.payload as CondocStateMsg
-            setCondocState(payload.active ? payload : null)
+          case 'control-state':
+            setControlState(msg.payload as ControlStateMsg)
+            break
+          case 'control-library':
+            setControlLibrary(msg.payload as ControlLibraryMsg)
+            break
+          case 'control-reply': {
+            const p = msg.payload as ControlLibReply
+            setControlReplies(prev => ({ ...prev, [p.req || p.op]: p }))
             break
           }
           case 'ac-state':
@@ -263,6 +351,17 @@ function useStatusWS() {
             setTCAvailable(payload.available)
             break
           }
+          case 'convo-state':
+            // Speak "application running" when this host's TC starts or
+            // restarts -- see tcannounce.ts.
+            noteTCStart('local', (msg.payload as ConvoStateMsg).started_at)
+            break
+          case 'worker-state':
+            setWorkerState(msg.payload as WorkerStateMsg)
+            break
+          case 'worker-reply':
+            setWorkerReply(msg.payload as WorkerReplyMsg)
+            break
         }
       } catch {
         // ignore malformed messages
@@ -279,10 +378,75 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcState, fcLog, ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles,
-    rebuildRepo, setAutoRebuild, setAutoUpdate,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
+    rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
   }
+}
+
+// FCInstancePicker lists every connected federation-command instance on the
+// federation-command tab; the panels below it follow the selected one.
+function FCInstancePicker({
+  instances,
+  selected,
+  onSelect,
+}: {
+  instances: FCInstanceInfo[]
+  selected: string | null
+  onSelect: (key: string) => void
+}) {
+  if (instances.length === 0) return null
+  return (
+    <div className="fc-instances">
+      <span className="fc-instances-label">
+        {instances.length} instance{instances.length === 1 ? '' : 's'}
+      </span>
+      {instances.map(inst => (
+        <button
+          key={inst.key}
+          className={`fc-instance fc-instance-${inst.state || 'none'}${inst.key === selected ? ' fc-instance-active' : ''}`}
+          onClick={() => onSelect(inst.key)}
+          title={`${inst.key}${inst.head ? ` (head ${inst.head})` : ''} — ${inst.state || 'no state yet'}`}
+        >
+          <span className="fc-instance-dot" />
+          {inst.label}
+          {inst.session && <span className="fc-instance-session">{inst.session}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Control tab (local-representative/control.go) ----
+
+const CONTROL_SUBTABS = ['v1'] as const
+type ControlSubTab = typeof CONTROL_SUBTABS[number]
+
+// ControlPanel is the control tab: its v1 sub-tab is ControlV1 (shared with
+// agent-coordinator's frontend), over this LR's own library.
+function ControlPanel(props: Omit<ControlV1Props, 'fileUrl' | 'node' | 'hostApi'>) {
+  const [sub, setSub] = useState<ControlSubTab>('v1')
+  return (
+    <div className="ctl-panel">
+      <div className="ctl-subtabs">
+        {CONTROL_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'v1' && (
+        <>
+          <div className="ctl-hint">
+            The robot finds a terminal by reading the screen: its window has to be visible, not behind
+            another, and no other view of federation-command's output (its tab here or in
+            agent-coordinator) should be showing on that desktop.
+          </div>
+          <ControlV1 {...props} fileUrl={fileRawUrl} node="this node" hostApi="" />
+        </>
+      )}
+    </div>
+  )
 }
 
 function FCCommandPanel({
@@ -344,6 +508,105 @@ function FCCommandPanel({
             autoFocus
           />
           <button className="fc-cmd-send" onClick={submit}>run</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// WorkerPanel is the worker tab: a temporary prompt box that hands
+// prompt-only work to this host's dungeon-keeper, and the work signals it
+// reports, newest first -- see local-representative/worker.go.
+function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const submit = () => {
+    const text = prompt.trim()
+    if (!text || !healthy) return
+    onSubmit(text)
+    setPrompt('')
+  }
+
+  const signals = state?.signals ?? []
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="worker-submit">
+        <textarea
+          className="worker-prompt"
+          value={prompt}
+          rows={3}
+          placeholder={healthy ? 'prompt for the worker (runs prompt-only, in /tmp)… Ctrl+Enter to submit' : 'the worker is not running — launch it from the system tab'}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit()
+          }}
+          disabled={!healthy}
+        />
+        <button className="worker-submit-btn" onClick={submit} disabled={!healthy || !prompt.trim()}>submit</button>
+      </div>
+      {reply?.error && <div className="worker-error">{reply.error}</div>}
+      {signals.length === 0
+        ? <div className="service-empty">no work signals yet</div>
+        : (
+          <div className="worker-signals">
+            {signals.map(sig => (
+              <WorkerSignalRow
+                key={sig.id || sig.file}
+                signal={sig}
+                open={openId === (sig.id || sig.file)}
+                onToggle={() => setOpenId(openId === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+              />
+            ))}
+          </div>
+        )}
+    </div>
+  )
+}
+
+function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo; open: boolean; onToggle: () => void }) {
+  const when = new Date(signal.created_at).toLocaleString()
+  return (
+    <div className={`worker-signal worker-status-${signal.status}`}>
+      <button className="worker-signal-head" onClick={onToggle} title={signal.file}>
+        <span className="worker-signal-status">{signal.status}</span>
+        <span className="worker-signal-prompt">{signal.prompt}</span>
+        <span className="worker-signal-when">{when}</span>
+      </button>
+      {open && (
+        <div className="worker-signal-body">
+          <div className="worker-signal-detail">
+            {signal.role} · {signal.work_type}{signal.work_location ? ` in ${signal.work_location}` : ''}
+            {signal.mode ? ` · ${signal.mode}` : ''}
+            {signal.agent ? ` · ${signal.agent}` : ''}{signal.model ? ` (${signal.model})` : ''}
+          </div>
+          <pre className="worker-signal-text">{signal.prompt}</pre>
+          {signal.comment && <div className="worker-signal-comment">{signal.comment}</div>}
+          {signal.output
+            ? (
+              <>
+                {signal.output_trimmed && <div className="worker-signal-detail">output is long — showing only the end</div>}
+                <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
+              </>
+            )
+            : signal.output_trimmed
+              ? <div className="worker-signal-detail">output is too long to show here — it's in the signal file {signal.file}</div>
+              : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
         </div>
       )}
     </div>
@@ -822,7 +1085,7 @@ function RepoWatchPanel({
 
 function SystemPanel({
   state,
-  fcState,
+  fcInstances,
   repoState,
   onLaunch,
   onTerminate,
@@ -832,7 +1095,7 @@ function SystemPanel({
   onSetAutoUpdate,
 }: {
   state: SystemStateMsg | null
-  fcState: string
+  fcInstances: FCInstanceInfo[]
   repoState: RepoStateMsg
   onLaunch: (name: string) => void
   onTerminate: (id: string) => void
@@ -857,20 +1120,25 @@ function SystemPanel({
     state.managed.filter(p => p.name === name && p.status === 'running').length
 
   const fcRunning = runningCount('federation-command') > 0
-  const fcControl =
-    fcState === 'remote-control' ? 'remote'
-    : fcState === 'local-control' ? 'local'
+  const fcControl = (st: string) =>
+    st === 'remote-control' ? 'remote'
+    : st === 'local-control' ? 'local'
     : 'not connected'
+  // One line per connected instance; a single "not connected" line while
+  // launched instances have yet to connect.
+  const fcRows = fcInstances.length > 0
+    ? fcInstances.map(inst => ({ key: inst.key, label: `federation-command ${inst.label}`, state: inst.state }))
+    : [{ key: '', label: 'federation-command', state: '' }]
 
   return (
     <div className="sys-panel">
       <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} />
-      {fcRunning && (
-        <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
-          federation-command control: <strong>{fcControl}</strong>
-          {fcControl !== 'remote' && ' — expected remote in a machine-driven chain'}
+      {fcRunning && fcRows.map(row => (
+        <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
+          {row.label} control: <strong>{fcControl(row.state)}</strong>
+          {fcControl(row.state) !== 'remote' && ' — expected remote in a machine-driven chain'}
         </div>
-      )}
+      ))}
       <div className="sys-table">
         <div className="sys-row sys-row-head">
           <span className="sys-col sys-col-name">process</span>
@@ -938,7 +1206,8 @@ function formatCountdown(expiresAtSec: number, nowSec: number): string {
 }
 
 // FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
-// this increment supports: text, image, and a catch-all for everything else.
+// the files tab supports: text, image, archive (a zippered page -- see
+// files.go's archiveExtensions), and a catch-all for everything else.
 // Each renders in `currentColor`, so FileIcon's state-driven CSS class is
 // what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
 const FILE_ICON_PATH: Record<string, JSX.Element> = {
@@ -954,6 +1223,14 @@ const FILE_ICON_PATH: Record<string, JSX.Element> = {
       <rect x="3" y="4" width="18" height="16" rx="1.5" />
       <circle cx="8.5" cy="9.5" r="1.5" />
       <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  archive: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M11 3h1M12 5h1M11 7h1M12 9h1M11 11h1" strokeLinecap="round" />
+      <rect x="10.25" y="13" width="3.5" height="5" rx="0.75" />
+      <path d="M12 15.5v0.5" strokeLinecap="round" />
     </svg>
   ),
   other: (
@@ -1040,6 +1317,15 @@ function markupCopyUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}/markup/copy`
 }
 
+// isReservedFileName mirrors files.go's saveUploadedFile reserved-prefix
+// checks -- a friendlier client-side echo of a rejection the server would
+// otherwise give silently (a rejected file is just dropped from the response).
+function isReservedFileName(name: string): boolean {
+  return name.startsWith('.manifest_') || name.startsWith('.markup_')
+}
+
+const RESERVED_NAME_ERROR = "that name is reserved for the host-cache's own bookkeeping files"
+
 // NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
 // Revision J: "add a 'new text file' button to the files tab ... accepts the
 // name and text (with optional voice input with mic icon when available)").
@@ -1066,11 +1352,8 @@ function NewTextFileDialog({
       setError('name is required')
       return
     }
-    // Mirrors files.go's saveUploadedFile reserved-prefix checks -- a
-    // friendlier client-side echo of a rejection the server would otherwise
-    // give silently (a rejected file is just dropped from the response).
-    if (trimmed.startsWith('.manifest_') || trimmed.startsWith('.markup_')) {
-      setError("that name is reserved for the host-cache's own bookkeeping files")
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
       return
     }
     const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
@@ -1123,23 +1406,326 @@ function NewTextFileDialog({
   )
 }
 
+// ClipboardContent is what the files tab's "new file from clipboard" button
+// (Step4SubstepDPrompt.md Revision D) found in the copy buffer: an image or
+// plain text, already as the Blob the upload will carry, plus the extension
+// its default name gets. For text that extension comes from
+// detectTextFormat (Revision E), e.g. "json" or "csv" rather than "txt".
+interface ClipboardContent {
+  kind: 'image' | 'text'
+  blob: Blob
+  ext: string
+  text?: string // kind 'text' only -- shown as the dialog's preview
+  format?: string // kind 'text' only -- the detected format's label, e.g. "JSON"
+}
+
+// CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
+// preference order. Browsers' async clipboard API only ever hands back
+// image/png (whatever was copied gets re-encoded), but a paste event can
+// carry the others when a site or the OS puts them there as-is.
+const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+}
+
+// CLIPBOARD_POLL_MS is how often useClipboardState rechecks the copy buffer
+// while the page is focused. There's no "clipboard changed" event: focus and
+// this page's own copy/cut events catch most changes, and the poll catches
+// the rest (e.g. clipboard-manager or keyboard-shortcut changes made while
+// the page stays focused).
+const CLIPBOARD_POLL_MS = 3000
+
+function textClipboard(text: string): ClipboardContent {
+  const f = detectTextFormat(text)
+  return { kind: 'text', blob: new Blob([text], { type: f.mime }), ext: f.ext, text, format: f.label }
+}
+
+// clipboardSupported says whether the page may read the copy buffer itself
+// at all -- the async clipboard API exists only in a secure context (https
+// or localhost), so over plain http only a Ctrl+V paste event can get at it.
+function clipboardSupported(): boolean {
+  return !!(navigator.clipboard?.read || navigator.clipboard?.readText)
+}
+
+// readClipboard reads the copy buffer through the async clipboard API: the
+// first image item wins, then plain text. null means it's empty (or holds
+// only things we don't take, e.g. a copied file); it throws when the read
+// isn't allowed (no secure context, permission denied, page not focused).
+async function readClipboard(): Promise<ClipboardContent | null> {
+  const cb = navigator.clipboard
+  if (cb?.read) {
+    const items = await cb.read()
+    for (const item of items) {
+      const type = Object.keys(CLIPBOARD_IMAGE_EXT).find(t => item.types.includes(t))
+      if (type) return { kind: 'image', blob: await item.getType(type), ext: CLIPBOARD_IMAGE_EXT[type] }
+    }
+    for (const item of items) {
+      if (!item.types.includes('text/plain')) continue
+      const text = await (await item.getType('text/plain')).text()
+      if (text) return textClipboard(text)
+    }
+    return null
+  }
+  if (cb?.readText) {
+    const text = await cb.readText()
+    return text ? textClipboard(text) : null
+  }
+  throw new Error('clipboard API unavailable')
+}
+
+// clipboardFromPaste is readClipboard's counterpart for a paste event's
+// DataTransfer -- no permission needed, so it works even over plain http.
+function clipboardFromPaste(data: DataTransfer): ClipboardContent | null {
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !CLIPBOARD_IMAGE_EXT[item.type]) continue
+    const f = item.getAsFile()
+    if (f) return { kind: 'image', blob: f, ext: CLIPBOARD_IMAGE_EXT[item.type] }
+  }
+  const text = data.getData('text/plain')
+  return text ? textClipboard(text) : null
+}
+
+// ClipboardState is what the "new file from clipboard" button knows about
+// the copy buffer: 'unknown' leaves it enabled (clicking it asks the browser),
+// 'empty' disables it, 'has' enables it.
+type ClipboardState = 'unknown' | 'empty' | 'has'
+
+// useClipboardState watches the copy buffer, but only once the browser has
+// already granted clipboard-read (Chromium, after the first click's prompt,
+// or for localhost). Without that grant a probe would pop a permission
+// prompt -- or, in Firefox/Safari, a "Paste" bubble -- on every check, so the
+// state just stays 'unknown'. The probe only lists the item types; it never
+// pulls the image/text bytes.
+function useClipboardState(): ClipboardState {
+  const [state, setState] = useState<ClipboardState>('unknown')
+  useEffect(() => {
+    if (!navigator.clipboard?.read || !navigator.permissions?.query) return
+    let cancelled = false
+    let granted = false
+    let perm: PermissionStatus | null = null
+    const probe = async () => {
+      if (!granted || document.visibilityState !== 'visible' || !document.hasFocus()) return
+      try {
+        const items = await navigator.clipboard.read()
+        const has = items.some(item => item.types.some(t => t === 'text/plain' || CLIPBOARD_IMAGE_EXT[t]))
+        if (!cancelled) setState(has ? 'has' : 'empty')
+      } catch {
+        // Focus lost mid-read or access revoked -- keep the last answer.
+      }
+    }
+    const onPerm = () => {
+      granted = perm?.state === 'granted'
+      if (granted) void probe()
+      else setState('unknown')
+    }
+    // 'clipboard-read' isn't in every TS lib's PermissionName union.
+    navigator.permissions.query({ name: 'clipboard-read' } as unknown as PermissionDescriptor)
+      .then(p => {
+        if (cancelled) return
+        perm = p
+        p.addEventListener('change', onPerm)
+        onPerm()
+      })
+      .catch(() => { /* Firefox/Safari don't know the name -- stay 'unknown' */ })
+    const onWake = () => { void probe() }
+    // "copy"/"cut" fire before the copy buffer is written, hence the delay.
+    const onCopy = () => { window.setTimeout(onWake, 100) }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    document.addEventListener('copy', onCopy)
+    document.addEventListener('cut', onCopy)
+    const timer = window.setInterval(onWake, CLIPBOARD_POLL_MS)
+    return () => {
+      cancelled = true
+      perm?.removeEventListener('change', onPerm)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      document.removeEventListener('copy', onCopy)
+      document.removeEventListener('cut', onCopy)
+      window.clearInterval(timer)
+    }
+  }, [])
+  return state
+}
+
+// clipboardDefaultName is the naming dialog's starting name, e.g.
+// "clipboard-20261010-142233.png" -- unique enough that accepting it as-is
+// never collides with the last paste.
+function clipboardDefaultName(ext: string): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `clipboard-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+}
+
+// CLIPBOARD_TEXT_PREVIEW caps how much pasted text the naming dialog shows.
+const CLIPBOARD_TEXT_PREVIEW = 2000
+
+// ClipboardFileDialog names a file about to be created from the copy buffer.
+// It opens with the default name's stem (not its extension) selected, so
+// typing replaces just that; a name typed without any extension gets the
+// content's own one back. Like NewTextFileDialog it saves through the plain
+// upload endpoint.
+function ClipboardFileDialog({
+  content,
+  onCreate,
+  onClose,
+}: {
+  content: ClipboardContent
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState(() => clipboardDefaultName(content.ext))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }, [])
+
+  useEffect(() => {
+    if (content.kind !== 'image') return
+    const url = URL.createObjectURL(content.blob)
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [content])
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.${content.ext}`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([content.blob], finalName, { type: content.blob.type })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  const text = content.text ?? ''
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">
+            new {content.kind === 'image' ? 'image' : 'text'} file from clipboard
+            {content.format && <span className="clip-file-format"> · detected {content.format}</span>}
+          </span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          ref={nameRef}
+          className="new-file-name-input"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !busy) void handleCreate()
+            else if (e.key === 'Escape') onClose()
+          }}
+        />
+        {content.kind === 'image' ? (
+          imageUrl && <img className="clip-file-image" src={imageUrl} alt="clipboard image" />
+        ) : (
+          <pre className="clip-file-text">
+            {text.length > CLIPBOARD_TEXT_PREVIEW
+              ? `${text.slice(0, CLIPBOARD_TEXT_PREVIEW)}\n… (${text.length - CLIPBOARD_TEXT_PREVIEW} more characters)`
+              : text}
+          </pre>
+        )}
+        <div className="clip-file-size">{formatBytes(content.blob.size)}</div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// isEditableTarget says a paste is meant for a text field, not the files tab.
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+}
+
 function FilesPanel({
   state,
   selectedId,
   onSelect,
   onEnter,
   onUpload,
+  onHostImport,
 }: {
   state: FilesStateMsg | null
   selectedId: string | null
   onSelect: (id: string) => void
   onEnter: (id: string) => void
   onUpload?: (files: FileList | File[]) => void
+  onHostImport?: (paths: string[], folders?: string[]) => Promise<string | null> // the error, if any
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
+  const [hostPickOpen, setHostPickOpen] = useState(false)
+  const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
+  const [clipError, setClipError] = useState<string | null>(null)
+  const clipState = useClipboardState()
   const inputRef = useRef<HTMLInputElement | null>(null)
   const files = state?.files ?? []
+
+  const fromClipboard = async () => {
+    setClipError(null)
+    if (!clipboardSupported()) {
+      setClipError("this page can't read the clipboard over plain http — press Ctrl+V (⌘V) on this tab instead")
+      return
+    }
+    try {
+      const content = await readClipboard()
+      if (content) setClipContent(content)
+      else setClipError('the clipboard has no text or image in it')
+    } catch {
+      setClipError("couldn't read the clipboard — allow clipboard access for this page, or press Ctrl+V (⌘V) on this tab")
+    }
+  }
+
+  // Ctrl+V anywhere on the tab (outside a text field) opens the same naming
+  // dialog -- the one way in over plain http, and a shortcut everywhere else.
+  useEffect(() => {
+    if (!onUpload || newFileOpen || clipContent) return
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || !e.clipboardData) return
+      const content = clipboardFromPaste(e.clipboardData)
+      if (!content) return
+      e.preventDefault()
+      setClipError(null)
+      setClipContent(content)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [onUpload, newFileOpen, clipContent])
 
   return (
     <div className="files-panel">
@@ -1170,12 +1756,53 @@ function FilesPanel({
         </div>
       )}
       {onUpload && (
-        <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
-          + new text file
-        </button>
+        <div className="files-new-row">
+          <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+            + new text file
+          </button>
+          <button
+            type="button"
+            className="files-new-btn"
+            onClick={() => void fromClipboard()}
+            disabled={clipState === 'empty'}
+            title={clipState === 'empty' ? 'the clipboard is empty' : 'create a file from the text or image on the clipboard (or press Ctrl+V on this tab)'}
+          >
+            + new file from clipboard
+          </button>
+          {onHostImport && (
+            <button
+              type="button"
+              className="files-new-btn"
+              onClick={() => setHostPickOpen(true)}
+              title="copy files that are already on this host into the files tab"
+            >
+              + select from host
+            </button>
+          )}
+        </div>
       )}
+      {clipError && <div className="files-clip-error">{clipError}</div>}
       {newFileOpen && onUpload && (
         <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {hostPickOpen && onHostImport && (
+        <HostFilePicker
+          api=""
+          multiple
+          title="select from host"
+          onClose={() => setHostPickOpen(false)}
+          onPick={async paths => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport(paths))
+          }}
+          onZipFolder={async dir => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport([], [dir]))
+          }}
+        />
+      )}
+      {clipContent && onUpload && (
+        <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
       )}
       {files.length === 0 ? (
         <div className="files-empty">no files in the host-cache</div>
@@ -1336,8 +1963,8 @@ function FileDetailPane({
 // a grid item or the detail pane's "view" widget (reminiscent of
 // condoccer's substep entry). Images render inline; text is fetched and shown
 // as plain text; anything else falls back to a "use download" notice — this
-// increment's wireframe icon set is deliberately small (text/image/other),
-// and so is its preview set.
+// tab's wireframe icon set is deliberately small (text/image/archive/other),
+// and its preview set smaller still (archives get the download notice too).
 function FileViewer({
   fileId,
   file,
@@ -1951,7 +2578,8 @@ function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void
 // TCAvailabilityIndicator sits beside the camera/screenshot icon in the
 // header: illuminated (mic-indicator-active) once agent-coordinator reports
 // at least one the-conversationalist instance available on any connected
-// host. Mirrors agent-coordinator's own copy -- a passive indicator, not a
+// host and this host's own instance can reach its transcription engine (see
+// tcavailability.go's getTCAvailability). Mirrors agent-coordinator's own copy -- a passive indicator, not a
 // control; the actual mic-to-transcribe action lives on condoccer's own text
 // inputs and, as of Step2Prompt.md Revision J, the files tab's new-text-file
 // dialog below -- both driven by the same tcAvailable this indicator reads.
@@ -1959,7 +2587,7 @@ function TCAvailabilityIndicator({ available }: { available: boolean }) {
   return (
     <span
       className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
-      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+      title={available ? 'The Conversationalist is available' : "The Conversationalist transcription is not available on this host"}
     >
       {MIC_ICON}
     </span>
@@ -2014,11 +2642,20 @@ export default function App() {
     capture() // in case condoccer already restored a hash before this attached
   }
   const {
-    connected, services, fcState, fcLog,
-    ridealongState, condocState, acState, systemState, repoState, filesState, modeMismatches, tcAvailable,
-    sendCommand, sendRidealongCommand, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, rebuildRepo, setAutoRebuild, setAutoUpdate,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
   } = useStatusWS()
+
+  // The federation-command tab follows one instance at a time: the one
+  // picked (kept per browser tab), else the first.
+  const [selectedFC, setSelectedFC] = useState<string | null>(() => sessionStorage.getItem('lr-selected-fc'))
+  const fc = fcInstances.find(i => i.key === selectedFC) ?? fcInstances[0] ?? null
+  const selectFC = (key: string) => {
+    setSelectedFC(key)
+    sessionStorage.setItem('lr-selected-fc', key)
+  }
 
   // Drives every MicButton in the tree (Step2Prompt.md Revision J) via
   // TCCaptureContext, below -- see useTCCapture's doc comment.
@@ -2036,7 +2673,8 @@ export default function App() {
   // right on the federation-command tab itself, next to its health
   // indicator, so "what session is FC on" doesn't require a trip to system.
   // See condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
-  const fcSession = systemState?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+  // With several instances it's the selected one's own session.
+  const fcSession = fc?.session ?? systemState?.managed.find(p => p.name === 'federation-command' && p.session)?.session
 
   const getStatus = (name: string): string => {
     return services.find(s => s.name === name)?.status ?? 'healthy'
@@ -2159,6 +2797,8 @@ export default function App() {
               />
             ) : activeTab === 'sessions' ? (
               <iframe className="embed-frame" src="/sessions/" title="sessions" />
+            ) : activeTab === 'robot' ? (
+              <iframe className="embed-frame" src="/robot/" title="robot" />
             ) : (
               <iframe className="embed-frame" src="/convo/" title="convo" />
             )
@@ -2174,7 +2814,7 @@ export default function App() {
               {activeTab === 'system' ? (
                 <SystemPanel
                   state={systemState}
-                  fcState={fcState}
+                  fcInstances={fcInstances}
                   repoState={repoState}
                   onLaunch={launchApp}
                   onTerminate={terminateApp}
@@ -2196,6 +2836,19 @@ export default function App() {
                   onSelect={setSelectedFileId}
                   onEnter={setViewerFileId}
                   onUpload={uploadFiles}
+                  onHostImport={importHostFiles}
+                />
+              ) : activeTab === 'control' ? (
+                <ControlPanel
+                  connected={connected}
+                  state={controlState}
+                  lib={controlLibrary}
+                  replies={controlReplies}
+                  request={requestControl}
+                  robotHealthy={getStatus('robot') === 'healthy'}
+                  onRun={runControl}
+                  onCancel={cancelControl}
+                  onContinue={continueControl}
                 />
               ) : (
                 <>
@@ -2206,25 +2859,35 @@ export default function App() {
                       <span className="fc-session-tag" title="active session">{fcSession}</span>
                     )}
                   </div>
+                  {activeTab === 'worker' && (
+                    <WorkerPanel
+                      healthy={getStatus('worker') === 'healthy'}
+                      state={workerState}
+                      reply={workerReply}
+                      onSubmit={submitWork}
+                    />
+                  )}
                   {activeTab === 'federation-command' && (
                     <>
-                      {ridealongState && (
+                      <FCInstancePicker instances={fcInstances} selected={fc?.key ?? null} onSelect={selectFC} />
+                      {fc?.ridealong && (
                         <RidealongPanel
-                          state={ridealongState}
-                          fcState={fcState}
-                          sendRidealongCommand={sendRidealongCommand}
+                          state={fc.ridealong}
+                          fcState={fc.state}
+                          sendRidealongCommand={action => sendRidealongCommand(action, fc.key)}
                         />
                       )}
-                      {condocState && !ridealongState && (
+                      {fc?.condoc && !fc.ridealong && (
                         <CondocPanel
-                          state={condocState}
-                          fcState={fcState}
+                          state={fc.condoc}
+                          fcState={fc.state}
                         />
                       )}
                       <FCCommandPanel
-                        fcState={fcState}
-                        fcLog={fcLog}
-                        sendCommand={sendCommand}
+                        key={fc?.key ?? ''}
+                        fcState={fc?.state ?? ''}
+                        fcLog={fc ? fcLogs[fc.key] ?? [] : []}
+                        sendCommand={cmd => sendCommand(cmd, fc?.key)}
                       />
                     </>
                   )}

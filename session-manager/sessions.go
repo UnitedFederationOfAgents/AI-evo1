@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,7 +32,7 @@ import (
 //
 // main.go's handleClientMsg dispatches "list-sessions"/"new-session"/
 // "set-session"/"rename-session"/"describe-session"/"view-session"/
-// "archive-sessions" into the handlers below, which wrap the pure functions
+// "view-processed"/"archive-sessions" into the handlers below, which wrap the pure functions
 // below (path resolution, listing, describing, creating, renaming,
 // archiving, viewing) with WS request/response and s.currentSession
 // bookkeeping.
@@ -186,6 +187,11 @@ func (s *Server) sendSessionView(c *wsClient, id string) {
 		return
 	}
 	incomplete := s.triggerSessionSync(id)
+	if validSessionID(id) {
+		if err := reconcileSessionLogs(filepath.Join(s.recordsPath, id), ufahostid.GetHostID()); err != nil {
+			log.Printf("view-session %s: reconciling session logs: %v", id, err)
+		}
+	}
 	view, err := viewSession(s.recordsPath, id)
 	if err != nil {
 		s.sendToClient(c, "error", "view-session: "+err.Error())
@@ -556,55 +562,115 @@ func archiveSessions(recordsPath string) (count int, archiveDir string, err erro
 type sessionLogEvent struct {
 	Timestamp  string `json:"timestamp"`
 	EventType  string `json:"event_type"`
+	Host       string `json:"host"`
 	Agent      string `json:"agent"`
 	Model      string `json:"model"`
 	DurationMs int64  `json:"duration_ms"`
 	ExitCode   int    `json:"exit_code"`
+	RecordPath string `json:"record_path"`
+
+	Metadata map[string]string `json:"metadata"`
 }
 
 // SessionEntry is one readable turn of a session's transcript: the event
-// header plus its IN>>/OUT>>/ERR>> blocks with prefixes stripped.
+// header plus its IN>>/OUT>>/ERR>> blocks with prefixes stripped. Record is
+// the turn's record ID (see recordIDFromPath) -- what "view-processed" takes
+// to expand the turn into its full -processed file; empty when the header
+// carries no record_path. EventType tells a command_execution, an
+// ai_invocation, a note and a resource apart (see clauditable's
+// RECORD_SCHEMAS.md); a resource's Metadata names its file
+// (resource_name/resource_file/resource_size). Host is the host the turn ran
+// on, from its header (empty for records that don't name one). SecondaryHost
+// is set on a turn that so far only exists in that host's secondary log (see
+// sessionlog.go). RecordMissing is set when the turn names a record whose
+// processed file isn't on this host.
 type SessionEntry struct {
-	Timestamp  string `json:"timestamp"`
-	EventType  string `json:"event_type,omitempty"`
-	Agent      string `json:"agent,omitempty"`
-	Model      string `json:"model,omitempty"`
-	DurationMs int64  `json:"duration_ms"`
-	ExitCode   int    `json:"exit_code"`
-	Input      string `json:"input,omitempty"`
-	Output     string `json:"output,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Timestamp     string            `json:"timestamp"`
+	EventType     string            `json:"event_type,omitempty"`
+	Host          string            `json:"host,omitempty"`
+	Agent         string            `json:"agent,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	DurationMs    int64             `json:"duration_ms"`
+	ExitCode      int               `json:"exit_code"`
+	Record        string            `json:"record,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+	Input         string            `json:"input,omitempty"`
+	Output        string            `json:"output,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	SecondaryHost string            `json:"secondary_host,omitempty"`
+	RecordMissing bool              `json:"record_missing,omitempty"`
+
+	header string // the turn's header line, which identifies it across logs
 }
 
 // SessionView is the "view session" response: id/name plus its parsed
-// transcript.
+// transcript. Warnings describe log content that couldn't be shown.
 type SessionView struct {
-	ID      string         `json:"id"`
-	Name    string         `json:"name"`
-	Entries []SessionEntry `json:"entries"`
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	Entries  []SessionEntry `json:"entries"`
+	Warnings []string       `json:"warnings,omitempty"`
 	// SyncIncomplete is set by sendSessionView, not viewSession (a purely
 	// local read has no notion of it) -- see sendSessionView's doc comment.
 	SyncIncomplete bool `json:"sync_incomplete,omitempty"`
 }
 
-// viewSession reads id's session.jsonl and parses it into a readable
-// transcript.
+// viewSession reads id's session.jsonl, splices in the turns its secondary
+// logs carry that it doesn't (see sessionlog.go), and parses the result into
+// a readable transcript. A session with no session.jsonl yet is an empty
+// transcript (plus whatever secondary logs hold), not an error.
 func viewSession(recordsPath, id string) (SessionView, error) {
 	sessionDir := filepath.Join(recordsPath, id)
 	if _, err := os.Stat(sessionDir); err != nil {
 		return SessionView{}, fmt.Errorf("session %q not found", id)
 	}
-	data, err := os.ReadFile(filepath.Join(sessionDir, "session.jsonl"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			// A brand-new session has no session.jsonl yet -- an empty
-			// transcript, not an error. Entries is set (not nil) so it
-			// marshals to "[]" rather than "null" for the frontend.
-			return SessionView{ID: id, Name: readSessionName(sessionDir), Entries: []SessionEntry{}}, nil
-		}
+	data, err := os.ReadFile(filepath.Join(sessionDir, primaryLogName))
+	if err != nil && !os.IsNotExist(err) {
 		return SessionView{}, fmt.Errorf("reading session log: %w", err)
 	}
-	return SessionView{ID: id, Name: readSessionName(sessionDir), Entries: parseSessionLog(data)}, nil
+	// Entries is set (not nil) so it marshals to "[]" rather than "null"
+	// for the frontend.
+	entries := spliceSecondaryEntries(sessionDir, parseSessionLog(data))
+	view := SessionView{ID: id, Name: readSessionName(sessionDir), Entries: entries}
+
+	missing := 0
+	for i := range view.Entries {
+		e := &view.Entries[i]
+		if e.Record != "" && !processedFileExists(sessionDir, e.Record) {
+			e.RecordMissing = true
+			missing++
+		}
+	}
+	if n := countUnreadableLines(data); n > 0 {
+		view.Warnings = append(view.Warnings, fmt.Sprintf("%d line(s) of session.jsonl couldn't be read and were skipped", n))
+	}
+	if missing > 0 {
+		view.Warnings = append(view.Warnings, fmt.Sprintf("%d turn(s) name a record that isn't on this host yet; their previews are shown, but they can't be expanded", missing))
+	}
+	return view, nil
+}
+
+// processedFileExists reports whether any of record's processed file names
+// is present in sessionDir.
+func processedFileExists(sessionDir, record string) bool {
+	for _, name := range processedFileNames(record) {
+		if _, err := os.Stat(filepath.Join(sessionDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// countUnreadableLines counts lines that look like a turn's JSON header but
+// don't parse -- what parseSessionLog silently skips.
+func countUnreadableLines(data []byte) int {
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "{") && !json.Valid([]byte(line)) {
+			n++
+		}
+	}
+	return n
 }
 
 // parseSessionLog splits session.jsonl's alternating JSON-header /
@@ -633,16 +699,19 @@ func parseSessionLog(data []byte) []SessionEntry {
 
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, "{") {
-			var ev sessionLogEvent
-			if err := json.Unmarshal([]byte(line), &ev); err == nil && (ev.Timestamp != "" || ev.EventType != "") {
+			if ev, ok := entryHeader(line); ok {
 				flush()
 				cur = &SessionEntry{
 					Timestamp:  ev.Timestamp,
 					EventType:  ev.EventType,
+					Host:       ev.Host,
 					Agent:      ev.Agent,
 					Model:      ev.Model,
 					DurationMs: ev.DurationMs,
 					ExitCode:   ev.ExitCode,
+					Record:     recordIDFromPath(ev.RecordPath),
+					Metadata:   ev.Metadata,
+					header:     line,
 				}
 				in.Reset()
 				out.Reset()
@@ -667,4 +736,112 @@ func parseSessionLog(data []byte) []SessionEntry {
 	}
 	flush()
 	return entries
+}
+
+// ---- expanding one turn (its {record}-processed.txt) ----
+
+// recordIDFromPath reduces an event header's record_path (e.g.
+// ".../1791294265-raw.txt", or a promoted secondary's "-s-raw.txt") to its
+// record ID -- the prefix clauditable names every file of one turn with (see
+// clauditable/main.go's writeProcessedFile): "1791294265" on the session's
+// owner, "1791294265-<host>" on any other host (see sessionlog.go). Only the
+// base name is used: record_path is absolute on whichever host produced the
+// turn, which needn't match this host's AGENT_RECORDS_PATH. Returns "" for
+// anything that isn't a record ID.
+func recordIDFromPath(recordPath string) string {
+	if recordPath == "" {
+		return ""
+	}
+	base := filepath.Base(recordPath)
+	for _, suffix := range []string{"-s-raw.txt", "-raw.txt", "-s-processed.txt", "-processed.txt"} {
+		if id, ok := strings.CutSuffix(base, suffix); ok {
+			if isRecordID(id) {
+				return id
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// isRecordID reports whether s is a record ID: a unix timestamp, optionally
+// followed by "-<host>" (letters, digits, '.', '_', '-'). This is also what
+// keeps a client-supplied "view-processed" record from naming a path outside
+// the session directory.
+func isRecordID(s string) bool {
+	ts, host, hasHost := strings.Cut(s, "-")
+	if ts == "" || (hasHost && host == "") || strings.Contains(s, "..") {
+		return false
+	}
+	for _, r := range ts {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ProcessedView is the "processed-view" response: one turn's full
+// -processed file, which the transcript only previews (session.jsonl caps
+// each block at clauditable's MaxPreviewLines).
+type ProcessedView struct {
+	ID      string `json:"id"`
+	Record  string `json:"record"`
+	File    string `json:"file,omitempty"`
+	Content string `json:"content"`
+	Error   string `json:"error,omitempty"`
+}
+
+// processedFileNames are the names a record's processed file may have, in
+// preference order: a consolidated turn's {record}-processed.txt, then a
+// secondary's not-yet-consolidated {record}-s-processed.txt.
+func processedFileNames(record string) []string {
+	return []string{record + "-processed.txt", record + "-s-processed.txt"}
+}
+
+// viewProcessed reads id's processed file for record.
+func viewProcessed(recordsPath, id, record string) (ProcessedView, error) {
+	if !isRecordID(record) {
+		return ProcessedView{}, fmt.Errorf("invalid record %q", record)
+	}
+	sessionDir := filepath.Join(recordsPath, id)
+	if _, err := os.Stat(sessionDir); err != nil {
+		return ProcessedView{}, fmt.Errorf("session %q not found", id)
+	}
+	for _, name := range processedFileNames(record) {
+		data, err := os.ReadFile(filepath.Join(sessionDir, name))
+		if err == nil {
+			return ProcessedView{ID: id, Record: record, File: name, Content: string(data)}, nil
+		}
+		if !os.IsNotExist(err) {
+			return ProcessedView{}, fmt.Errorf("reading %s: %w", name, err)
+		}
+	}
+	return ProcessedView{}, fmt.Errorf("no processed file for record %s in session %q", record, id)
+}
+
+// sendProcessedView expands one transcript turn into its full -processed
+// file, replying to c only. The file is normally already here -- the
+// transcript's own sendSessionView synced the "*-processed.txt" glob -- so
+// this only asks local-representative to sync again when the first read
+// misses (e.g. a remote turn that landed after the transcript was fetched).
+// A failure is reported on the payload rather than as a generic "error", so
+// the expanded pane can show it in place.
+func (s *Server) sendProcessedView(c *wsClient, id, record string) {
+	view, err := viewProcessed(s.recordsPath, id, record)
+	if err != nil && isRecordID(record) {
+		s.triggerSessionSync(id)
+		view, err = viewProcessed(s.recordsPath, id, record)
+	}
+	if err != nil {
+		view = ProcessedView{ID: id, Record: record, Error: err.Error()}
+	}
+	s.sendToClient(c, "processed-view", view)
 }

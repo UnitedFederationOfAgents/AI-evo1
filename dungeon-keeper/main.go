@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	"dungeon-keeper/pkg/writespace"
 
 	"github.com/google/uuid"
+	"representable"
 	"ufa-loader/restartsignal"
 	ufaversion "ufa-version"
 )
@@ -191,6 +193,10 @@ func runWatch(cfg *types.Config, args []string) {
 	fs := flag.NewFlagSet("watch", flag.ExitOnError)
 	agentType := fs.String("agent-type", "agent-worker", "Agent type: agent-worker or heuristic-request")
 	devMode := fs.Bool("dev-mode", false, "dev mode (see docs/DevMode.md): this watch loop is running from an in-progress branch")
+	autoConnect := fs.Bool("auto-connect", false, "dial local-representative in the background and keep retrying, so LR can show this worker's signals and submit work to it")
+	lrHost := fs.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
+	lrPort := fs.String("lr-port", "8082", "local-representative representable port for --auto-connect")
+	name := fs.String("name", "worker", "name to register with local-representative under")
 	fs.Parse(args)
 
 	switch *agentType {
@@ -215,6 +221,9 @@ func runWatch(cfg *types.Config, args []string) {
 	go watchRestartSignal()
 
 	worker := NewWorker(cfg)
+	if *autoConnect {
+		go worker.connectLoop(*lrHost, *lrPort, *name)
+	}
 	worker.Run()
 }
 
@@ -653,6 +662,18 @@ type Worker struct {
 	lastActivity   time.Time
 	backoffIndex   int
 	nextBackoffLog time.Time
+
+	// wake cuts the sleep between checks short, so work submitted from
+	// local-representative starts right away (see repr.go's submit).
+	wake chan struct{}
+
+	// The local-representative link and what was last pushed over it --
+	// see repr.go.
+	pushMu     sync.Mutex
+	reprMu     sync.Mutex
+	repr       *representable.Client
+	lastPushed string
+	busy       bool // a signal is being processed right now
 }
 
 // NewWorker creates a new worker.
@@ -668,6 +689,7 @@ func NewWorker(cfg *types.Config) *Worker {
 		lastActivity:   time.Now(),
 		backoffIndex:   0,
 		nextBackoffLog: time.Now().Add(backoffLevels[0]),
+		wake:           make(chan struct{}, 1),
 	}
 }
 
@@ -717,7 +739,14 @@ func (w *Worker) Run() {
 			}
 		}
 
-		time.Sleep(checkInterval)
+		// Picks up signals created or finished by anything else (the CLI,
+		// another process) too; only sends when something changed.
+		w.pushState()
+
+		select {
+		case <-w.wake:
+		case <-time.After(checkInterval):
+		}
 	}
 }
 
@@ -750,6 +779,8 @@ func (w *Worker) processWorkSignal(signalPath string) error {
 	if err := w.workSignalMgr.TakeOwnership(signalPath, w.workerID); err != nil {
 		return fmt.Errorf("failed to take ownership: %w", err)
 	}
+	w.setBusy(true)
+	defer w.setBusy(false)
 
 	// Read the signal
 	signal, _, err := w.workSignalMgr.Read(signalPath)
@@ -830,7 +861,8 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 	prompt := executor.FormatPromptForAgent(signal, workdir)
 
 	log.Printf("[%s] Invoking agent %s with model %s", w.workerID, signal.Agent, signal.Model)
-	output, err := w.executor.InvokeAgentWithCapture(signal.Agent, signal.Model, "execute", prompt, workdir)
+	output, err := w.executor.InvokeAgentWithCapture(signal.Agent, signal.Model, signal.Mode, prompt, workdir)
+	w.recordOutput(signalPath, output)
 	if err != nil {
 		log.Printf("[%s] Agent output:\n%s", w.workerID, string(output))
 		return fmt.Errorf("agent invocation failed: %w", err)
@@ -856,7 +888,8 @@ func (w *Worker) processInPlaceWork(signal *types.WorkSignal, signalPath string)
 	prompt := executor.FormatPromptForAgent(signal, workdir)
 
 	log.Printf("[%s] Invoking agent %s with model %s in-place at %s", w.workerID, signal.Agent, signal.Model, workdir)
-	output, err := w.executor.InvokeAgentWithCapture(signal.Agent, signal.Model, "execute", prompt, workdir)
+	output, err := w.executor.InvokeAgentWithCapture(signal.Agent, signal.Model, signal.Mode, prompt, workdir)
+	w.recordOutput(signalPath, output)
 	if err != nil {
 		log.Printf("[%s] Agent output:\n%s", w.workerID, string(output))
 		return fmt.Errorf("agent invocation failed: %w", err)
@@ -865,6 +898,15 @@ func (w *Worker) processInPlaceWork(signal *types.WorkSignal, signalPath string)
 	log.Printf("[%s] Agent output:\n%s", w.workerID, string(output))
 
 	return nil
+}
+
+// recordOutput appends the agent's captured output to the work signal, so it
+// travels with the signal into complete/ and can be shown on LR's worker tab.
+func (w *Worker) recordOutput(signalPath string, output []byte) {
+	event := &types.WorkEvent{StatusUpdate: "output", Output: string(output)}
+	if err := w.workSignalMgr.AppendEvent(signalPath, event); err != nil {
+		log.Printf("[%s] Failed to record agent output: %v", w.workerID, err)
+	}
 }
 
 func formatDuration(d time.Duration) string {

@@ -1,0 +1,728 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type {
+  CaptureResultMsg,
+  CircleMouseResultMsg,
+  ClipResultMsg,
+  InspectResultMsg,
+  ModeMismatchMsg,
+  ReprStatus,
+  ReprStatusMsg,
+  SaveResultMsg,
+  SelfInfoMsg,
+  Seq2ReplyMsg,
+  Seq2StartedMsg,
+  SeqLibraryMsg,
+  SequenceProgressMsg,
+  SequenceResultMsg,
+  WakeScreenResultMsg,
+} from './types'
+import { clipPreview, PreviewView, SaveToFile } from './shared'
+import type { Preview, SaveStatus, SeqRun } from './shared'
+import { SequenceV2Panel } from './SequenceV2'
+
+// ---- WebSocket hook ----
+//
+// Wires up the representable connect/disconnect widget, dev-mode banner, and
+// version-mismatch reload check shared by every sub-app in this repo, plus
+// IANAR's own capture-native/capture-browser/circle-mouse/clip-native/
+// inspect-screen/wake-screen channels (see condocs/InitialRobot.md, robot.go,
+// clip.go, vision.go and screenstate.go), the sequence-v2 library and runner (seqv2.go, sequence.go,
+// SequenceV2.tsx), and saving any of their
+// results into local-representative's files area (artifacts.go).
+
+type CaptureStatus = { kind: 'idle' | 'pending' | 'error'; message?: string }
+type CircleStatus = { kind: 'idle' | 'running' | 'success' | 'error'; message?: string }
+type ClipStatus = { kind: 'idle' | 'recording' | 'success' | 'error'; message?: string }
+type InspectStatus = { kind: 'idle' | 'reading' | 'success' | 'error'; message?: string }
+type WakeStatus = { kind: 'idle' | 'waking' | 'success' | 'error'; message?: string }
+
+// browserCaptureUnsupportedReason: why the Screen Capture API
+// (getDisplayMedia) is unavailable in this tab, named precisely instead of
+// assumed -- the previous revision of this check treated "missing API" as
+// synonymous with "mobile browser", but a desktop browser hits the exact
+// same missing-function symptom when the *connection* isn't a secure
+// context (plain http:// on anything but localhost loses
+// navigator.mediaDevices.getDisplayMedia regardless of device), e.g. when
+// reached remotely through agent-coordinator's reverse proxy today, ahead
+// of the Tailscale Funnel HTTPS front door described in
+// agent-coordinator/web-exposure-poc/ actually being brought up. Checked
+// once at module load since it depends only on the browser/connection, not
+// any app state.
+const browserCaptureUnsupportedReason: string | null =
+  typeof navigator === 'undefined'
+    ? 'no browser APIs available'
+    : typeof window !== 'undefined' && !window.isSecureContext
+      ? "this connection isn't secure (needs HTTPS, or http://localhost) -- a plain http:// remote connection loses screen capture on every browser, desktop included"
+      : !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function'
+        ? 'this browser has no screen-picker API for web pages to use (expected on mobile browsers)'
+        : null
+
+const browserCaptureSupported = browserCaptureUnsupportedReason === null
+
+function useRobotWS() {
+  const [connected, setConnected] = useState(false)
+  const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
+  const [reprHost, setReprHost] = useState('')
+  const [reprPort, setReprPort] = useState('')
+  const [reprAutoConnect, setReprAutoConnect] = useState(false)
+  const [devMode, setDevMode] = useState(false)
+  const [version, setVersion] = useState('')
+  const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
+  const [preview, setPreview] = useState<Preview | null>(null)
+  const [captureStatus, setCaptureStatus] = useState<CaptureStatus>({ kind: 'idle' })
+  const [circleStatus, setCircleStatus] = useState<CircleStatus>({ kind: 'idle' })
+  const [clipStatus, setClipStatus] = useState<ClipStatus>({ kind: 'idle' })
+  const [inspectStatus, setInspectStatus] = useState<InspectStatus>({ kind: 'idle' })
+  const [wakeStatus, setWakeStatus] = useState<WakeStatus>({ kind: 'idle' })
+  const [saves, setSaves] = useState<Record<string, SaveStatus>>({})
+  const [seqLib, setSeqLib] = useState<SeqLibraryMsg | null>(null)
+  const [seq2Replies, setSeq2Replies] = useState<Record<string, Seq2ReplyMsg>>({})
+  const [seq2Run, setSeq2Run] = useState<SeqRun | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const reqCounter = useRef(0)
+
+  const send = useCallback((type: string, payload: unknown) => {
+    wsRef.current?.send(JSON.stringify({ type, payload }))
+  }, [])
+
+  const connectRepr = useCallback(
+    (host: string, port: string) => {
+      send('connect', { host, port })
+    },
+    [send],
+  )
+
+  const disconnectRepr = useCallback(() => {
+    send('disconnect', {})
+  }, [send])
+
+  // setAutoConnectRepr toggles the persistent auto-connect state: on, it
+  // arms the retry cycle (starting a connect attempt at host/port if none is
+  // already underway) and keeps it armed across a successful connection, so
+  // a later unintentional disconnect resumes on its own; off, it only stops
+  // a retry in progress -- Disconnect above is still the separate, explicit
+  // action for dropping an active connection.
+  const setAutoConnectRepr = useCallback(
+    (enabled: boolean, host?: string, port?: string) => {
+      send('set-auto-connect', { enabled, host, port })
+    },
+    [send],
+  )
+
+  useEffect(() => {
+    // Derive the WebSocket URL from the path this document was served
+    // under, so it also works when reverse-proxied beneath a prefix
+    // (/robot/ via local-representative, /host/<id>/robot/ via
+    // agent-coordinator).
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+    const base = dir.endsWith('/') ? dir.slice(0, -1) : dir
+    const wsUrl = `${proto}://${window.location.host}${base}/ws`
+
+    function connect() {
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => setConnected(true)
+
+      ws.onclose = () => {
+        setConnected(false)
+        // A run in flight reports to the connection that started it, so its
+        // result is lost with that connection.
+        setSeq2Run((run) => (run?.running ? { ...run, running: false, lostConnection: true } : run))
+        setTimeout(connect, 2000)
+      }
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data) as { type: string; payload: unknown }
+          if (msg.type === 'repr-status') {
+            const p = msg.payload as ReprStatusMsg
+            setReprStatus(p.status)
+            if (p.host) setReprHost(p.host)
+            if (p.port) setReprPort(p.port)
+            setReprAutoConnect(!!p.auto_connect)
+          } else if (msg.type === 'self-info') {
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setVersion(p.version)
+            // A rebuild+restart is invisible to an already-open tab -- the
+            // reconnect above is the only signal it gets. Compare the
+            // server's own reported version against this bundle's
+            // build-time version and reload if they differ; skip under the
+            // Vite dev server, where HMR already keeps the tab current.
+            if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+          } else if (msg.type === 'mode-mismatch') {
+            const p = msg.payload as ModeMismatchMsg
+            setModeMismatch(p.mismatched ? p : null)
+          } else if (msg.type === 'capture-result') {
+            const p = msg.payload as CaptureResultMsg
+            if (p.success) {
+              if (p.image_url) setPreview({ kind: 'image', url: p.image_url, artifactId: p.artifact_id })
+              setCaptureStatus({ kind: 'idle' })
+            } else {
+              setCaptureStatus({ kind: 'error', message: p.error ?? `${p.source} capture failed` })
+            }
+          } else if (msg.type === 'circle-mouse-result') {
+            const p = msg.payload as CircleMouseResultMsg
+            const via = p.via ? ` (via ${p.via})` : ''
+            setCircleStatus(
+              p.success
+                ? { kind: 'success', message: via }
+                : { kind: 'error', message: (p.error ?? 'circle-mouse failed') + via },
+            )
+          } else if (msg.type === 'wake-screen-result') {
+            const p = msg.payload as WakeScreenResultMsg
+            setWakeStatus(
+              p.success
+                ? { kind: 'success', message: p.message }
+                : { kind: 'error', message: p.error ?? 'wake up failed' },
+            )
+          } else if (msg.type === 'clip-result') {
+            const p = msg.payload as ClipResultMsg
+            const via = p.via ? ` (via ${p.via})` : ''
+            const clip = clipPreview(p)
+            if (clip) {
+              setPreview(clip)
+              setClipStatus({ kind: 'success', message: via })
+            } else {
+              setClipStatus({ kind: 'error', message: p.error ?? 'native clip failed' })
+            }
+          } else if (msg.type === 'inspect-result') {
+            const p = msg.payload as InspectResultMsg
+            if (p.success) {
+              setPreview({ kind: 'inspect', result: p, artifactId: p.artifact_id })
+              const found = p.find ? ` · ${p.matches?.length ?? 0} line(s) read "${p.find}"` : ''
+              setInspectStatus({
+                kind: 'success',
+                message: `Read ${p.lines?.length ?? 0} lines in ${(p.duration_ms / 1000).toFixed(1)}s via ${p.capture_via}${found}`,
+              })
+            } else {
+              setInspectStatus({ kind: 'error', message: p.error ?? 'screen inspection failed' })
+            }
+          } else if (msg.type === 'seq2-library') {
+            setSeqLib(msg.payload as SeqLibraryMsg)
+          } else if (msg.type === 'seq2-reply') {
+            const p = msg.payload as Seq2ReplyMsg
+            if (p.req) setSeq2Replies((r) => ({ ...r, [p.req!]: p }))
+          } else if (msg.type === 'seq2-started') {
+            const p = msg.payload as Seq2StartedMsg
+            setSeq2Run((run) =>
+              run && run.sequenceId === p.sequence_id
+                ? { ...run, def: p.def, steps: p.def.steps.map(() => ({ status: 'pending' as const })) }
+                : run,
+            )
+          } else if (msg.type === 'seq2-progress') {
+            const p = msg.payload as SequenceProgressMsg
+            setSeq2Run((run) => {
+              if (!run || run.sequenceId !== p.sequence_id) return run
+              const steps = run.steps.slice()
+              steps[p.step] = { ...steps[p.step], status: p.status, message: p.message, imageUrl: p.image_url }
+              return { ...run, steps, outputs: p.outputs ?? run.outputs }
+            })
+          } else if (msg.type === 'seq2-result') {
+            const p = msg.payload as SequenceResultMsg
+            setSeq2Run((run) => ({
+              sequenceId: p.sequence_id,
+              running: false,
+              def: run?.sequenceId === p.sequence_id ? run.def : undefined,
+              steps: (p.steps ?? []).map((s) => ({
+                status: s.status,
+                message: s.message,
+                durationMs: s.duration_ms,
+                imageUrl: s.image_url,
+              })),
+              result: p,
+              recording: p.recording ? clipPreview(p.recording) : null,
+              outputs: p.outputs ?? [],
+            }))
+          } else if (msg.type === 'save-result') {
+            const p = msg.payload as SaveResultMsg
+            setSaves((s) => ({
+              ...s,
+              [p.artifact_id]: p.success
+                ? { kind: 'success', message: `saved to local-representative's files as ${p.name ?? p.file_id}` }
+                : { kind: 'error', message: p.error ?? 'save failed' },
+            }))
+          }
+        } catch {
+          // ignore malformed messages
+        }
+      }
+    }
+
+    connect()
+    return () => wsRef.current?.close()
+  }, [])
+
+  // Release a recorded clip's blob: URL once it's no longer being previewed.
+  useEffect(() => {
+    if (preview?.kind !== 'video') return
+    const url = preview.url
+    return () => URL.revokeObjectURL(url)
+  }, [preview])
+
+  // Likewise for the last sequence run's recording.
+  const seq2Recording = seq2Run?.recording
+  useEffect(() => {
+    if (seq2Recording?.kind !== 'video') return
+    const url = seq2Recording.url
+    return () => URL.revokeObjectURL(url)
+  }, [seq2Recording])
+
+  const captureNative = useCallback(() => {
+    setCaptureStatus({ kind: 'pending' })
+    send('capture-native', {})
+  }, [send])
+
+  // captureBrowser grabs a single frame of the current display via the
+  // browser's own screen-capture API (same technique as
+  // local-representative's/agent-coordinator's screenshot-upload widget)
+  // and hands it to the backend over the "capture-browser" channel, so it
+  // renders through the same capture-result path as a native capture.
+  const captureBrowser = useCallback(async () => {
+    setCaptureStatus({ kind: 'pending' })
+    if (!browserCaptureSupported) {
+      // Fail fast with a message naming the real cause (insecure connection
+      // or no getDisplayMedia support) instead of a generic TypeError.
+      setCaptureStatus({
+        kind: 'error',
+        message:
+          `browser capture is not available: ${browserCaptureUnsupportedReason}. Try Capture Native from a machine with ` +
+          "direct display access to the robot's host instead.",
+      })
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+      try {
+        const track = stream.getVideoTracks()[0]
+        const video = document.createElement('video')
+        video.srcObject = stream
+        await video.play()
+        await new Promise((resolve) => requestAnimationFrame(resolve))
+        const canvas = document.createElement('canvas')
+        canvas.width = video.videoWidth
+        canvas.height = video.videoHeight
+        canvas.getContext('2d')!.drawImage(video, 0, 0)
+        track.stop()
+        const dataURL = canvas.toDataURL('image/png')
+        send('capture-browser', { data: dataURL })
+      } finally {
+        stream.getTracks().forEach((t) => t.stop())
+      }
+    } catch (err) {
+      // Past the support check above, a rejection here is a genuine
+      // permissions/user-action outcome (e.g. NotAllowedError from
+      // dismissing the picker), not a capability gap -- labeled
+      // separately so the two causes aren't conflated in the UI.
+      setCaptureStatus({ kind: 'error', message: `browser capture failed: ${String(err)}` })
+    }
+  }, [send])
+
+  const circleMouse = useCallback(() => {
+    setCircleStatus({ kind: 'running' })
+    send('circle-mouse', {})
+  }, [send])
+
+  const wakeScreen = useCallback(() => {
+    setWakeStatus({ kind: 'waking' })
+    send('wake-screen', {})
+  }, [send])
+
+  const clipNative = useCallback(() => {
+    setClipStatus({ kind: 'recording' })
+    send('clip-native', {})
+  }, [send])
+
+  const inspectScreen = useCallback(
+    (find: string) => {
+      setInspectStatus({ kind: 'reading' })
+      send('inspect-screen', { find })
+    },
+    [send],
+  )
+
+  // seq2Request sends a sequence-v2 library request ("seq2-save-action",
+  // "seq2-import", ...) and returns its req id; the "seq2-reply" answering
+  // it lands in seq2Replies under that id.
+  const seq2Request = useCallback(
+    (type: string, payload: Record<string, unknown>) => {
+      reqCounter.current++
+      const req = `r${reqCounter.current}`
+      send(type, { ...payload, req })
+      return req
+    },
+    [send],
+  )
+
+  const runSeq2 = useCallback(
+    (id: string, controls: Record<string, string>) => {
+      setSeq2Run({ sequenceId: id, running: true, steps: [] })
+      send('seq2-run', { id, controls })
+    },
+    [send],
+  )
+
+  // saveArtifact asks the backend to upload a result it kept (see
+  // artifacts.go) into local-representative's files area.
+  const saveArtifact = useCallback(
+    (id: string) => {
+      setSaves((s) => ({ ...s, [id]: { kind: 'saving' } }))
+      send('save-artifact', { id })
+    },
+    [send],
+  )
+
+  return {
+    connected,
+    reprStatus,
+    reprHost,
+    reprPort,
+    reprAutoConnect,
+    devMode,
+    version,
+    modeMismatch,
+    connectRepr,
+    disconnectRepr,
+    setAutoConnectRepr,
+    preview,
+    captureStatus,
+    circleStatus,
+    clipStatus,
+    inspectStatus,
+    wakeStatus,
+    captureNative,
+    captureBrowser,
+    circleMouse,
+    clipNative,
+    inspectScreen,
+    wakeScreen,
+    saves,
+    saveArtifact,
+    seqLib,
+    seq2Replies,
+    seq2Request,
+    seq2Run,
+    runSeq2,
+  }
+}
+
+// ---- representable connect/disconnect widget ----
+
+const REPR_STATUS_LABELS: Record<ReprStatus, string> = {
+  disconnected: 'not connected to local-representative',
+  connecting: 'connecting to local-representative…',
+  connected: 'connected to local-representative',
+}
+
+interface ReprFooterProps {
+  status: ReprStatus
+  host: string
+  port: string
+  autoConnect: boolean
+  onConnect: (host: string, port: string) => void
+  onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
+}
+
+function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, onSetAutoConnect }: ReprFooterProps) {
+  const [hostInput, setHostInput] = useState(host)
+  const [portInput, setPortInput] = useState(port)
+
+  // Track the address the server reports (its --lr-host/--lr-port defaults,
+  // or whatever it's currently connected/connecting to) until the user edits
+  // the fields themselves.
+  useEffect(() => setHostInput(host), [host])
+  useEffect(() => setPortInput(port), [port])
+
+  const autoConnectToggle = (
+    <label
+      className="repr-footer-auto-connect"
+      title="keep reaching for local-representative: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off"
+    >
+      <input
+        type="checkbox"
+        checked={autoConnect}
+        onChange={(e) => onSetAutoConnect(e.target.checked, hostInput.trim(), portInput.trim())}
+      />
+      auto-connect
+    </label>
+  )
+
+  return (
+    <div className="repr-footer">
+      <div className="repr-footer-status">
+        <span className={`conn-dot ${status === 'connected' ? 'connected' : status === 'connecting' ? 'connecting' : 'disconnected'}`} />
+        <span className="repr-footer-label">{REPR_STATUS_LABELS[status]}</span>
+      </div>
+      {status === 'disconnected' ? (
+        <div className="repr-footer-form">
+          <input
+            className="repr-footer-input"
+            type="text"
+            placeholder="host"
+            value={hostInput}
+            onChange={(e) => setHostInput(e.target.value)}
+          />
+          <input
+            className="repr-footer-input repr-footer-input-port"
+            type="text"
+            placeholder="port"
+            value={portInput}
+            onChange={(e) => setPortInput(e.target.value)}
+          />
+          <button className="btn-secondary" onClick={() => onConnect(hostInput.trim(), portInput.trim())}>
+            Connect
+          </button>
+          {autoConnectToggle}
+        </div>
+      ) : (
+        <div className="repr-footer-form">
+          <span className="repr-footer-addr">{host}:{port}</span>
+          {autoConnectToggle}
+          <button className="btn-secondary" onClick={onDisconnect}>
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- Simple tab: capture native / capture browser / circle mouse / native clip / wake up / inspect screen ----
+
+interface RobotPanelProps {
+  connected: boolean
+  reprStatus: ReprStatus
+  saves: Record<string, SaveStatus>
+  onSave: (id: string) => void
+  preview: Preview | null
+  captureStatus: CaptureStatus
+  circleStatus: CircleStatus
+  clipStatus: ClipStatus
+  inspectStatus: InspectStatus
+  wakeStatus: WakeStatus
+  onCaptureNative: () => void
+  onCaptureBrowser: () => void
+  onCircleMouse: () => void
+  onClipNative: () => void
+  onInspectScreen: (find: string) => void
+  onWakeScreen: () => void
+}
+
+function RobotPanel({
+  connected,
+  reprStatus,
+  saves,
+  onSave,
+  preview,
+  captureStatus,
+  circleStatus,
+  clipStatus,
+  inspectStatus,
+  wakeStatus,
+  onCaptureNative,
+  onCaptureBrowser,
+  onCircleMouse,
+  onClipNative,
+  onInspectScreen,
+  onWakeScreen,
+}: RobotPanelProps) {
+  const [find, setFind] = useState('federation-command')
+  const reading = inspectStatus.kind === 'reading'
+  return (
+    <div className="robot-panel">
+      <div className="robot-actions">
+        <button className="btn-secondary" disabled={!connected || captureStatus.kind === 'pending'} onClick={onCaptureNative}>
+          Capture Native
+        </button>
+        <button
+          className="btn-secondary"
+          disabled={!connected || captureStatus.kind === 'pending' || !browserCaptureSupported}
+          title={browserCaptureSupported ? undefined : `Not supported: ${browserCaptureUnsupportedReason}`}
+          onClick={onCaptureBrowser}
+        >
+          Capture Browser
+        </button>
+        <button className="btn-secondary" disabled={!connected || circleStatus.kind === 'running'} onClick={onCircleMouse}>
+          Circle Mouse
+        </button>
+        <button className="btn-secondary" disabled={!connected || clipStatus.kind === 'recording'} onClick={onClipNative}>
+          Native Clip
+        </button>
+        <button
+          className="btn-secondary"
+          disabled={!connected || wakeStatus.kind === 'waking'}
+          title="Unlock this host's screen if it is locked and wake it if it has gone to sleep (as a sequence's unlock-screen does), then send the wake request and pointer nudge"
+          onClick={onWakeScreen}
+        >
+          Wake Up
+        </button>
+      </div>
+      <form
+        className="robot-inspect"
+        onSubmit={(e) => {
+          e.preventDefault()
+          onInspectScreen(find.trim())
+        }}
+      >
+        <input
+          className="robot-inspect-input"
+          type="text"
+          placeholder="text to find (optional)"
+          value={find}
+          onChange={(e) => setFind(e.target.value)}
+        />
+        <button className="btn-secondary" type="submit" disabled={!connected || reading}>
+          Inspect Screen
+        </button>
+      </form>
+      {captureStatus.kind === 'pending' && <div className="robot-status">Capturing…</div>}
+      {captureStatus.kind === 'error' && <div className="robot-status robot-status-error">{captureStatus.message}</div>}
+      {circleStatus.kind === 'running' && <div className="robot-status">Driving the pointer through a circle…</div>}
+      {circleStatus.kind === 'success' && <div className="robot-status">Circle complete{circleStatus.message}.</div>}
+      {circleStatus.kind === 'error' && <div className="robot-status robot-status-error">{circleStatus.message}</div>}
+      {clipStatus.kind === 'recording' && <div className="robot-status">Recording a 4 second clip of the desktop…</div>}
+      {clipStatus.kind === 'success' && <div className="robot-status">Clip recorded{clipStatus.message}.</div>}
+      {clipStatus.kind === 'error' && <div className="robot-status robot-status-error">{clipStatus.message}</div>}
+      {wakeStatus.kind === 'waking' && <div className="robot-status">Waking the screen…</div>}
+      {wakeStatus.kind === 'success' && <div className="robot-status">Wake up: {wakeStatus.message}.</div>}
+      {wakeStatus.kind === 'error' && <div className="robot-status robot-status-error">{wakeStatus.message}</div>}
+      {reading && <div className="robot-status">Capturing the screen and reading its text…</div>}
+      {inspectStatus.kind === 'success' && <div className="robot-status">{inspectStatus.message}.</div>}
+      {inspectStatus.kind === 'error' && <div className="robot-status robot-status-error">{inspectStatus.message}</div>}
+      {preview?.artifactId && (
+        <SaveToFile
+          artifactId={preview.artifactId}
+          label={
+            preview.kind === 'image'
+              ? 'Save capture to file'
+              : preview.kind === 'inspect'
+                ? 'Save inspection to file'
+                : 'Save clip to file'
+          }
+          connected={connected}
+          reprStatus={reprStatus}
+          status={saves[preview.artifactId]}
+          onSave={onSave}
+        />
+      )}
+      <PreviewView
+        preview={preview}
+        placeholder={'Press "Capture Native", "Capture Browser", "Native Clip" or "Inspect Screen" — the result appears here.'}
+      />
+    </div>
+  )
+}
+
+type Tab = 'simple' | 'sequence-v2'
+const TABS: Tab[] = ['simple', 'sequence-v2']
+
+export default function App() {
+  const {
+    connected,
+    reprStatus,
+    reprHost,
+    reprPort,
+    reprAutoConnect,
+    devMode,
+    version,
+    modeMismatch,
+    connectRepr,
+    disconnectRepr,
+    setAutoConnectRepr,
+    preview,
+    captureStatus,
+    circleStatus,
+    clipStatus,
+    inspectStatus,
+    wakeStatus,
+    captureNative,
+    captureBrowser,
+    circleMouse,
+    clipNative,
+    inspectScreen,
+    wakeScreen,
+    saves,
+    saveArtifact,
+    seqLib,
+    seq2Replies,
+    seq2Request,
+    seq2Run,
+    runSeq2,
+  } = useRobotWS()
+  const [tab, setTab] = useState<Tab>('simple')
+
+  return (
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {modeMismatch && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch with local-representative ({modeMismatch.peer_mode}):
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
+      <div className="sidebar-wrap">
+        <div className="sidebar">
+          <div className="sidebar-header">
+            <h1>I am Not a Robot</h1>
+            {version && <span className="app-version-tag">v{version.replace(/^v/, '')}</span>}
+          </div>
+          <ReprFooter
+            status={reprStatus}
+            host={reprHost}
+            port={reprPort}
+            autoConnect={reprAutoConnect}
+            onConnect={connectRepr}
+            onDisconnect={disconnectRepr}
+            onSetAutoConnect={setAutoConnectRepr}
+          />
+        </div>
+      </div>
+      <div className="main-content">
+        <div className="tab-bar">
+          {TABS.map((t) => (
+            <button key={t} className={`tab${tab === t ? ' tab-active' : ''}`} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ))}
+        </div>
+        {tab === 'simple' && (
+          <RobotPanel
+            connected={connected}
+            reprStatus={reprStatus}
+            saves={saves}
+            onSave={saveArtifact}
+            preview={preview}
+            captureStatus={captureStatus}
+            circleStatus={circleStatus}
+            clipStatus={clipStatus}
+            inspectStatus={inspectStatus}
+            wakeStatus={wakeStatus}
+            onCaptureNative={captureNative}
+            onCaptureBrowser={captureBrowser}
+            onCircleMouse={circleMouse}
+            onClipNative={clipNative}
+            onInspectScreen={inspectScreen}
+            onWakeScreen={wakeScreen}
+          />
+        )}
+        {tab === 'sequence-v2' && (
+          <SequenceV2Panel
+            connected={connected}
+            reprStatus={reprStatus}
+            saves={saves}
+            onSave={saveArtifact}
+            lib={seqLib}
+            replies={seq2Replies}
+            request={seq2Request}
+            run={seq2Run}
+            onRun={runSeq2}
+          />
+        )}
+      </div>
+    </div>
+  )
+}

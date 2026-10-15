@@ -1,0 +1,74 @@
+local-representative control run: federation-command: robot hand-off (fc-robot-handoff)
+node: desktop01-8x5i
+run: ayztftzn
+started: 2026-10-07T18:10:05Z
+result: ERROR after 12.1s: step 7 (Upload that file to the files tab): desktop01-8x5i: desktop01-8x5i doesn't hand over files: its local-representative has no control-fetch-allow setting -- the node's control-fetch-allow setting has to allow the file
+
+controls:
+  found_file: ~/Desktop/found-it-{{timestamp}}.txt
+
+steps:
+
+1. [success] Unlock the screen if it is locked (2.0s)
+   robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked
+     - robot: unlock the screen if it is locked, and wake it if it has blanked
+   the screen wasn't locked
+
+2. [success] Launch a new federation-command instance (0.2s)
+   launch federation-command as the system tab does, then wait for the new instance to connect under its own name, in remote control
+     - launch a new federation-command, saved as {{fc}}
+   federation-command#1 is connected in remote control
+
+3. [success] Echo "This is the one - <random-chars>" through the remote interface (0.3s)
+   send an echo of a marker ending in random characters to that instance only, and wait for its output to come back -- from it and no other instance; saved as {{marker}}
+     - save 6 random characters as {{marker_token}}
+     - save This is the one - {{marker_token}} as {{marker}}
+     - show marker command: echo "{{marker}}"
+     - send echo "{{marker}}" to {{fc}}
+   federation-command#1 printed "This is the one - 2kdtdz"
+
+4. [success] Find that terminal with the robot and bring it to local control (3.5s)
+   robot: click the line reading the text on screen, press →; then check the instance reports local control
+     - check {{fc}} has a window on screen
+     - robot: check the screen is unlocked, and wake it if it has blanked
+     - robot: left-click the line on screen reading "{{marker}}" (waiting up to 10s for it)
+     - robot: press right
+     - wait for {{fc}} to be in local-control
+   the screen is awake and unlocked; saw "This is the one 2kdtdz" at (186, 508) and left-clicked it via compositor (org.gnome.Mutter.RemoteDesktop); federation-command#1 is in local-control
+
+5. [success] Type into it with the robot: echo "found it" into a new file on the desktop (2.4s)
+   robot: clear the command line, type the command, press Enter; then check the instance printed the expected line
+     - robot: press end ctrl+u
+     - robot: type "echo "found it" | tee ~/Desktop/found-it-2026-10-07T18-10-05.txt"
+     - robot: press enter
+     - wait for {{fc}} to print found it
+   federation-command#1 printed "found it"
+
+6. [success] Put the terminal back into remote control (0.3s)
+   robot: press ←; then check the instance reports remote control
+     - robot: press left
+     - wait for {{fc}} to be in remote-control
+   federation-command#1 is in remote-control
+
+7. [error] Upload that file to the files tab (0.0s)
+   node-fetch-file: copy a file from a node into this node's files tab, if that node's control-fetch-allow setting allows it
+     - fetch ~/Desktop/found-it-2026-10-07T18-10-05.txt from desktop01-8x5i
+   desktop01-8x5i: desktop01-8x5i doesn't hand over files: its local-representative has no control-fetch-allow setting -- the node's control-fetch-allow setting has to allow the file
+
+8. [skipped] Delete the file
+   send rm for the file to that instance, and wait for it to report rm's exit status -- failing unless it's 0
+     - save 6 random characters as {{rm_token}}
+     - send rm -- ~/Desktop/found-it-2026-10-07T18-10-05.txt; echo "{{rm_token}} exit=$?" to {{fc}}
+     - wait for {{fc}} to print {{rm_token}} exit=0
+
+values:
+  robot run: ianar-sequence-lr-nqb6cs3y-2026-10-07T18-10-07.zip (files tab)
+  screen recording: ianar-recording-fc-robot-handoff-2026-10-07T18-10-17.webm (files tab; 9.9s via compositor (org.gnome.Shell.Screencast))
+  federation-command instance: federation-command#1
+  marker command: echo "This is the one - 2kdtdz"
+  robot run: ianar-sequence-lr-cs89q65h-2026-10-07T18-10-13.zip (files tab)
+  robot run: ianar-sequence-lr-mrgzp9t5-2026-10-07T18-10-15.zip (files tab)
+  robot run: ianar-sequence-lr-mc7cuet9-2026-10-07T18-10-15.zip (files tab)
+
+files:
+  files/ianar-recording-fc-robot-handoff-2026-10-07T18-10-17.webm -- recording of robot's screen

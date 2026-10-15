@@ -11,16 +11,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	ufahostid "ufa-hostid"
+	"ufa-loader/awsprincipal"
 	"ufa-loader/restartsignal"
 	ufaversion "ufa-version"
 )
@@ -32,6 +38,8 @@ func main() {
 	maxRestarts := flag.Int("max-restarts", 0, "stop relaunching after this many restarts (0 = unlimited)")
 	restartDelay := flag.Duration("restart-delay", 500*time.Millisecond, "pause before relaunching, giving an in-flight binary replacement time to land")
 	showVersion := flag.Bool("version", false, "print ufa-loader's own version and exit (a wrapped binary's --version goes to the binary, not here)")
+	noAWSPrincipal := flag.Bool("no-aws-principal", false, "don't create a temporary AWS principal; pass the starting AWS credentials (if any) straight through to <binary>")
+	awsIdleDays := flag.Int("aws-principal-idle-days", 2, "delete temporary AWS principals from previous days once unused for this many days")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -44,6 +52,10 @@ func main() {
 	if len(args) == 0 {
 		usage()
 		os.Exit(2)
+	}
+
+	if !*noAWSPrincipal {
+		provisionAWSPrincipal(filepath.Base(args[0]), *awsIdleDays)
 	}
 
 	l := &loader{
@@ -65,6 +77,47 @@ func usage() {
 		"exits with the same code.\n\n"+
 		"example: ufa-loader local-representative --dev-mode\n\nflags:\n")
 	flag.PrintDefaults()
+}
+
+// provisionAWSPrincipal swaps the AWS credentials ufa-loader started with
+// for a fresh temporary IAM user's (see ufa-loader/awsprincipal), so every
+// launch of app inherits only the new keys through the environment. With no
+// starting credentials it does nothing and says nothing; if creating the
+// principal fails, it logs why and leaves the starting credentials in
+// place. The new keys live only in this process's environment -- nothing is
+// written to disk.
+func provisionAWSPrincipal(app string, idleDays int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	res, err := awsprincipal.Provision(ctx, awsprincipal.Options{
+		HostID:   ufahostid.GetHostID(),
+		App:      app,
+		IdleDays: idleDays,
+	})
+	if errors.Is(err, awsprincipal.ErrNoCredentials) {
+		return
+	}
+	if err != nil {
+		log.Printf("no temporary AWS principal (keeping starting credentials): %v", err)
+		return
+	}
+	awsprincipal.ApplyToEnv(res.Credentials)
+
+	var notes []string
+	if !res.Confirmed {
+		notes = append(notes, "key not yet accepted by AWS")
+	}
+	if res.Removed > 0 {
+		notes = append(notes, fmt.Sprintf("removed %d stale", res.Removed))
+	}
+	if res.CleanupErrs > 0 {
+		notes = append(notes, fmt.Sprintf("%d stale cleanup failures", res.CleanupErrs))
+	}
+	suffix := ""
+	if len(notes) > 0 {
+		suffix = " (" + strings.Join(notes, ", ") + ")"
+	}
+	log.Printf("created temporary AWS principal %s for %s%s", res.UserName, app, suffix)
 }
 
 // loader supervises repeated launches of one binary.
@@ -120,7 +173,7 @@ func (l *loader) runOnce(sigCh <-chan os.Signal, state json.RawMessage) (exitCod
 	// Let the sub-application detect it is loader-managed (see
 	// restartsignal.IsLoaderManaged) without needing to know anything else
 	// about how it was invoked.
-	env := append(os.Environ(), restartsignal.InitEnvVar+"=1")
+	env := append(childEnviron(), restartsignal.InitEnvVar+"=1")
 	if len(state) > 0 {
 		// Hand the previous instance's disclosed state back to this one
 		// (see restartsignal.PreviousState) — opaque to ufa-loader itself.
@@ -178,4 +231,21 @@ func (l *loader) runOnce(sigCh <-chan os.Signal, state json.RawMessage) (exitCod
 	}
 	log.Printf("%s (pid %d) exited %d", l.bin, cmd.Process.Pid, code)
 	return code, nil
+}
+
+// childEnviron returns ufa-loader's own environment minus the loader
+// variables it sets itself (see restartsignal.InitEnvVar / StateEnvVar).
+// ufa-loader may itself run inside a loader-managed process tree (e.g. a
+// shell opened from local-representative), and an inherited StateEnvVar
+// would otherwise hand that unrelated app's state to our child's very first
+// launch.
+func childEnviron() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, restartsignal.InitEnvVar+"=") || strings.HasPrefix(kv, restartsignal.StateEnvVar+"=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
 }

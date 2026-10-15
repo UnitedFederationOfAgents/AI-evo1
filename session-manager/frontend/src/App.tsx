@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  AnnotationResultMsg,
   ArchiveResultMsg,
   ModeMismatchMsg,
+  ProcessedView,
   ReprStatus,
   ReprStatusMsg,
   SelfInfoMsg,
+  SessionEntry,
   SessionInfo,
   SessionsMsg,
   SessionSummary,
@@ -23,6 +26,23 @@ import type {
 
 type Notice = { kind: 'error' | 'success'; message: string } | null
 
+// serverBase is the path this document was served under, so requests also
+// work when reverse-proxied beneath a prefix (/sessions/ via
+// local-representative, /host/<id>/sessions/ via agent-coordinator).
+function serverBase(): string {
+  const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+  return dir.endsWith('/') ? dir.slice(0, -1) : dir
+}
+
+// resourceUrl is where an attached resource's content is served (see
+// ../annotations.go's handleResource).
+function resourceUrl(id: string, record: string): string {
+  return `${serverBase()}/api/resource?session=${encodeURIComponent(id)}&record=${encodeURIComponent(record)}`
+}
+
+// MAX_RESOURCE_BYTES mirrors ../annotations.go's maxResourceBytes.
+const MAX_RESOURCE_BYTES = 25 << 20
+
 function useSessionManagerWS() {
   const [connected, setConnected] = useState(false)
   const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
@@ -39,6 +59,20 @@ function useSessionManagerWS() {
   const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null)
   const [sessionView, setSessionView] = useState<SessionView | null>(null)
   const [notice, setNotice] = useState<Notice>(null)
+  // The latest add-note/add-resource outcome -- the annotate bar clears its
+  // input once its own submission comes back without an error.
+  const [annotationResult, setAnnotationResult] = useState<AnnotationResultMsg | null>(null)
+  // selectedIdRef lets the message handler drop a "session-view" for a
+  // session that's no longer selected (e.g. one refreshed after a note was
+  // added just before switching away).
+  const selectedIdRef = useRef<string | null>(null)
+
+  // The transcript turn currently expanded into its full -processed file,
+  // or null at the transcript level. expandedRef lets the message handler
+  // drop a "processed-view" reply for a turn that's no longer expanded.
+  const [expanded, setExpanded] = useState<{ id: string; record: string } | null>(null)
+  const [processedView, setProcessedView] = useState<ProcessedView | null>(null)
+  const expandedRef = useRef<{ id: string; record: string } | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
 
@@ -70,17 +104,39 @@ function useSessionManagerWS() {
     [send],
   )
 
+  // expandEntry scopes the transcript down into one turn's full -processed
+  // file; collapseEntry goes back "up" to the transcript, the way
+  // condoccer's ↑ buttons step back out of a step or substep.
+  const expandEntry = useCallback(
+    (id: string, record: string) => {
+      const target = { id, record }
+      expandedRef.current = target
+      setExpanded(target)
+      setProcessedView(null)
+      send('view-processed', target)
+    },
+    [send],
+  )
+
+  const collapseEntry = useCallback(() => {
+    expandedRef.current = null
+    setExpanded(null)
+    setProcessedView(null)
+  }, [])
+
   // selectSession picks a session for the detail pane and asks the server
   // for both its describe-parity info and its readable transcript.
   const selectSession = useCallback(
     (id: string) => {
+      selectedIdRef.current = id
       setSelectedId(id)
       setSessionInfo(null)
       setSessionView(null)
+      collapseEntry()
       send('describe-session', { id })
       send('view-session', { id })
     },
-    [send],
+    [send, collapseEntry],
   )
 
   const newSession = useCallback(
@@ -108,6 +164,32 @@ function useSessionManagerWS() {
     send('archive-sessions', {})
   }, [send])
 
+  const addNote = useCallback(
+    (id: string, text: string) => {
+      send('add-note', { id, text })
+    },
+    [send],
+  )
+
+  // addResource reads file in the browser and sends it base64-encoded in a
+  // single message, so it's capped at MAX_RESOURCE_BYTES before reading.
+  const addResource = useCallback(
+    (id: string, file: File) => {
+      if (file.size > MAX_RESOURCE_BYTES) {
+        setNotice({ kind: 'error', message: `resource: ${file.name} is over ${MAX_RESOURCE_BYTES >> 20} MiB` })
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = () => {
+        const url = String(reader.result)
+        send('add-resource', { id, name: file.name, content: url.slice(url.indexOf(',') + 1) })
+      }
+      reader.onerror = () => setNotice({ kind: 'error', message: `resource: couldn't read ${file.name}` })
+      reader.readAsDataURL(file)
+    },
+    [send],
+  )
+
   // Auto-select whichever session becomes current (e.g. right after "New")
   // as long as nothing is already selected -- never hijacks an in-progress
   // selection just because another tab changed the current session.
@@ -123,9 +205,7 @@ function useSessionManagerWS() {
     // (/sessions/ via local-representative, /host/<id>/sessions/ via
     // agent-coordinator).
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
-    const base = dir.endsWith('/') ? dir.slice(0, -1) : dir
-    const wsUrl = `${proto}://${window.location.host}${base}/ws`
+    const wsUrl = `${proto}://${window.location.host}${serverBase()}/ws`
 
     function connect() {
       const ws = new WebSocket(wsUrl)
@@ -169,16 +249,35 @@ function useSessionManagerWS() {
           } else if (msg.type === 'session-info') {
             setSessionInfo(msg.payload as SessionInfo)
           } else if (msg.type === 'session-view') {
-            setSessionView(msg.payload as SessionView)
+            const p = msg.payload as SessionView
+            if (p.id === selectedIdRef.current) setSessionView(p)
+          } else if (msg.type === 'annotation-result') {
+            const p = msg.payload as AnnotationResultMsg
+            setAnnotationResult(p)
+            if (p.error) {
+              setNotice({ kind: 'error', message: `${p.kind}: ${p.error}` })
+            } else {
+              setNotice({ kind: 'success', message: p.kind === 'note' ? 'note added' : `resource ${p.name} added` })
+            }
+          } else if (msg.type === 'processed-view') {
+            const p = msg.payload as ProcessedView
+            const cur = expandedRef.current
+            if (cur && cur.id === p.id && cur.record === p.record) {
+              setProcessedView(p)
+            }
           } else if (msg.type === 'archive-result') {
             const p = msg.payload as ArchiveResultMsg
             if (p.error) {
               setNotice({ kind: 'error', message: `archive: ${p.error}` })
             } else if (p.count > 0) {
               setNotice({ kind: 'success', message: `archived ${p.count} session(s) to ${p.path}` })
+              selectedIdRef.current = null
               setSelectedId(null)
               setSessionInfo(null)
               setSessionView(null)
+              expandedRef.current = null
+              setExpanded(null)
+              setProcessedView(null)
             } else {
               setNotice({ kind: 'success', message: 'no sessions to archive' })
             }
@@ -212,12 +311,19 @@ function useSessionManagerWS() {
     selectedId,
     sessionInfo,
     sessionView,
+    expanded,
+    processedView,
     notice,
+    annotationResult,
     selectSession,
+    expandEntry,
+    collapseEntry,
     newSession,
     setCurrentSession,
     renameSession,
     archiveSessions,
+    addNote,
+    addResource,
   }
 }
 
@@ -401,12 +507,37 @@ interface SessionDetailProps {
   currentId: string
   info: SessionInfo | null
   view: SessionView | null
+  expanded: { id: string; record: string } | null
+  processedView: ProcessedView | null
+  annotationResult: AnnotationResultMsg | null
   onSetCurrent: (id: string) => void
   onRename: (id: string, name: string) => void
+  onExpand: (id: string, record: string) => void
+  onCollapse: () => void
+  onAddNote: (id: string, text: string) => void
+  onAddResource: (id: string, file: File) => void
 }
 
-function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: SessionDetailProps) {
-  const [tab, setTab] = useState<DetailTab>('details')
+function SessionDetail({
+  id,
+  currentId,
+  info,
+  view,
+  expanded,
+  processedView,
+  annotationResult,
+  onSetCurrent,
+  onRename,
+  onExpand,
+  onCollapse,
+  onAddNote,
+  onAddResource,
+}: SessionDetailProps) {
+  // Opens on the transcript (Step5Prompt.md Revision E) so moving to a new
+  // session shows what happened in it without an extra click; whichever tab
+  // is picked afterwards sticks across selections since this component isn't
+  // keyed by id.
+  const [tab, setTab] = useState<DetailTab>('transcript')
   const [renameInput, setRenameInput] = useState('')
   const [renaming, setRenaming] = useState(false)
 
@@ -460,11 +591,11 @@ function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: Se
       </div>
 
       <div className="session-detail-tabs">
-        <button className={`session-tab${tab === 'details' ? ' active' : ''}`} onClick={() => setTab('details')}>
-          Details
-        </button>
         <button className={`session-tab${tab === 'transcript' ? ' active' : ''}`} onClick={() => setTab('transcript')}>
           View
+        </button>
+        <button className={`session-tab${tab === 'details' ? ' active' : ''}`} onClick={() => setTab('details')}>
+          Details
         </button>
       </div>
 
@@ -494,8 +625,268 @@ function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: Se
           )}
         </div>
       ) : (
-        <SessionTranscript view={view} />
+        <>
+          {/* Hidden rather than unmounted while a turn is expanded, so going
+              back up lands at the same scroll position. */}
+          <div className={`session-transcript-scope${expanded ? ' is-hidden' : ''}`}>
+            <AnnotateBar
+              id={id}
+              result={annotationResult}
+              onAddNote={(text) => onAddNote(id, text)}
+              onAddResource={(file) => onAddResource(id, file)}
+            />
+            <SessionTranscript view={view} onExpand={(record) => onExpand(id, record)} />
+          </div>
+          {expanded && <ProcessedPane record={expanded.record} view={processedView} onUp={onCollapse} />}
+        </>
       )}
+    </div>
+  )
+}
+
+// AnnotateBar attaches a note (text) or a resource (a file) to the session,
+// recorded as the transcript's "note"/"resource" entries (see
+// ../annotations.go). The note box clears once its note comes back added;
+// Ctrl+Enter adds it.
+function AnnotateBar({
+  id,
+  result,
+  onAddNote,
+  onAddResource,
+}: {
+  id: string
+  result: AnnotationResultMsg | null
+  onAddNote: (text: string) => void
+  onAddResource: (file: File) => void
+}) {
+  const [note, setNote] = useState('')
+  // pending is true while a submitted note awaits its "annotation-result".
+  const [pending, setPending] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    if (!result || result.id !== id || result.kind !== 'note') return
+    if (!result.error) setNote('')
+    setPending(false)
+  }, [result])
+
+  // A different session starts with an empty, idle bar.
+  useEffect(() => {
+    setNote('')
+    setPending(false)
+  }, [id])
+
+  const submitNote = () => {
+    if (!note.trim() || pending) return
+    setPending(true)
+    onAddNote(note)
+  }
+
+  return (
+    <div className="annotate-bar">
+      <textarea
+        className="annotate-note-input"
+        placeholder="add a note to this session…"
+        rows={2}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault()
+            submitNote()
+          }
+        }}
+      />
+      <div className="annotate-actions">
+        <button className="btn-secondary" disabled={!note.trim() || pending} onClick={submitNote} title="Ctrl+Enter">
+          Add Note
+        </button>
+        <button
+          className="btn-secondary"
+          onClick={() => fileRef.current?.click()}
+          title={`attach a file (up to ${MAX_RESOURCE_BYTES >> 20} MiB) to this session`}
+        >
+          Add Resource…
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            e.target.value = ''
+            if (file) onAddResource(file)
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ProcessedPane is one transcript turn expanded into its full -processed
+// file -- everything the transcript's capped preview leaves out. "↑
+// transcript" (or Escape) goes back up, mirroring condoccer's scoping.
+function ProcessedPane({ record, view, onUp }: { record: string; view: ProcessedView | null; onUp: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (e.key === 'Escape' && !(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'))) {
+        onUp()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onUp])
+
+  return (
+    <div className="processed-pane">
+      <div className="processed-pane-header">
+        <button className="nav-up-btn" onClick={onUp} title="back to the transcript (Esc)">
+          ↑ transcript
+        </button>
+        <span className="processed-pane-file">{view?.file ?? `${record}-processed.txt`}</span>
+      </div>
+      {!view ? (
+        <div className="session-detail-loading">loading…</div>
+      ) : view.error ? (
+        <div className="session-transcript-warning">{view.error}</div>
+      ) : (
+        <ProcessedContent content={view.content} />
+      )}
+    </div>
+  )
+}
+
+// Separators/prefixes of a -processed file, mirroring clauditable/pkg/
+// records (WrittenFileSeparator, ResponseSeparator, Input/Output/
+// ErrorPrefix).
+const WRITTEN_RAW_SEPARATOR = '\n----------WRITTEN_RAW----------\n'
+const RESPONSE_SEPARATOR = '\n\n----------RESPONSE----------\n\n'
+const STDERR_MARKER = '[STDERR]\n'
+const BLOCK_PREFIXES: [string, 'in' | 'out' | 'err'][] = [
+  ['IN>> ', 'in'],
+  ['OUT>> ', 'out'],
+  ['ERR>> ', 'err'],
+]
+
+type ProcessedBlock = { kind: 'in' | 'out' | 'err'; text: string }
+
+interface ParsedProcessed {
+  event: Record<string, unknown> | null
+  processing: Record<string, unknown>[]
+  blocks: ProcessedBlock[]
+}
+
+// parseProcessed splits a -processed file (see clauditable's
+// FormatProcessedFile) into its event header, its auto-maintenance
+// processing headers, and command/response blocks with the IN>>/OUT>>/ERR>>
+// prefixes stripped. The written-raw section after WRITTEN_RAW is the full
+// command and response; the prefixed lines before it are only a capped
+// preview of the same, so they're used only when there is no raw section.
+function parseProcessed(content: string): ParsedProcessed {
+  const sep = content.indexOf(WRITTEN_RAW_SEPARATOR)
+  const log = sep >= 0 ? content.slice(0, sep) : content
+  const raw = sep >= 0 ? content.slice(sep + WRITTEN_RAW_SEPARATOR.length) : null
+
+  let event: Record<string, unknown> | null = null
+  const processing: Record<string, unknown>[] = []
+  const preview: ProcessedBlock[] = []
+  for (const line of log.split('\n')) {
+    if (line.startsWith('{')) {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>
+        if (event === null && ('timestamp' in obj || 'event_type' in obj)) event = obj
+        else processing.push(obj)
+        continue
+      } catch {
+        // not JSON after all -- fall through to the prefix checks
+      }
+    }
+    const match = BLOCK_PREFIXES.find(([p]) => line.startsWith(p))
+    if (!match) continue
+    const [prefix, kind] = match
+    const text = line.slice(prefix.length)
+    const last = preview[preview.length - 1]
+    if (last && last.kind === kind) last.text += '\n' + text
+    else preview.push({ kind, text })
+  }
+
+  let blocks = preview
+  if (raw !== null) {
+    const r = raw.indexOf(RESPONSE_SEPARATOR)
+    const command = r >= 0 ? raw.slice(0, r) : raw
+    let response = r >= 0 ? raw.slice(r + RESPONSE_SEPARATOR.length) : ''
+    // FormatRawFile appends stderr after a "[STDERR]" line.
+    let stderr = ''
+    const e = response.startsWith(STDERR_MARKER) ? 0 : response.indexOf('\n' + STDERR_MARKER)
+    if (e >= 0) {
+      stderr = response.slice(e === 0 ? STDERR_MARKER.length : e + 1 + STDERR_MARKER.length)
+      response = response.slice(0, e)
+    }
+    blocks = [{ kind: 'in', text: command.trimEnd() }]
+    if (response.trim()) blocks.push({ kind: 'out', text: response.trimEnd() })
+    if (stderr.trim()) blocks.push({ kind: 'err', text: stderr.trimEnd() })
+  }
+  return { event, processing, blocks }
+}
+
+function formatHeaderValue(key: string, value: unknown): string {
+  if (key === 'duration_ms' && typeof value === 'number') {
+    return value >= 1000 ? `${(value / 1000).toFixed(1)}s (${value}ms)` : `${value}ms`
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+const BLOCK_LABELS = { in: 'command', out: 'response', err: 'error' }
+
+// ProcessedContent renders a -processed file: its JSON event header as a
+// key/value table (processing headers beneath it), then the command and
+// response as colour-coded blocks instead of IN>>/OUT>> prefixed text.
+function ProcessedContent({ content }: { content: string }) {
+  const { event, processing, blocks } = parseProcessed(content)
+  return (
+    <div className="processed-pane-content">
+      {(event || processing.length > 0) && (
+        <table className="processed-header-table">
+          <tbody>
+            {event &&
+              Object.entries(event).map(([k, v]) => (
+                <tr key={k}>
+                  <th>{k}</th>
+                  <td
+                    className={
+                      k === 'exit_code' ? (v === 0 ? 'transcript-exit-ok' : 'transcript-exit-err') : undefined
+                    }
+                  >
+                    {formatHeaderValue(k, v)}
+                  </td>
+                </tr>
+              ))}
+            {processing.map((p, i) => {
+              const { processing_type, ...rest } = p
+              return (
+                <tr key={`p${i}`} className="processed-header-processing">
+                  <th>processing</th>
+                  <td>
+                    <span className="transcript-entry-tag">{String(processing_type ?? '?')}</span>
+                    {Object.entries(rest).map(([k, v]) => (
+                      <span key={k} className="processed-header-sub">
+                        {k} {formatHeaderValue(k, v)}
+                      </span>
+                    ))}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+      {blocks.map((b, i) => (
+        <div key={i} className={`transcript-block transcript-block-${b.kind}`}>
+          <div className="transcript-block-label">{BLOCK_LABELS[b.kind]}</div>
+          <pre>{b.text}</pre>
+        </div>
+      ))}
     </div>
   )
 }
@@ -503,8 +894,9 @@ function SessionDetail({ id, currentId, info, view, onSetCurrent, onRename }: Se
 // SessionTranscript presents a session's session.jsonl in the "ice readable"
 // way Revision I asks for: one card per turn, timestamp/agent/model/
 // duration/exit-code header, then its input/output/error blocks -- instead
-// of the raw IN>>/OUT>>/ERR>> prefixed log text.
-function SessionTranscript({ view }: { view: SessionView | null }) {
+// of the raw IN>>/OUT>>/ERR>> prefixed log text. A turn with a record ID gets
+// an "expand" control that opens its full -processed file (ProcessedPane).
+function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExpand: (record: string) => void }) {
   if (!view) {
     return <div className="session-detail-body session-detail-loading">loading…</div>
   }
@@ -513,10 +905,19 @@ function SessionTranscript({ view }: { view: SessionView | null }) {
   // other LR-active hosts while refreshing this session just now -- the
   // transcript below (even if non-empty) may be missing turns a reachable
   // peer would have had (see types.ts's SessionView doc comment).
-  const warning = view.sync_incomplete && (
-    <div className="session-transcript-warning">
-      could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
-    </div>
+  const warning = (
+    <>
+      {view.sync_incomplete && (
+        <div className="session-transcript-warning">
+          could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
+        </div>
+      )}
+      {(view.warnings ?? []).map((w, i) => (
+        <div key={i} className="session-transcript-warning">
+          {w}
+        </div>
+      ))}
+    </>
   )
   if (entries.length === 0) {
     return (
@@ -526,42 +927,137 @@ function SessionTranscript({ view }: { view: SessionView | null }) {
       </div>
     )
   }
+  // Once more than one host has taken part, each turn says which it ran on.
+  const showHost = new Set(entries.map((e) => e.host).filter(Boolean)).size > 1
   return (
     <div className="session-transcript">
       {warning}
       {entries.map((e, i) => (
-        <div className="transcript-entry" key={i}>
-          <div className="transcript-entry-header">
-            <span className="transcript-entry-time">{e.timestamp}</span>
-            {e.agent && <span className="transcript-entry-tag">{e.agent}</span>}
-            {e.model && <span className="transcript-entry-tag">{e.model}</span>}
+        <TranscriptEntry key={i} sessionId={view.id} entry={e} showHost={showHost} onExpand={onExpand} />
+      ))}
+    </div>
+  )
+}
+
+// TranscriptEntry is one turn's card. Its type tag tells a command, an AI
+// invocation, a note and a resource apart; notes and resources aren't runs,
+// so they skip duration/exit, and a resource links to its content. A turn
+// carried on from another host's secondary log (not yet fused into the
+// owner's log) gets a dashed left edge and a "via <host>" tag. With showHost
+// (a session more than one host has taken part in), a host tag beside the
+// exit code names the host the turn ran on.
+function TranscriptEntry({
+  sessionId,
+  entry: e,
+  showHost,
+  onExpand,
+}: {
+  sessionId: string
+  entry: SessionEntry
+  showHost: boolean
+  onExpand: (record: string) => void
+}) {
+  const type = e.event_type ?? ''
+  const attached = type === 'note' || type === 'resource'
+  const classes = ['transcript-entry']
+  if (attached) classes.push(`transcript-entry-${type}`)
+  if (e.secondary_host) classes.push('transcript-entry-secondary')
+  return (
+    <div className={classes.join(' ')}>
+      <div className="transcript-entry-header">
+        <span className="transcript-entry-time">{e.timestamp}</span>
+        {e.secondary_host && (
+          <span
+            className="transcript-entry-tag transcript-secondary-tag"
+            title={`recorded on ${e.secondary_host}, which doesn't own this session; not yet merged into the owner's log`}
+          >
+            via {e.secondary_host}
+          </span>
+        )}
+        {type && (
+          <span className={`transcript-entry-tag transcript-type-tag transcript-type-${type}`} title={type}>
+            {EVENT_TYPE_LABELS[type] ?? type}
+          </span>
+        )}
+        {e.agent && e.agent !== 'none' && <span className="transcript-entry-tag">{e.agent}</span>}
+        {e.model && <span className="transcript-entry-tag">{e.model}</span>}
+        {!attached && (
+          <>
             <span className="transcript-entry-tag">{e.duration_ms}ms</span>
             <span className={`transcript-entry-tag ${e.exit_code === 0 ? 'transcript-exit-ok' : 'transcript-exit-err'}`}>
               exit {e.exit_code}
             </span>
-          </div>
-          {e.input && (
-            <div className="transcript-block transcript-block-in">
-              <div className="transcript-block-label">input</div>
-              <pre>{e.input}</pre>
-            </div>
-          )}
-          {e.output && (
-            <div className="transcript-block transcript-block-out">
-              <div className="transcript-block-label">output</div>
-              <pre>{e.output}</pre>
-            </div>
-          )}
-          {e.error && (
-            <div className="transcript-block transcript-block-err">
-              <div className="transcript-block-label">error</div>
-              <pre>{e.error}</pre>
-            </div>
-          )}
+          </>
+        )}
+        {showHost && e.host && (
+          <span className="transcript-entry-tag transcript-host-tag" title={`ran on ${e.host}`}>
+            {e.host}
+          </span>
+        )}
+        {type === 'resource' && e.record && (
+          <a
+            className="transcript-expand-btn"
+            href={resourceUrl(sessionId, e.record)}
+            target="_blank"
+            rel="noreferrer"
+            title={`open ${e.metadata?.resource_file ?? 'the resource'}`}
+          >
+            ↗ open
+          </a>
+        )}
+        {e.record && !e.record_missing && (
+          <button
+            className="transcript-expand-btn"
+            onClick={() => onExpand(e.record!)}
+            title={`open ${e.record}-processed.txt -- the full turn, not just this preview`}
+          >
+            ⤢ expand
+          </button>
+        )}
+        {e.record && e.record_missing && (
+          <span
+            className="transcript-entry-tag transcript-record-missing"
+            title={`${e.record}-processed.txt isn't on this host yet`}
+          >
+            record not here
+          </span>
+        )}
+      </div>
+      {e.input && (
+        <div className="transcript-block transcript-block-in">
+          <div className="transcript-block-label">{INPUT_LABELS[type] ?? 'input'}</div>
+          <pre>{e.input}</pre>
         </div>
-      ))}
+      )}
+      {e.output && (
+        <div className="transcript-block transcript-block-out">
+          <div className="transcript-block-label">output</div>
+          <pre>{e.output}</pre>
+        </div>
+      )}
+      {e.error && (
+        <div className="transcript-block transcript-block-err">
+          <div className="transcript-block-label">error</div>
+          <pre>{e.error}</pre>
+        </div>
+      )}
     </div>
   )
+}
+
+// EVENT_TYPE_LABELS are the transcript's tags for clauditable's event types
+// (RECORD_SCHEMAS.md). Sessions recorded before ai_invocation existed show
+// their agent runs as "command" too.
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  command_execution: 'command',
+  ai_invocation: 'AI',
+  note: 'note',
+  resource: 'resource',
+}
+
+const INPUT_LABELS: Record<string, string> = {
+  note: 'note',
+  resource: 'resource',
 }
 
 export default function App() {
@@ -582,12 +1078,19 @@ export default function App() {
     selectedId,
     sessionInfo,
     sessionView,
+    expanded,
+    processedView,
     notice,
+    annotationResult,
     selectSession,
+    expandEntry,
+    collapseEntry,
     newSession,
     setCurrentSession,
     renameSession,
     archiveSessions,
+    addNote,
+    addResource,
   } = useSessionManagerWS()
 
   return (
@@ -633,8 +1136,15 @@ export default function App() {
             currentId={currentSessionId}
             info={sessionInfo}
             view={sessionView}
+            expanded={expanded}
+            processedView={processedView}
+            annotationResult={annotationResult}
             onSetCurrent={setCurrentSession}
             onRename={renameSession}
+            onExpand={expandEntry}
+            onCollapse={collapseEntry}
+            onAddNote={addNote}
+            onAddResource={addResource}
           />
         ) : (
           <div className="empty-state">

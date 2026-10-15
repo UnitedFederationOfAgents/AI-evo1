@@ -56,13 +56,16 @@ type StatusMsg struct {
 	Services []ServiceStatus `json:"services"`
 }
 
-// FCStateMsg is the payload of "fc-state" WebSocket messages.
+// FCStateMsg is the payload of "fc-state" WebSocket messages. FC is the
+// instance it's about (see fcinstances.go).
 type FCStateMsg struct {
+	FC    string `json:"fc,omitempty"`
 	State string `json:"state"` // "remote-control", "local-control", or "" (disconnected)
 }
 
 // FCLogMsg is the payload of "fc-log" WebSocket messages.
 type FCLogMsg struct {
+	FC   string `json:"fc,omitempty"`
 	Line string `json:"line"`
 	Kind string `json:"kind,omitempty"` // "cmd" or "output"
 }
@@ -90,6 +93,7 @@ type FCSessionMsg struct {
 
 // RidealongStateMsg is the payload of "ridealong-state" WebSocket messages.
 type RidealongStateMsg struct {
+	FC           string   `json:"fc,omitempty"` // the FC instance it's about -- set by LR
 	Active       bool     `json:"active"`
 	Title        string   `json:"title,omitempty"`
 	CurrentIndex int      `json:"current_index,omitempty"`
@@ -105,6 +109,7 @@ type RidealongStateMsg struct {
 
 // CondocStateMsg is the payload of "condoc-state" WebSocket messages.
 type CondocStateMsg struct {
+	FC        string `json:"fc,omitempty"` // the FC instance it's about -- set by LR
 	Active    bool   `json:"active"`
 	Name      string `json:"name,omitempty"`
 	Phase     string `json:"phase,omitempty"`
@@ -160,9 +165,25 @@ type SessionsStateMsg struct {
 // ConvoStateMsg is the "convo-state" payload: a managed the-conversationalist
 // pushes it to LR over representable, and LR forwards a copy up to
 // agent-coordinator and out to browser clients so the forwarded 'convo' view
-// has the port to reverse-proxy from. Grows domain-specific fields in a later
-// step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+// has the port to reverse-proxy from, plus whether it can currently reach its
+// transcription engine (see the-conversationalist/transcribe_status.go and
+// tcavailability.go's getTCAvailability). StartedAt (unix ms) is when that
+// the-conversationalist process started -- passed through so browsers here and
+// on agent-coordinator can announce its start/restart (see
+// the-conversationalist's Server.startedAt).
 type ConvoStateMsg struct {
+	HTTPPort            string `json:"http_port"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
+}
+
+// RobotStateMsg is the "robot-state" payload: a managed ianar pushes it to
+// LR over representable, and LR forwards a copy up to agent-coordinator and
+// out to browser clients so the forwarded 'robot' view has the port to
+// reverse-proxy from. Grows domain-specific fields in a later step (see
+// condocs/InitialRobot.md).
+type RobotStateMsg struct {
 	HTTPPort string `json:"http_port"`
 }
 
@@ -201,14 +222,13 @@ type Server struct {
 	modeMu         sync.RWMutex
 	modeMismatches map[string]ModeMismatchMsg // peer name -> current mismatch disclosure, mismatched entries only
 
-	fcMu    sync.RWMutex
-	fcState string // "remote-control", "local-control", or "" (disconnected)
+	// fcInst holds every connected federation-command instance, keyed by the
+	// name it connected under -- see fcinstances.go.
+	fcMu   sync.RWMutex
+	fcInst map[string]*fcInstance
 
-	ridealongMu    sync.RWMutex
-	ridealongState *RidealongStateMsg
-
-	condocMu    sync.RWMutex
-	condocState *CondocStateMsg
+	// control runs the control tab's sequences -- see control.go.
+	control *controlEngine
 
 	acMu                sync.RWMutex
 	acClient            *representable.Client
@@ -244,9 +264,10 @@ type Server struct {
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
 	condoccerPort string                  // HTTP port a managed condoccer serves on / is proxied from
-	condoccerRoot string                  // repo root a managed condoccer scans (empty: condoccer's default)
-	sessionsPort  string                  // HTTP port a managed session-manager serves on / is proxied from
+	condoccerRoot string                  // working dir a managed condoccer scans (empty: condoccer's default); follows condoccer's own reports, guarded by condoccerMu
+	sessionsPort  string                // HTTP port a managed session-manager serves on / is proxied from
 	convoPort     string                  // HTTP port a managed the-conversationalist serves on / is proxied from
+	robotPort     string                  // HTTP port a managed ianar serves on / is proxied from
 	selfStart     time.Time               // when this LR process started
 	binOverrides  map[string]string       // app name -> explicit binary path (from config)
 	terminalCmd   string                  // command prefix that hosts an interactive child in a terminal
@@ -314,11 +335,15 @@ type Server struct {
 	condoccerState *CondoccerStateMsg
 
 	// Latest state pushed up by a managed session-manager / the-conversationalist
-	// over representable -- see condoccerState above.
+	// / ianar over representable -- see condoccerState above.
 	sessionsMu    sync.RWMutex
 	sessionsState *SessionsStateMsg
 	convoMu       sync.RWMutex
 	convoState    *ConvoStateMsg
+	robotMu       sync.RWMutex
+	robotState    *RobotStateMsg
+	workerMu      sync.RWMutex
+	workerState   *WorkerStateMsg // kept after dungeon-keeper disconnects, so its signals stay visible
 
 	// Files tab: where uploaded files land, and where "persist" moves them to
 	// (see files.go). listFiles() scans these directly, so no further
@@ -371,10 +396,12 @@ type Server struct {
 	// change at runtime via the "connect to AC" widget.
 	recordsPath string
 	acHTTPPort  string
+	sessionSync sessionSyncState
 
 	// tcMu/tcAvailable hold the aggregate "is a the-conversationalist instance
 	// available on any host" verdict, relayed down from agent-coordinator's
-	// own aggregate -- see tcavailability.go and
+	// own aggregate (getTCAvailability further gates it on this host's own
+	// TC being able to transcribe) -- see tcavailability.go and
 	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
 	// Step2Prompt.md.
 	tcMu        sync.RWMutex
@@ -382,7 +409,7 @@ type Server struct {
 }
 
 func newServer(lrName string) *Server {
-	return &Server{
+	s := &Server{
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -398,7 +425,10 @@ func newServer(lrName string) *Server {
 		managedPendingVersion:  make(map[string]string),
 		stateboardCustom:       make(map[string]map[string]string),
 		fcHeads:                make(map[string]string),
+		fcInst:                 make(map[string]*fcInstance),
 	}
+	s.control = newControlEngine(s)
+	return s
 }
 
 // ModeMismatchMsg is the "mode-mismatch" WebSocket payload disclosing that a
@@ -469,7 +499,7 @@ func (s *Server) broadcast(typ string, payload interface{}) {
 // currentStatus returns service statuses; federation-command reflects live heartbeat health.
 func (s *Server) currentStatus() StatusMsg {
 	fcStatus := "unhealthy"
-	if s.reprServer != nil && s.reprServer.IsHealthy("federation-command") {
+	if s.anyFCHealthy() {
 		fcStatus = "healthy"
 	}
 	condoccerStatus := "unhealthy"
@@ -484,58 +514,57 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("convo") {
 		convoStatus = "healthy"
 	}
+	robotStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("robot") {
+		robotStatus = "healthy"
+	}
+	workerStatus := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("worker") {
+		workerStatus = "healthy"
+	}
 	return StatusMsg{
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
 			{Name: "condoccer", Status: condoccerStatus},
 			{Name: "convo", Status: convoStatus},
 			{Name: "sessions", Status: sessionsStatus},
-			{Name: "worker", Status: "healthy"},
+			{Name: "robot", Status: robotStatus},
+			{Name: "worker", Status: workerStatus},
 		},
 	}
-}
-
-func (s *Server) getFCState() string {
-	s.fcMu.RLock()
-	defer s.fcMu.RUnlock()
-	return s.fcState
-}
-
-func (s *Server) setFCState(state string) {
-	s.fcMu.Lock()
-	s.fcState = state
-	s.fcMu.Unlock()
-	s.broadcast("fc-state", FCStateMsg{State: state})
-	s.acMu.RLock()
-	ac := s.acClient
-	s.acMu.RUnlock()
-	if ac != nil {
-		ac.SendData("fc-state", FCStateMsg{State: state})
-	}
-}
-
-func (s *Server) getRidealongState() RidealongStateMsg {
-	s.ridealongMu.RLock()
-	defer s.ridealongMu.RUnlock()
-	if s.ridealongState == nil {
-		return RidealongStateMsg{Active: false}
-	}
-	return *s.ridealongState
-}
-
-func (s *Server) getCondocState() CondocStateMsg {
-	s.condocMu.RLock()
-	defer s.condocMu.RUnlock()
-	if s.condocState == nil {
-		return CondocStateMsg{Active: false}
-	}
-	return *s.condocState
 }
 
 func (s *Server) getCondoccerState() *CondoccerStateMsg {
 	s.condoccerMu.RLock()
 	defer s.condoccerMu.RUnlock()
 	return s.condoccerState
+}
+
+// getCondoccerRoot returns the working dir a (re)launched condoccer should be
+// handed as --root: the --condoccer-root flag/config value until condoccer
+// reports otherwise, then whatever it last reported (see setCondoccerRoot).
+// That way a "Set Working Dir" change in condoccer survives condoccer being
+// relaunched by this LR, and, via lrState.CondoccerRoot, this LR itself
+// being restarted -- Step4SubstepDPrompt.md Revision C.
+func (s *Server) getCondoccerRoot() string {
+	s.condoccerMu.RLock()
+	defer s.condoccerMu.RUnlock()
+	return s.condoccerRoot
+}
+
+// setCondoccerRoot records the working dir condoccer reported in its
+// condoccer-state push. An empty report is ignored rather than clearing it.
+func (s *Server) setCondoccerRoot(root string) {
+	if root == "" {
+		return
+	}
+	s.condoccerMu.Lock()
+	changed := s.condoccerRoot != root
+	s.condoccerRoot = root
+	s.condoccerMu.Unlock()
+	if changed {
+		log.Printf("condoccer working dir is now %s (passed as --root on its next launch)", root)
+	}
 }
 
 func (s *Server) getSessionsState() *SessionsStateMsg {
@@ -548,6 +577,12 @@ func (s *Server) getConvoState() *ConvoStateMsg {
 	s.convoMu.RLock()
 	defer s.convoMu.RUnlock()
 	return s.convoState
+}
+
+func (s *Server) getRobotState() *RobotStateMsg {
+	s.robotMu.RLock()
+	defer s.robotMu.RUnlock()
+	return s.robotState
 }
 
 func (s *Server) getACClient() *representable.Client {
@@ -592,9 +627,11 @@ func (s *Server) pushStateToAC() {
 		return
 	}
 	ac.SendData("services", s.currentStatus())
-	ac.SendData("fc-state", FCStateMsg{State: s.getFCState()})
-	ac.SendData("ridealong-state", s.getRidealongState())
-	ac.SendData("condoc-state", s.getCondocState())
+	s.pushFCStateToAC()
+	ac.SendData("control-state", s.control.state())
+	ac.SendData("control-library", s.control.libraryForAC())
+	// Which nodes a control sequence can reach -- see controlnodes.go.
+	ac.SendData("control-nodes-request", struct{}{})
 	ac.SendData("system-state", s.systemState())
 	ac.SendData("repo-state", s.repoState())
 	ac.SendData("lr-http", LRHTTPMsg{Port: s.httpPort})
@@ -610,6 +647,12 @@ func (s *Server) pushStateToAC() {
 	}
 	if cv := s.getConvoState(); cv != nil {
 		ac.SendData("convo-state", *cv)
+	}
+	if rb := s.getRobotState(); rb != nil {
+		ac.SendData("robot-state", *rb)
+	}
+	if wk := s.getWorkerState(); wk != nil {
+		ac.SendData("worker-state", *wk)
 	}
 }
 
@@ -820,19 +863,35 @@ func (s *Server) connectAC(host, port string) {
 	s.acMu.Unlock()
 
 	// Commands from AC: "__system:" commands drive this LR's own system tab
-	// (launch/terminate managed apps); everything else is forwarded to FC.
+	// (launch/terminate managed apps), "__control:" its control tab (see
+	// control.go), "__worker:" its worker tab (see worker.go), and
+	// "__fc:<instance> <cmd>" goes to one FC instance (see fcinstances.go);
+	// everything else is forwarded to the default FC instance.
 	client.SetCommandHandler(func(cmd string) {
 		if strings.HasPrefix(cmd, "__system:") {
 			s.handleSystemCommand(cmd)
+			return
+		}
+		if strings.HasPrefix(cmd, "__worker:") {
+			s.handleWorkerCommand(cmd)
 			return
 		}
 		if strings.HasPrefix(cmd, "__tc-availability:") {
 			s.handleTCAvailabilityCommand(cmd)
 			return
 		}
-		if s.reprServer != nil {
-			s.reprServer.SendCommand("federation-command", cmd)
+		if strings.HasPrefix(cmd, "__control:") {
+			s.control.handleCommand(cmd)
+			return
 		}
+		if rest, ok := strings.CutPrefix(cmd, "__fc:"); ok {
+			key, fcCmd, _ := strings.Cut(rest, " ")
+			if isFCName(key) && fcCmd != "" {
+				s.sendFCCommand(key, fcCmd)
+			}
+			return
+		}
+		s.sendFCCommand("", cmd)
 	})
 	client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
 		s.setModeMismatch("agent-coordinator", mismatched, peerMode)
@@ -875,6 +934,7 @@ func (s *Server) connectAC(host, port string) {
 	}
 
 	log.Printf("disconnected from agent-coordinator at %s", addr)
+	s.control.setNodes(nil) // no nodes to choose among until it reconnects
 	s.broadcast("ac-state", s.acStateMsg(false, host, port))
 	s.setModeMismatch("agent-coordinator", false, "")
 
@@ -1049,9 +1109,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial status and FC state.
 	go func() {
 		s.sendToClient(c, "status", s.currentStatus())
-		s.sendToClient(c, "fc-state", FCStateMsg{State: s.getFCState()})
-		s.sendToClient(c, "ridealong-state", s.getRidealongState())
-		s.sendToClient(c, "condoc-state", s.getCondocState())
+		s.sendToClient(c, "fc-instances", s.fcInstances())
+		s.sendToClient(c, "control-state", s.control.state())
+		s.sendToClient(c, "control-library", s.control.library())
 		s.sendToClient(c, "ac-state", s.getACState())
 		s.sendToClient(c, "system-state", s.systemState())
 		s.sendToClient(c, "repo-state", s.repoState())
@@ -1067,6 +1127,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 		if cv := s.getConvoState(); cv != nil {
 			s.sendToClient(c, "convo-state", *cv)
+		}
+		if rb := s.getRobotState(); rb != nil {
+			s.sendToClient(c, "robot-state", *rb)
+		}
+		if wk := s.getWorkerState(); wk != nil {
+			s.sendToClient(c, "worker-state", *wk)
 		}
 		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 		for _, mm := range s.currentModeMismatches() {
@@ -1109,22 +1175,65 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		if s.reprServer != nil {
-			switch m.Type {
-			case "command":
-				var payload struct {
-					Cmd string `json:"cmd"`
+		switch m.Type {
+		case "command":
+			// fc names the instance to run it on (see fcinstances.go); empty
+			// sends it to the default instance.
+			var payload struct {
+				Cmd string `json:"cmd"`
+				FC  string `json:"fc"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
+				s.sendFCCommand(payload.FC, payload.Cmd)
+			}
+		case "ridealong-command":
+			var payload struct {
+				Action string `json:"action"`
+				FC     string `json:"fc"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Action != "" {
+				s.sendFCCommand(payload.FC, "__ridealong:"+payload.Action)
+			}
+		case "control-run":
+			var payload struct {
+				Sequence       string            `json:"sequence"`
+				Controls       map[string]string `json:"controls"`
+				RecordOverride string            `json:"record_override"` // a node, "none", or "" for the sequence's own recordings
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				if err := s.control.start(payload.Sequence, payload.Controls, payload.RecordOverride); err != nil {
+					log.Printf("control-run %q: %v", payload.Sequence, err)
+					s.sendToClient(c, "control-reply", ControlLibReply{Op: "run", Error: err.Error()})
 				}
-				if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Cmd != "" {
-					s.reprServer.SendCommand("federation-command", payload.Cmd)
+			}
+		case "control-cancel":
+			s.control.cancel()
+		case "control-continue":
+			// The continue button on a step waiting for the user (ask-user).
+			var payload struct {
+				Run string `json:"run"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				if err := s.control.continueRun(payload.Run); err != nil {
+					log.Printf("control-continue: %v", err)
 				}
-			case "ridealong-command":
-				var payload struct {
-					Action string `json:"action"`
+			}
+		case "control-lib":
+			// The definer's and composer's edits, imports and exports -- see
+			// controllib.go.
+			var req ControlLibRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				s.sendToClient(c, "control-reply", s.control.handleLibRequest(req))
+			}
+		case "worker-submit":
+			// The worker tab's temporary prompt box -- see worker.go.
+			var req WorkerSubmitRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				reply := WorkerReplyMsg{OK: true}
+				if err := s.submitWork(req); err != nil {
+					reply = WorkerReplyMsg{Error: err.Error()}
 				}
-				if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Action != "" {
-					s.reprServer.SendCommand("federation-command", "__ridealong:"+payload.Action)
-				}
+				s.sendToClient(c, "worker-reply", reply)
 			}
 		}
 		switch m.Type {
@@ -1306,14 +1415,46 @@ func (s *Server) proxyToConvo(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// proxyToRobot reverse-proxies /robot/* to a managed ianar's HTTP server on
+// loopback, stripping the /robot prefix -- mirrors proxyToCondoccer.
+func (s *Server) proxyToRobot(w http.ResponseWriter, r *http.Request) {
+	port := s.robotPort
+	if rb := s.getRobotState(); rb != nil && rb.HTTPPort != "" {
+		port = rb.HTTPPort // trust the port ianar actually reported
+	}
+	if port == "" {
+		http.Error(w, "ianar port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/robot")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "ianar not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
 	mux.HandleFunc("/sessions/", s.proxyToSessions)
 	mux.HandleFunc("/convo/", s.proxyToConvo)
+	mux.HandleFunc("/robot/", s.proxyToRobot)
 	mux.HandleFunc("/api/files", s.handleFilesAPI)
 	mux.HandleFunc("/api/files/", s.handleFileItem)
+	mux.HandleFunc("/api/file-peers", s.handleFilePeers)
+	mux.HandleFunc("/api/host-files", s.handleHostFiles)
+	mux.HandleFunc("/api/host-files/raw", s.handleHostFileRaw)
 	mux.HandleFunc("/api/sessions", s.handleSessionsIndex)
 	mux.HandleFunc("/api/sessions/", s.handleSessionsAPI)
 
@@ -1370,8 +1511,11 @@ type appConfig struct {
 	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
 	sessionsPort  string   // HTTP port a managed session-manager serves on / is reverse-proxied from
 	convoPort     string   // HTTP port a managed the-conversationalist serves on / is reverse-proxied from
+	robotPort     string   // HTTP port a managed ianar serves on / is reverse-proxied from
 	fileCacheDir  string   // directory uploaded files land in for the files tab
 	hostStoreDir  string   // directory a "persist" press moves a file into
+	fetchAllow    []string // paths/globs this node hands over to control runs' node-fetch-file; "*" (the default): any file (see controlnodes.go)
+	fetchAllowSrc string   // where fetchAllow came from: a config file, "the command line" or "(default)"
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -1419,8 +1563,14 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
 		sessionsPort:  pick("sessions-port", defaults.sessionsPort),
 		convoPort:     pick("convo-port", defaults.convoPort),
+		robotPort:     pick("robot-port", defaults.robotPort),
 		fileCacheDir:  pick("file-cache-dir", defaults.fileCacheDir),
 		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
+		fetchAllow:    splitList(pick("control-fetch-allow", strings.Join(defaults.fetchAllow, ","))),
+		fetchAllowSrc: conf.Source("control-fetch-allow"),
+	}
+	if setOnCLI["control-fetch-allow"] {
+		out.fetchAllowSrc = "the command line"
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -1520,8 +1670,11 @@ func main() {
 	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
 	sessionsPort := flag.String("sessions-port", "8085", "HTTP port a managed session-manager serves on; its UI is reverse-proxied at /sessions/")
 	convoPort := flag.String("convo-port", "8086", "HTTP port a managed the-conversationalist serves on; its UI is reverse-proxied at /convo/")
+	robotPort := flag.String("robot-port", "8087", "HTTP port a managed ianar serves on; its UI is reverse-proxied at /robot/")
 	fileCacheDir := flag.String("file-cache-dir", defaultFileCacheDir, "directory uploaded files land in for the files tab; files older than 1 hour are swept")
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
+	controlLibPath := flag.String("control-library", defaultControlLibraryPath(), "YAML file the control tab's actions and sequences are kept in (see controllib.go); empty keeps them in memory only")
+	fetchAllow := flag.String("control-fetch-allow", fetchAllowAll, "files this node hands over to control runs' node-fetch-file, whichever node's run asks: \"*\" (or empty) for any file, or comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) (see controlnodes.go)")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -1550,8 +1703,10 @@ func main() {
 		condoccerRoot: *condoccerRoot,
 		sessionsPort:  *sessionsPort,
 		convoPort:     *convoPort,
+		robotPort:     *robotPort,
 		fileCacheDir:  *fileCacheDir,
 		hostStoreDir:  *hostStoreDir,
+		fetchAllow:    splitList(*fetchAllow),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -1575,12 +1730,22 @@ func main() {
 	// auto-rebuild and auto-update halves.
 	prevState, havePrevState := loadPreviousState()
 	if havePrevState {
-		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v from before the restart",
-			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps)
+		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v condoccer-root=%q from before the restart",
+			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps, prevState.CondoccerRoot)
 		prevState.applyToConfig(&cfg)
 	}
 
 	s := newServer(cfg.name)
+	s.control.lib = openControlLibrary(*controlLibPath)
+	if err := s.control.setFetchAllow(cfg.fetchAllow); err != nil {
+		log.Fatal(err)
+	}
+	s.control.fetchAllowFrom = cfg.fetchAllowSrc
+	if allow := s.control.getFetchAllow(); len(allow) > 0 {
+		log.Printf("control: node-fetch-file may only take %s (control-fetch-allow, from %s)", strings.Join(allow, ", "), cfg.fetchAllowSrc)
+	} else {
+		log.Printf("control: node-fetch-file may take any file (control-fetch-allow, from %s)", cfg.fetchAllowSrc)
+	}
 	s.loaderManaged = restartsignal.IsLoaderManaged()
 	if s.loaderManaged {
 		// Only worth polling for an on-disk update when a restart could
@@ -1611,6 +1776,7 @@ func main() {
 	s.condoccerRoot = cfg.condoccerRoot
 	s.sessionsPort = cfg.sessionsPort
 	s.convoPort = cfg.convoPort
+	s.robotPort = cfg.robotPort
 	s.terminalCmd = cfg.terminal
 	s.fileCacheDir = cfg.fileCacheDir
 	s.hostStoreDir = cfg.hostStoreDir
@@ -1695,38 +1861,37 @@ func main() {
 				if ac := s.getACClient(); ac != nil {
 					ac.SendData("convo-state", empty)
 				}
+				s.pushTCAvailability()
 				s.setModeMismatch("convo", false, "")
 			}
 			return
 		}
-		if name == "federation-command" {
-			s.setFCState(state)
+		if name == "robot" {
 			if state == "disconnected" {
-				s.ridealongMu.Lock()
-				s.ridealongState = nil
-				s.ridealongMu.Unlock()
-				s.broadcast("ridealong-state", RidealongStateMsg{Active: false})
-				s.condocMu.Lock()
-				s.condocState = nil
-				s.condocMu.Unlock()
-				s.broadcast("condoc-state", CondocStateMsg{Active: false})
+				s.robotMu.Lock()
+				s.robotState = nil
+				s.robotMu.Unlock()
+				empty := RobotStateMsg{}
+				s.broadcast("robot-state", empty)
 				if ac := s.getACClient(); ac != nil {
-					ac.SendData("ridealong-state", RidealongStateMsg{Active: false})
-					ac.SendData("condoc-state", CondocStateMsg{Active: false})
+					ac.SendData("robot-state", empty)
 				}
-				s.setModeMismatch("federation-command", false, "")
-				// Every federation-command instance shares this one
-				// representable connection identity (see versionMu's
-				// comment above), so a disconnect means none are reachable
-				// any more -- drop every self-reported head rather than let
-				// a stale one linger on the stateboard (also refreshes
-				// "federation-command: present"/"hosts", which read
-				// reprServer.IsHealthy live but only on the next broadcast).
-				s.stateboardMu.Lock()
-				s.fcHeads = make(map[string]string)
-				s.stateboardMu.Unlock()
-				s.broadcastStateboard()
+				s.setModeMismatch("robot", false, "")
 			}
+			return
+		}
+		if name == "worker" {
+			if state == "disconnected" {
+				// The last worker-state is kept (see Server.workerState); the
+				// worker tab shows the service as unhealthy instead.
+				s.setModeMismatch("worker", false, "")
+			}
+			return
+		}
+		if isFCName(name) {
+			// Each FC instance connects under its own name, so this is one
+			// instance's state change or disconnect -- see fcinstances.go.
+			s.setFCInstanceState(name, state)
 		}
 	})
 
@@ -1738,15 +1903,8 @@ func main() {
 	})
 
 	reprSrv.SetLogHandler(func(name, line, kind string) {
-		if name == "federation-command" {
-			s.broadcast("fc-log", FCLogMsg{Line: line, Kind: kind})
-			if ac := s.getACClient(); ac != nil {
-				if kind == "output" {
-					ac.SendOutput(line)
-				} else {
-					ac.SendLog(line)
-				}
-			}
+		if isFCName(name) {
+			s.handleFCLog(name, line, kind)
 		}
 	})
 
@@ -1779,7 +1937,11 @@ func main() {
 			// per-app-name dispatch below.
 			var payload VersionMsg
 			if err := json.Unmarshal(data, &payload); err == nil && payload.Version != "" {
-				s.setManagedVersion(name, payload.Version)
+				app := name
+				if isFCName(name) {
+					app = fcAppName // versions are tracked per app, not per instance
+				}
+				s.setManagedVersion(app, payload.Version)
 			}
 			if name == "condoccer" {
 				// condoccer has never received a tc-availability command
@@ -1797,6 +1959,7 @@ func main() {
 					s.condoccerMu.Lock()
 					s.condoccerState = &payload
 					s.condoccerMu.Unlock()
+					s.setCondoccerRoot(payload.Root)
 					s.broadcast("condoccer-state", payload)
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("condoccer-state", payload)
@@ -1839,41 +2002,84 @@ func main() {
 					if ac := s.getACClient(); ac != nil {
 						ac.SendData("convo-state", payload)
 					}
+					s.pushTCAvailability()
 				}
 			}
 			return
 		}
-		if name != "federation-command" {
+		if name == "robot" {
+			switch dataType {
+			case "robot-state":
+				var payload RobotStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.robotMu.Lock()
+					s.robotState = &payload
+					s.robotMu.Unlock()
+					s.broadcast("robot-state", payload)
+					if ac := s.getACClient(); ac != nil {
+						ac.SendData("robot-state", payload)
+					}
+				}
+			case "robot-run-progress", "robot-run-result":
+				// A run the control tab asked for -- see control.go.
+				var payload RobotRunMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.noteRobotRun(dataType == "robot-run-result", payload)
+				}
+			case "robot-record-result":
+				// A control sequence's screen recording -- see control.go.
+				var payload RobotRecordMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.noteRobotRecord(payload)
+				}
+			case "robot-capture-result":
+				// A control sequence's screenshot of this node -- see
+				// controlnodes.go.
+				var payload RobotCaptureMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.noteRobotCapture(payload)
+				}
+			case "robot-ops":
+				// The ops the control tab's definer offers as robot.<op> --
+				// see controlops.go.
+				var payload struct {
+					Ops []ControlOpSpec `json:"ops"`
+				}
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.control.setRobotOps(payload.Ops)
+				}
+			}
+			return
+		}
+		if name == "worker" {
+			if dataType == "worker-state" {
+				var payload WorkerStateMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.setWorkerState(payload)
+				}
+			}
+			return
+		}
+		if !isFCName(name) {
 			return
 		}
 		switch dataType {
 		case "ridealong-state":
 			var payload RidealongStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
-				s.ridealongMu.Lock()
-				s.ridealongState = &payload
-				s.ridealongMu.Unlock()
-				s.broadcast("ridealong-state", payload)
-				if ac := s.getACClient(); ac != nil {
-					ac.SendData("ridealong-state", payload)
-				}
+				s.setFCInstanceRidealong(name, payload)
 			}
 		case "condoc-state":
 			var payload CondocStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
-				s.condocMu.Lock()
-				s.condocState = &payload
-				s.condocMu.Unlock()
-				s.broadcast("condoc-state", payload)
-				if ac := s.getACClient(); ac != nil {
-					ac.SendData("condoc-state", payload)
-				}
+				s.setFCInstanceCondoc(name, payload)
 			}
 		case "fc-session":
 			var payload FCSessionMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
 				s.setFCSessionState(payload.ID, payload.Name)
 				s.setFCHead(payload.InstanceID, payload.Head)
+				s.setFCInstanceSession(name, payload)
 			}
 		}
 	})

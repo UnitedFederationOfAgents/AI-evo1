@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
@@ -138,7 +139,7 @@ func TestFetchHighlightedFilesFrom(t *testing.T) {
 	defer srv.Close()
 
 	destDir := t.TempDir()
-	links, err := fetchHighlightedFilesFrom(srv.URL, destDir)
+	links, err := fetchHighlightedFilesFrom(srv.URL, destDir, nil)
 	if err != nil {
 		t.Fatalf("fetchHighlightedFilesFrom: %v", err)
 	}
@@ -172,12 +173,78 @@ func TestFetchHighlightedFilesFromNoneHighlighted(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	links, err := fetchHighlightedFilesFrom(srv.URL, t.TempDir())
+	links, err := fetchHighlightedFilesFrom(srv.URL, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(links) != 0 {
 		t.Errorf("expected no links, got %+v", links)
+	}
+}
+
+// fakeFilesTab serves a files tab at prefix ("" or "/host/<node>") on mux,
+// listing files (id -> highlighted) with each file's content being its id.
+func fakeFilesTab(mux *http.ServeMux, prefix string, files map[string]bool) {
+	mux.HandleFunc(prefix+"/api/files", func(w http.ResponseWriter, r *http.Request) {
+		var list []map[string]interface{}
+		for id, hl := range files {
+			list = append(list, map[string]interface{}{"id": id, "name": strings.SplitN(id, "_", 2)[1], "highlighted": hl})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"files": list})
+	})
+	mux.HandleFunc(prefix+"/api/files/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.TrimPrefix(r.URL.Path, prefix+"/api/files/")))
+	})
+}
+
+// TestFetchAllHighlightedFilesIncludesPeers verifies the "Highlighted"
+// source (Revision K) copies the highlighted files of this LR and of every
+// peer LR it reports, labels peer files with their node, skips an id
+// already copied, and carries on past an unreachable peer.
+func TestFetchAllHighlightedFilesIncludesPeers(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	fakeFilesTab(mux, "", map[string]bool{"aaa_local.txt": true, "bbb_off.txt": false})
+	fakeFilesTab(mux, "/host/node-b", map[string]bool{"ccc_peer.txt": true, "aaa_local.txt": true})
+	mux.HandleFunc("/api/file-peers", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node": "node-a",
+			"peers": []highlightedSource{
+				{Node: "node-b", Base: srv.URL + "/host/node-b"},
+				{Node: "node-c", Base: srv.URL + "/host/node-c"}, // 404s
+			},
+		})
+	})
+
+	destDir := t.TempDir()
+	links, err := fetchAllHighlightedFiles(srv.URL, destDir)
+	if err != nil {
+		t.Fatalf("fetchAllHighlightedFiles: %v", err)
+	}
+	want := []resourceLink{
+		{Name: "local.txt", Filename: "aaa_local.txt"},
+		{Name: "peer.txt (node-b)", Filename: "ccc_peer.txt"},
+	}
+	if len(links) != len(want) || links[0] != want[0] || links[1] != want[1] {
+		t.Fatalf("links = %+v, want %+v", links, want)
+	}
+	if got, err := os.ReadFile(filepath.Join(destDir, "ccc_peer.txt")); err != nil || string(got) != "ccc_peer.txt" {
+		t.Errorf("peer file = %q, %v", got, err)
+	}
+}
+
+// TestFetchAllHighlightedFilesOlderLR verifies an LR without
+// GET /api/file-peers still gives its own highlighted files.
+func TestFetchAllHighlightedFilesOlderLR(t *testing.T) {
+	mux := http.NewServeMux()
+	fakeFilesTab(mux, "", map[string]bool{"aaa_local.txt": true})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	links, err := fetchAllHighlightedFiles(srv.URL, t.TempDir())
+	if err != nil || len(links) != 1 || links[0].Filename != "aaa_local.txt" {
+		t.Fatalf("links = %+v, err = %v", links, err)
 	}
 }
 
@@ -240,8 +307,11 @@ func TestAddVoiceNoteResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Errorf("expected no files written to the Impls folder, got %+v", entries)
+	// The fixture's own step file lives there; a voice note must add nothing else.
+	for _, e := range entries {
+		if e.Name() != filepath.Base(stepPath) {
+			t.Errorf("expected no files written to the Impls folder besides the step file, got %q", e.Name())
+		}
 	}
 }
 
@@ -538,5 +608,225 @@ func TestSanitizeFilename(t *testing.T) {
 		if got := sanitizeFilename(in); got != want {
 			t.Errorf("sanitizeFilename(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// buildZip returns a zip archive holding the given name -> content entries
+// (a name ending in "/" becomes a directory entry).
+func buildZip(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range entries {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestExtractZipResource verifies a zip is unpacked into a sibling folder
+// named after it minus the extension, keeping nested paths (Revision F of
+// condocs/initialRobotImpls/Step2Prompt.md).
+func TestExtractZipResource(t *testing.T) {
+	dir := t.TempDir()
+	data := buildZip(t, map[string]string{
+		"report.txt":               "all good",
+		"recording/":               "",
+		"recording/recording.webm": "webm bytes",
+	})
+	if err := os.WriteFile(filepath.Join(dir, "abcd1234_run.ZIP"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	note, err := extractZipResource(dir, "abcd1234_run.ZIP")
+	if err != nil {
+		t.Fatalf("extractZipResource: %v", err)
+	}
+	if note != "unzipped to abcd1234_run/" {
+		t.Errorf("note = %q, want %q", note, "unzipped to abcd1234_run/")
+	}
+	for rel, want := range map[string]string{
+		"report.txt":               "all good",
+		"recording/recording.webm": "webm bytes",
+	} {
+		got, err := os.ReadFile(filepath.Join(dir, "abcd1234_run", filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("expected %s to be extracted: %v", rel, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", rel, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "abcd1234_run.ZIP")); err != nil {
+		t.Errorf("the zip itself should be kept: %v", err)
+	}
+}
+
+// TestExtractZipResourceIgnoresNonZip verifies other files are left alone.
+func TestExtractZipResourceIgnoresNonZip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if note, err := extractZipResource(dir, "note.txt"); err != nil || note != "" {
+		t.Fatalf("extractZipResource = %q, %v; want no note and no error", note, err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("expected only note.txt, got %d entries", len(entries))
+	}
+}
+
+// TestExtractZipResourceRejectsTraversal verifies an entry that would land
+// outside the extraction folder fails the extraction and leaves no folder.
+func TestExtractZipResourceRejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	data := buildZip(t, map[string]string{"../evil.txt": "nope"})
+	if err := os.WriteFile(filepath.Join(dir, "bad.zip"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractZipResource(dir, "bad.zip"); err == nil {
+		t.Fatal("expected an error for a path-traversal entry")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "evil.txt")); !os.IsNotExist(err) {
+		t.Error("traversal entry should not have been written")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bad")); !os.IsNotExist(err) {
+		t.Error("partial extraction folder should have been removed")
+	}
+}
+
+// TestExtractZipResourceInvalidZip verifies a corrupt .zip is reported
+// rather than silently skipped.
+func TestExtractZipResourceInvalidZip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "broken.zip"), []byte("not a zip"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractZipResource(dir, "broken.zip"); err == nil {
+		t.Fatal("expected an error for an invalid zip")
+	}
+}
+
+// TestExtractZipResourceTooLarge verifies a zip whose contents exceed
+// maxZipExtractSize isn't unpacked and isn't an error either: the note says
+// it was too large, no folder is left behind, and the zip is kept (Revision E
+// of condocs/initialRobotImpls/Step4Prompt.md).
+func TestExtractZipResourceTooLarge(t *testing.T) {
+	old := maxZipExtractSize
+	maxZipExtractSize = 4
+	defer func() { maxZipExtractSize = old }()
+
+	dir := t.TempDir()
+	data := buildZip(t, map[string]string{"big.txt": "more than four bytes"})
+	if err := os.WriteFile(filepath.Join(dir, "big.zip"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	note, err := extractZipResource(dir, "big.zip")
+	if err != nil {
+		t.Fatalf("extractZipResource: %v", err)
+	}
+	if note != "too large to unzip: over 4 bytes uncompressed" {
+		t.Errorf("note = %q", note)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "big")); !os.IsNotExist(err) {
+		t.Error("no extraction folder should be left for a too-large zip")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "big.zip")); err != nil {
+		t.Errorf("the zip itself should be kept: %v", err)
+	}
+}
+
+// TestInsertResourceBlockWritesNote verifies a link's note lands as an
+// indented "(note)" line right under it.
+func TestInsertResourceBlockWritesNote(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Step1Prompt.md")
+	if err := os.WriteFile(path, []byte("# Prompt\n\nDo it.\n\n## <REPLACE-Revision|Retry> A\n\n<REPLACE-PROMPT>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	links := []resourceLink{
+		{Name: "run.zip", Filename: "abcd1234_run.zip", Note: "unzipped to abcd1234_run/"},
+		{Name: "x.txt", Filename: "id_x.txt"},
+	}
+	if err := insertResourceBlock(path, "", "", links); err != nil {
+		t.Fatalf("insertResourceBlock: %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	want := "- [run.zip](abcd1234_run.zip)\n  (unzipped to abcd1234_run/)\n- [x.txt](id_x.txt)\n"
+	if !strings.Contains(string(got), want) {
+		t.Errorf("block missing %q:\n%s", want, got)
+	}
+}
+
+// TestHandleUploadResourceExtractsZip verifies the "Upload" source unpacks
+// an uploaded zip beside it in the Impls folder.
+func TestHandleUploadResourceExtractsZip(t *testing.T) {
+	root, mainRelPath, stepPath := newUploadResourceFixture(t)
+	s := newServer(root)
+
+	data := buildZip(t, map[string]string{"report.txt": "from the zip"})
+	req := newUploadResourceRequest(t, mainRelPath, "", "", "run.zip", string(data))
+	rec := httptest.NewRecorder()
+	s.handleUploadResource(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	implDirPath := filepath.Dir(stepPath)
+	entries, err := os.ReadDir(implDirPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var folder string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasSuffix(e.Name(), "_run") {
+			folder = e.Name()
+		}
+	}
+	if folder == "" {
+		t.Fatal("expected the uploaded zip to be extracted into a <id>_run folder")
+	}
+	got, err := os.ReadFile(filepath.Join(implDirPath, folder, "report.txt"))
+	if err != nil || string(got) != "from the zip" {
+		t.Errorf("extracted report.txt = %q, %v", got, err)
+	}
+}
+
+// TestFetchHighlightedFilesFromExtractsZip verifies the "Highlighted"
+// source unpacks a zip copied from local-representative.
+func TestFetchHighlightedFilesFromExtractsZip(t *testing.T) {
+	data := buildZip(t, map[string]string{"step-1.jpg": "jpeg bytes"})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/files", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"id": "aaa_seq.zip", "name": "seq.zip", "highlighted": true},
+			},
+		})
+	})
+	mux.HandleFunc("/api/files/aaa_seq.zip", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(data)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	destDir := t.TempDir()
+	links, err := fetchHighlightedFilesFrom(srv.URL, destDir, nil)
+	if err != nil {
+		t.Fatalf("fetchHighlightedFilesFrom: %v", err)
+	}
+	if len(links) != 1 || links[0].Note != "unzipped to aaa_seq/" {
+		t.Errorf("links = %+v, want one with note %q", links, "unzipped to aaa_seq/")
+	}
+	got, err := os.ReadFile(filepath.Join(destDir, "aaa_seq", "step-1.jpg"))
+	if err != nil || string(got) != "jpeg bytes" {
+		t.Errorf("extracted step-1.jpg = %q, %v", got, err)
 	}
 }

@@ -24,6 +24,30 @@ const (
 	LongResponseLineThreshold = 1000
 )
 
+// Event types. A record's event_type says what produced it: a plain command,
+// an AI agent invocation (the command was an agent run, e.g. through
+// ambiguous-agent), or something a person attached to the session -- a note
+// (text) or a resource (a file). Sessions recorded before ai_invocation
+// existed carry command_execution for agent runs too; they aren't rewritten.
+const (
+	EventTypeCommandExecution = "command_execution"
+	EventTypeAIInvocation     = "ai_invocation"
+	EventTypeNote             = "note"
+	EventTypeResource         = "resource"
+)
+
+// Metadata keys a resource record carries: the name it was added under, the
+// file (in the session directory) holding its content, and its size.
+const (
+	MetadataResourceName = "resource_name"
+	MetadataResourceFile = "resource_file"
+	MetadataResourceSize = "resource_size"
+)
+
+// ResourceFileInfix sits between a resource's record ID and its name in the
+// file holding its content: {record}-resource-{name}.
+const ResourceFileInfix = "-resource-"
+
 // ProcessingHeader is a JSON snippet inserted after the first event header
 // in a processed file to record which auto-maintenance steps were applied.
 type ProcessingHeader struct {
@@ -49,7 +73,7 @@ var (
 // not the actual command input/output content.
 type Event struct {
 	Timestamp  string            `json:"timestamp"`             // RFC3339 formatted timestamp
-	EventType  string            `json:"event_type"`            // Type of event (e.g., "command_execution")
+	EventType  string            `json:"event_type"`            // Type of event (one of the EventType* constants)
 	Host       string            `json:"host,omitempty"`        // Host identifier (from UFA_HOST or ~/.ufa/host.yaml)
 	Head       string            `json:"head,omitempty"`        // Head identifier (from UFA_HEAD)
 	Agent      string            `json:"agent,omitempty"`       // Agent identifier (from UFA_AGENT)

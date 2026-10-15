@@ -403,6 +403,186 @@ body {
 .transcript-exit-ok { color: #4ec94e; }
 .transcript-exit-err { color: #e07070; }
 
+.transcript-expand-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #888;
+  font-size: 10px;
+  font-family: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+.transcript-expand-btn:hover { color: #ccc; border-color: #555; }
+
+/* A resource's "open" link sits just before its "expand". */
+a.transcript-expand-btn { text-decoration: none; }
+.transcript-expand-btn + .transcript-expand-btn { margin-left: 0; }
+
+/* Event type tags -- see App.tsx's EVENT_TYPE_LABELS. */
+.transcript-type-ai_invocation { color: #c9a0ff; }
+.transcript-type-note { color: #e0c060; }
+.transcript-type-resource { color: #60b8e0; }
+
+/* Notes and resources are attached by a person, not run -- set apart by a
+   coloured edge. */
+.transcript-entry-note { border-left: 3px solid #8a7430; }
+.transcript-entry-resource { border-left: 3px solid #306f8a; }
+
+/* A turn carried on from another host's secondary log, not yet fused into
+   the owner's session.jsonl -- deliberately quiet. */
+.transcript-entry.transcript-entry-secondary {
+  border-left: 2px dashed #6a6a78;
+  opacity: 0.9;
+}
+.transcript-secondary-tag { color: #9a9ab0; font-style: italic; }
+.transcript-record-missing { color: #8a8a8a; }
+.transcript-host-tag { color: #7fb0d8; }
+
+/* ---- Annotate bar (add a note / resource to the session) ---- */
+
+.annotate-bar {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 16px;
+  border-bottom: 1px solid #333;
+}
+
+.annotate-note-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 34px;
+  background: #1a1a1a;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.annotate-note-input:focus { outline: none; border-color: #555; }
+
+.annotate-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ---- Expanded turn (its -processed file) ---- */
+
+/* Wraps the transcript so it can be hidden, not unmounted, while a turn is
+   expanded -- keeping its scroll position for the way back up. */
+.session-transcript-scope {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.session-transcript-scope.is-hidden { display: none; }
+
+.processed-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.processed-pane-header {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid #333;
+}
+
+.processed-pane-file {
+  font-size: 12px;
+  color: #aaa;
+}
+
+.processed-pane > .session-detail-loading {
+  padding: 16px;
+}
+
+.processed-pane-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* The -processed file's JSON event header, as a key/value table. */
+.processed-header-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  background: #202021;
+  border: 1px solid #333;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  align-self: flex-start;
+  min-width: 50%;
+}
+
+.processed-header-table th,
+.processed-header-table td {
+  padding: 4px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #2a2a2b;
+}
+
+.processed-header-table tr:last-child th,
+.processed-header-table tr:last-child td { border-bottom: none; }
+
+.processed-header-table th {
+  color: #888;
+  font-weight: normal;
+  white-space: nowrap;
+}
+
+.processed-header-table td {
+  color: #d4d4d4;
+  word-break: break-all;
+}
+
+.processed-header-processing th,
+.processed-header-processing td { background: #1c1c1d; }
+
+.processed-header-sub {
+  margin-left: 8px;
+  font-size: 10px;
+  color: #888;
+}
+
+/* Command/response coloured by kind rather than IN>>/OUT>> prefixes. */
+.processed-pane-content .transcript-block { margin-top: 0; }
+.processed-pane-content .transcript-block-in .transcript-block-label { color: #4a90d9; }
+.processed-pane-content .transcript-block-out .transcript-block-label { color: #4ec94e; }
+.processed-pane-content .transcript-block-err .transcript-block-label { color: #e07070; }
+.processed-pane-content .transcript-block-in pre { background: #1a1f26; }
+.processed-pane-content .transcript-block-out pre { background: #1a221a; }
+
+.nav-up-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.nav-up-btn:hover { color: #999; }
+
 .transcript-block {
   margin-top: 6px;
 }

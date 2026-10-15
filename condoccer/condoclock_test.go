@@ -49,6 +49,86 @@ func TestUpdateCondocLockFirstSighting(t *testing.T) {
 	lockAbsent(t, s3.root)
 }
 
+// TestUpdateCondocLockPerRepo verifies that with a working dir above two
+// repos, each condoc's lock lands at the root of its own repo (where
+// local-representative and federation-command look for it), never at the
+// scan root, and that one repo's condoc reaching a safe point doesn't release
+// the other repo's lock.
+func TestUpdateCondocLockPerRepo(t *testing.T) {
+	parent := t.TempDir()
+	repoA := filepath.Join(parent, "repoA")
+	repoB := filepath.Join(parent, "repoB")
+	for _, r := range []string{repoA, repoB} {
+		if err := os.MkdirAll(filepath.Join(r, ".git"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(r, "condocs"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := newServer(parent)
+
+	s.updateCondocLock(CondocInfo{Path: "repoA/condocs/A.md", Name: "A", Phase: PhaseAgentRunning}, "", false)
+	s.updateCondocLock(CondocInfo{Path: "repoB/condocs/B.md", Name: "B", Phase: PhaseAgentRunning}, "", false)
+	if !strings.Contains(lockContent(t, repoA), "began work on A") {
+		t.Error("expected repoA's lock to describe A")
+	}
+	if !strings.Contains(lockContent(t, repoB), "began work on B") {
+		t.Error("expected repoB's lock to describe B")
+	}
+	lockAbsent(t, parent)
+
+	// A finishing releases only repoA's lock.
+	s.updateCondocLock(CondocInfo{Path: "repoA/condocs/A.md", Name: "A", Phase: PhaseAwaitingAction}, PhaseAgentRunning, true)
+	lockAbsent(t, repoA)
+	lockContent(t, repoB)
+}
+
+// TestSetRoot verifies "Set Working Dir" accepts existing directories
+// (absolute, or relative to the current root), rejects anything else, and
+// clears client subscriptions whose paths were relative to the old root.
+func TestSetRoot(t *testing.T) {
+	base := t.TempDir()
+	sub := filepath.Join(base, "sub")
+	if err := os.Mkdir(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(base, "f.txt")
+	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(base)
+	c := &wsClient{subscribed: "condocs/X.md", send: make(chan []byte, 8)}
+	s.clients[c] = true
+
+	if err := s.setRoot(filepath.Join(base, "missing")); err == nil {
+		t.Error("expected an error for a missing dir")
+	}
+	if err := s.setRoot(file); err == nil {
+		t.Error("expected an error for a non-directory")
+	}
+	if s.getRoot() != base {
+		t.Fatalf("root changed on a rejected setRoot: %q", s.getRoot())
+	}
+
+	if err := s.setRoot("sub"); err != nil {
+		t.Fatalf("setRoot(relative): %v", err)
+	}
+	if s.getRoot() != sub {
+		t.Errorf("root = %q, want %q", s.getRoot(), sub)
+	}
+	if c.subscribed != "" {
+		t.Errorf("expected subscription cleared, got %q", c.subscribed)
+	}
+
+	if err := s.setRoot(base); err != nil {
+		t.Fatalf("setRoot(absolute): %v", err)
+	}
+	if s.getRoot() != base {
+		t.Errorf("root = %q, want %q", s.getRoot(), base)
+	}
+}
+
 // TestUpdateCondocLockTransitions verifies the lock file is (re)created on
 // ordinary transitions, and removed exactly when a condoc reaches
 // awaiting_action (right after an agent finishes) or completed.

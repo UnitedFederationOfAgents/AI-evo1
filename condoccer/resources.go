@@ -1,11 +1,14 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -33,6 +36,7 @@ import (
 type resourceLink struct {
 	Name     string // original filename, for the link text
 	Filename string // on-disk filename inside the Impls folder (the link target); the host-cache's own <8-hex>_<name> id, kept as-is to stay collision-free
+	Note     string // for a zip, what extractZipResource did with it ("unzipped to <dir>/" or why it wasn't); written as a line under the link
 }
 
 // resourceTargetFile returns the step/substep file that receives a
@@ -77,7 +81,7 @@ func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequ
 // info.Phase, so nothing else would otherwise stop local-representative's
 // dev-repo watcher from rebuilding out from under the copy+edit.
 func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action ActionRequest) error {
-	targetFile, err := resourceTargetFile(s.root, info)
+	targetFile, err := resourceTargetFile(s.getRoot(), info)
 	if err != nil {
 		return err
 	}
@@ -86,15 +90,16 @@ func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action
 	// markdown edit: dropping new files into the condoc's Impls folder is
 	// itself a working-tree change local-representative's dev-repo watcher
 	// could notice, same as the file it links from.
-	s.writeCondocLock(fmt.Sprintf("copying resources into %s", info.Name))
-	defer s.removeCondocLock()
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, fmt.Sprintf("copying resources into %s", info.Name))
+	defer s.removeCondocLock(repoRoot)
 
 	links, err := s.fetchHighlightedFiles(implDir(mainPath))
 	if err != nil {
 		return err
 	}
 	if len(links) == 0 {
-		return fmt.Errorf("no highlighted files on local-representative")
+		return fmt.Errorf("no highlighted files on any local-representative")
 	}
 
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, links)
@@ -116,48 +121,134 @@ func (s *Server) addVoiceNoteResource(info CondocInfo, action ActionRequest) err
 		return fmt.Errorf("voice note has no dictated text")
 	}
 
-	targetFile, err := resourceTargetFile(s.root, info)
+	targetFile, err := resourceTargetFile(s.getRoot(), info)
 	if err != nil {
 		return err
 	}
 
-	s.writeCondocLock(fmt.Sprintf("adding a voice-note resource to %s", info.Name))
-	defer s.removeCondocLock()
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, fmt.Sprintf("adding a voice-note resource to %s", info.Name))
+	defer s.removeCondocLock(repoRoot)
 
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, nil)
 }
 
-// fetchHighlightedFiles asks local-representative (over the same connection
-// condoccer already maintains for status/commands -- see repr.go) which
-// files are currently highlighted, and copies each one's bytes into destDir.
-// It talks straight HTTP to LR's own dashboard port, disclosed over the
-// representable connection's "hello" message (see representable.Client.
-// PeerHTTPPort) -- LR's GET /api/files and GET /api/files/<id> are
-// deliberately ungated on proxiedHeader (see docs/DistributedExchange.md),
-// so this same call would also work unmodified if condoccer were ever
-// reached through agent-coordinator's transparent proxy instead of dialing
-// LR directly.
+// fetchHighlightedFiles copies every currently-highlighted file into destDir
+// -- from this box's local-representative and, through it, from every other
+// LR connected to agent-coordinator (Revision K of
+// condocs/initialRobotImpls/Step3Prompt.md). It talks straight HTTP to this
+// LR's own dashboard port, disclosed over the representable connection's
+// "hello" message (see representable.Client.PeerHTTPPort) -- LR's GET
+// /api/files and GET /api/files/<id> are deliberately ungated on
+// proxiedHeader (see docs/DistributedExchange.md), so this same call would
+// also work unmodified if condoccer were ever reached through
+// agent-coordinator's transparent proxy instead of dialing LR directly.
 func (s *Server) fetchHighlightedFiles(destDir string) ([]resourceLink, error) {
+	base, err := s.lrBase()
+	if err != nil {
+		return nil, err
+	}
+	return fetchAllHighlightedFiles(base, destDir)
+}
+
+// lrBase is the base URL of this condoccer's local-representative's
+// dashboard, from the representable connection's "hello" (see
+// representable.Client.PeerHTTPPort).
+func (s *Server) lrBase() (string, error) {
 	s.reprMu.Lock()
 	client := s.reprClient
 	host := s.reprHost
 	s.reprMu.Unlock()
 	if client == nil {
-		return nil, fmt.Errorf("not connected to local-representative")
+		return "", fmt.Errorf("not connected to local-representative")
 	}
 	lrHTTPPort := client.PeerHTTPPort()
 	if lrHTTPPort == "" {
-		return nil, fmt.Errorf("local-representative has not disclosed its HTTP port")
+		return "", fmt.Errorf("local-representative has not disclosed its HTTP port")
 	}
-	base := "http://" + net.JoinHostPort(host, lrHTTPPort)
-	return fetchHighlightedFilesFrom(base, destDir)
+	return "http://" + net.JoinHostPort(host, lrHTTPPort), nil
 }
 
-// fetchHighlightedFilesFrom does the actual HTTP work for
-// fetchHighlightedFiles against a resolved "http://host:port" base URL --
-// split out so it can be exercised against an httptest.Server without a real
-// representable connection.
-func fetchHighlightedFilesFrom(base, destDir string) ([]resourceLink, error) {
+// highlightedSource is one files tab fetchAllHighlightedFiles reads: Node
+// labels its files' links ("" for this box's own LR), Base is where its
+// GET /api/files and GET /api/files/<id> live.
+type highlightedSource struct {
+	Node string `json:"node"`
+	Base string `json:"base"`
+}
+
+// fetchAllHighlightedFiles copies the highlighted files of every source
+// into destDir: this LR (at base) first, then each other LR it reports from
+// GET /api/file-peers (agent-coordinator's /host/<node> proxies), then
+// agent-coordinator's own files (acHighlightedSources). This LR failing is
+// an error; a peer that can't be listed or copied from is logged and
+// skipped, so one unreachable node doesn't block the rest. A file id
+// already copied from an earlier source is skipped rather than overwritten.
+func fetchAllHighlightedFiles(base, destDir string) ([]resourceLink, error) {
+	links, err := fetchHighlightedFilesFrom(base, destDir, nil)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, l := range links {
+		seen[l.Filename] = true
+	}
+
+	peers, err := listHighlightedPeers(base)
+	if err != nil {
+		log.Printf("add resource: listing other local-representatives: %v", err)
+	}
+	for _, src := range append(peers, acHighlightedSources()...) {
+		got, err := fetchHighlightedFilesFrom(src.Base, destDir, seen)
+		if err != nil {
+			log.Printf("add resource: highlighted files on %s: %v", src.Node, err)
+			continue
+		}
+		for _, l := range got {
+			seen[l.Filename] = true
+			l.Name = fmt.Sprintf("%s (%s)", l.Name, src.Node)
+			links = append(links, l)
+		}
+	}
+	return links, nil
+}
+
+// listHighlightedPeers asks this LR (at base) for the other LRs connected to
+// agent-coordinator (see local-representative/filepeers.go). An LR that
+// predates GET /api/file-peers answers 404, which just means no peers.
+func listHighlightedPeers(base string) ([]highlightedSource, error) {
+	resp, err := http.Get(base + "/api/file-peers")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	var msg struct {
+		Peers []highlightedSource `json:"peers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&msg); err != nil {
+		return nil, err
+	}
+	return msg.Peers, nil
+}
+
+// acHighlightedSources is where agent-coordinator's own files will join the
+// "Highlighted" sources. AC has no files of its own yet, so for now there
+// are none.
+func acHighlightedSources() []highlightedSource {
+	return nil
+}
+
+// fetchHighlightedFilesFrom does the actual HTTP work for one source against
+// a resolved base URL -- split out so it can be exercised against an
+// httptest.Server without a real representable connection. Files whose id
+// is in skip (which may be nil) are left out.
+func fetchHighlightedFilesFrom(base, destDir string, skip map[string]bool) ([]resourceLink, error) {
 	resp, err := http.Get(base + "/api/files")
 	if err != nil {
 		return nil, fmt.Errorf("listing local-representative's files: %w", err)
@@ -183,13 +274,17 @@ func fetchHighlightedFilesFrom(base, destDir string) ([]resourceLink, error) {
 
 	var links []resourceLink
 	for _, f := range listing.Files {
-		if !f.Highlighted {
+		if !f.Highlighted || skip[f.ID] {
 			continue
 		}
 		if err := downloadFile(base, f.ID, destDir); err != nil {
 			return nil, fmt.Errorf("copying %s: %w", f.Name, err)
 		}
-		links = append(links, resourceLink{Name: f.Name, Filename: f.ID})
+		note, err := extractZipResource(destDir, f.ID)
+		if err != nil {
+			return nil, fmt.Errorf("extracting %s: %w", f.Name, err)
+		}
+		links = append(links, resourceLink{Name: f.Name, Filename: f.ID, Note: note})
 	}
 	return links, nil
 }
@@ -250,24 +345,41 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	condocRel := r.FormValue("path")
-	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
-		http.Error(w, "invalid condoc path", http.StatusBadRequest)
-		return
-	}
 	headers := r.MultipartForm.File["file"]
 	if len(headers) == 0 {
 		http.Error(w, `no file provided (expected multipart field "file")`, http.StatusBadRequest)
 		return
 	}
+	s.writeResourceFiles(w, r.FormValue("path"), r.FormValue("name"), r.FormValue("description"), len(headers),
+		func(i int, destDir string) (resourceLink, string, error) {
+			link, err := saveUploadedResource(headers[i], destDir)
+			return link, headers[i].Filename, err
+		})
+}
 
-	absPath := filepath.Join(s.root, filepath.FromSlash(condocRel))
-	info, err := detectPhase(s.root, absPath)
+// writeResourceFiles is the shared tail of the "Upload" source's two ways
+// in (a browser upload, and "select from host" -- see handleHostResource):
+// it resolves the condoc at condocRel to its active step/substep file the
+// same way addResource does, asserts the .condoc lock for the same reason
+// (writing into the Impls folder is itself a working-tree change
+// local-representative's dev-repo watcher could notice), saves each of the
+// n files with save (label names the file in an error), unzips zips, and
+// inserts the resulting "## Resource N" block. It writes the HTTP reply.
+func (s *Server) writeResourceFiles(w http.ResponseWriter, condocRel, name, description string, n int,
+	save func(i int, destDir string) (link resourceLink, label string, err error)) {
+	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+		http.Error(w, "invalid condoc path", http.StatusBadRequest)
+		return
+	}
+
+	root := s.getRoot()
+	absPath := filepath.Join(root, filepath.FromSlash(condocRel))
+	info, err := detectPhase(root, absPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	targetFile, err := resourceTargetFile(s.root, info)
+	targetFile, err := resourceTargetFile(root, info)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -276,8 +388,9 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 	// Same lock discipline as addResource: assert it before the first
 	// uploaded byte lands in the Impls folder, not just around the markdown
 	// edit.
-	s.writeCondocLock(fmt.Sprintf("uploading resources into %s", info.Name))
-	defer s.removeCondocLock()
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, fmt.Sprintf("uploading resources into %s", info.Name))
+	defer s.removeCondocLock(repoRoot)
 
 	destDir := implDir(absPath)
 	if err := os.MkdirAll(destDir, 0755); err != nil {
@@ -285,17 +398,23 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	links := make([]resourceLink, 0, len(headers))
-	for _, fh := range headers {
-		link, err := saveUploadedResource(fh, destDir)
+	links := make([]resourceLink, 0, n)
+	for i := 0; i < n; i++ {
+		link, label, err := save(i, destDir)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("saving %s: %v", fh.Filename, err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("saving %s: %v", label, err), http.StatusInternalServerError)
 			return
 		}
+		note, err := extractZipResource(destDir, link.Filename)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("extracting %s: %v", label, err), http.StatusUnprocessableEntity)
+			return
+		}
+		link.Note = note
 		links = append(links, link)
 	}
 
-	if err := insertResourceBlock(targetFile, r.FormValue("name"), r.FormValue("description"), links); err != nil {
+	if err := insertResourceBlock(targetFile, name, description, links); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -314,8 +433,13 @@ func saveUploadedResource(fh *multipart.FileHeader, destDir string) (resourceLin
 		return resourceLink{}, err
 	}
 	defer src.Close()
+	return saveResourceFrom(fh.Filename, src, destDir)
+}
 
-	name := sanitizeFilename(fh.Filename)
+// saveResourceFrom writes filename's content from src into destDir the way
+// saveUploadedResource does.
+func saveResourceFrom(filename string, src io.Reader, destDir string) (resourceLink, error) {
+	name := sanitizeFilename(filename)
 	id := randomID() + "_" + name
 	dst, err := os.OpenFile(filepath.Join(destDir, id), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
@@ -328,6 +452,138 @@ func saveUploadedResource(fh *multipart.FileHeader, destDir string) (resourceLin
 		return resourceLink{}, err
 	}
 	return resourceLink{Name: name, Filename: id}, nil
+}
+
+// ---- Zip extraction for Add Resources (Revision F of
+// condocs/initialRobotImpls/Step2Prompt.md) ----
+//
+// Any .zip brought in by either "Add Resources" source is also unpacked into
+// a folder of the same name, minus the extension, beside it in the Impls
+// folder -- e.g. "117e9380_run.zip" -> "117e9380_run/" -- so an agent
+// working the step can read the contents without needing unzip approval.
+// Revision E of condocs/initialRobotImpls/Step4Prompt.md adds a note under
+// the zip's link in its "## Resource N" block saying where it was unzipped
+// to, or that it was too large to unzip.
+
+// maxZipExtractSize caps the total uncompressed bytes extracted from one
+// zip resource, so a zip bomb can't fill the disk. A var so tests can lower
+// it.
+var maxZipExtractSize int64 = 1 << 30 // 1GiB
+
+// errZipTooLarge is extractZipEntry's error when a zip's contents run past
+// maxZipExtractSize.
+var errZipTooLarge = errors.New("zip contents too large")
+
+// extractZipResource unpacks filename (already saved in dir) into
+// dir/<filename minus ".zip">/ when it's a zip; any other file is left alone
+// with an empty note. For a zip, note is the line shown under its link:
+// "unzipped to <dir>/", or "too large to unzip (...)" when its contents
+// exceed maxZipExtractSize -- not an error, since the zip itself is still
+// kept and linked. Entries that would land outside that folder (absolute
+// paths, "..") and symlinks are rejected. On failure, or when too large, the
+// partially-extracted folder is removed, leaving just the zip itself.
+func extractZipResource(dir, filename string) (note string, err error) {
+	ext := filepath.Ext(filename)
+	if !strings.EqualFold(ext, ".zip") || len(filename) == len(ext) {
+		return "", nil
+	}
+	destName := strings.TrimSuffix(filename, ext)
+	dest := filepath.Join(dir, destName)
+	tooLarge := fmt.Sprintf("too large to unzip: over %s uncompressed", formatBytes(maxZipExtractSize))
+
+	zr, err := zip.OpenReader(filepath.Join(dir, filename))
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+
+	// Check the sizes the zip claims before writing anything; the streaming
+	// limit in extractZipEntry still catches a zip whose headers lie.
+	var claimed uint64
+	for _, zf := range zr.File {
+		claimed += zf.UncompressedSize64
+	}
+	if claimed > uint64(maxZipExtractSize) {
+		return tooLarge, nil
+	}
+
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil || note == tooLarge {
+			os.RemoveAll(dest)
+		}
+	}()
+
+	remaining := maxZipExtractSize
+	for _, zf := range zr.File {
+		name := filepath.FromSlash(strings.ReplaceAll(zf.Name, "\\", "/"))
+		target := filepath.Join(dest, name)
+		if filepath.IsAbs(name) || (target != dest && !strings.HasPrefix(target, dest+string(filepath.Separator))) {
+			return "", fmt.Errorf("zip entry %q escapes the extraction folder", zf.Name)
+		}
+		mode := zf.Mode()
+		switch {
+		case mode.IsDir():
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return "", err
+			}
+			continue
+		case !mode.IsRegular():
+			return "", fmt.Errorf("zip entry %q is not a regular file", zf.Name)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return "", err
+		}
+		n, err := extractZipEntry(zf, target, remaining)
+		if errors.Is(err, errZipTooLarge) {
+			return tooLarge, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		remaining -= n
+	}
+	return "unzipped to " + destName + "/", nil
+}
+
+// formatBytes renders n in the largest binary unit it fills, e.g. 1<<30 ->
+// "1GiB", for the "too large to unzip" note.
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%dGiB", n>>30)
+	case n >= 1<<20:
+		return fmt.Sprintf("%dMiB", n>>20)
+	case n >= 1<<10:
+		return fmt.Sprintf("%dKiB", n>>10)
+	}
+	return fmt.Sprintf("%d bytes", n)
+}
+
+// extractZipEntry writes one zip entry's bytes to target, failing with
+// errZipTooLarge if it would exceed limit bytes. Returns the number of bytes
+// written.
+func extractZipEntry(zf *zip.File, target string, limit int64) (int64, error) {
+	src, err := zf.Open()
+	if err != nil {
+		return 0, err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer dst.Close()
+	n, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err != nil {
+		return n, err
+	}
+	if n > limit {
+		return n, errZipTooLarge
+	}
+	return n, nil
 }
 
 // sanitizeFilename strips directory components so an upload can't escape the
@@ -369,7 +625,8 @@ func nextResourceNum(content string) int {
 // insertResourceBlock inserts a new "## Resource N" block -- optionally
 // "## Resource N -- <name>" when a display name is given (Revision B; also
 // where the original "## Resource (N)" parens were dropped) -- the optional
-// description followed by a link per file in links -- immediately above the
+// description followed by a link per file in links, each with its Note (if
+// any) as an indented "(note)" line beneath it -- immediately above the
 // file's pending "## <REPLACE-Revision|Retry> X" placeholder (see
 // replaceIterationPlaceholder), with blank-line spacing matching the rest of
 // a step/substep file's sections.
@@ -397,6 +654,9 @@ func insertResourceBlock(path, name, description string, links []resourceLink) e
 	}
 	for _, l := range links {
 		fmt.Fprintf(&b, "- [%s](%s)\n", l.Name, l.Filename)
+		if l.Note != "" {
+			fmt.Fprintf(&b, "  (%s)\n", l.Note)
+		}
 	}
 	b.WriteString("\n")
 
@@ -438,7 +698,7 @@ func (s *Server) handleResourceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := implDir(filepath.Join(s.root, filepath.FromSlash(condocRel)))
+	dir := implDir(filepath.Join(s.getRoot(), filepath.FromSlash(condocRel)))
 	f, err := os.Open(filepath.Join(dir, filename))
 	if err != nil {
 		http.NotFound(w, r)

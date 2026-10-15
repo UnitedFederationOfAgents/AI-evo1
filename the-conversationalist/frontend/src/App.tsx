@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ModeMismatchMsg,
+  NotepadMsg,
+  NotesResultMsg,
+  NotesSource,
+  PollyAudioMsg,
   ReprStatus,
   ReprStatusMsg,
   SaveResultMsg,
   SelfInfoMsg,
+  TranscribeStatusMsg,
   TranscriptMsg,
 } from './types'
+import { noteTCStart } from './tcannounce'
 
 // ---- WebSocket hook ----
 //
@@ -33,6 +39,27 @@ function useConversationalistWS() {
   const [transcript, setTranscript] = useState('')
   const [partialTranscript, setPartialTranscript] = useState('')
   const [saveStatus, setSaveStatus] = useState<SaveStatus>({ kind: 'idle' })
+  const [transcribeStatus, setTranscribeStatus] = useState<TranscribeStatusMsg>({
+    state: 'checking',
+    engine: 'aws-transcribe',
+  })
+  const [notepad, setNotepadText] = useState('')
+  // notepadRevRef is the newest server revision this tab has applied, so a
+  // stale "notepad" message (e.g. the connect-time snapshot racing a newer
+  // broadcast) can't roll the text back; notepadSeqRef numbers this tab's
+  // own edits so the server can drop any that arrive out of order (see
+  // notepad.go).
+  const notepadRevRef = useRef(0)
+  const notepadSeqRef = useRef(0)
+  // notes holds each panel's "To Notes" state (see notes.go);
+  // notesInFlightRef remembers the text each pending request sent, so a
+  // successful "notes-result" can record it as that panel's sent text.
+  const [notes, setNotes] = useState<Record<NotesSource, NotesStatus>>(INITIAL_NOTES)
+  const notesInFlightRef = useRef<Partial<Record<NotesSource, string>>>({})
+  // pollyResult is the latest "polly-audio" answer; PollyButton plays it if
+  // its id is the request it's waiting for (see polly.go).
+  const [pollyResult, setPollyResult] = useState<PollyAudioMsg | null>(null)
+  const pollySeqRef = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
 
   const send = useCallback((type: string, payload: unknown) => {
@@ -77,10 +104,22 @@ function useConversationalistWS() {
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
-      ws.onopen = () => setConnected(true)
+      ws.onopen = () => {
+        // A reconnect may be to a restarted server whose notepad revision
+        // counter started over -- accept whatever it sends next.
+        notepadRevRef.current = 0
+        setConnected(true)
+      }
 
       ws.onclose = () => {
         setConnected(false)
+        // A request in flight on the dropped socket will never be answered;
+        // free its button rather than leaving it stuck.
+        notesInFlightRef.current = {}
+        setNotes((n) => ({
+          notepad: { ...n.notepad, pending: false },
+          transcript: { ...n.transcript, pending: false },
+        }))
         setTimeout(connect, 2000)
       }
 
@@ -104,7 +143,12 @@ function useConversationalistWS() {
             // Vite dev server, where HMR already keeps the tab current.
             if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
               window.location.reload()
+              return
             }
+            // Announce a start/restart (Step5Prompt.md Revision D) -- but not
+            // when embedded (LR's/AC's convo tab, condoccer's capture
+            // overlay): the page around the iframe announces it itself.
+            if (window.self === window.top) noteTCStart('local', p.started_at)
           } else if (msg.type === 'mode-mismatch') {
             const p = msg.payload as ModeMismatchMsg
             setModeMismatch(p.mismatched ? p : null)
@@ -125,6 +169,27 @@ function useConversationalistWS() {
             } else {
               setSaveStatus({ kind: 'error', message: p.error ?? 'save failed' })
             }
+          } else if (msg.type === 'notepad') {
+            const p = msg.payload as NotepadMsg
+            if (p.rev >= notepadRevRef.current) {
+              notepadRevRef.current = p.rev
+              setNotepadText(p.text)
+            }
+          } else if (msg.type === 'transcribe-status') {
+            setTranscribeStatus(msg.payload as TranscribeStatusMsg)
+          } else if (msg.type === 'notes-result') {
+            const p = msg.payload as NotesResultMsg
+            if (p.source !== 'notepad' && p.source !== 'transcript') return
+            const sentText = notesInFlightRef.current[p.source]
+            delete notesInFlightRef.current[p.source]
+            setNotes((n) => ({
+              ...n,
+              [p.source]: p.success
+                ? { pending: false, sent: sentText, message: `appended to ${p.path ?? 'notes file'}` }
+                : { pending: false, sent: n[p.source].sent, error: p.error ?? 'append failed' },
+            }))
+          } else if (msg.type === 'polly-audio') {
+            setPollyResult(msg.payload as PollyAudioMsg)
           } else if (msg.type === 'error') {
             setSaveStatus({ kind: 'error', message: String(msg.payload) })
           }
@@ -190,6 +255,56 @@ function useConversationalistWS() {
     send('save-transcript', {})
   }, [send])
 
+  // clearTranscript empties the transcription window (Revision G) and the
+  // server's accumulated copy, so a later Save can't write the cleared text.
+  // Recording, if running, carries on into the now-empty window. The To
+  // Notes "last sent" marker resets too, so new text can always be appended.
+  const clearTranscript = useCallback(() => {
+    send('clear-transcript', {})
+    setTranscript('')
+    setPartialTranscript('')
+    setSaveStatus({ kind: 'idle' })
+    setNotes((n) => ({ ...n, transcript: { pending: n.transcript.pending } }))
+  }, [send])
+
+  const recheckTranscribe = useCallback(() => {
+    send('recheck-transcribe', {})
+  }, [send])
+
+  // setNotepad applies a local edit immediately and pushes it to the server,
+  // which relays it to every other connected client.
+  const setNotepad = useCallback(
+    (text: string) => {
+      setNotepadText(text)
+      notepadSeqRef.current += 1
+      send('set-notepad', { text, seq: notepadSeqRef.current })
+    },
+    [send],
+  )
+
+  // sendToNotes asks the server to append text to its notes file. The panel
+  // keeps its text; its button stays disabled until the text differs from
+  // what was last appended (see ToNotesButton).
+  const sendToNotes = useCallback(
+    (source: NotesSource, text: string) => {
+      notesInFlightRef.current[source] = text
+      setNotes((n) => ({ ...n, [source]: { ...n[source], pending: true, error: undefined, message: undefined } }))
+      send('append-notes', { source, text })
+    },
+    [send],
+  )
+
+  // requestPolly asks the server to synthesize text with AWS Polly and
+  // returns the request's id; the answer arrives as pollyResult.
+  const requestPolly = useCallback(
+    (text: string) => {
+      pollySeqRef.current += 1
+      send('polly-speak', { id: pollySeqRef.current, text })
+      return pollySeqRef.current
+    },
+    [send],
+  )
+
   return {
     connected,
     reprStatus,
@@ -209,6 +324,15 @@ function useConversationalistWS() {
     startRecording,
     stopRecording,
     saveTranscript,
+    clearTranscript,
+    transcribeStatus,
+    recheckTranscribe,
+    notepad,
+    setNotepad,
+    notes,
+    sendToNotes,
+    pollyResult,
+    requestPolly,
   }
 }
 
@@ -225,6 +349,49 @@ function int16ToBase64(samples: Int16Array): string {
 }
 
 type SaveStatus = { kind: 'idle' | 'pending' | 'success' | 'error'; message?: string }
+
+// NotesStatus is one panel's "To Notes" state: sent is the text it last
+// appended successfully, message/error describe the latest attempt.
+type NotesStatus = { pending: boolean; sent?: string; message?: string; error?: string }
+
+const INITIAL_NOTES: Record<NotesSource, NotesStatus> = {
+  notepad: { pending: false },
+  transcript: { pending: false },
+}
+
+// ---- To Notes (Step5SubstepGPrompt.md Revision C) ----
+//
+// ToNotesButton appends text to the server's notes file (~/notes-input.txt
+// by default -- see notes.go) without clearing the panel it sits in. It's
+// only enabled while there's text to send that differs from what this panel
+// last appended, so the same content can't be appended twice in a row.
+
+function ToNotesButton({ connected, text, status, onSend }: {
+  connected: boolean
+  text: string
+  status: NotesStatus
+  onSend: (text: string) => void
+}) {
+  const alreadySent = status.sent !== undefined && text === status.sent
+  const disabled = !connected || status.pending || !text.trim() || alreadySent
+  const title = !text.trim()
+    ? 'nothing to append'
+    : alreadySent
+      ? 'already appended -- edit the text to append again'
+      : 'append this text to the notes file'
+  return (
+    <span className="to-notes">
+      <button className="btn-secondary" disabled={disabled} title={title} onClick={() => onSend(text)}>
+        {status.pending ? 'Appending…' : 'To Notes'}
+      </button>
+      {status.error ? (
+        <span className="to-notes-status to-notes-error">{status.error}</span>
+      ) : alreadySent && status.message ? (
+        <span className="to-notes-status">{status.message}</span>
+      ) : null}
+    </span>
+  )
+}
 
 // ---- representable connect/disconnect widget ----
 
@@ -323,9 +490,71 @@ interface TranscriptionPanelProps {
   transcript: string
   partialTranscript: string
   saveStatus: SaveStatus
+  transcribeStatus: TranscribeStatusMsg
   onStart: () => void
   onStop: () => void
   onSave: () => void
+  onClear: () => void
+  onRecheck: () => void
+  notes: NotesStatus
+  onToNotes: (text: string) => void
+  onToNotepad: (text: string) => void
+}
+
+const TRANSCRIBE_ENGINE_LABELS: Record<string, string> = {
+  'aws-transcribe': 'AWS Transcribe',
+}
+
+// TranscribeAvailability shows whether the server can currently reach its
+// transcription engine (see transcribe_status.go): a quiet one-liner while
+// available or checking, and a prominent "unavailable" notice with the
+// server's reason and a Recheck button otherwise. A server warning (e.g. a
+// defaulted region) shows as a yellow notice above either.
+function TranscribeAvailability({ status, connected, onRecheck }: {
+  status: TranscribeStatusMsg
+  connected: boolean
+  onRecheck: () => void
+}) {
+  return (
+    <>
+      {status.warning && (
+        <div className="transcribe-availability transcribe-availability-warning">{status.warning}</div>
+      )}
+      <TranscribeAvailabilityState status={status} connected={connected} onRecheck={onRecheck} />
+    </>
+  )
+}
+
+function TranscribeAvailabilityState({ status, connected, onRecheck }: {
+  status: TranscribeStatusMsg
+  connected: boolean
+  onRecheck: () => void
+}) {
+  const engine = TRANSCRIBE_ENGINE_LABELS[status.engine] ?? status.engine
+  if (status.state === 'unavailable') {
+    return (
+      <div className="transcribe-availability transcribe-availability-unavailable">
+        <div>
+          <strong>Transcription unavailable</strong> — {engine} can't be reached
+          {status.reason && <div className="transcribe-availability-reason">{status.reason}</div>}
+        </div>
+        <button className="btn-secondary" disabled={!connected} onClick={onRecheck}>
+          Recheck
+        </button>
+      </div>
+    )
+  }
+  const who = status.identity
+    ? `as ${status.identity}${status.credential_source ? ` (${status.credential_source})` : ''}`
+    : undefined
+  return (
+    <div className={`transcribe-availability transcribe-availability-${status.state}`} title={who}>
+      <span className={`conn-dot ${status.state === 'available' ? 'connected' : 'connecting'}`} />
+      {status.state === 'available'
+        ? `${engine} available${status.region ? ` (${status.region})` : ''}`
+        : `checking ${engine} access…`}
+    </div>
+  )
 }
 
 function TranscriptionPanel({
@@ -334,16 +563,31 @@ function TranscriptionPanel({
   transcript,
   partialTranscript,
   saveStatus,
+  transcribeStatus,
   onStart,
   onStop,
   onSave,
+  onClear,
+  onRecheck,
+  notes,
+  onToNotes,
+  onToNotepad,
 }: TranscriptionPanelProps) {
   const hasTranscript = Boolean(transcript.trim() || partialTranscript.trim())
+  // What the window shows, partial result included.
+  const shownTranscript = `${transcript} ${partialTranscript}`.trim()
+  const unavailable = transcribeStatus.state === 'unavailable'
 
   return (
     <div className="transcribe-panel">
+      <TranscribeAvailability status={transcribeStatus} connected={connected} onRecheck={onRecheck} />
       <div className="transcribe-controls">
-        <button className="btn-secondary" disabled={!connected || recording} onClick={onStart}>
+        <button
+          className="btn-secondary"
+          disabled={!connected || recording || unavailable}
+          title={unavailable ? 'transcription is unavailable -- see the notice above' : undefined}
+          onClick={onStart}
+        >
           Start Transcription
         </button>
         <button className="btn-secondary" disabled={!recording} onClick={onStop}>
@@ -351,6 +595,18 @@ function TranscriptionPanel({
         </button>
         <button className="btn-secondary" disabled={!connected || !hasTranscript} onClick={onSave}>
           Save to File
+        </button>
+        <ToNotesButton connected={connected} text={shownTranscript} status={notes} onSend={onToNotes} />
+        <button
+          className="btn-secondary"
+          disabled={!connected || !hasTranscript}
+          title="add the transcript to the end of the shared notepad"
+          onClick={() => onToNotepad(shownTranscript)}
+        >
+          To Notepad
+        </button>
+        <button className="btn-secondary" disabled={!connected || !hasTranscript} onClick={onClear}>
+          Clear
         </button>
         {recording && <span className="conn-dot connecting transcribe-recording-dot" title="recording" />}
       </div>
@@ -360,6 +616,8 @@ function TranscriptionPanel({
             {transcript}
             {partialTranscript && <span className="transcribe-partial"> {partialTranscript}</span>}
           </>
+        ) : unavailable ? (
+          <span className="transcribe-placeholder">Transcription is unavailable on this instance.</span>
         ) : (
           <span className="transcribe-placeholder">Press "Start Transcription" and speak — the transcript appears here.</span>
         )}
@@ -370,6 +628,246 @@ function TranscriptionPanel({
         </div>
       )}
     </div>
+  )
+}
+
+// ---- Notepad panel ----
+//
+// A quick-notes area shared by every client connected to this instance
+// (condocs/initialRobotImpls/Step5Prompt.md): each keystroke goes straight to
+// the server and on to every other open tab, last writer wins. Read-only
+// while the WebSocket is down so edits can't silently go nowhere.
+
+interface NotepadPanelProps {
+  connected: boolean
+  text: string
+  onChange: (text: string) => void
+  notes: NotesStatus
+  onToNotes: (text: string) => void
+  pollyResult: PollyAudioMsg | null
+  onPolly: (text: string) => number
+}
+
+function NotepadPanel({ connected, text, onChange, notes, onToNotes, pollyResult, onPolly }: NotepadPanelProps) {
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [pollyError, setPollyError] = useState<string | undefined>()
+
+  // speakText reads the textarea's current selection if there is one, else
+  // the whole notepad -- read at click time rather than from `text` so a
+  // selection made just before clicking is what gets spoken.
+  const speakText = useCallback(() => {
+    const el = inputRef.current
+    if (el && el.selectionStart !== el.selectionEnd) {
+      return el.value.slice(el.selectionStart, el.selectionEnd)
+    }
+    return el?.value ?? text
+  }, [text])
+
+  return (
+    <div className="notepad-panel">
+      <div className="notepad-header">
+        <span className="notepad-title">Notepad</span>
+        <span className="notepad-hint">{connected ? 'shared with all clients' : 'disconnected — read-only'}</span>
+        <ToNotesButton connected={connected} text={text} status={notes} onSend={onToNotes} />
+      </div>
+      <div className="notepad-body">
+        <textarea
+          ref={inputRef}
+          className="notepad-input"
+          value={text}
+          readOnly={!connected}
+          placeholder="Quick notes — visible to everyone connected."
+          spellCheck={false}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <div className="notepad-speak-buttons">
+          <SpeakButton getText={speakText} disabled={!text.trim()} />
+          <PollyButton
+            connected={connected}
+            getText={speakText}
+            disabled={!text.trim()}
+            result={pollyResult}
+            onRequest={onPolly}
+            onError={setPollyError}
+          />
+        </div>
+      </div>
+      {pollyError && <div className="polly-error">{pollyError}</div>}
+    </div>
+  )
+}
+
+// ---- Speech output (Step5Prompt.md Revision C) ----
+//
+// The first step of docs/ConversationalistSpeechOutput.md's recommendation:
+// the browser's own speechSynthesis, spoken locally in the tab that clicked
+// -- nothing goes through the server or to other clients, unlike the notepad
+// text itself.
+
+// SPEAK_ICON follows the grey-palette wireframe convention of
+// local-representative's/agent-coordinator's MIC_ICON and CAMERA_ICON
+// (Step1SubstepCPrompt.md): a speech balloon with a sound wave in it.
+const SPEAK_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-9l-4 3.5V17H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
+    <path d="M7 9.5v2M9.5 8v5M12 6.5v8M14.5 8.5v4M17 9.5v2" />
+  </svg>
+)
+
+const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window
+
+// SpeakButton toggles speaking getText()'s result: click to speak, click
+// again to stop. Renders nothing in a browser without speechSynthesis.
+function SpeakButton({ getText, disabled }: { getText: () => string; disabled: boolean }) {
+  const [speaking, setSpeaking] = useState(false)
+
+  // Don't keep talking after the panel goes away.
+  useEffect(() => () => { if (speechSupported) window.speechSynthesis.cancel() }, [])
+
+  const toggle = useCallback(() => {
+    const synth = window.speechSynthesis
+    if (speaking) {
+      synth.cancel()
+      setSpeaking(false)
+      return
+    }
+    const text = getText().trim()
+    if (!text) return
+    // Clear anything already queued so this utterance starts immediately.
+    synth.cancel()
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => setSpeaking(false)
+    synth.speak(utterance)
+    setSpeaking(true)
+  }, [speaking, getText])
+
+  if (!speechSupported) return null
+  return (
+    <button
+      type="button"
+      className={`speak-btn${speaking ? ' speak-btn-active' : ''}`}
+      disabled={disabled && !speaking}
+      title={speaking ? 'stop speaking' : 'speak the notepad (or its selected text) aloud'}
+      aria-pressed={speaking}
+      onClick={toggle}
+    >
+      {SPEAK_ICON}
+    </button>
+  )
+}
+
+// ---- AWS Polly speech (Step5SubstepGPrompt.md Revision I) ----
+//
+// Option B of docs/ConversationalistSpeechOutput.md, as one isolated button
+// under SpeakButton: the server synthesizes the text with Polly (polly.go)
+// and only this tab plays the returned audio.
+
+// POLLY_ICON is SPEAK_ICON's balloon with a "P" in it.
+const POLLY_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-9l-4 3.5V17H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
+    <path d="M10 14V7.5h2.5a2 2 0 0 1 0 4H10" />
+  </svg>
+)
+
+// POLLY_MAX_CHARS matches polly.go's pollyMaxChars.
+const POLLY_MAX_CHARS = 3000
+
+// PollyButton toggles Polly speech of getText()'s result: click to request
+// and play it, click again to cancel the wait or stop playback. A failure
+// is reported through onError and cleared on the next click.
+function PollyButton({ connected, getText, disabled, result, onRequest, onError }: {
+  connected: boolean
+  getText: () => string
+  disabled: boolean
+  result: PollyAudioMsg | null
+  onRequest: (text: string) => number
+  onError: (message?: string) => void
+}) {
+  // waitingId is the request whose answer should be played; 0 when none.
+  const [waitingId, setWaitingId] = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const audioRef = useRef<{ audio: HTMLAudioElement; url: string } | null>(null)
+
+  const stopAudio = useCallback(() => {
+    const cur = audioRef.current
+    audioRef.current = null
+    if (cur) {
+      cur.audio.pause()
+      URL.revokeObjectURL(cur.url)
+    }
+    setPlaying(false)
+  }, [])
+
+  // Don't keep talking after the panel goes away.
+  useEffect(() => stopAudio, [stopAudio])
+
+  // A request in flight on a dropped socket will never be answered.
+  useEffect(() => {
+    if (!connected) setWaitingId(0)
+  }, [connected])
+
+  useEffect(() => {
+    if (!result || waitingId === 0 || result.id !== waitingId) return
+    setWaitingId(0)
+    if (result.error || !result.audio) {
+      onError(`Polly: ${result.error ?? 'no audio returned'}`)
+      return
+    }
+    const bytes = Uint8Array.from(atob(result.audio), (ch) => ch.charCodeAt(0))
+    const url = URL.createObjectURL(new Blob([bytes], { type: result.content_type || 'audio/mpeg' }))
+    const audio = new Audio(url)
+    audio.onended = stopAudio
+    audio.onerror = () => {
+      stopAudio()
+      onError('Polly: the browser could not play the audio')
+    }
+    stopAudio()
+    audioRef.current = { audio, url }
+    setPlaying(true)
+    audio.play().catch((err) => {
+      stopAudio()
+      onError(`Polly: playback failed: ${String(err)}`)
+    })
+  }, [result, waitingId, stopAudio, onError])
+
+  const busy = waitingId !== 0 || playing
+
+  const toggle = useCallback(() => {
+    onError(undefined)
+    if (busy) {
+      setWaitingId(0)
+      stopAudio()
+      return
+    }
+    const text = getText().trim()
+    if (!text) return
+    const chars = [...text].length
+    if (chars > POLLY_MAX_CHARS) {
+      onError(`Polly: ${chars} characters is over its ${POLLY_MAX_CHARS}-character limit -- select a shorter part`)
+      return
+    }
+    setWaitingId(onRequest(text))
+  }, [busy, getText, onRequest, onError, stopAudio])
+
+  return (
+    <button
+      type="button"
+      className={`speak-btn${busy ? ' speak-btn-active' : ''}${waitingId !== 0 ? ' speak-btn-waiting' : ''}`}
+      disabled={!busy && (disabled || !connected)}
+      title={
+        waitingId !== 0
+          ? 'waiting for AWS Polly -- click to cancel'
+          : playing
+            ? 'stop speaking'
+            : 'speak the notepad (or its selected text) aloud with AWS Polly'
+      }
+      aria-pressed={busy}
+      onClick={toggle}
+    >
+      {POLLY_ICON}
+    </button>
   )
 }
 
@@ -393,16 +891,28 @@ function isCaptureMode(): boolean {
 }
 
 function CaptureApp() {
-  const { connected, recording, transcript, partialTranscript, saveStatus, startRecording, stopRecording } =
-    useConversationalistWS()
+  const {
+    connected,
+    recording,
+    transcript,
+    partialTranscript,
+    saveStatus,
+    transcribeStatus,
+    startRecording,
+    stopRecording,
+    recheckTranscribe,
+  } = useConversationalistWS()
   const startedRef = useRef(false)
+  const unavailable = transcribeStatus.state === 'unavailable'
 
+  // Auto-start once the server has confirmed its transcription engine is
+  // reachable, rather than opening the mic only to have Start fail.
   useEffect(() => {
-    if (connected && !startedRef.current) {
+    if (connected && transcribeStatus.state === 'available' && !startedRef.current) {
       startedRef.current = true
       startRecording()
     }
-  }, [connected, startRecording])
+  }, [connected, transcribeStatus.state, startRecording])
 
   const insertTranscript = useCallback(() => {
     stopRecording()
@@ -427,6 +937,10 @@ function CaptureApp() {
           </>
         ) : saveStatus.kind === 'error' ? (
           <span className="tc-capture-error">{saveStatus.message}</span>
+        ) : unavailable ? (
+          <span className="tc-capture-error">
+            Transcription unavailable{transcribeStatus.reason ? `: ${transcribeStatus.reason}` : ''}
+          </span>
         ) : (
           <span>Connecting…</span>
         )}
@@ -446,7 +960,9 @@ function CaptureApp() {
           Insert Transcript
         </button>
         <button className="btn-secondary" onClick={cancel}>Cancel</button>
-        {saveStatus.kind === 'error' && (
+        {unavailable ? (
+          <button className="btn-secondary" disabled={!connected} onClick={recheckTranscribe}>Recheck</button>
+        ) : saveStatus.kind === 'error' && (
           <button className="btn-secondary" onClick={startRecording}>Retry</button>
         )}
       </div>
@@ -476,7 +992,23 @@ export default function App() {
     startRecording,
     stopRecording,
     saveTranscript,
+    clearTranscript,
+    transcribeStatus,
+    recheckTranscribe,
+    notepad,
+    setNotepad,
+    notes,
+    sendToNotes,
+    pollyResult,
+    requestPolly,
   } = useConversationalistWS()
+
+  // appendToNotepad adds text to the end of the shared notepad on a line of
+  // its own -- the transcription window's "To Notepad" button (Revision I).
+  const appendToNotepad = (text: string) => {
+    if (!notepad) setNotepad(text)
+    else setNotepad(`${notepad}${notepad.endsWith('\n') ? '' : '\n'}${text}`)
+  }
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
@@ -510,9 +1042,24 @@ export default function App() {
           transcript={transcript}
           partialTranscript={partialTranscript}
           saveStatus={saveStatus}
+          transcribeStatus={transcribeStatus}
           onStart={startRecording}
           onStop={stopRecording}
           onSave={saveTranscript}
+          onClear={clearTranscript}
+          onRecheck={recheckTranscribe}
+          notes={notes.transcript}
+          onToNotes={(text) => sendToNotes('transcript', text)}
+          onToNotepad={appendToNotepad}
+        />
+        <NotepadPanel
+          connected={connected}
+          text={notepad}
+          onChange={setNotepad}
+          notes={notes.notepad}
+          onToNotes={(text) => sendToNotes('notepad', text)}
+          pollyResult={pollyResult}
+          onPolly={requestPolly}
         />
       </div>
     </div>

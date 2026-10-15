@@ -57,17 +57,32 @@ export interface SessionInfo {
   fields: [string, string][]
 }
 
-// SessionEntry is one readable turn of a session's transcript.
+// SessionEntry is one readable turn of a session's transcript. record is the
+// turn's record ID (its files' {timestamp} prefix) -- what "view-processed"
+// takes to expand it; absent when the turn's header carries no record_path.
+// event_type is one of EVENT_TYPE_LABELS' keys in App.tsx (older sessions
+// recorded agent runs as command_execution too); a resource's metadata names
+// its file (resource_name/resource_file/resource_size). host is the host the
+// turn ran on (absent for records that don't name one). secondary_host is
+// set on a turn that so far only exists in that host's secondary log -- it
+// hasn't been fused into the owner's session.jsonl yet (see
+// ../sessionlog.go). record_missing is set when the turn's record file isn't
+// on this host, so it can't be expanded.
 export interface SessionEntry {
   timestamp: string
   event_type?: string
+  host?: string
   agent?: string
   model?: string
   duration_ms: number
   exit_code: number
+  record?: string
+  metadata?: Record<string, string>
   input?: string
   output?: string
   error?: string
+  secondary_host?: string
+  record_missing?: boolean
 }
 
 // SessionView is the "session-view" payload: a session's transcript parsed
@@ -75,12 +90,25 @@ export interface SessionEntry {
 // local-representative's pre-view sync couldn't actually reach one of the
 // other LR-active hosts (Step1SubstepBPrompt.md Revision G) -- the transcript
 // may be missing turns a reachable peer would have had, so it's not
-// necessarily "genuinely empty/short".
+// necessarily "genuinely empty/short". warnings describe log content that
+// couldn't be shown (unreadable lines, records not on this host).
 export interface SessionView {
   id: string
   name: string
   entries: SessionEntry[]
+  warnings?: string[]
   sync_incomplete?: boolean
+}
+
+// ProcessedView is the "processed-view" payload: one expanded turn's full
+// {record}-processed.txt (or -s-processed.txt), which the transcript only
+// previews. error is set instead of content when it couldn't be read.
+export interface ProcessedView {
+  id: string
+  record: string
+  file?: string
+  content: string
+  error?: string
 }
 
 // ArchiveResultMsg is the "archive-result" payload ("ufa session archive"
@@ -91,6 +119,17 @@ export interface ArchiveResultMsg {
   error?: string
 }
 
+// AnnotationResultMsg is the "annotation-result" payload: the outcome of an
+// add-note/add-resource (see ../annotations.go). record is the new entry's
+// record ID; error is set instead when it failed.
+export interface AnnotationResultMsg {
+  id: string
+  kind: 'note' | 'resource'
+  name?: string
+  record?: string
+  error?: string
+}
+
 export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
@@ -98,5 +137,7 @@ export type ServerMsg =
   | { type: 'sessions'; payload: SessionsMsg }
   | { type: 'session-info'; payload: SessionInfo }
   | { type: 'session-view'; payload: SessionView }
+  | { type: 'processed-view'; payload: ProcessedView }
   | { type: 'archive-result'; payload: ArchiveResultMsg }
+  | { type: 'annotation-result'; payload: AnnotationResultMsg }
   | { type: 'error'; payload: string }

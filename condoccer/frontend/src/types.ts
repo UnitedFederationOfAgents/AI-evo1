@@ -93,6 +93,13 @@ export interface SelfInfoMsg {
   version: string
 }
 
+// RootMsg is condoccer's current working dir (the scan root every condoc
+// path is relative to) -- sent on connect and whenever "Set Working Dir"
+// changes it.
+export interface RootMsg {
+  root: string
+}
+
 // ModeMismatchMsg discloses that the connected local-representative's
 // dev-mode status differs from this condoccer's own. mismatched: false
 // clears a prior disclosure.
@@ -108,6 +115,7 @@ export type ServerMsg =
   | { type: 'repr-status'; payload: ReprStatusMsg }
   | { type: 'self-info'; payload: SelfInfoMsg }
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
+  | { type: 'root'; payload: RootMsg }
 
 export interface ActionRequest {
   action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit' | 'add_resource'
@@ -119,6 +127,6 @@ export interface ActionRequest {
   revertStep?: number
   revertIter?: string
   revertSubIter?: string
-  resourceType?: 'highlighted' | 'voice-note' // for add_resource action; 'upload' goes through /api/upload-resource instead
+  resourceType?: 'highlighted' | 'voice-note' // for add_resource action; 'upload' and 'clipboard' go through /api/upload-resource instead
   resourceName?: string // for add_resource action: optional display name -> "## Resource N -- <name>"
 }

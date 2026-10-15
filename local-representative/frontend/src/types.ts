@@ -7,16 +7,44 @@ export interface StatusMsg {
   services: ServiceStatus[]
 }
 
+// fc on the FC messages below is the federation-command instance they're
+// about -- the name it connected to LR under ("federation-command#2" for one
+// LR launched). See local-representative/fcinstances.go.
 export interface FCStateMsg {
+  fc?: string
   state: string // "remote-control", "local-control", or "" (disconnected)
 }
 
 export interface FCLogMsg {
+  fc?: string
   line: string
   kind?: string // "cmd" or "output"
 }
 
+// FCInstanceInfo is one connected federation-command instance.
+export interface FCInstanceInfo {
+  key: string
+  label: string // "#2", "@fc-ab12"
+  instance_id?: string
+  head?: string
+  state: string
+  session?: string
+  ridealong?: RidealongStateMsg
+  condoc?: CondocStateMsg
+}
+
+export interface FCInstancesMsg {
+  instances: FCInstanceInfo[]
+}
+
+// Control tab -- see local-representative/control.go and controlTypes.ts.
+export type {
+  ControlStepInfo, ControlSequenceInfo, ControlStepResult, ControlRunMsg, ControlRecording, ControlStateMsg,
+  ControlLibraryMsg, ControlLibReply, ControlLibRequest,
+} from './controlTypes'
+
 export interface RidealongStateMsg {
+  fc?: string
   active: boolean
   title?: string
   current_index?: number
@@ -31,6 +59,7 @@ export interface RidealongStateMsg {
 }
 
 export interface CondocStateMsg {
+  fc?: string
   active: boolean
   name?: string
   phase?: string
@@ -93,11 +122,22 @@ export interface TCAvailabilityMsg {
   available: boolean
 }
 
+// ConvoStateMsg is the "convo-state" payload this LR forwards from its managed
+// the-conversationalist (see main.go). Empty (no http_port) once TC
+// disconnects. Only started_at is read here, to announce a TC start/restart
+// (see tcannounce.ts and condocs/initialRobotImpls/Step5Prompt.md, Revision D).
+export interface ConvoStateMsg {
+  http_port?: string
+  transcribe_available?: boolean
+  transcribe_reason?: string
+  started_at?: number
+}
+
 export interface FileInfo {
   id: string
   name: string
   size: number
-  kind: string // "text" | "image" | "other" -- selects the wireframe icon
+  kind: string // "text" | "image" | "archive" | "other" -- selects the wireframe icon
   state: string // "cached" | "held" | "persisted" -- selects the icon's color
   uploaded_at: number // unix seconds
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
@@ -133,4 +173,36 @@ export interface RepoStateMsg {
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
   // is never rebuilt out from under.
   condoc_locked?: boolean
+}
+
+// The worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md): what the
+// host's dungeon-keeper reports -- see local-representative/worker.go.
+export interface WorkerSignalInfo {
+  id: string
+  file: string
+  role: string
+  prompt: string
+  agent?: string
+  model?: string
+  mode?: string
+  work_type: string
+  work_location?: string
+  status: string // "pending" | "processing" | "completed" | "failed"
+  created_at: number // unix ms
+  completed_at?: number
+  comment?: string
+  output?: string
+  output_trimmed?: boolean // only the end of the output is included, or none of it if empty
+}
+
+export interface WorkerStateMsg {
+  worker_id: string
+  agent_type: string
+  busy: boolean
+  signals: WorkerSignalInfo[]
+}
+
+export interface WorkerReplyMsg {
+  ok: boolean
+  error?: string
 }

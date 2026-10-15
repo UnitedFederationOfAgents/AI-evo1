@@ -79,11 +79,13 @@ it back once LR is listening again).
 | `--fc-bin` | `fc-bin` | — | explicit path to the `federation-command` binary (default: search next to LR, the dev bin dir, then `$PATH`) |
 | `--terminal` | `terminal` | autodetect | command prefix used to host `federation-command` in a terminal, e.g. `xterm -e` (visible window — preferred) or `tmux new-session -d -s fc` (detached fallback) |
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
-| `--condoccer-root` | `condoccer-root` | — | repo root a managed `condoccer` scans (default: condoccer's own `-root`) |
+| `--condoccer-root` | `condoccer-root` | — | initial working dir a managed `condoccer` scans (default: condoccer's own `-root`). Once condoccer reports a different one (its **Set Working Dir**), that's used on every later launch, including across an LR restart |
 | `--sessions-port` | `sessions-port` | `8085` | HTTP port a managed `session-manager` serves on; its UI is reverse-proxied at `/sessions/` |
 | `--convo-port` | `convo-port` | `8086` | HTTP port a managed `the-conversationalist` serves on; its UI is reverse-proxied at `/convo/` |
+| `--robot-port` | `robot-port` | `8087` | HTTP port a managed `ianar` serves on; its UI is reverse-proxied at `/robot/` |
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
 | `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
+| `--control-library` | — (command line only) | `~/.config/local-representative/control-v1.yaml` | YAML file the **control** tab's actions and sequences are kept in; empty keeps them in memory only |
 
 ## Configuration files
 
@@ -279,6 +281,154 @@ one mutex, so the check-and-rebuild process never overlaps itself. See
 [`docs/DevMode.md`](../docs/DevMode.md) "Dev-repo watcher" for the full
 detection rules.
 
+## Control tab
+
+The **control** tab sequences actions across this host's sub-apps
+(`control.go`). Its **v1** sub-tab has three views over the control library
+(`controllib.go`), the way the robot's sequence-v2 tab works:
+
+- **runner** — pick a sequence, set its controls, run it, and follow each
+  step, with the sequence's recording blocks beside the steps showing how
+  each recording is going; each recording plays back below once it stops.
+  **override recording** replaces the sequence's recording blocks for one
+  run: pick a node (by default this one) to record its screen from the first
+  step to the last, or until the run stops on a failure or cancel, or pick
+  **none** to record nothing. Once a run ends, **save results to files** uploads it into the files tab
+  as `lr-control-<sequence>-<time>.zip` (`controlsave.go`), like the
+  robot's "Save to file". The zip holds `report.txt` (the controls, each
+  step's result, the values and output), `run.json`, and a copy of each
+  recording, screenshot and fetched file from the run under `files/`. Only
+  the most recent run is kept, so only that run can be saved.
+- **definer** — actions: reusable building blocks that expose controls and
+  carry out a list of instructions. An instruction is one of LR's own ops
+  (`launch-fc`, `fc-send`, `fc-expect-output`, `fc-expect-state`, `random`,
+  `set`, `show`, … — see `controlops.go`) or `robot.<op>`, one of the
+  robot's sequence-v2 ops, which LR hands to IANAR (the robot reports its
+  ops when it connects).
+- **composer** — sequences: actions in order with values for their
+  controls, and slim **recording** blocks to the right of the steps
+  (`controlrecord.go`). Each block records one node's screen from its first
+  step to its last: this node's (`{{this_node}}`), a node control's, any
+  node connected to agent-coordinator, or a node saved by a step before the
+  block (e.g. `{{rebuilt_node}}` from `node-wait-connected`'s `save_as`: a
+  node that only joins during the run), filled in when the block starts.
+  Blocks may overlap, up to 3 side by
+  side, but a node can't be in two blocks at the same step. Another node's
+  screen is recorded by that node's robot, asked through agent-coordinator
+  (`node-record`), and the video is copied into this files tab. Every
+  recording is gathered on the run and in its saved zip. ⏺ beside a step
+  starts a block there; drag a block's top or bottom end to change its
+  steps, and the recordings list below the steps sets each block's node,
+  steps and label. A node's blocks may follow straight on from each other
+  (the hand-off example records steps 2–4, then 5–7): the next takes over
+  the screen as soon as the one before stops, without waiting for it to be
+  saved. A library saved before blocks existed (`record: [robot]`,
+  `before_recording`) loads as one block of this node.
+
+Values may refer to controls, built-ins (`{{timestamp}}`, when the run
+started, and `{{this_node}}`, the node running it) and values earlier
+instructions saved as `{{name}}`. Actions and sequences import from and export to YAML
+(`format: lr-control-v1`); an exported sequence carries the actions it uses.
+A sequence deleted and re-imported, or imported over (or whose actions an
+import changes), starts afresh: the runner forgets its last run and the
+control values typed for it.
+The library is saved to `--control-library`. The built-in examples
+(`controlexamples.go`) are the original sample sequence, `fc-robot-handoff`,
+`capture-two-nodes` and `you-tell-me`; **restore examples** puts them back.
+In `fc-robot-handoff` the robot types `echo "found it" | tee <file>`, into
+a new file on the desktop (the **Desktop file** control, by default
+`~/Desktop/found-it-{{timestamp}}.txt`). Once the terminal is back in remote
+control, `node-fetch-file` uploads that file from this node to the files
+tab, and an `rm` sent over the remote interface deletes it. This node's
+`control-fetch-allow` hands over any file by default; if it's set to a list
+of paths, that list has to allow the file, for example
+`~/Desktop/found-it-*.txt`. A library saved before an example was added
+gains it when LR starts, and an example you haven't edited is updated to
+this build's version. agent-coordinator's
+control tab shows the same views for a chosen host, editing and running that
+host's library.
+
+A control can be of type `node`: the runner then offers only the nodes
+connected to agent-coordinator (which tells every LR when one comes or goes),
+and a run won't start if the control names any other. The `node-capture` op
+has a node's robot take a native capture into the files tab as a screenshot.
+Another node's robot is asked through agent-coordinator, and the screenshot is
+then copied from that node's files tab into this one's, through
+agent-coordinator's `/host/<id>/*` proxy (`controlnodes.go`). The runner
+shows a run's screenshots under its steps. `capture-two-nodes` does this for
+two nodes that you choose.
+
+A step can wait for the person running the sequence. The `ask-user` op shows
+a message with a **continue** button on that step (in LR and in
+agent-coordinator) and waits until someone presses it. `fc-capture-echo` takes
+the phrase that the last `echo` typed into an FC instance in local control
+printed, and `output` shows a value as the run's output under its steps.
+`you-tell-me` starts like the hand-off: it echoes
+`<random-chars> Enter a phrase to capture!` over the remote interface. The
+robot then takes local control and leaves `echo ""` on the command line, with
+the cursor between the quotes. You type a phrase, press Enter in the terminal
+and then press continue, and the phrase comes back as the run's output. The
+terminal is left in local control, because by then the keyboard focus is in
+the browser.
+
+A few ops are for long runs that rebuild another node and then collect from
+it:
+
+- `fc-expect-output` takes a `fail_text`: a line starting with it, other than
+  the awaited `text`, fails the step at once. Wrapping a command as
+  `cmd; echo "<marker> exit=$?"` and waiting for `<marker> exit=0` with
+  `fail_text: "<marker> exit="` fails as soon as it exits non-zero. With
+  `since: run` it also sees lines printed before the step started. This is
+  for a command sent steps earlier: FC only reports a command's output once
+  it exits, and that can happen while a step in between, such as an
+  `ask-user`, is still waiting.
+- `node-wait-connected` waits for a node to be connected to
+  agent-coordinator. With `fresh: true`, only a connection made since the
+  step started counts, as after a reboot. With `prefix: true`, a node named
+  `<node>-<anything>` counts too: nodes are named `<hostname>-<4 characters>`,
+  and a rebuilt node draws new characters. `save_as` saves the name it
+  connected under, for later steps' `node`.
+- `node-capture` takes a `wait_robot` duration: it keeps asking while the
+  node's robot isn't running yet, as just after the node logged in.
+- `node-fetch-file` copies the files a path or glob matches from a node into
+  this files tab, the way `node-capture` copies a screenshot. Each file keeps
+  its last `max_size` bytes, and the runner links them under the steps. A
+  node's `control-fetch-allow` setting is `*` by default: it hands over any
+  file. Setting it to a comma-separated list of absolute paths or globs (`~`
+  for home, a trailing `/` for a whole directory) limits that, checked
+  against the path and the file it resolves to; a `*` anywhere in the list
+  allows everything again. This applies to whichever node's run asks,
+  including its own. LR logs the setting in force, and the config file it
+  came from, at startup, and a refused file's message says the same.
+
+A robot step's run is given 2 minutes plus the `timeout`s and waits its
+instructions set, so `robot.wait-for-text` with `timeout: 10m` isn't cut off.
+
+## Worker tab
+
+The **worker** tab shows this host's dungeon-keeper, which LR launches as the
+one-per-host `worker` app (system tab, or `auto-launch: worker`). It runs
+`dungeon-keeper watch --auto-connect …`, connects back over representable as
+`worker`, and pushes its work signals (ongoing ones, plus the 20 most recent
+completed) as `worker-state`. dungeon-keeper has no UI of its own.
+
+For now the tab has a temporary prompt box: **submit** (or Ctrl+Enter) sends
+`__worker:submit {"prompt": …}` to dungeon-keeper, which writes an in-place
+work signal for `/tmp` in prompt-only mode (`ambiguous-agent -p`) and starts it
+straight away. Click a signal to see its prompt, the agent's output and how it
+finished. The output is also kept in the signal file in
+`/host-agent-files/work/complete/`.
+
+Each `worker-state` is one representable line, which can't go past 64 KiB, so
+dungeon-keeper keeps it under 48 KiB: older signals lose their output first,
+then prompts are shortened, then only the end of the newest output is kept.
+The full text is always in the signal file. Submitted prompts are limited to
+32 KiB for the same reason.
+
+agent-coordinator has the same tab for each host. LR forwards `worker-state`
+up to it, and its submits come down as `__worker:submit <json>`, which LR
+handles like its own and answers with `worker-reply`.
+
 ## Files tab
 
 The **files** tab shows a wireframe-icon view (text / image / other — a small
@@ -337,6 +487,39 @@ request, so the coordinator's files tab gets the same viewer/view/download
 widgets, just proxied at `/host/<id>/api/files/<id>`.
 See [`docs/DistributedExchange.md`](../docs/DistributedExchange.md) for how
 this and cross-host (LR↔AC↔LR) transfer fit together.
+
+### Select from host
+
+The file pickers can also pick from this LR's host rather than from the
+browser's machine. Picking from the browser's machine still works as before.
+**+ select from host** in the files tab (here and in agent-coordinator's
+per-host files tab), **select from host…** in the control tab's YAML import,
+the **Select from host…** button in IANAR's sequence YAML import, and the 🖥
+button beside condoccer's "Upload" resource source all open the same folder
+browser over this host's filesystem. It starts in the LR user's home folder,
+and you can type a path or `~/…` to jump.
+
+- `GET /api/host-files?path=<dir>` lists one folder (folders first).
+- `GET /api/host-files/raw?path=<file>` serves one file's bytes; the YAML
+  imports read the chosen file through this.
+- `POST /api/files` with a JSON body `{"host_paths": [...]}` copies those
+  files into the host-cache under their own names, as if uploaded. It's
+  gated exactly like an upload, so agent-coordinator sends it through its
+  upload relay.
+- In the files tab's picker (here and in agent-coordinator), clicking a
+  folder selects it rather than opening it (double-click opens it), and the
+  select button becomes **to zip**. That sends `{"host_folders": [...]}` on
+  the same route, which zips the folder into the host-cache as
+  `<folder>.zip`. Symlinks and unreadable entries are skipped, and a folder
+  over 512 MiB or 20,000 files is refused. The other pickers still open a
+  folder on a single click.
+- condoccer and IANAR pass `/api/host-files` through to their own LR, so
+  their pickers browse that LR's host however their UI is reached.
+
+The two reads, like `GET /api/files/<id>`, aren't gated on the proxied
+header. Anyone who can reach this LR, directly or through
+agent-coordinator's `/host/<id>/*` proxy, can browse and read any file the
+LR user can read.
 
 Any image file also gets a **markup** button in its detail pane: a dialog
 with a colour palette and click-drag arrow/rectangle tools plus a

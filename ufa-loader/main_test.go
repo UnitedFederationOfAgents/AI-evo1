@@ -114,8 +114,11 @@ func TestLoaderPropagatesExitCodeWithoutRestarting(t *testing.T) {
 
 // TestLoaderCarriesStateForward verifies each relaunch is handed the
 // previous launch's announced state (via UFA_LOADER_STATE), and that the
-// very first launch sees none.
+// very first launch sees none — even when ufa-loader itself inherited a
+// stale UFA_LOADER_STATE (e.g. from a shell opened under another
+// loader-managed app).
 func TestLoaderCarriesStateForward(t *testing.T) {
+	t.Setenv(restartsignal.StateEnvVar, `{"stale":true}`)
 	t.Setenv("BANNER", restartsignal.Banner)
 	t.Setenv("FOOTER", restartsignal.Footer)
 	t.Setenv("LIMIT", "3")

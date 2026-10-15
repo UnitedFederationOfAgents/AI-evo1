@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -388,12 +389,34 @@ func (s *Server) handleReprCommand(raw string) {
 	}
 }
 
+// sessionSyncGlob is one file pattern triggerSessionSync asks
+// local-representative to pull; maxSize > 0 leaves files larger than that
+// behind.
+type sessionSyncGlob struct {
+	glob    string
+	maxSize int64
+}
+
+// autoResourceBytes is the largest resource pulled along with a session
+// view; a larger one is pulled when it's opened (see annotations.go's
+// handleResource).
+const autoResourceBytes = 256 << 10
+
 // sessionSyncGlobs are the file patterns a session-view read keeps fresh --
 // see triggerSessionSync. session.yaml is included so a session that exists
 // only on a remote host (never before pulled here -- see
 // listSessionsWithRemote's Remote-tagged entries) gets its name/metadata
-// materialized locally too, not just its transcript.
-var sessionSyncGlobs = []string{"session.jsonl", "session.yaml", "*-processed.txt"}
+// materialized locally too, not just its transcript. Which host each file
+// may come from is local-representative's call (see its handleSessionsPull):
+// session.yaml/session.jsonl only from the owner, secondary logs only to the
+// owner, and raw files never.
+var sessionSyncGlobs = []sessionSyncGlob{
+	{glob: "session.yaml"},
+	{glob: "session.jsonl"},
+	{glob: "session.*.jsonl"},
+	{glob: "*-processed.txt"},
+	{glob: "*" + resourceFileInfix + "*", maxSize: autoResourceBytes},
+}
 
 // sessionSyncTimeout bounds each glob's pull request -- see
 // triggerSessionSync.
@@ -469,6 +492,14 @@ func reportChainCall(repr *representable.Client, method, target string, start ti
 // empty because its remote peer was unreachable isn't indistinguishable from
 // one that's genuinely empty.
 func (s *Server) triggerSessionSync(id string) (incomplete bool) {
+	return s.triggerSessionSyncGlobs(id, sessionSyncGlobs)
+}
+
+// triggerSessionSyncGlobs is triggerSessionSync for an explicit glob list --
+// annotations.go's handleResource uses it to pull one resource's content,
+// which sessionSyncGlobs only takes along when it's small, so a transcript
+// view doesn't drag every large attached file along.
+func (s *Server) triggerSessionSyncGlobs(id string, globs []sessionSyncGlob) (incomplete bool) {
 	s.reprMu.Lock()
 	client := s.reprClient
 	host := s.reprHost
@@ -480,8 +511,8 @@ func (s *Server) triggerSessionSync(id string) (incomplete bool) {
 	if port == "" {
 		return false
 	}
-	for _, glob := range sessionSyncGlobs {
-		if !requestSessionPull(client, host, port, id, glob) {
+	for _, g := range globs {
+		if !requestSessionPull(client, host, port, id, g.glob, g.maxSize) {
 			incomplete = true
 		}
 	}
@@ -495,14 +526,13 @@ type sessionPullResultMsg struct {
 }
 
 // requestSessionPull issues one best-effort POST asking local-representative
-// to sync-pull id's files matching glob from every other LR-active host --
-// the mirror image of clauditable/distsync.go's requestSessionPull (mode
-// "once" there, "sync" here). repr is the already-connected representable
+// to pull id's files matching glob (none larger than maxSize, when > 0) from
+// every other LR-active host. repr is the already-connected representable
 // client to report the call's outcome to (see reportChainCall). Returns false
 // when the pull itself failed outright (network error, non-200) or when
 // local-representative reports at least one peer it couldn't reach --
 // true otherwise, including the ordinary "had nothing new to pull" case.
-func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, glob string) bool {
+func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, glob string, maxSize int64) bool {
 	u := url.URL{
 		Scheme: "http",
 		Host:   net.JoinHostPort(lrHost, lrPort),
@@ -513,7 +543,9 @@ func requestSessionPull(repr *representable.Client, lrHost, lrPort, sessionID, g
 	}
 	q := u.Query()
 	q.Set("glob", glob)
-	q.Set("mode", "sync")
+	if maxSize > 0 {
+		q.Set("max_size", strconv.FormatInt(maxSize, 10))
+	}
 	u.RawQuery = q.Encode()
 
 	httpClient := &http.Client{Timeout: sessionSyncTimeout}

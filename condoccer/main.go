@@ -133,7 +133,15 @@ type Iteration struct {
 }
 
 var (
-	condocYamlRe         = regexp.MustCompile(`condoc-yaml`)
+	// condocYamlRe matches the commented-out condoc-yaml header exactly as
+	// federation-command writes and recognises it (condocYAMLHeaderRe in
+	// federation-command/condoc.go), so a file that merely mentions
+	// "condoc-yaml" in prose isn't mistaken for a condoc.
+	condocYamlRe         = regexp.MustCompile("(?s)<!--\\s*```condoc-yaml\\n(.*?)```\\s*-->")
+	// snapshotFileRe matches example snapshot files (<file>.snpN.md, see
+	// condocs-examples/*/explanation.md). They copy a real condoc's header at
+	// a point in time but are not live condocs.
+	snapshotFileRe       = regexp.MustCompile(`\.snp\d+\.md$`)
 	completedRe          = regexp.MustCompile(`(?m)^## Condoc Completed\s*$`)
 	humanPromptRe        = regexp.MustCompile(`(?m)^## Human-Prompt\s*$`)
 	replaceTitleRe       = regexp.MustCompile(`(?m)^### Step \d+ - <REPLACE-TITLE>`)
@@ -565,7 +573,7 @@ func findCondocs(root string) ([]CondocInfo, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(d.Name(), ".md") {
+		if !strings.HasSuffix(d.Name(), ".md") || snapshotFileRe.MatchString(d.Name()) {
 			return nil
 		}
 		b, err := os.ReadFile(path)
@@ -594,6 +602,13 @@ type wsClient struct {
 
 // Server manages WebSocket clients and polls condoc files for changes.
 type Server struct {
+	// root is the scan scope condocs are discovered under (and that every
+	// CondocInfo.Path is relative to). It starts as --root and can be changed
+	// at runtime via the UI's "Set Working Dir" control (see setRoot), so read
+	// it through getRoot. It is deliberately *not* assumed to be a git repo
+	// root -- git work (the .condoc lock, diffs, resubmit) runs against each
+	// condoc's own repo instead (see condocRepoRoot).
+	rootMu   sync.RWMutex
 	root     string
 	httpPort string // HTTP port this condoccer serves on (reported to local-representative)
 	name     string // identifier reported to local-representative
@@ -640,6 +655,104 @@ func newServer(root string) *Server {
 	}
 }
 
+// RootMsg is the "root" WebSocket payload: condoccer's current working dir
+// (scan root), sent on connect and broadcast whenever it changes.
+type RootMsg struct {
+	Root string `json:"root"`
+}
+
+func (s *Server) getRoot() string {
+	s.rootMu.RLock()
+	defer s.rootMu.RUnlock()
+	return s.root
+}
+
+// setRoot changes the scan root ("Set Working Dir"). The new root must be an
+// existing directory; a relative path is resolved against the current root.
+// Every client's subscription is dropped, since condoc paths are relative to
+// the root and the old ones no longer mean anything; the frontend returns to
+// the condoc list when it sees the new root. watchLoop notices the change on
+// its next tick and resets its per-condoc tracking.
+func (s *Server) setRoot(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("working dir is empty")
+	}
+	if strings.HasPrefix(path, "~/") || path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(s.getRoot(), path)
+	}
+	path = filepath.Clean(path)
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("working dir: %v", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("working dir: %s is not a directory", path)
+	}
+
+	s.rootMu.Lock()
+	changed := s.root != path
+	s.root = path
+	s.rootMu.Unlock()
+	if !changed {
+		return nil
+	}
+	log.Printf("working dir changed to %s", path)
+
+	msg := s.marshalMsg("root", RootMsg{Root: path})
+	s.mu.Lock()
+	for c := range s.clients {
+		c.subscribed = ""
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+	s.mu.Unlock()
+	s.broadcastList()
+	s.pushCondoccerState()
+	return nil
+}
+
+// findGitRoot walks up from dir to the nearest directory containing a .git
+// entry (a directory for an ordinary clone, a file for a worktree), mirroring
+// federation-command's condocFindGitRoot. Returns "" when there is none.
+func findGitRoot(dir string) string {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// condocRepoRoot returns the git repo root owning the condoc at relPath
+// (relative to the current scan root) -- the place its .condoc lock lives and
+// its git operations run. Falls back to the scan root when the condoc isn't
+// inside any repo, which preserves the old single-root behaviour.
+func (s *Server) condocRepoRoot(relPath string) string {
+	root := s.getRoot()
+	if relPath == "" {
+		if r := findGitRoot(root); r != "" {
+			return r
+		}
+		return root
+	}
+	if r := findGitRoot(filepath.Dir(filepath.Join(root, relPath))); r != "" {
+		return r
+	}
+	return root
+}
+
 func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
 	p, _ := json.Marshal(payload)
 	m := wsMsg{Type: typ, Payload: p}
@@ -655,13 +768,18 @@ func (s *Server) sendToClient(c *wsClient, typ string, payload interface{}) {
 }
 
 func (s *Server) sendList(c *wsClient) {
-	infos, _ := findCondocs(s.root)
+	infos, _ := findCondocs(s.getRoot())
 	s.sendToClient(c, "list", map[string]interface{}{"condocs": infos})
 }
 
+func (s *Server) sendRoot(c *wsClient) {
+	s.sendToClient(c, "root", RootMsg{Root: s.getRoot()})
+}
+
 func (s *Server) sendCondocState(c *wsClient, relPath string) {
-	absPath := filepath.Join(s.root, relPath)
-	state, err := getCondocState(s.root, absPath)
+	root := s.getRoot()
+	absPath := filepath.Join(root, relPath)
+	state, err := getCondocState(root, absPath)
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
 		return
@@ -670,7 +788,7 @@ func (s *Server) sendCondocState(c *wsClient, relPath string) {
 }
 
 func (s *Server) broadcastList() {
-	infos, _ := findCondocs(s.root)
+	infos, _ := findCondocs(s.getRoot())
 	msg := s.marshalMsg("list", map[string]interface{}{"condocs": infos})
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -683,8 +801,9 @@ func (s *Server) broadcastList() {
 }
 
 func (s *Server) broadcastCondocUpdate(relPath string) {
-	absPath := filepath.Join(s.root, relPath)
-	state, err := getCondocState(s.root, absPath)
+	root := s.getRoot()
+	absPath := filepath.Join(root, relPath)
+	state, err := getCondocState(root, absPath)
 	if err != nil {
 		return
 	}
@@ -720,6 +839,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial condoc list and representable connection status.
 	go s.sendList(c)
+	go s.sendRoot(c)
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
@@ -817,28 +937,42 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		json.Unmarshal(m.Payload, &p)
 		s.setAutoConnect(p.Enabled, strings.TrimSpace(p.Host), strings.TrimSpace(p.Port))
 
+	case "set-root":
+		var p struct {
+			Root string `json:"root"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		if err := s.setRoot(p.Root); err != nil {
+			s.sendToClient(c, "error", map[string]string{"message": err.Error()})
+		}
+
+	// get-diff/get-file-diff carry the condoc's path so git runs against
+	// that condoc's own repo (see condocRepoRoot), not the scan root.
 	case "get-diff":
 		var p struct {
+			Path       string `json:"path"`
 			FromCommit string `json:"fromCommit"`
 			ToCommit   string `json:"toCommit"`
 		}
 		json.Unmarshal(m.Payload, &p)
-		go s.handleGetDiff(c, p.FromCommit, p.ToCommit)
+		go s.handleGetDiff(c, p.Path, p.FromCommit, p.ToCommit)
 
 	case "get-file-diff":
 		var p struct {
+			Path       string `json:"path"`
 			FromCommit string `json:"fromCommit"`
 			ToCommit   string `json:"toCommit"`
 			File       string `json:"file"`
 		}
 		json.Unmarshal(m.Payload, &p)
-		go s.handleGetFileDiff(c, p.FromCommit, p.ToCommit, p.File)
+		go s.handleGetFileDiff(c, p.Path, p.FromCommit, p.ToCommit, p.File)
 	}
 }
 
 func (s *Server) performAction(action ActionRequest) error {
-	absPath := filepath.Join(s.root, action.Path)
-	info, err := detectPhase(s.root, absPath)
+	root := s.getRoot()
+	absPath := filepath.Join(root, action.Path)
+	info, err := detectPhase(root, absPath)
 	if err != nil {
 		return err
 	}
@@ -847,9 +981,9 @@ func (s *Server) performAction(action ActionRequest) error {
 	activeFile := absPath
 	if info.Phase == PhaseAwaitingAction {
 		if info.SubstepFile != "" {
-			activeFile = filepath.Join(s.root, info.SubstepFile)
+			activeFile = filepath.Join(root, info.SubstepFile)
 		} else if info.StepFile != "" {
-			activeFile = filepath.Join(s.root, info.StepFile)
+			activeFile = filepath.Join(root, info.StepFile)
 		}
 	}
 
@@ -869,20 +1003,20 @@ func (s *Server) performAction(action ActionRequest) error {
 
 	case "revision":
 		if info.SubstepFile != "" {
-			sfPath := filepath.Join(s.root, info.SubstepFile)
+			sfPath := filepath.Join(root, info.SubstepFile)
 			header := fmt.Sprintf("## Revision %s", action.Letter)
 			return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
 		}
 		if info.StepFile == "" {
 			return fmt.Errorf("no active step or substep file")
 		}
-		sfPath := filepath.Join(s.root, info.StepFile)
+		sfPath := filepath.Join(root, info.StepFile)
 		header := fmt.Sprintf("## Revision %s", action.Letter)
 		return replaceIterationPlaceholder(sfPath, action.Letter, header, action.Content)
 
 	case "retry":
 		if info.SubstepFile != "" {
-			sfPath := filepath.Join(s.root, info.SubstepFile)
+			sfPath := filepath.Join(root, info.SubstepFile)
 			header := fmt.Sprintf("## Retry %s", action.Letter)
 			if action.From != "" {
 				header = fmt.Sprintf("## Retry %s (from %s)", action.Letter, action.From)
@@ -892,7 +1026,7 @@ func (s *Server) performAction(action ActionRequest) error {
 		if info.StepFile == "" {
 			return fmt.Errorf("no active step or substep file")
 		}
-		sfPath := filepath.Join(s.root, info.StepFile)
+		sfPath := filepath.Join(root, info.StepFile)
 		header := fmt.Sprintf("## Retry %s", action.Letter)
 		if action.From != "" {
 			header = fmt.Sprintf("## Retry %s (from %s)", action.Letter, action.From)
@@ -903,7 +1037,7 @@ func (s *Server) performAction(action ActionRequest) error {
 		if info.StepFile == "" {
 			return fmt.Errorf("no active step file")
 		}
-		sfPath := filepath.Join(s.root, info.StepFile)
+		sfPath := filepath.Join(root, info.StepFile)
 		header := fmt.Sprintf("## Substep %s - %s", action.Letter, action.SubstepTitle)
 		promptBlock := fmt.Sprintf("```prompt\n%s\n```", action.Content)
 		return replaceIterationPlaceholder(sfPath, action.Letter, header, promptBlock)
@@ -928,17 +1062,19 @@ func (s *Server) performAction(action ActionRequest) error {
 	case "resubmit":
 		// Stage and commit any outstanding working-tree changes so that the
 		// agent coordinator's git pull --rebase can succeed after it picks up
-		// the !HANDOFF! directive written below.
-		exec.Command("git", "-C", s.root, "add", "-A").Run()
-		if exec.Command("git", "-C", s.root, "diff", "--cached", "--quiet").Run() != nil {
-			exec.Command("git", "-C", s.root, "commit", "-m", "condoc: recovery commit before resubmit").Run()
+		// the !HANDOFF! directive written below. Runs in the condoc's own
+		// repo, which needn't be the scan root.
+		repoRoot := s.condocRepoRoot(info.Path)
+		exec.Command("git", "-C", repoRoot, "add", "-A").Run()
+		if exec.Command("git", "-C", repoRoot, "diff", "--cached", "--quiet").Run() != nil {
+			exec.Command("git", "-C", repoRoot, "commit", "-m", "condoc: recovery commit before resubmit").Run()
 		}
 		resubmitFile := absPath
 		if info.StepFile != "" {
-			resubmitFile = filepath.Join(s.root, info.StepFile)
+			resubmitFile = filepath.Join(root, info.StepFile)
 		}
 		if info.SubstepFile != "" {
-			resubmitFile = filepath.Join(s.root, info.SubstepFile)
+			resubmitFile = filepath.Join(root, info.SubstepFile)
 		}
 		return appendToFile(resubmitFile, "\n!HANDOFF!\n")
 
@@ -969,7 +1105,22 @@ func logLineIsCommitHeader(line string) bool {
 	return i >= 4 && i < len(line) && line[i] == ' '
 }
 
-func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
+// diffRepoRoot validates the condoc path a diff request carries and resolves
+// the repo to run git in. An empty path (an older frontend) falls back to the
+// scan root's repo.
+func (s *Server) diffRepoRoot(condocRel string) (string, error) {
+	if filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+		return "", fmt.Errorf("invalid condoc path")
+	}
+	return s.condocRepoRoot(condocRel), nil
+}
+
+func (s *Server) handleGetDiff(c *wsClient, condocRel, fromCommit, toCommit string) {
+	repoRoot, err := s.diffRepoRoot(condocRel)
+	if err != nil {
+		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
+		return
+	}
 	if !commitHashRe.MatchString(fromCommit) {
 		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
 		return
@@ -982,7 +1133,7 @@ func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
 	if toCommit != "" {
 		rangeSpec = fromCommit + ".." + toCommit
 	}
-	out, err := exec.Command("git", "-C", s.root, "log", "--name-only", "--oneline", rangeSpec).Output()
+	out, err := exec.Command("git", "-C", repoRoot, "log", "--name-only", "--oneline", rangeSpec).Output()
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": "git log failed: " + err.Error()})
 		return
@@ -1008,7 +1159,12 @@ func (s *Server) handleGetDiff(c *wsClient, fromCommit, toCommit string) {
 	})
 }
 
-func (s *Server) handleGetFileDiff(c *wsClient, fromCommit, toCommit, file string) {
+func (s *Server) handleGetFileDiff(c *wsClient, condocRel, fromCommit, toCommit, file string) {
+	repoRoot, err := s.diffRepoRoot(condocRel)
+	if err != nil {
+		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
+		return
+	}
 	if !commitHashRe.MatchString(fromCommit) {
 		s.sendToClient(c, "error", map[string]string{"message": "invalid commit hash"})
 		return
@@ -1025,7 +1181,7 @@ func (s *Server) handleGetFileDiff(c *wsClient, fromCommit, toCommit, file strin
 	if toCommit != "" {
 		rangeSpec = fromCommit + ".." + toCommit
 	}
-	out, err := exec.Command("git", "-C", s.root, "diff", rangeSpec, "--", file).Output()
+	out, err := exec.Command("git", "-C", repoRoot, "diff", rangeSpec, "--", file).Output()
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": "git diff failed: " + err.Error()})
 		return
@@ -1082,33 +1238,41 @@ func replaceIterationPlaceholder(sfPath, letter, header, content string) error {
 // in-flight condoc handoff. The point is to prevent excessive rebuilds, not
 // to track exact repo state -- so the file is a dumb presence/absence lock,
 // not something condoccer ever reads back.
+//
+// The lock lives at the root of the git repo that owns the condoc in
+// question (see condocRepoRoot), not at condoccer's scan root -- that is the
+// one place local-representative and federation-command look for it, and it
+// lets condocs in different repos each hold their own lock: one active
+// condoc per repo, rather than one shared toggle across every repo under the
+// scan root. Two condocs active in the *same* repo still share that repo's
+// lock.
 
-// condocLockPath is the lock file's well-known location.
-func (s *Server) condocLockPath() string {
-	return filepath.Join(s.root, ".condoc")
+// condocLockPath is the lock file's well-known location within repoRoot.
+func condocLockPath(repoRoot string) string {
+	return filepath.Join(repoRoot, ".condoc")
 }
 
-// writeCondocLock creates or overwrites the lock file to record the most
-// recent condoc state transition.
-func (s *Server) writeCondocLock(action string) {
+// writeCondocLock creates or overwrites repoRoot's lock file to record the
+// most recent condoc state transition.
+func (s *Server) writeCondocLock(repoRoot, action string) {
 	now := time.Now()
 	content := fmt.Sprintf("Condoccer %s at %s (%d)\n", action, now.Format(time.RFC1123), now.Unix())
-	if err := os.WriteFile(s.condocLockPath(), []byte(content), 0644); err != nil {
+	if err := os.WriteFile(condocLockPath(repoRoot), []byte(content), 0644); err != nil {
 		log.Printf("condoc lock: write failed: %v", err)
 		return
 	}
-	s.commitCondocLock("condoc: lock - " + action)
+	s.commitCondocLock(repoRoot, "condoc: lock - "+action)
 }
 
-// removeCondocLock deletes the lock file, if present.
-func (s *Server) removeCondocLock() {
-	if err := os.Remove(s.condocLockPath()); err != nil {
+// removeCondocLock deletes repoRoot's lock file, if present.
+func (s *Server) removeCondocLock(repoRoot string) {
+	if err := os.Remove(condocLockPath(repoRoot)); err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("condoc lock: remove failed: %v", err)
 		}
 		return
 	}
-	s.commitCondocLock("condoc: lock released")
+	s.commitCondocLock(repoRoot, "condoc: lock released")
 }
 
 // commitCondocLock stages and commits only the '.condoc' lock file itself,
@@ -1125,22 +1289,42 @@ func (s *Server) removeCondocLock() {
 // by hand (see the "fix condoc rails" commits). Committing it immediately,
 // scoped to just this one file, keeps the tree clean without touching
 // whatever else may be mid-edit at the same time.
-func (s *Server) commitCondocLock(message string) {
-	if err := exec.Command("git", "-C", s.root, "add", "--", ".condoc").Run(); err != nil {
-		log.Printf("condoc lock: git add failed: %v", err)
+func (s *Server) commitCondocLock(repoRoot, message string) {
+	if out, err := runGitRetryingIndexLock(repoRoot, "add", "--", ".condoc"); err != nil {
+		log.Printf("condoc lock: git add failed: %v\n%s", err, out)
 		return
 	}
-	if exec.Command("git", "-C", s.root, "diff", "--cached", "--quiet", "--", ".condoc").Run() == nil {
+	if _, err := runGitRetryingIndexLock(repoRoot, "diff", "--cached", "--quiet", "--", ".condoc"); err == nil {
 		return // nothing staged -- not a git repo, or no-op write of identical content
 	}
-	if err := exec.Command("git", "-C", s.root, "commit", "-m", message, "--", ".condoc").Run(); err != nil {
-		log.Printf("condoc lock: git commit failed: %v", err)
+	if out, err := runGitRetryingIndexLock(repoRoot, "commit", "-m", message, "--", ".condoc"); err != nil {
+		log.Printf("condoc lock: git commit failed: %v\n%s", err, out)
 	}
 }
 
+const gitIndexLockAttempts = 10
+const gitIndexLockBackoff = 300 * time.Millisecond
+
+// runGitRetryingIndexLock runs one git command in repoRoot, retrying while
+// another process holds .git/index.lock -- federation-command commits a
+// condoc's prompt/reply content from its own ~1s poll, so its commits can
+// land in the very same second as this lock commit.
+func runGitRetryingIndexLock(repoRoot string, args ...string) ([]byte, error) {
+	var out []byte
+	var err error
+	for attempt := 0; attempt < gitIndexLockAttempts; attempt++ {
+		out, err = exec.Command("git", append([]string{"-C", repoRoot}, args...)...).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "index.lock") {
+			return out, err
+		}
+		time.Sleep(gitIndexLockBackoff)
+	}
+	return out, err
+}
+
 // updateCondocLock reacts to one condoc's phase (possibly) having changed
-// since the last poll, creating/updating/removing the shared lock file per
-// Step5Prompt.md:
+// since the last poll, creating/updating/removing the lock file in that
+// condoc's own repo (see condocRepoRoot) per Step5Prompt.md:
 //   - a condoc seen for the first time -- condoccer "begins working" on it --
 //     creates the lock
 //   - reaching "awaiting action" (an agent just completed its work) or
@@ -1168,13 +1352,13 @@ func (s *Server) updateCondocLock(info CondocInfo, prev Phase, existed bool) {
 			// to lock until it actually transitions.
 			return
 		}
-		s.writeCondocLock(fmt.Sprintf("began work on %s", info.Name))
+		s.writeCondocLock(s.condocRepoRoot(info.Path), fmt.Sprintf("began work on %s", info.Name))
 	case prev == info.Phase:
 		// no transition
 	case safeToRebuild:
-		s.removeCondocLock()
+		s.removeCondocLock(s.condocRepoRoot(info.Path))
 	default:
-		s.writeCondocLock(fmt.Sprintf("advanced %s to %s", info.Name, info.Phase))
+		s.writeCondocLock(s.condocRepoRoot(info.Path), fmt.Sprintf("advanced %s to %s", info.Name, info.Phase))
 	}
 }
 
@@ -1184,11 +1368,28 @@ func (s *Server) watchLoop() {
 	lastContent := make(map[string]string) // relPath → last known content fingerprint
 	lastPhase := make(map[string]Phase)    // relPath → last known phase, for lock-file transitions
 
+	lastRoot := s.getRoot()
+
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		current, _ := findCondocs(s.root)
+		root := s.getRoot()
+		if root != lastRoot {
+			// Working dir changed (see setRoot): every tracked path was
+			// relative to the old root, so start over as on a fresh start --
+			// condocs already sitting at a safe point won't lock, anything
+			// mid-flight will (re)assert its own repo's lock.
+			lastRoot = root
+			lastList = nil
+			lastContent = make(map[string]string)
+			lastPhase = make(map[string]Phase)
+		}
+
+		current, _ := findCondocs(root)
+		if s.getRoot() != root {
+			continue // changed again mid-scan; pick it up next tick
+		}
 
 		for _, info := range current {
 			prev, existed := lastPhase[info.Path]
@@ -1215,8 +1416,8 @@ func (s *Server) watchLoop() {
 		s.mu.RUnlock()
 
 		for relPath := range subscribed {
-			absPath := filepath.Join(s.root, relPath)
-			info, err := detectPhase(s.root, absPath)
+			absPath := filepath.Join(root, relPath)
+			info, err := detectPhase(root, absPath)
 			if err != nil {
 				continue
 			}
@@ -1224,9 +1425,9 @@ func (s *Server) watchLoop() {
 			// Fingerprint the most-active file: substep if present, else step, else main.
 			watchFile := absPath
 			if info.SubstepFile != "" {
-				watchFile = filepath.Join(s.root, info.SubstepFile)
+				watchFile = filepath.Join(root, info.SubstepFile)
 			} else if info.StepFile != "" {
-				watchFile = filepath.Join(s.root, info.StepFile)
+				watchFile = filepath.Join(root, info.StepFile)
 			}
 
 			b, err := os.ReadFile(watchFile)
@@ -1261,6 +1462,8 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/api/resource/", s.handleResourceFile)
 	mux.HandleFunc("/api/upload-resource", s.handleUploadResource)
+	mux.HandleFunc("/api/host-files", s.handleHostFiles)
+	mux.HandleFunc("/api/host-resource", s.handleHostResource)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.
@@ -1323,7 +1526,7 @@ func main() {
 
 	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	port := flag.String("port", "8080", "HTTP port to listen on")
-	root := flag.String("root", ".", "repository root to scan for condocs")
+	root := flag.String("root", ".", "initial working dir to scan for condocs (changeable from the UI); each condoc's lock and git work use its own repo root")
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
 	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): this condoccer is running from an in-progress branch. Unrelated to --dev.")
 	name := flag.String("name", "condoccer", "identifier reported to local-representative")

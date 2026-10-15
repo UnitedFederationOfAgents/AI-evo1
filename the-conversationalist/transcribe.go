@@ -74,29 +74,17 @@ func (s *Server) startTranscription(c *wsClient) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var opts []func(*config.LoadOptions) error
-	if s.awsRegion != "" {
-		opts = append(opts, config.WithRegion(s.awsRegion))
-	}
-	cfg, err := config.LoadDefaultConfig(ctx, opts...)
+	// A defaulted region isn't reported here: the availability check
+	// already shows it to every tab as a warning (transcribe_status.go).
+	cfg, _, err := s.loadAWSConfig(ctx)
 	if err != nil {
 		cancel()
-		log.Printf("transcribe: loading AWS config: %v", err)
-		s.sendToClient(c, "error", fmt.Sprintf("loading AWS config: %v", err))
-		return
-	}
-	// LoadDefaultConfig does not error when no region is found anywhere in
-	// its chain (env/shared config/instance role) -- it just leaves
-	// cfg.Region empty and defers the failure to the first call that needs
-	// one, which then fails deep inside endpoint/signing resolution with a
-	// cryptic SDK error. Credentials (AWS_ACCESS_KEY_ID/SECRET) being set
-	// does not imply a region is too, so check explicitly and fail with an
-	// actionable message instead.
-	if cfg.Region == "" {
-		cancel()
-		const msg = "no AWS region configured: set AWS_REGION (or AWS_DEFAULT_REGION) in the environment, add a region to the shared AWS config, or start with --aws-region"
-		log.Printf("transcribe: %s", msg)
-		s.sendToClient(c, "error", "starting AWS Transcribe: "+msg)
+		log.Printf("transcribe: %v", err)
+		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: %v", err))
+		// Whatever broke here (e.g. a malformed shared config) also breaks
+		// every other tab -- refresh the availability indicator so they all
+		// find out (see transcribe_status.go).
+		go s.refreshTranscribeStatus()
 		return
 	}
 
@@ -122,8 +110,18 @@ func (s *Server) startTranscription(c *wsClient) {
 	})
 	if err != nil {
 		cancel()
-		log.Printf("transcribe: starting AWS Transcribe (region %q): %v", cfg.Region, err)
+		// Name the identity the last availability check saw, so an
+		// AccessDenied here says whose permissions are missing (e.g. a
+		// ufa-loader temporary principal vs the host's own keys).
+		s.transcribeStatusMu.Lock()
+		identity := s.transcribeStatus.Identity
+		s.transcribeStatusMu.Unlock()
+		if identity == "" {
+			identity = "unknown identity"
+		}
+		log.Printf("transcribe: starting AWS Transcribe (region %q, as %s): %v", cfg.Region, identity, err)
 		s.sendToClient(c, "error", fmt.Sprintf("starting AWS Transcribe: %v", err))
+		go s.refreshTranscribeStatus()
 		return
 	}
 
@@ -134,6 +132,42 @@ func (s *Server) startTranscription(c *wsClient) {
 
 	go s.readTranscriptEvents(c, sess)
 	log.Printf("transcribe: session started")
+}
+
+// defaultAWSRegion is the region loadAWSConfig falls back to when none is
+// configured anywhere (Step5SubstepGPrompt.md Revision F).
+const defaultAWSRegion = "us-east-2"
+
+// noRegionWarning is the warning shown (yellow, not as an error) when
+// loadAWSConfig had to fall back to defaultAWSRegion.
+var noRegionWarning = "no AWS region configured, so the default region " + defaultAWSRegion + " is being used: set AWS_REGION (or AWS_DEFAULT_REGION) in the environment, add a region to the shared AWS config, or start with --aws-region to choose another"
+
+// loadAWSConfig resolves the AWS config used both for real transcription
+// sessions (startTranscription) and for the availability check
+// (transcribe_status.go's checkTranscribeAccess), honouring --aws-region.
+//
+// LoadDefaultConfig does not error when no region is found anywhere in its
+// chain (env/shared config/instance role) -- it just leaves cfg.Region empty
+// and defers the failure to the first call that needs one, which then fails
+// deep inside endpoint/signing resolution with a cryptic SDK error.
+// Credentials (AWS_ACCESS_KEY_ID/SECRET) being set does not imply a region is
+// too -- e.g. ufa-loader's temporary principal hands over keys only -- so
+// this checks explicitly and falls back to defaultAWSRegion, returning
+// regionDefaulted so callers can warn about it.
+func (s *Server) loadAWSConfig(ctx context.Context) (cfg aws.Config, regionDefaulted bool, err error) {
+	var opts []func(*config.LoadOptions) error
+	if s.awsRegion != "" {
+		opts = append(opts, config.WithRegion(s.awsRegion))
+	}
+	cfg, err = config.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return aws.Config{}, false, fmt.Errorf("loading AWS config: %w", err)
+	}
+	if cfg.Region == "" {
+		cfg.Region = defaultAWSRegion
+		regionDefaulted = true
+	}
+	return cfg, regionDefaulted, nil
 }
 
 // readTranscriptEvents drains sess's AWS Transcribe result stream, pushing
@@ -267,6 +301,17 @@ func (s *Server) saveTranscript(c *wsClient) {
 	c.finalText.Reset()
 	c.transcribeMu.Unlock()
 	s.sendToClient(c, "save-result", SaveResultMsg{Success: true, FileID: uploaded.ID, Name: uploaded.Name})
+}
+
+// clearTranscript discards c's accumulated final transcript -- the
+// transcription window's "Clear" button (Step5SubstepGPrompt.md Revision G).
+// The frontend clears its own copy; this keeps a later saveTranscript from
+// writing out text the user already cleared. A running session keeps going,
+// and its subsequent results accumulate afresh.
+func (s *Server) clearTranscript(c *wsClient) {
+	c.transcribeMu.Lock()
+	c.finalText.Reset()
+	c.transcribeMu.Unlock()
 }
 
 // uploadedFile mirrors the subset of local-representative's FileInfo JSON

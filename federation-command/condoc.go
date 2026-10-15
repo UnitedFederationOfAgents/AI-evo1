@@ -34,6 +34,7 @@ const (
 	condocPhaseAwaitingAction                      // step done; watching step file for revision/!COMPLETED!
 	condocPhaseDone                                // condoc completed; handler will exit
 	condocPhaseHumanCommitting                     // committing stripped human prompt; pending agent will follow
+	condocPhaseGitFailed                           // a git sequence failed; watching the active file for !HANDOFF! to re-run it
 )
 
 func (p condocPhase) label() string {
@@ -56,6 +57,8 @@ func (p condocPhase) label() string {
 		return "completed"
 	case condocPhaseHumanCommitting:
 		return "committing prompt…"
+	case condocPhaseGitFailed:
+		return "git error — !HANDOFF! to retry"
 	default:
 		return "unknown"
 	}
@@ -94,6 +97,29 @@ type CondocSession struct {
 	pendingIsRetry  bool      // true when the current agent run was triggered by a Retry heading
 	pendingAgentCmd *exec.Cmd // pre-built agent command waiting for human-prompt commit to finish
 	pendingReplyTmp string    // temp path for pendingAgentCmd output
+
+	lastGitCmds    [][]string  // most recent sequence started via runGit
+	failedGitCmds  [][]string  // sequence to re-run on the next !HANDOFF! while in condocPhaseGitFailed
+	failedGitPhase condocPhase // phase the failed sequence ran in; restored when it is re-run
+}
+
+// activeFile returns the file the human currently interacts with: the active
+// substep file, else the active step file, else the main file.
+func (cs *CondocSession) activeFile() string {
+	if cs.substepFile != "" {
+		return cs.substepFile
+	}
+	if cs.stepFile != "" {
+		return cs.stepFile
+	}
+	return cs.mainFilePath
+}
+
+// runGit starts a git sequence in the repo, remembering it so it can be
+// re-run if it fails (see condocPhaseGitFailed).
+func (cs *CondocSession) runGit(cmds [][]string) tea.Cmd {
+	cs.lastGitCmds = cmds
+	return runGitSequence(cmds, cs.repoRoot)
 }
 
 // ===== MESSAGES =====
@@ -350,14 +376,42 @@ func removeCondocLockFile(repoRoot string) {
 	_ = os.Remove(filepath.Join(repoRoot, ".condoc"))
 }
 
+const gitIndexLockAttempts = 10
+const gitIndexLockBackoff = 300 * time.Millisecond
+
+// runGitRetryingIndexLock runs one git command inside dir, retrying while
+// another process holds .git/index.lock. condoccer commits its '.condoc' lock
+// file from its own ~1s poll, so it can land in the very same second as one
+// of our commits in the same repo.
+func runGitRetryingIndexLock(dir string, args ...string) ([]byte, error) {
+	var out []byte
+	var err error
+	for attempt := 0; attempt < gitIndexLockAttempts; attempt++ {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err = cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "index.lock") {
+			return out, err
+		}
+		time.Sleep(gitIndexLockBackoff)
+	}
+	return out, err
+}
+
 // runGitSequence runs git commands in sequence inside dir.
+// A commit with nothing staged is skipped rather than failing the sequence:
+// re-running a sequence whose commit already landed (e.g. condoccer's
+// Resubmit after a recovery commit) must still go on to push and proceed.
 // Returns a condocGitDoneMsg — intended for use as a tea.Cmd goroutine.
 func runGitSequence(cmds [][]string, dir string) tea.Cmd {
 	return func() tea.Msg {
 		for _, args := range cmds {
-			cmd := exec.Command("git", args...)
-			cmd.Dir = dir
-			if out, err := cmd.CombinedOutput(); err != nil {
+			if args[0] == "commit" {
+				if _, err := runGitRetryingIndexLock(dir, "diff", "--cached", "--quiet"); err == nil {
+					continue
+				}
+			}
+			if out, err := runGitRetryingIndexLock(dir, args...); err != nil {
 				return condocGitDoneMsg{errStr: fmt.Sprintf("git %s: %v\n%s", args[0], err, string(out))}
 			}
 		}
@@ -1541,6 +1595,10 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 	}
 
 	switch cs.phase {
+	case condocPhaseGitFailed:
+		if condocFileHasHandoff(cs.activeFile()) {
+			return m.condocRetryFailedGit()
+		}
 	case condocPhaseProposed:
 		if condocFileHasHandoff(cs.mainFilePath) {
 			return m.condocAcceptProposal()
@@ -1640,7 +1698,7 @@ func (m appModel) condocAcceptProposal() (appModel, tea.Cmd) {
 	}
 	return m, tea.Batch(
 		m.condocDynapane.Activate(cs),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -1652,7 +1710,20 @@ func (m appModel) handleCondocGitDone(msg condocGitDoneMsg) (appModel, tea.Cmd) 
 	}
 	if msg.errStr != "" {
 		cs.statusMsg = "git error: " + msg.errStr
-		cs.phase = condocPhaseAwaitingStep // let user sort it out
+		switch cs.phase {
+		case condocPhaseStepStarting, condocPhaseHumanCommitting, condocPhaseCommitting:
+			// Hold on to the failed sequence (and any pendingAgentCmd) and
+			// keep watching the active file, so a !HANDOFF! there -- e.g.
+			// condoccer's Resubmit -- re-runs it and the condoc carries on.
+			// Falling back to "awaiting step" instead would drop the pending
+			// agent and leave only the main file watched.
+			cs.failedGitCmds = cs.lastGitCmds
+			cs.failedGitPhase = cs.phase
+			cs.phase = condocPhaseGitFailed
+			cs.statusMsg += "\nfix the repo, then add !HANDOFF! to " + filepath.Base(cs.activeFile()) + " (or Resubmit) to retry"
+		default:
+			cs.phase = condocPhaseAwaitingStep // let user sort it out
+		}
 		return m, tea.Batch(
 			tea.Println(errorStyle.Render("condoc git: "+msg.errStr)),
 			m.condocDynapane.Activate(cs),
@@ -1729,6 +1800,32 @@ func (m appModel) handleCondocGitDone(msg condocGitDoneMsg) (appModel, tea.Cmd) 
 	return m, condocTickCmd()
 }
 
+// condocRetryFailedGit handles !HANDOFF! on the active file after a git
+// sequence failed: it consumes the directive and re-runs the sequence in the
+// phase it originally ran in, so success continues exactly where it stopped.
+func (m appModel) condocRetryFailedGit() (appModel, tea.Cmd) {
+	cs := m.condoc
+	file := cs.activeFile()
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return m.condocError("read active file: " + err.Error())
+	}
+	stripped := strings.TrimRight(condocHandoffRe.ReplaceAllString(string(b), ""), " \t\n") + "\n"
+	if err := os.WriteFile(file, []byte(stripped), 0644); err != nil {
+		return m.condocError("strip handoff from active file: " + err.Error())
+	}
+
+	cmds := cs.failedGitCmds
+	cs.phase = cs.failedGitPhase
+	cs.failedGitCmds = nil
+	cs.statusMsg = "retrying git…"
+	return m, tea.Batch(
+		tea.Println(sessionStyle.Render("condoc: retrying failed git sequence…")),
+		m.condocDynapane.Activate(cs),
+		cs.runGit(cmds),
+	)
+}
+
 // condocStartStep handles !HANDOFF! on the main file when a step is ready to run.
 // It creates the step file, updates the main file, then commits before starting the agent.
 // Committing first ensures a clean git state that retry can reset to.
@@ -1767,7 +1864,7 @@ func (m appModel) condocStartStep() (appModel, tea.Cmd) {
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("condoc: step "+strconv.Itoa(step.num)+" started, committing…")),
 		m.condocDynapane.Activate(cs),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -1910,7 +2007,7 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 		statusPrint,
 		m.condocDynapane.Activate(cs),
 		m.blinker.ResetTick(),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -1985,7 +2082,7 @@ func (m appModel) condocRunRevision() (appModel, tea.Cmd) {
 		tea.Println(sessionStyle.Render("condoc: revision "+revLetter+" — "+revText)),
 		m.condocDynapane.Activate(cs),
 		m.blinker.ResetTick(),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -2135,7 +2232,7 @@ func (m appModel) condocStartSubstep(letter, title string) (appModel, tea.Cmd) {
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render(fmt.Sprintf("condoc: substep %s started, committing…", letter))),
 		m.condocDynapane.Activate(cs),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -2208,7 +2305,7 @@ func (m appModel) condocCompleteSubstep() (appModel, tea.Cmd) {
 	return m, tea.Batch(
 		tea.Println(successStyle.Render(fmt.Sprintf("condoc: substep %s completed", substepLetter))),
 		m.condocDynapane.Activate(cs),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -2570,7 +2667,7 @@ func (m appModel) condocCompleteStep() (appModel, tea.Cmd) {
 	return m, tea.Batch(
 		tea.Println(successStyle.Render(fmt.Sprintf("condoc: step %d completed", nextStep-1))),
 		m.condocDynapane.Activate(cs),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 	)
 }
 
@@ -2601,7 +2698,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 
 	return m, tea.Batch(
 		tea.Println(successStyle.Render("condoc: completed — "+filepath.Base(cs.mainFilePath))),
-		runGitSequence(gitCmds, cs.repoRoot),
+		cs.runGit(gitCmds),
 		m.blinker.ResetTick(),
 	)
 }

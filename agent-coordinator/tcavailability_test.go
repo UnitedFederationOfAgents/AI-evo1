@@ -27,11 +27,19 @@ func TestAnyConvoAvailable(t *testing.T) {
 	}
 
 	hsB.mu.Lock()
-	hsB.convo = &ConvoStateMsg{HTTPPort: "8090"}
+	hsB.convo = &ConvoStateMsg{HTTPPort: "8090", TranscribeAvailable: false, TranscribeReason: "no AWS credentials found"}
+	hsB.mu.Unlock()
+
+	if s.anyConvoAvailable() {
+		t.Fatal("expected anyConvoAvailable=false while the only reporting TC can't reach its transcription engine")
+	}
+
+	hsB.mu.Lock()
+	hsB.convo = &ConvoStateMsg{HTTPPort: "8090", TranscribeAvailable: true}
 	hsB.mu.Unlock()
 
 	if !s.anyConvoAvailable() {
-		t.Fatal("expected anyConvoAvailable=true once one host (of several) reports a convo-state")
+		t.Fatal("expected anyConvoAvailable=true once one host (of several) reports a transcription-capable convo-state")
 	}
 
 	hsB.mu.Lock()
@@ -61,7 +69,7 @@ func TestBroadcastTCAvailabilityOnlyBroadcastsOnChange(t *testing.T) {
 	hs, _ := s.getOrCreateHost("host-a")
 	hs.mu.Lock()
 	hs.connected = true
-	hs.convo = &ConvoStateMsg{HTTPPort: "8090"}
+	hs.convo = &ConvoStateMsg{HTTPPort: "8090", TranscribeAvailable: true}
 	hs.mu.Unlock()
 
 	s.broadcastTCAvailability() // false -> true: must not panic with a nil reprServer either
@@ -79,5 +87,19 @@ func TestTCAvailabilityCommand(t *testing.T) {
 	}
 	if got := tcAvailabilityCommand(false); got != "__tc-availability:false" {
 		t.Fatalf("tcAvailabilityCommand(false) = %q", got)
+	}
+}
+
+// TestConvoMsgCarriesStartedAt covers condocs/initialRobotImpls/
+// Step5Prompt.md Revision D: the browser announces a TC start/restart off
+// started_at, so convoMsg must pass it through -- and leave it out once no
+// TC is reporting.
+func TestConvoMsgCarriesStartedAt(t *testing.T) {
+	m := convoMsg("host-a", &ConvoStateMsg{HTTPPort: "8090", StartedAt: 1234})
+	if m.StartedAt != 1234 {
+		t.Fatalf("convoMsg StartedAt = %d, want 1234", m.StartedAt)
+	}
+	if m := convoMsg("host-a", nil); m.StartedAt != 0 || m.Available {
+		t.Fatalf("convoMsg(nil) = %+v, want unavailable with no StartedAt", m)
 	}
 }

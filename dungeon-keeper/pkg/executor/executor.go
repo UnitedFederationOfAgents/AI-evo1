@@ -45,29 +45,11 @@ func findClauditable() (string, error) {
 		return "", nil
 	}
 
-	// Check current directory first
-	cwd, _ := os.Getwd()
-	localPath := filepath.Join(cwd, ClauditableBinary)
-	if _, err := os.Stat(localPath); err == nil {
-		return localPath, nil
+	path, err := findBinary(ClauditableBinary)
+	if err != nil {
+		return "", fmt.Errorf("clauditable binary not found in PATH or current directory")
 	}
-
-	// Check directory of executable (for deployed binaries)
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		localPath := filepath.Join(exeDir, ClauditableBinary)
-		if _, err := os.Stat(localPath); err == nil {
-			return localPath, nil
-		}
-	}
-
-	// Check PATH
-	path, err := exec.LookPath(ClauditableBinary)
-	if err == nil {
-		return path, nil
-	}
-
-	return "", fmt.Errorf("clauditable binary not found in PATH or current directory")
+	return path, nil
 }
 
 // Run executes a command wrapped with clauditable.
@@ -136,6 +118,7 @@ func (e *Executor) InvokeAgent(agent, model, mode, prompt, workdir string) error
 	}
 
 	cmd := e.Command(ambiguousAgentPath, args...)
+	cmd.Env = append(cmd.Env, agentRecordEnv(agent, model)...)
 	cmd.Dir = workdir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -173,17 +156,34 @@ func (e *Executor) InvokeAgentWithCapture(agent, model, mode, prompt, workdir st
 	}
 
 	cmd := e.Command(ambiguousAgentPath, args...)
+	cmd.Env = append(cmd.Env, agentRecordEnv(agent, model)...)
 	cmd.Dir = workdir
 
 	return cmd.CombinedOutput()
 }
 
+// agentRecordEnv names the agent and model for clauditable's record of an
+// agent run. The outer clauditable (from Command) is the one that records it --
+// ambiguous-agent's own clauditable passes straight through -- so without
+// these it would log the run as a plain command_execution with no agent.
+// UFA_EVENT_TYPE covers a signal that leaves the agent to ambiguous-agent's
+// default.
+func agentRecordEnv(agent, model string) []string {
+	env := []string{"UFA_EVENT_TYPE=ai_invocation", "UFA_AGENT=" + agent}
+	if model != "" {
+		env = append(env, "UFA_MODEL="+model)
+	}
+	return env
+}
+
 // findBinary searches for a binary in PATH, current directory, and executable directory.
+// Local candidates must be executable regular files: run from the repo root,
+// "clauditable" and "ambiguous-agent" name source directories, not binaries.
 func findBinary(name string) (string, error) {
 	// Check current directory first
 	cwd, _ := os.Getwd()
 	localPath := filepath.Join(cwd, name)
-	if _, err := os.Stat(localPath); err == nil {
+	if isExecutableFile(localPath) {
 		return localPath, nil
 	}
 
@@ -191,7 +191,7 @@ func findBinary(name string) (string, error) {
 	if exePath, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exePath)
 		localPath := filepath.Join(exeDir, name)
-		if _, err := os.Stat(localPath); err == nil {
+		if isExecutableFile(localPath) {
 			return localPath, nil
 		}
 	}
@@ -203,6 +203,15 @@ func findBinary(name string) (string, error) {
 	}
 
 	return "", fmt.Errorf("binary %s not found", name)
+}
+
+// isExecutableFile reports whether path is a regular file with an execute bit set.
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
 }
 
 // IsClauditableWrapped returns true if commands are being wrapped.

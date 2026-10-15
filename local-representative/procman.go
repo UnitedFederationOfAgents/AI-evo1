@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -128,8 +129,11 @@ var managedApps = map[string]launchSpec{
 				"--port", s.condoccerPort,
 				"--name", "condoccer",
 			}
-			if s.condoccerRoot != "" {
-				args = append(args, "--root", s.condoccerRoot)
+			// --root follows condoccer's last reported working dir (see
+			// getCondoccerRoot), so a "Set Working Dir" change survives a
+			// relaunch.
+			if root := s.getCondoccerRoot(); root != "" {
+				args = append(args, "--root", root)
 			}
 			if s.devMode {
 				// Cascade this LR's dev mode to every instance it launches — see
@@ -181,6 +185,46 @@ var managedApps = map[string]launchSpec{
 				"--lr-port", s.heartbeatPort,
 				"--port", s.convoPort,
 				"--name", "convo",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"robot": {
+		binName:   "ianar",
+		singleton: true,  // one per box, like condoccer
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.robotPort,
+				"--name", "robot",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"worker": {
+		binName:   "dungeon-keeper",
+		singleton: true,  // one per host for now (Step5SubstepGPrompt.md)
+		terminal:  false, // a background daemon; it has no UI of its own -- the worker tab shows its signals
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"watch",
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--name", "worker",
 			}
 			if s.devMode {
 				// Cascade this LR's dev mode to every instance it launches — see
@@ -316,7 +360,11 @@ func (s *Server) systemState() SystemStateMsg {
 		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
 		info.PendingVersion = s.managedPendingVersionFor(p.app)
 		if p.app == "federation-command" {
-			if id, name := s.fcSession(); id != "" {
+			// Each instance's own report first (see fcinstances.go), then the
+			// most recent report from any instance.
+			if sess := s.fcSessionFor(p.instanceID); sess != "" {
+				info.Session = sess
+			} else if id, name := s.fcSession(); id != "" {
 				if name != "" {
 					info.Session = name
 				} else {
@@ -654,8 +702,34 @@ func (s *Server) broadcastChainCall() {
 	st := s.chainCallState()
 	s.broadcast("chain-call-state", st)
 	if ac := s.getACClient(); ac != nil {
-		ac.SendData("chain-call-state", st)
+		ac.SendData("chain-call-state", trimChainCallForAC(st))
 	}
+}
+
+// maxChainCallACBytes bounds the chain-call-state copy sent up to
+// agent-coordinator. Each representable message is one line, and its reader
+// drops the connection on a line over 64 KiB; a full 400-entry buffer of
+// session-pull URLs is well over that, so a burst of session syncing used to
+// cut this LR off from agent-coordinator.
+const maxChainCallACBytes = 48 << 10
+
+// trimChainCallForAC drops the oldest entries until st marshals to under
+// maxChainCallACBytes.
+func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
+	entries := st.Entries
+	for len(entries) > 0 {
+		data, err := json.Marshal(ChainCallStateMsg{Entries: entries})
+		if err == nil && len(data) <= maxChainCallACBytes {
+			break
+		}
+		// Drop roughly the excess share at once rather than one at a time.
+		drop := 1
+		if err == nil {
+			drop = max(1, len(entries)*(len(data)-maxChainCallACBytes)/len(data))
+		}
+		entries = entries[min(drop, len(entries)):]
+	}
+	return ChainCallStateMsg{Entries: entries}
 }
 
 // handleSystemCommand executes a system-tab action requested remotely by
@@ -715,9 +789,20 @@ func (s *Server) handleSystemCommand(raw string) {
 // nextInstanceLocked allocates the next per-app ordinal and its instance id.
 // Callers must hold procMu.
 func (s *Server) nextInstanceLocked(app string) (int, string) {
-	s.instanceSeq[app]++
-	n := s.instanceSeq[app]
-	return n, fmt.Sprintf("%s#%d", app, n)
+	for {
+		s.instanceSeq[app]++
+		n := s.instanceSeq[app]
+		id := fmt.Sprintf("%s#%d", app, n)
+		// A federation-command still connected under this id -- one a
+		// previous run of this LR launched, which outlived it in its own
+		// terminal -- would share the new instance's representable name, and
+		// with it its commands (Step3Prompt.md Revision A). Skip past it.
+		if app == fcAppName && s.fcInstanceIDClaimed(id) {
+			log.Printf("procman: %s is still connected from before; skipping that instance id", id)
+			continue
+		}
+		return n, id
+	}
 }
 
 // runningCountLocked reports how many instances of app are currently running.

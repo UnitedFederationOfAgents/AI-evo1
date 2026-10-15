@@ -1,9 +1,15 @@
 import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
 import type {
-  Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
-  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg,
+  Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
+  LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
+  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
 } from './types'
+import { ControlV1 } from './ControlV1'
+import { HostFilePicker } from './HostFilePicker'
+import { detectTextFormat } from './textformat'
+import { noteTCStart } from './tcannounce'
+import type { ControlV1Props } from './ControlV1'
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
@@ -12,6 +18,8 @@ const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
   { name: 'condoccer', multi: false },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
+  { name: 'robot', multi: false },
+  { name: 'worker', multi: false },
 ]
 
 interface LogEntry {
@@ -21,8 +29,18 @@ interface LogEntry {
 
 interface HostClientState {
   lrState?: LRStateMsg
+  // fcState/fcLog are for an older LR that doesn't tell its FC instances
+  // apart; fcInstances/fcLogs (keyed by instance) for a current one -- see
+  // local-representative/fcinstances.go.
   fcState: string
   fcLog: LogEntry[]
+  fcInstances: FCInstanceInfo[]
+  fcLogs: Record<string, LogEntry[]>
+  control?: ControlStateMsg
+  // The host's control library, and its replies to requests sent from here
+  // (by request id; a run that couldn't start is under "run").
+  controlLib?: ControlLibraryMsg
+  controlReplies?: Record<string, ControlLibReply>
   ridealong?: LRRidealongMsg
   condoc?: LRCondocMsg
   system?: LRSystemStateMsg
@@ -30,6 +48,11 @@ interface HostClientState {
   condoccer?: LRCondoccerMsg
   sessions?: LRSessionsMsg
   convo?: LRConvoMsg
+  robot?: LRRobotMsg
+  // The host's worker tab: what its dungeon-keeper last reported, and the
+  // answer to the last prompt submitted from here -- see worker.go.
+  worker?: WorkerStateMsg
+  workerReply?: WorkerReplyMsg
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
@@ -37,7 +60,14 @@ interface HostClientState {
 }
 
 function emptyHostState(): HostClientState {
-  return { fcState: '', fcLog: [] }
+  return { fcState: '', fcLog: [], fcInstances: [], fcLogs: {} }
+}
+
+function fcStateLabel(state: string): string {
+  return state === '' ? '-- disconnected --'
+    : state === 'remote-control' ? '-- remote control --'
+    : state === 'local-control' ? '-- local control --'
+    : `-- ${state} --`
 }
 
 function useCoordinatorWS() {
@@ -66,12 +96,66 @@ function useCoordinatorWS() {
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRefs = useRef<Record<string, string>>({})
 
-  const sendLRCommand = useCallback((hostId: string, cmd: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'lr-command', payload: { host_id: hostId, cmd } }))
+  // fc names the FC instance on that host; without it the host's LR picks.
+  const sendLRCommand = useCallback((hostId: string, cmd: string, fc?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-command', payload: { host_id: hostId, cmd, fc } }))
   }, [])
 
-  const sendLRRidealongCommand = useCallback((hostId: string, action: string) => {
-    wsRef.current?.send(JSON.stringify({ type: 'lr-ridealong-command', payload: { host_id: hostId, action } }))
+  const sendLRRidealongCommand = useCallback((hostId: string, action: string, fc?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-ridealong-command', payload: { host_id: hostId, action, fc } }))
+  }, [])
+
+  // A host's control tab -- see local-representative/control.go.
+  const sendLRControlRun = useCallback((hostId: string, sequence: string, controls: Record<string, string>, recordOverride?: string) => {
+    setHostData(prev => {
+      const hs = prev[hostId] ?? emptyHostState()
+      const replies = { ...(hs.controlReplies ?? {}) }
+      delete replies.run
+      return { ...prev, [hostId]: { ...hs, controlReplies: replies } }
+    })
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence, controls, record_override: recordOverride } }))
+  }, [])
+
+  // requestLRControl sends a host's definer/composer request and returns the
+  // id its reply will carry. Replies go to every browser, so ids carry this
+  // page's own prefix.
+  const controlReqPrefix = useRef(Math.random().toString(36).slice(2, 8))
+  const controlReqSeq = useRef(0)
+  const requestLRControl = useCallback((hostId: string, r: ControlLibRequest): string => {
+    const req = `${controlReqPrefix.current}-${++controlReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'lr-control-lib', payload: { host_id: hostId, request: { ...r, req } } }))
+    } else {
+      const reply: ControlLibReply = { req, op: r.op, success: false, error: 'not connected' }
+      setHostData(prev => {
+        const hs = prev[hostId] ?? emptyHostState()
+        return { ...prev, [hostId]: { ...hs, controlReplies: { ...(hs.controlReplies ?? {}), [req]: reply } } }
+      })
+    }
+    return req
+  }, [])
+
+  const sendLRControlCancel = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-cancel', payload: { host_id: hostId } }))
+  }, [])
+
+  const sendLRControlContinue = useCallback((hostId: string, run: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-continue', payload: { host_id: hostId, run } }))
+  }, [])
+
+  // A host's worker tab prompt box -- see worker.go. Its answer comes back as
+  // lr-worker-reply.
+  const sendLRWorkerSubmit = useCallback((hostId: string, prompt: string) => {
+    const setReply = (workerReply: WorkerReplyMsg | undefined) => setHostData(prev => ({
+      ...prev,
+      [hostId]: { ...(prev[hostId] ?? emptyHostState()), workerReply },
+    }))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setReply(undefined)
+      wsRef.current.send(JSON.stringify({ type: 'lr-worker-submit', payload: { host_id: hostId, prompt } }))
+    } else {
+      setReply({ ok: false, error: 'not connected' })
+    }
   }, [])
 
   const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
@@ -153,6 +237,23 @@ function useCoordinatorWS() {
     }
   }, [])
 
+  // "select from host": a JSON body on the same upload-relay route asks the
+  // host's local-representative to copy files already on that host into its
+  // host-cache (local-representative/hostfiles.go); folders are zipped into
+  // it. Returns the error to show, if any.
+  const importHostFiles = useCallback(async (hostId: string, paths: string[], folders: string[] = []): Promise<string | null> => {
+    try {
+      const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_paths: paths, host_folders: folders }),
+      })
+      return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
+    } catch (err) {
+      return String(err)
+    }
+  }, [])
+
   const connect = useCallback(() => {
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
@@ -220,17 +321,22 @@ function useCoordinatorWS() {
           case 'lr-fc-state': {
             const p = msg.payload as LRFCStateMsg
             const newSt = p.state === 'disconnected' ? '' : p.state
-            const prevSt = fcStateRefs.current[p.host_id] ?? ''
-            fcStateRefs.current[p.host_id] = newSt
-            const stateEntry: LogEntry | null = prevSt !== newSt ? {
-              kind: 'state',
-              text: newSt === '' ? '-- disconnected --'
-                : newSt === 'remote-control' ? '-- remote control --'
-                : newSt === 'local-control' ? '-- local control --'
-                : `-- ${newSt} --`,
-            } : null
+            const refKey = p.fc ? `${p.host_id}\n${p.fc}` : p.host_id
+            const prevSt = fcStateRefs.current[refKey] ?? ''
+            fcStateRefs.current[refKey] = newSt
+            const stateEntry: LogEntry | null = prevSt !== newSt ? { kind: 'state', text: fcStateLabel(newSt) } : null
             setHostData(prev => {
               const cur = prev[p.host_id] ?? emptyHostState()
+              if (p.fc) {
+                // One instance's transition -- its current state comes with
+                // lr-fc-instances.
+                const fc = p.fc
+                if (!stateEntry) return prev
+                return {
+                  ...prev,
+                  [p.host_id]: { ...cur, fcLogs: { ...cur.fcLogs, [fc]: [...(cur.fcLogs[fc] ?? []), stateEntry] } },
+                }
+              }
               return {
                 ...prev,
                 [p.host_id]: {
@@ -250,6 +356,13 @@ function useCoordinatorWS() {
             }
             setHostData(prev => {
               const cur = prev[p.host_id] ?? emptyHostState()
+              if (p.fc) {
+                const fc = p.fc
+                return {
+                  ...prev,
+                  [p.host_id]: { ...cur, fcLogs: { ...cur.fcLogs, [fc]: [...(cur.fcLogs[fc] ?? []).slice(-199), entry] } },
+                }
+              }
               return {
                 ...prev,
                 [p.host_id]: {
@@ -257,6 +370,42 @@ function useCoordinatorWS() {
                   fcLog: [...cur.fcLog.slice(-199), entry],
                 },
               }
+            })
+            break
+          }
+          case 'lr-fc-instances': {
+            const p = msg.payload as LRFCInstancesMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), fcInstances: p.instances ?? [] },
+            }))
+            break
+          }
+          case 'lr-control-state': {
+            const p = msg.payload as LRControlMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), control: p.control ?? undefined },
+            }))
+            break
+          }
+          case 'lr-control-library': {
+            const p = msg.payload as LRControlLibraryMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), controlLib: p.library ?? undefined },
+            }))
+            break
+          }
+          case 'lr-control-reply': {
+            // Every browser gets every reply: keep this page's own, and runs
+            // that couldn't start.
+            const p = msg.payload as LRControlReplyMsg
+            const key = p.reply.req || p.reply.op
+            if (p.reply.req && !p.reply.req.startsWith(`${controlReqPrefix.current}-`)) break
+            setHostData(prev => {
+              const hs = prev[p.host_id] ?? emptyHostState()
+              return { ...prev, [p.host_id]: { ...hs, controlReplies: { ...(hs.controlReplies ?? {}), [key]: p.reply } } }
             })
             break
           }
@@ -310,9 +459,36 @@ function useCoordinatorWS() {
           }
           case 'lr-convo-state': {
             const p = msg.payload as LRConvoMsg
+            // Speak "application running" when any host's TC starts or
+            // restarts -- see tcannounce.ts.
+            noteTCStart(p.host_id, p.started_at)
             setHostData(prev => ({
               ...prev,
               [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), convo: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-robot-state': {
+            const p = msg.payload as LRRobotMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), robot: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-worker-state': {
+            const p = msg.payload as LRWorkerMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), worker: p.worker ?? undefined },
+            }))
+            break
+          }
+          case 'lr-worker-reply': {
+            const p = msg.payload as LRWorkerReplyMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), workerReply: p.reply },
             }))
             break
           }
@@ -371,8 +547,8 @@ function useCoordinatorWS() {
   return {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -419,13 +595,15 @@ function HostSidebar({
   )
 }
 
-const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'] as const
+const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'] as const
 // "system" and "files" sit to the right of the service tabs, mirroring
 // local-representative's own dashboard: they drive/view that LR's process
 // management and host-cache from the coordinator. Upload on this files tab is
 // relayed through AC's dedicated upload-relay route rather than AC keeping
 // its own copy of the file (see docs/DistributedExchange.md, Path 1).
-const LR_TABS = [...LR_SERVICES, 'system', 'files'] as const
+// "control" sequences actions across a host's sub-apps (see
+// local-representative/control.go); it sits between the services and system.
+const LR_TABS = [...LR_SERVICES, 'control', 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -437,7 +615,7 @@ type LRTab = typeof LR_TABS[number]
 // under the tab bar, so the embedded app's own UI (including its own
 // "DEV MODE" border, when that sub-app runs in dev mode) fills the space
 // instead of floating in a padded, header-topped box.
-const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo'])
+const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
 
 // Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
 // BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
@@ -688,6 +866,72 @@ function RidealongPanel({
       )}
       {!canControl && (
         <div className="ra-observe-hint">observing — switch to remote control to drive</div>
+      )}
+    </div>
+  )
+}
+
+// FCInstancePicker lists every federation-command instance connected to the
+// host's LR; the federation-command tab's panels follow the selected one.
+// Mirrors local-representative/frontend/src/App.tsx's own copy.
+function FCInstancePicker({
+  instances, selected, onSelect,
+}: {
+  instances: FCInstanceInfo[]
+  selected: string | null
+  onSelect: (key: string) => void
+}) {
+  if (instances.length === 0) return null
+  return (
+    <div className="fc-instances">
+      <span className="fc-instances-label">
+        {instances.length} instance{instances.length === 1 ? '' : 's'}
+      </span>
+      {instances.map(inst => (
+        <button
+          key={inst.key}
+          className={`fc-instance fc-instance-${inst.state || 'none'}${inst.key === selected ? ' fc-instance-active' : ''}`}
+          onClick={() => onSelect(inst.key)}
+          title={`${inst.key}${inst.head ? ` (head ${inst.head})` : ''} — ${inst.state || 'no state yet'}`}
+        >
+          <span className="fc-instance-dot" />
+          {inst.label}
+          {inst.session && <span className="fc-instance-session">{inst.session}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Control tab (local-representative/control.go) ----
+// Runs on the selected host's LR; mirrors local-representative's own copy.
+
+const CONTROL_SUBTABS = ['v1'] as const
+type ControlSubTab = typeof CONTROL_SUBTABS[number]
+
+// ControlPanel is a host's control tab: its v1 sub-tab is ControlV1 (shared
+// with local-representative's frontend), over that host's library, with
+// recordings played back through the host's /host/<id>/* proxy.
+function ControlPanel({ hostId, ...props }: Omit<ControlV1Props, 'fileUrl' | 'node' | 'hostApi'> & { hostId: string }) {
+  const [sub, setSub] = useState<ControlSubTab>('v1')
+  return (
+    <div className="ctl-panel">
+      <div className="ctl-subtabs">
+        {CONTROL_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'v1' && (
+        <>
+          <div className="ctl-hint">
+            The robot finds a terminal by reading that host's screen: its window has to be visible,
+            not behind another, and no other view of federation-command's output (its tab here or in
+            local-representative) should be showing on that desktop.
+          </div>
+          <ControlV1 {...props} fileUrl={id => fileRawUrl(hostId, id)} node="this host" hostApi={`/host/${encodeURIComponent(hostId)}`} />
+        </>
       )}
     </div>
   )
@@ -1066,8 +1310,8 @@ function RepoWatchPanel({
 // from this one page, wrapping window.fetch once (see installNetworkCapture)
 // covers all of them without needing each sub-app's own embedded iframe to
 // cooperate. It doesn't yet see network activity that happens entirely
-// inside an embedded iframe's own document (condoccer/sessions/convo's own
-// UI) -- a later increment could thread that through postMessage if needed.
+// inside an embedded iframe's own document (condoccer/sessions/convo/robot's
+// own UI) -- a later increment could thread that through postMessage if needed.
 interface NetworkLogEntry {
   id: number
   time: number // unix ms
@@ -1366,12 +1610,13 @@ function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => vo
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
   active: boolean
-  fcState: string
+  fcState: string // an older LR's single FC state -- see HostClientState
+  fcInstances: FCInstanceInfo[]
   repoState: LRRepoStateMsg | undefined
   onLaunch: (hostId: string, name: string) => void
   onTerminate: (hostId: string, id: string) => void
@@ -1405,10 +1650,15 @@ function SystemPanel({
     managed.filter(p => p.name === name && p.status === 'running').length
 
   const fcRunning = runningCount('federation-command') > 0
-  const fcControl =
-    fcState === 'remote-control' ? 'remote'
-    : fcState === 'local-control' ? 'local'
+  const fcControl = (st: string) =>
+    st === 'remote-control' ? 'remote'
+    : st === 'local-control' ? 'local'
     : 'not connected'
+  // One line per connected FC instance (see FCInstancePicker); a single line
+  // for an older LR, or while launched instances have yet to connect.
+  const fcRows = fcInstances.length > 0
+    ? fcInstances.map(inst => ({ key: inst.key, label: `federation-command ${inst.label}`, state: inst.state }))
+    : [{ key: '', label: 'federation-command', state: fcState }]
 
   const selectedProc = selectedKey === null
     ? undefined
@@ -1421,12 +1671,12 @@ function SystemPanel({
         onRebuild={() => onRebuild(hostId)}
         onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
       />
-      {fcRunning && (
-        <div className={`sys-fc-control sys-fc-control-${fcState || 'none'}`}>
-          federation-command control: <strong>{fcControl}</strong>
-          {fcControl !== 'remote' && ' — expected remote in a machine-driven chain'}
+      {fcRunning && fcRows.map(row => (
+        <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
+          {row.label} control: <strong>{fcControl(row.state)}</strong>
+          {fcControl(row.state) !== 'remote' && ' — expected remote in a machine-driven chain'}
         </div>
-      )}
+      ))}
       <div className="sys-table">
         <div className="sys-row sys-row-head">
           <span className="sys-col sys-col-name">process</span>
@@ -1510,8 +1760,9 @@ function formatCountdown(expiresAtSec: number, nowSec: number): string {
 }
 
 // FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
-// this increment supports: text, image, and a catch-all for everything else.
-// Each renders in `currentColor`, so FileIcon's state-driven CSS class is
+// the files tab supports: text, image, archive (a zippered page -- see
+// local-representative/files.go's archiveExtensions), and a catch-all for
+// everything else. Mirrors local-representative's own copy. Each renders in `currentColor`, so FileIcon's state-driven CSS class is
 // what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
 const FILE_ICON_PATH: Record<string, JSX.Element> = {
   text: (
@@ -1526,6 +1777,14 @@ const FILE_ICON_PATH: Record<string, JSX.Element> = {
       <rect x="3" y="4" width="18" height="16" rx="1.5" />
       <circle cx="8.5" cy="9.5" r="1.5" />
       <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  archive: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M11 3h1M12 5h1M11 7h1M12 9h1M11 11h1" strokeLinecap="round" />
+      <rect x="10.25" y="13" width="3.5" height="5" rx="0.75" />
+      <path d="M12 15.5v0.5" strokeLinecap="round" />
     </svg>
   ),
   other: (
@@ -1611,6 +1870,16 @@ function markupCopyUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/copy`
 }
 
+// isReservedFileName mirrors local-representative/files.go's saveUploadedFile
+// reserved-prefix checks -- a friendlier client-side echo of a rejection the
+// server would otherwise give silently (a rejected file is just dropped from
+// the response).
+function isReservedFileName(name: string): boolean {
+  return name.startsWith('.manifest_') || name.startsWith('.markup_')
+}
+
+const RESERVED_NAME_ERROR = "that name is reserved for the host-cache's own bookkeeping files"
+
 // NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
 // Revision J: "add a 'new text file' button to the files tab ... accepts the
 // name and text (with optional voice input with mic icon when available)").
@@ -1639,11 +1908,8 @@ function NewTextFileDialog({
       setError('name is required')
       return
     }
-    // Mirrors files.go's saveUploadedFile reserved-prefix checks -- a
-    // friendlier client-side echo of a rejection the server would otherwise
-    // give silently (a rejected file is just dropped from the response).
-    if (trimmed.startsWith('.manifest_') || trimmed.startsWith('.markup_')) {
-      setError("that name is reserved for the host-cache's own bookkeeping files")
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
       return
     }
     const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
@@ -1696,8 +1962,268 @@ function NewTextFileDialog({
   )
 }
 
+// ClipboardContent is what the files tab's "new file from clipboard" button
+// (Step4SubstepDPrompt.md Revisions D/E, brought over from
+// local-representative's files tab in Revision G) found in the copy buffer:
+// an image or plain text, already as the Blob the upload will carry, plus the
+// extension its default name gets -- for text, from detectTextFormat. This
+// whole block, down to ClipboardFileDialog, mirrors local-representative's
+// own copy.
+interface ClipboardContent {
+  kind: 'image' | 'text'
+  blob: Blob
+  ext: string
+  text?: string // kind 'text' only -- shown as the dialog's preview
+  format?: string // kind 'text' only -- the detected format's label, e.g. "JSON"
+}
+
+// CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
+// preference order. Browsers' async clipboard API only ever hands back
+// image/png (whatever was copied gets re-encoded), but a paste event can
+// carry the others when a site or the OS puts them there as-is.
+const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+}
+
+// CLIPBOARD_POLL_MS is how often useClipboardState rechecks the copy buffer
+// while the page is focused -- there's no "clipboard changed" event.
+const CLIPBOARD_POLL_MS = 3000
+
+function textClipboard(text: string): ClipboardContent {
+  const f = detectTextFormat(text)
+  return { kind: 'text', blob: new Blob([text], { type: f.mime }), ext: f.ext, text, format: f.label }
+}
+
+// clipboardSupported says whether the page may read the copy buffer itself
+// at all -- the async clipboard API exists only in a secure context (https
+// or localhost), so over plain http only a Ctrl+V paste event can get at it.
+function clipboardSupported(): boolean {
+  return !!(navigator.clipboard?.read || navigator.clipboard?.readText)
+}
+
+// readClipboard reads the copy buffer through the async clipboard API: the
+// first image item wins, then plain text. null means it's empty (or holds
+// only things we don't take); it throws when the read isn't allowed.
+async function readClipboard(): Promise<ClipboardContent | null> {
+  const cb = navigator.clipboard
+  if (cb?.read) {
+    const items = await cb.read()
+    for (const item of items) {
+      const type = Object.keys(CLIPBOARD_IMAGE_EXT).find(t => item.types.includes(t))
+      if (type) return { kind: 'image', blob: await item.getType(type), ext: CLIPBOARD_IMAGE_EXT[type] }
+    }
+    for (const item of items) {
+      if (!item.types.includes('text/plain')) continue
+      const text = await (await item.getType('text/plain')).text()
+      if (text) return textClipboard(text)
+    }
+    return null
+  }
+  if (cb?.readText) {
+    const text = await cb.readText()
+    return text ? textClipboard(text) : null
+  }
+  throw new Error('clipboard API unavailable')
+}
+
+// clipboardFromPaste is readClipboard's counterpart for a paste event's
+// DataTransfer -- no permission needed, so it works even over plain http.
+function clipboardFromPaste(data: DataTransfer): ClipboardContent | null {
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !CLIPBOARD_IMAGE_EXT[item.type]) continue
+    const f = item.getAsFile()
+    if (f) return { kind: 'image', blob: f, ext: CLIPBOARD_IMAGE_EXT[item.type] }
+  }
+  const text = data.getData('text/plain')
+  return text ? textClipboard(text) : null
+}
+
+// ClipboardState is what the "new file from clipboard" button knows about
+// the copy buffer: 'unknown' leaves it enabled (clicking it asks the browser),
+// 'empty' disables it, 'has' enables it.
+type ClipboardState = 'unknown' | 'empty' | 'has'
+
+// useClipboardState watches the copy buffer, but only once the browser has
+// already granted clipboard-read -- without that grant every probe would pop
+// a permission prompt or "Paste" bubble, so the state just stays 'unknown'.
+// The probe only lists the item types; it never pulls the bytes.
+function useClipboardState(): ClipboardState {
+  const [state, setState] = useState<ClipboardState>('unknown')
+  useEffect(() => {
+    if (!navigator.clipboard?.read || !navigator.permissions?.query) return
+    let cancelled = false
+    let granted = false
+    let perm: PermissionStatus | null = null
+    const probe = async () => {
+      if (!granted || document.visibilityState !== 'visible' || !document.hasFocus()) return
+      try {
+        const items = await navigator.clipboard.read()
+        const has = items.some(item => item.types.some(t => t === 'text/plain' || CLIPBOARD_IMAGE_EXT[t]))
+        if (!cancelled) setState(has ? 'has' : 'empty')
+      } catch {
+        // Focus lost mid-read or access revoked -- keep the last answer.
+      }
+    }
+    const onPerm = () => {
+      granted = perm?.state === 'granted'
+      if (granted) void probe()
+      else setState('unknown')
+    }
+    // 'clipboard-read' isn't in every TS lib's PermissionName union.
+    navigator.permissions.query({ name: 'clipboard-read' } as unknown as PermissionDescriptor)
+      .then(p => {
+        if (cancelled) return
+        perm = p
+        p.addEventListener('change', onPerm)
+        onPerm()
+      })
+      .catch(() => { /* Firefox/Safari don't know the name -- stay 'unknown' */ })
+    const onWake = () => { void probe() }
+    // "copy"/"cut" fire before the copy buffer is written, hence the delay.
+    const onCopy = () => { window.setTimeout(onWake, 100) }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    document.addEventListener('copy', onCopy)
+    document.addEventListener('cut', onCopy)
+    const timer = window.setInterval(onWake, CLIPBOARD_POLL_MS)
+    return () => {
+      cancelled = true
+      perm?.removeEventListener('change', onPerm)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      document.removeEventListener('copy', onCopy)
+      document.removeEventListener('cut', onCopy)
+      window.clearInterval(timer)
+    }
+  }, [])
+  return state
+}
+
+// clipboardDefaultName is the naming dialog's starting name, e.g.
+// "clipboard-20261010-142233.png".
+function clipboardDefaultName(ext: string): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `clipboard-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+}
+
+// CLIPBOARD_TEXT_PREVIEW caps how much pasted text the naming dialog shows.
+const CLIPBOARD_TEXT_PREVIEW = 2000
+
+// ClipboardFileDialog names a file about to be created from the copy buffer.
+// It opens with the default name's stem (not its extension) selected; a name
+// typed without any extension gets the content's own one back. Like
+// NewTextFileDialog it saves through the relayed upload.
+function ClipboardFileDialog({
+  content,
+  onCreate,
+  onClose,
+}: {
+  content: ClipboardContent
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState(() => clipboardDefaultName(content.ext))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }, [])
+
+  useEffect(() => {
+    if (content.kind !== 'image') return
+    const url = URL.createObjectURL(content.blob)
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [content])
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.${content.ext}`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([content.blob], finalName, { type: content.blob.type })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  const text = content.text ?? ''
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">
+            new {content.kind === 'image' ? 'image' : 'text'} file from clipboard
+            {content.format && <span className="clip-file-format"> · detected {content.format}</span>}
+          </span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          ref={nameRef}
+          className="new-file-name-input"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !busy) void handleCreate()
+            else if (e.key === 'Escape') onClose()
+          }}
+        />
+        {content.kind === 'image' ? (
+          imageUrl && <img className="clip-file-image" src={imageUrl} alt="clipboard image" />
+        ) : (
+          <pre className="clip-file-text">
+            {text.length > CLIPBOARD_TEXT_PREVIEW
+              ? `${text.slice(0, CLIPBOARD_TEXT_PREVIEW)}\n… (${text.length - CLIPBOARD_TEXT_PREVIEW} more characters)`
+              : text}
+          </pre>
+        )}
+        <div className="clip-file-size">{formatBytes(content.blob.size)}</div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// isEditableTarget says a paste is meant for a text field, not the files tab.
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+}
+
 function FilesPanel({
-  files, active, selectedId, onSelect, onEnter, onUpload,
+  files, active, selectedId, onSelect, onEnter, onUpload, hostApi, onHostImport,
 }: {
   files: FileInfo[]
   active: boolean
@@ -1705,10 +2231,47 @@ function FilesPanel({
   onSelect: (id: string) => void
   onEnter: (id: string) => void
   onUpload: (files: FileList | File[]) => void
+  hostApi: string // the host's /host/<id> proxy, for the "select from host" picker
+  onHostImport: (paths: string[], folders?: string[]) => Promise<string | null> // the error, if any
 }) {
   const [dragging, setDragging] = useState(false)
   const [newFileOpen, setNewFileOpen] = useState(false)
+  const [hostPickOpen, setHostPickOpen] = useState(false)
+  const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
+  const [clipError, setClipError] = useState<string | null>(null)
+  const clipState = useClipboardState()
   const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const fromClipboard = async () => {
+    setClipError(null)
+    if (!clipboardSupported()) {
+      setClipError("this page can't read the clipboard over plain http — press Ctrl+V (⌘V) on this tab instead")
+      return
+    }
+    try {
+      const content = await readClipboard()
+      if (content) setClipContent(content)
+      else setClipError('the clipboard has no text or image in it')
+    } catch {
+      setClipError("couldn't read the clipboard — allow clipboard access for this page, or press Ctrl+V (⌘V) on this tab")
+    }
+  }
+
+  // Ctrl+V anywhere on the tab (outside a text field) opens the same naming
+  // dialog -- the one way in over plain http, and a shortcut everywhere else.
+  useEffect(() => {
+    if (!active || newFileOpen || clipContent) return
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || !e.clipboardData) return
+      const content = clipboardFromPaste(e.clipboardData)
+      if (!content) return
+      e.preventDefault()
+      setClipError(null)
+      setClipContent(content)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [active, newFileOpen, clipContent])
 
   if (!active) {
     return <div className="service-empty">local-representative on this host is not connected</div>
@@ -1739,11 +2302,50 @@ function FilesPanel({
           }}
         />
       </div>
-      <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
-        + new text file
-      </button>
+      <div className="files-new-row">
+        <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+          + new text file
+        </button>
+        <button
+          type="button"
+          className="files-new-btn"
+          onClick={() => void fromClipboard()}
+          disabled={clipState === 'empty'}
+          title={clipState === 'empty' ? 'the clipboard is empty' : 'create a file from the text or image on the clipboard (or press Ctrl+V on this tab)'}
+        >
+          + new file from clipboard
+        </button>
+        <button
+          type="button"
+          className="files-new-btn"
+          onClick={() => setHostPickOpen(true)}
+          title="copy files that are already on this host into its files tab"
+        >
+          + select from host
+        </button>
+      </div>
+      {clipError && <div className="files-clip-error">{clipError}</div>}
       {newFileOpen && (
         <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {hostPickOpen && (
+        <HostFilePicker
+          api={hostApi}
+          multiple
+          title="select from host"
+          onClose={() => setHostPickOpen(false)}
+          onPick={async paths => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport(paths))
+          }}
+          onZipFolder={async dir => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport([], [dir]))
+          }}
+        />
+      )}
+      {clipContent && (
+        <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
       )}
       {files.length === 0 ? (
         <div className="files-empty">no files in the host-cache</div>
@@ -2331,7 +2933,7 @@ function hostOutOfDate(data: HostClientState | undefined): boolean {
 function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
   const services = data?.lrState?.services
   const managed = data?.system?.managed
-  return ['federation-command', 'condoccer', 'convo', 'sessions', 'worker'].some(
+  return ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'].some(
     name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
   )
 }
@@ -2367,16 +2969,19 @@ function TopologyNodeCard({
   const coHealthy = serviceHealthy(services, 'condoccer')
   const tcHealthy = serviceHealthy(services, 'convo')
   const smHealthy = serviceHealthy(services, 'sessions')
+  const rbHealthy = serviceHealthy(services, 'robot')
   const wHealthy = serviceHealthy(services, 'worker')
   const fcManaged = subAppManaged(managed, 'federation-command')
   const coManaged = subAppManaged(managed, 'condoccer')
   const tcManaged = subAppManaged(managed, 'convo')
   const smManaged = subAppManaged(managed, 'sessions')
+  const rbManaged = subAppManaged(managed, 'robot')
   const wManaged = subAppManaged(managed, 'worker')
   const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
   const coOutdated = devMode && coHealthy && subAppOutOfDate(managed, 'condoccer')
   const tcOutdated = devMode && tcHealthy && subAppOutOfDate(managed, 'convo')
   const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
+  const rbOutdated = devMode && rbHealthy && subAppOutOfDate(managed, 'robot')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
 
   return (
@@ -2412,6 +3017,10 @@ function TopologyNodeCard({
             className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
             title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
           >SM</span>
+          <span
+            className={subAppBoxClass(rbHealthy, rbManaged, !!rbOutdated)}
+            title={rbOutdated ? "robot is connected but running an older build than what's on disk" : undefined}
+          >RB</span>
           <span
             className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
@@ -2930,23 +3539,129 @@ function GlobalView({
   )
 }
 
+// WorkerPanel is a host's worker tab: a temporary prompt box that hands
+// prompt-only work to that host's dungeon-keeper, and the work signals it
+// reports, newest first -- see worker.go. Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
+function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const submit = () => {
+    const text = prompt.trim()
+    if (!text || !healthy) return
+    onSubmit(text)
+    setPrompt('')
+  }
+
+  const signals = state?.signals ?? []
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="worker-submit">
+        <textarea
+          className="worker-prompt"
+          value={prompt}
+          rows={3}
+          placeholder={healthy ? 'prompt for the worker (runs prompt-only, in /tmp)… Ctrl+Enter to submit' : 'the worker is not running on this host — launch it from the system tab'}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit()
+          }}
+          disabled={!healthy}
+        />
+        <button className="worker-submit-btn" onClick={submit} disabled={!healthy || !prompt.trim()}>submit</button>
+      </div>
+      {reply?.error && <div className="worker-error">{reply.error}</div>}
+      {signals.length === 0
+        ? <div className="service-empty">no work signals yet</div>
+        : (
+          <div className="worker-signals">
+            {signals.map(sig => (
+              <WorkerSignalRow
+                key={sig.id || sig.file}
+                signal={sig}
+                open={openId === (sig.id || sig.file)}
+                onToggle={() => setOpenId(openId === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+              />
+            ))}
+          </div>
+        )}
+    </div>
+  )
+}
+
+function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo; open: boolean; onToggle: () => void }) {
+  const when = new Date(signal.created_at).toLocaleString()
+  return (
+    <div className={`worker-signal worker-status-${signal.status}`}>
+      <button className="worker-signal-head" onClick={onToggle} title={signal.file}>
+        <span className="worker-signal-status">{signal.status}</span>
+        <span className="worker-signal-prompt">{signal.prompt}</span>
+        <span className="worker-signal-when">{when}</span>
+      </button>
+      {open && (
+        <div className="worker-signal-body">
+          <div className="worker-signal-detail">
+            {signal.role} · {signal.work_type}{signal.work_location ? ` in ${signal.work_location}` : ''}
+            {signal.mode ? ` · ${signal.mode}` : ''}
+            {signal.agent ? ` · ${signal.agent}` : ''}{signal.model ? ` (${signal.model})` : ''}
+          </div>
+          <pre className="worker-signal-text">{signal.prompt}</pre>
+          {signal.comment && <div className="worker-signal-comment">{signal.comment}</div>}
+          {signal.output
+            ? (
+              <>
+                {signal.output_trimmed && <div className="worker-signal-detail">output is long — showing only the end</div>}
+                <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
+              </>
+            )
+            : signal.output_trimmed
+              ? <div className="worker-signal-detail">output is too long to show here — it's in the signal file {signal.file}</div>
+              : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, activeTab, setActiveTab,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
   data: HostClientState
-  sendLRCommand: (hostId: string, cmd: string) => void
-  sendLRRidealongCommand: (hostId: string, action: string) => void
+  sendLRCommand: (hostId: string, cmd: string, fc?: string) => void
+  sendLRRidealongCommand: (hostId: string, action: string, fc?: string) => void
+  sendLRControlRun: (hostId: string, sequence: string, controls: Record<string, string>, recordOverride?: string) => void
+  sendLRControlCancel: (hostId: string) => void
+  sendLRControlContinue: (hostId: string, run: string) => void
+  requestLRControl: (hostId: string, req: ControlLibRequest) => string
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
+  sendLRWorkerSubmit: (hostId: string, prompt: string) => void
   sendLRRestartApp: (hostId: string) => void
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
+  importHostFiles: (hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -2974,7 +3689,11 @@ function LRView({
   // lr-system-state (see condocs/initialDistributedSessionsImpls/
   // Step2Prompt.md Revision C). Surfaced on the federation-command tab
   // itself rather than only the system tab's per-row tag.
-  const fcSession = data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+  // The federation-command tab follows one FC instance at a time (see
+  // FCInstancePicker): the one picked on this host, else the first.
+  const [selectedFC, setSelectedFC] = useState<Record<string, string>>({})
+  const fc = data.fcInstances.find(i => i.key === selectedFC[host.id]) ?? data.fcInstances[0] ?? null
+  const fcSession = fc?.session ?? data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
 
   // Consume the global "go to first highlighted file" handoff (Step5SubstepR
   // Revision E) once this is the host it was aimed at -- App() has already
@@ -3029,10 +3748,11 @@ function LRView({
 
   // Drives every MicButton under this host's view (Step2Prompt.md Revision
   // J) via TCCaptureContext, below -- gated on this host's own data.convo
-  // (whether a the-conversationalist instance is actually running there),
-  // not the header's global tcAvailable, since dictation has to reach this
+  // (whether a the-conversationalist instance is actually running there and,
+  // per Step5Prompt.md Revision B, can reach its transcription engine), not
+  // the header's global tcAvailable, since dictation has to reach this
   // specific host's convo instance -- see useTCCapture's doc comment.
-  const tcCapture = useTCCapture(Boolean(data.convo), host.id)
+  const tcCapture = useTCCapture(Boolean(data.convo?.transcribe_available), host.id)
 
   return (
     <TCCaptureContext.Provider value={{ available: tcCapture.available, capture: tcCapture.capture }}>
@@ -3099,6 +3819,14 @@ function LRView({
                 sessions is not running on this host — launch it from the system tab
               </div>
             )
+          ) : activeTab === 'robot' ? (
+            data.robot ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/robot/`} title={`robot on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                robot is not running on this host — launch it from the system tab
+              </div>
+            )
           ) : (
             data.convo ? (
               <iframe className="embed-frame" src={`/host/${host.id}/convo/`} title={`convo on ${host.label}`} />
@@ -3112,7 +3840,7 @@ function LRView({
           <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
             <div className="service-view">
               <div className="service-name">{activeTab}</div>
-              {activeTab === 'federation-command' && (
+              {(activeTab === 'federation-command' || activeTab === 'worker') && (
                 <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
                   <span className="health-dot" />
                   <span className="health-label">{getServiceStatus(activeTab)}</span>
@@ -3136,6 +3864,7 @@ function LRView({
                     state={data.system}
                     active={active}
                     fcState={data.fcState}
+                    fcInstances={data.fcInstances}
                     repoState={data.repo}
                     onLaunch={sendLRLaunchApp}
                     onTerminate={sendLRTerminateApp}
@@ -3162,9 +3891,70 @@ function LRView({
                   onSelect={setSelectedFileId}
                   onEnter={setViewerFileId}
                   onUpload={f => uploadFiles(host.id, f)}
+                  hostApi={`/host/${encodeURIComponent(host.id)}`}
+                  onHostImport={(paths, folders) => importHostFiles(host.id, paths, folders)}
                 />
               )}
-              {activeTab === 'federation-command' && (
+              {activeTab === 'control' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <ControlPanel
+                    hostId={host.id}
+                    connected={active}
+                    state={data.control ?? null}
+                    lib={data.controlLib ?? null}
+                    replies={data.controlReplies ?? {}}
+                    request={req => requestLRControl(host.id, req)}
+                    robotHealthy={getServiceStatus('robot') === 'healthy'}
+                    onRun={(seq, controls, recordOverride) => sendLRControlRun(host.id, seq, controls, recordOverride)}
+                    onCancel={() => sendLRControlCancel(host.id)}
+                    onContinue={run => sendLRControlContinue(host.id, run)}
+                  />
+                )
+              )}
+              {activeTab === 'worker' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <WorkerPanel
+                    healthy={getServiceStatus('worker') === 'healthy'}
+                    state={data.worker ?? null}
+                    reply={data.workerReply ?? null}
+                    onSubmit={prompt => sendLRWorkerSubmit(host.id, prompt)}
+                  />
+                )
+              )}
+              {activeTab === 'federation-command' && (fc ? (
+                // A current LR: one instance at a time, picked above.
+                <>
+                  <FCInstancePicker
+                    instances={data.fcInstances}
+                    selected={fc.key}
+                    onSelect={key => setSelectedFC(prev => ({ ...prev, [host.id]: key }))}
+                  />
+                  {fc.ridealong && (
+                    <RidealongPanel
+                      hostId={host.id}
+                      state={{ ...fc.ridealong, host_id: host.id }}
+                      fcState={fc.state}
+                      sendLRRidealongCommand={(hostId, action) => sendLRRidealongCommand(hostId, action, fc.key)}
+                    />
+                  )}
+                  {fc.condoc && !fc.ridealong && (
+                    <CondocPanel state={{ ...fc.condoc, host_id: host.id }} fcState={fc.state} />
+                  )}
+                  <FCCommandPanel
+                    key={fc.key}
+                    hostId={host.id}
+                    fcState={fc.state}
+                    fcLog={data.fcLogs[fc.key] ?? []}
+                    sendLRCommand={(hostId, cmd) => sendLRCommand(hostId, cmd, fc.key)}
+                  />
+                </>
+              ) : (
+                // An older LR that doesn't tell its instances apart (or none
+                // connected yet).
                 <>
                   {data.ridealong && (
                     <RidealongPanel
@@ -3184,7 +3974,7 @@ function LRView({
                     sendLRCommand={sendLRCommand}
                   />
                 </>
-              )}
+              ))}
             </div>
             {selectedFile && (
               <FileDetailPane
@@ -3398,7 +4188,7 @@ function TCAvailabilityIndicator({ available }: { available: boolean }) {
   return (
     <span
       className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
-      title={available ? 'The Conversationalist is available' : 'The Conversationalist is not available on any connected host'}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist transcription is not available on any connected host'}
     >
       {MIC_ICON}
     </span>
@@ -3428,8 +4218,8 @@ export default function App() {
   const {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
-    sendLRCommand, sendLRRidealongCommand, sendLRLaunchApp, sendLRTerminateApp, uploadFiles,
-    sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -3609,14 +4399,20 @@ export default function App() {
               data={hostData[selectedHost.id] ?? emptyHostState()}
               sendLRCommand={sendLRCommand}
               sendLRRidealongCommand={sendLRRidealongCommand}
+              sendLRControlRun={sendLRControlRun}
+              sendLRControlCancel={sendLRControlCancel}
+              sendLRControlContinue={sendLRControlContinue}
+              requestLRControl={requestLRControl}
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
+              sendLRWorkerSubmit={sendLRWorkerSubmit}
               sendLRRestartApp={sendLRRestartApp}
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               uploadFiles={uploadFiles}
+              importHostFiles={importHostFiles}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
               hasHighlighted={!!firstHighlighted}

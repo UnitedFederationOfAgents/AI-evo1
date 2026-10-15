@@ -11,7 +11,7 @@ for the exact on-disk formats.
 |------|----------|------------|---------|
 | `{ts}-writing.txt` / `{ts}-s-writing.txt` | Transient — exists only while the command runs | The invocation that dispatched the command | Marks "a writer is active at this timestamp" so concurrent invocations can detect a collision |
 | `{ts}-raw.txt` / `{ts}-s-raw.txt` | Permanent | The same invocation, at completion | The complete, untruncated command + response. Never edited after creation, except a `-s-raw.txt` being renamed to `-raw.txt` (see below) |
-| `{ts}-processed.txt` / `{ts}-s-processed.txt` | Permanent | The **producer of the raw/s-raw file above**, immediately after writing it | The raw content run through auto-maintenance (secret redaction, loading-bar stripping, long-response truncation), with a JSON header per processing step applied. A primary writes straight to `-processed.txt`; a secondary keeps the `-s-` infix until consolidation folds and promotes it (see below) — the same infix a distributed once-transfer targets |
+| `{ts}-processed.txt` / `{ts}-s-processed.txt` | Permanent | The **producer of the raw/s-raw file above**, immediately after writing it | The raw content run through auto-maintenance (secret redaction, loading-bar stripping, long-response truncation), with a JSON header per processing step applied. A primary writes straight to `-processed.txt`; a secondary keeps the `-s-` infix until consolidation folds and promotes it (see below) |
 | `session.jsonl` | Permanent, append-only | The primary, once its own command completes | The consolidated, human-scannable log: one JSON-metadata-plus-preview entry per invocation, in timestamp order |
 | `session.yaml` | Permanent | Whichever invocation creates the session directory | Session identity (`id`, `name`, `created`) |
 
@@ -61,10 +61,8 @@ next to it. (Consolidation still knows how to produce a missing
 `-processed.txt` itself as a fallback, purely as a safety net — that path
 shouldn't be hit in normal operation.)
 
-Step 5 keys off `-s-processed.txt` rather than `-s-raw.txt` on purpose: a
-`-s-raw.txt` only ever exists locally (a concurrent secondary invocation on
-this same host), but a `-s-processed.txt` can *also* have arrived from
-another host entirely — see "Distributed sessions" below. Either way,
+Step 5 keys off `-s-processed.txt` rather than `-s-raw.txt`, so a
+`-s-processed.txt` with no `-s-raw.txt` sibling is still folded. Either way,
 consolidation never re-runs auto-maintenance on it; that only ever happens
 once, at `-raw.txt`/`-s-raw.txt` → `-processed.txt` time, by the record's own
 producer.
@@ -73,67 +71,60 @@ producer.
 
 The sequence above is entirely local. When more than one host shares a
 session (see [`docs/DistributedSessionsBrainstorm.md`](../docs/DistributedSessionsBrainstorm.md)),
-`local-representative` adds two triggers around it, both implemented as
-pulls a host makes on its own behalf (never a push another host forces on
-it):
+the session's **owner** — the host named by `owner:` in its `session.yaml`,
+the one that created it — is the only one that writes `session.jsonl` (see
+`sessionlog.go`). On any other host the same sequence runs with two
+differences:
+
+- Every record file carries the host: `{ts}-<host>-writing.txt`,
+  `{ts}-<host>-raw.txt`, `{ts}-<host>-processed.txt` (and `-s-` variants), so
+  two hosts writing in the same second can't collide.
+- Step 5 appends to the host's own **secondary log**,
+  `session.<host>.jsonl`, instead of `session.jsonl`.
+
+Notes and resources (`add-note`/`add-resource`) follow the same rules.
+A session with no `session.yaml` has no known owner, and is written to as
+someone else's; clauditable never creates `session.yaml` except for the
+host's own daily default (new-session and federation-command's confirmed
+set-session create the others).
+
+Every log append (clauditable, federation-command, session-manager's fuse)
+is a single write under an exclusive `flock` on the log.
 
 ```
- secondary host                      primary host                    any viewer host
- ───────────────                     ────────────                    ───────────────
- {ts}-s-writing.txt
-        │
-        ▼
- {ts}-s-raw.txt          ──xfer once, on the primary's
-        │                  next dispatch, if not already       ┐
-        ▼                  seen locally──────────────────────► │
- {ts}-s-processed.txt      (glob: *-s-processed.txt)            ▼
-                                                        {ts}-s-processed.txt
-                                                        sits alongside any
-                                                        LOCAL secondary's own
-                                                        {ts}-s-processed.txt,
-                                                        folded into session.jsonl
-                                                        by step 5 exactly the
-                                                        same way — promoted to
-                                                        {ts}-processed.txt with
-                                                        no {ts}-raw.txt ever
-                                                        appearing (its raw
-                                                        content never left the
-                                                        secondary host)
-                                                                │
-                                                                ▼
-                                                   session.jsonl / {ts}-processed.txt
-                                                        ──sync, refreshed any───► session.jsonl /
-                                                          number of times,        {ts}-processed.txt
-                                                          checksum-compared
-                                                          to skip unchanged
-                                                          files (glob:
-                                                          session.jsonl,
-                                                          *-processed.txt)
+ non-owner host                                  owner host
+ ──────────────                                  ──────────
+ {ts}-<host>-raw.txt   (never leaves the host)
+ {ts}-<host>-processed.txt ───pulled once by name─────────►  {ts}-<host>-processed.txt
+ session.<host>.jsonl ────pulled when its checksum changes─► session.<host>.jsonl
+                                                                   │ session-manager fuses the
+                                                                   ▼ turns it doesn't have yet
+ session.jsonl  ◄──pulled when its checksum changes──────── session.jsonl
+   │
+   ▼ session-manager prunes the turns that came back from
+     session.<host>.jsonl, and removes it once it's empty
 ```
 
-- **Once-transfer**: whenever a host is about to write a record and finds
-  itself primary, it asks every other LR-active host holding this session for
-  a copy of its `*-s-processed.txt` files, skipping any name it already has.
-  Since `-s-processed.txt` is already fully auto-maintained by its own
-  producer, nothing runs again on arrival — the transferred copy is folded
-  into `session.jsonl` and promoted to `-processed.txt` exactly like a local
-  secondary's, just with no `-raw.txt` counterpart ever appearing locally
-  (the pre-redaction content never crosses hosts).
-- **Sync**: whenever a host is about to read a session — supplying it to an
-  agent for context, or opening it in session-manager for viewing — it asks
-  every other LR-active host for its current `session.jsonl` and
-  `*-processed.txt`, refreshed as many times as the session is read.
-  Checksums (not just presence) are compared so an unchanged file is never
-  re-transferred.
+All transfers are pulls `local-representative` makes on its own host's
+behalf, over `agent-coordinator`'s `/host/<id>/*` proxy (see
+`local-representative/sessions.go`'s `handleSessionsPull`), triggered by
+session-manager before it renders a view (`session-manager/repr.go`) and by
+federation-command's set-session:
 
-Both triggers are implemented as one HTTP call from clauditable
-(once-transfer, right after determining primary/secondary — see
-`distsync.go`) or session-manager (sync, right before rendering a view — see
-`session-manager/repr.go`) to their own host's `local-representative`, which
-performs the actual cross-host fetch over `agent-coordinator`'s existing
-`/host/<id>/*` proxy (see `local-representative/sessions.go`). Neither
-trigger is required for `local-representative` to be present or connected —
-both degrade silently to the purely local sequence above when it isn't.
+- `session.yaml` and `session.jsonl` only come from the owner, and the owner
+  never takes them from anyone. (A host with no copy at all may take one
+  from a non-owner when the owner can't be reached, but never replaces one.)
+- `session.<host>.jsonl` only goes to the owner, and only from `<host>`.
+- Processed records and resources never change once written, so they're
+  fetched once by name. Resources over 256 KiB are left behind until someone
+  opens them.
+- Raw files, `-writing.txt` files and unconsolidated `-s-processed.txt`
+  files never cross hosts.
+
+session-manager's transcript splices every secondary log's not-yet-fused
+turns in among `session.jsonl`'s, marked with the host they came from (see
+`session-manager/sessionlog.go`). None of this needs `local-representative`
+to be present or connected — without it, each host just keeps its own logs.
 
 ## Worked example: one primary, one concurrent secondary
 
@@ -165,9 +156,8 @@ After this, the session directory holds `0-raw.txt`, `0-processed.txt`,
 `1-s-processed.txt`), and `session.jsonl` — no `-writing.txt`, `-s-raw.txt`,
 or `-s-processed.txt` files remain.
 
-Had `git log` instead run to completion on a *different* LR-active host
-sharing this session, only its `1-s-processed.txt` would ever reach this
-host (once-transferred in ahead of `git status`'s consolidation — see
-"Distributed sessions" below); `1-s-raw.txt` would stay on that other host,
-so the sequence above would promote straight to `1-processed.txt` with no
-local `1-raw.txt` ever appearing.
+Had `git log` instead run on a *different* host that doesn't own this
+session, it would have been that host's own primary, leaving
+`1-<host>-raw.txt`, `1-<host>-processed.txt` and an entry in
+`session.<host>.jsonl` there; only the processed file and the secondary log
+would reach the owner (see "Distributed sessions" above).

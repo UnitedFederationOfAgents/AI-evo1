@@ -1,0 +1,32 @@
+IANAR sequence run: federation-command: hello world (fc-hello-world)
+result: FAILED after 15.6s: step 5 (Press enter to submit the command): instruction 4 (wait-for-text): after 3s, 0 line(s) on screen show "hello world!" -- needed more than 0
+keyboard via: compositor (org.gnome.Mutter.RemoteDesktop)
+recording: via compositor (org.gnome.Shell.Screencast), 18.1s -- recording/recording.webm
+
+steps:
+
+1. [success] Select the terminal with federation-command (4.6s)
+     - check the screen is unlocked, and wake it if it has blanked
+     - find the line reading exactly "federation-command" on screen (a title bar) and click it; failing that, ask the window manager to focus that window
+   the screen is awake and unlocked; saw "federation-command" at (2880, 156) and clicked it via compositor (org.gnome.Mutter.RemoteDesktop) (top-most of 2 matches)
+   saw: step-1.jpg
+
+2. [success] Bring federation-command to local control (0.3s)
+     - press right
+
+3. [success] Bring the cursor to the command line input (0.6s)
+     - press end ctrl+u
+
+4. [success] Enter: 'echo "hello world!"' (1.8s)
+     - type "echo "hello world!""
+
+5. [error] Press enter to submit the command (8.3s)
+     - count the lines on screen containing "hello world!" (not "echo "hello world!"") as {{output_before}}
+     - press enter
+     - wait 1s
+     - wait up to 3s for more than {{output_before}} line(s) on screen containing "hello world!"
+   instruction 4 (wait-for-text): after 3s, 0 line(s) on screen show "hello world!" -- needed more than 0
+   saw: step-5.jpg
+
+6. [skipped] Bring federation-command back to remote control
+     - press left

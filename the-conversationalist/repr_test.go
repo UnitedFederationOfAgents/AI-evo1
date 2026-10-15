@@ -46,6 +46,17 @@ func TestConvoStateMsgShape(t *testing.T) {
 	}
 }
 
+// TestServerReportsStartedAt covers Step5Prompt.md Revision D: the start
+// time UIs announce off must be set when the server is created, not left at
+// the zero time.
+func TestServerReportsStartedAt(t *testing.T) {
+	before := time.Now().UnixMilli()
+	s := newServer()
+	if got := s.startedAt.UnixMilli(); got < before || got > time.Now().UnixMilli() {
+		t.Fatalf("startedAt = %d, want a time during newServer", got)
+	}
+}
+
 // TestStartConnectLoopThenStop verifies the manual widget path: starting a
 // connect loop against an address nothing answers on moves status to
 // "connecting", and stopConnectLoop (the widget's "Disconnect") reports

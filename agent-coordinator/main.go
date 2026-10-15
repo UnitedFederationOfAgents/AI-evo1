@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -128,13 +130,16 @@ type StatusMsg struct {
 	Services []ServiceStatus `json:"services"`
 }
 
-// FCStateMsg matches the fc-state payload sent from LR.
+// FCStateMsg matches the fc-state payload sent from LR. FC is the FC
+// instance it's about.
 type FCStateMsg struct {
+	FC    string `json:"fc,omitempty"`
 	State string `json:"state"`
 }
 
-// FCLogMsg is the payload of "lr-fc-log" WebSocket messages.
+// FCLogMsg matches the fc-log payload sent from LR.
 type FCLogMsg struct {
+	FC   string `json:"fc,omitempty"`
 	Line string `json:"line"`
 	Kind string `json:"kind,omitempty"`
 }
@@ -195,9 +200,23 @@ type SessionsStateMsg struct {
 // ConvoStateMsg matches the convo-state payload forwarded up from LR
 // (originating at a managed the-conversationalist). HTTPPort is
 // the-conversationalist's own port on the LR box; the coordinator
-// reverse-proxies its UI at /host/<id>/convo/. Grows domain-specific fields
-// in a later step (see condocs/InitialShellsSessionManagerAndTheConversationalist.md).
+// reverse-proxies its UI at /host/<id>/convo/. TranscribeAvailable says
+// whether that instance can currently reach its transcription engine (see
+// the-conversationalist/transcribe_status.go) -- it gates the mic icons, not
+// the convo tab itself. StartedAt (unix ms) is when that the-conversationalist
+// process started, which lets the browser announce its start/restart.
 type ConvoStateMsg struct {
+	HTTPPort            string `json:"http_port"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
+}
+
+// RobotStateMsg matches the robot-state payload forwarded up from LR
+// (originating at a managed ianar). HTTPPort is ianar's own port on the LR
+// box; the coordinator reverse-proxies its UI at /host/<id>/robot/. Grows
+// domain-specific fields in a later step (see condocs/InitialRobot.md).
+type RobotStateMsg struct {
 	HTTPPort string `json:"http_port"`
 }
 
@@ -257,8 +276,21 @@ type LRSessionsMsg struct {
 
 // LRConvoMsg is the host-scoped "lr-convo-state" message sent to browser
 // clients: whether a managed the-conversationalist's forwarded UI is
-// available on that host -- mirrors LRCondoccerMsg.
+// available on that host -- mirrors LRCondoccerMsg -- and whether that
+// instance can currently transcribe (gating that host's mic icons), plus when
+// it started (so the browser can announce a start/restart).
 type LRConvoMsg struct {
+	HostID              string `json:"host_id"`
+	Available           bool   `json:"available"`
+	TranscribeAvailable bool   `json:"transcribe_available"`
+	TranscribeReason    string `json:"transcribe_reason,omitempty"`
+	StartedAt           int64  `json:"started_at,omitempty"`
+}
+
+// LRRobotMsg is the host-scoped "lr-robot-state" message sent to browser
+// clients: whether a managed ianar's forwarded UI is available on that host
+// -- mirrors LRCondoccerMsg.
+type LRRobotMsg struct {
 	HostID    string `json:"host_id"`
 	Available bool   `json:"available"`
 }
@@ -347,13 +379,51 @@ type RepoStateMsg struct {
 
 type LRFCStateMsg struct {
 	HostID string `json:"host_id"`
+	FC     string `json:"fc,omitempty"` // the FC instance on that host -- see local-representative/fcinstances.go
 	State  string `json:"state"`
 }
 
 type LRFCLogMsg struct {
 	HostID string `json:"host_id"`
+	FC     string `json:"fc,omitempty"`
 	Line   string `json:"line"`
 	Kind   string `json:"kind,omitempty"`
+}
+
+// LRFCInstancesMsg relays a host's "fc-instances" snapshot (every connected
+// federation-command instance -- see local-representative/fcinstances.go)
+// as-is.
+type LRFCInstancesMsg struct {
+	HostID    string          `json:"host_id"`
+	Instances json.RawMessage `json:"instances"`
+}
+
+// LRControlMsg relays a host's "control-state" (its control tab's sequences
+// and current run -- see local-representative/control.go) as-is. Control is
+// null when the host has disconnected.
+type LRControlMsg struct {
+	HostID  string          `json:"host_id"`
+	Control json.RawMessage `json:"control"`
+}
+
+// LRControlLibraryMsg relays a host's "control-library" (its control tab's
+// definer actions and composer sequences -- see
+// local-representative/controllib.go) as-is; null once it disconnects.
+type LRControlLibraryMsg struct {
+	HostID  string          `json:"host_id"`
+	Library json.RawMessage `json:"library"`
+}
+
+// maxControlLibCommand caps a library request relayed to a host: the
+// representable link reads a line at a time, up to 64 KiB.
+const maxControlLibCommand = 48 << 10
+
+// LRControlReplyMsg relays a host's "control-reply", its answer to a
+// library request ("lr-control-lib") or a run that couldn't start. Every
+// browser gets it; the one that asked matches it by the reply's req.
+type LRControlReplyMsg struct {
+	HostID string          `json:"host_id"`
+	Reply  json.RawMessage `json:"reply"`
 }
 
 type LRRidealongMsg struct {
@@ -529,11 +599,20 @@ type hostState struct {
 	condoccer  *CondoccerStateMsg
 	sessions   *SessionsStateMsg
 	convo      *ConvoStateMsg
+	robot      *RobotStateMsg
 	files      *FilesStateMsg
 	debugLog   *DebugLogStateMsg
 	chainCall  *ChainCallStateMsg
 	stateboard *StateboardMsg
 	lrHTTPPort string
+
+	// fcInstances, control, controlLib and worker are relayed to browsers
+	// as-is -- see LRFCInstancesMsg, LRControlMsg, LRControlLibraryMsg and
+	// LRWorkerMsg.
+	fcInstances json.RawMessage
+	control     json.RawMessage
+	controlLib  json.RawMessage
+	worker      json.RawMessage
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -772,14 +851,22 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	condoccer := hs.condoccer
 	sessions := hs.sessions
 	convo := hs.convo
+	robot := hs.robot
 	files := hs.files
 	debugLog := hs.debugLog
 	chainCall := hs.chainCall
 	stateboard := hs.stateboard
+	fcInstances := hs.fcInstances
+	control := hs.control
+	controlLib := hs.controlLib
+	worker := hs.worker
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
 	s.sendToClient(c, "lr-fc-state", LRFCStateMsg{HostID: name, State: fcState})
+	s.sendToClient(c, "lr-fc-instances", fcInstancesMsg(name, fcInstances))
+	s.sendToClient(c, "lr-control-state", LRControlMsg{HostID: name, Control: control})
+	s.sendToClient(c, "lr-control-library", LRControlLibraryMsg{HostID: name, Library: controlLib})
 	if ridealong != nil {
 		s.sendToClient(c, "lr-ridealong-state", ridealongMsg(name, ridealong))
 	} else {
@@ -801,6 +888,8 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	s.sendToClient(c, "lr-condoccer-state", condoccerMsg(name, condoccer))
 	s.sendToClient(c, "lr-sessions-state", sessionsMsg(name, sessions))
 	s.sendToClient(c, "lr-convo-state", convoMsg(name, convo))
+	s.sendToClient(c, "lr-robot-state", robotMsg(name, robot))
+	s.sendToClient(c, "lr-worker-state", workerMsg(name, worker))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
@@ -856,7 +945,31 @@ func convoMsg(hostID string, cv *ConvoStateMsg) LRConvoMsg {
 	if cv == nil || cv.HTTPPort == "" {
 		return LRConvoMsg{HostID: hostID, Available: false}
 	}
-	return LRConvoMsg{HostID: hostID, Available: true}
+	return LRConvoMsg{
+		HostID:              hostID,
+		Available:           true,
+		TranscribeAvailable: cv.TranscribeAvailable,
+		TranscribeReason:    cv.TranscribeReason,
+		StartedAt:           cv.StartedAt,
+	}
+}
+
+// robotMsg builds a host-scoped lr-robot-state payload; a nil state means no
+// managed ianar is currently reporting on that host -- mirrors condoccerMsg.
+func robotMsg(hostID string, rb *RobotStateMsg) LRRobotMsg {
+	if rb == nil || rb.HTTPPort == "" {
+		return LRRobotMsg{HostID: hostID, Available: false}
+	}
+	return LRRobotMsg{HostID: hostID, Available: true}
+}
+
+// fcInstancesMsg builds a host-scoped lr-fc-instances payload; nil means no
+// snapshot yet (or the host disconnected), sent as an empty list.
+func fcInstancesMsg(hostID string, raw json.RawMessage) LRFCInstancesMsg {
+	if len(raw) == 0 || string(raw) == "null" {
+		raw = json.RawMessage("[]")
+	}
+	return LRFCInstancesMsg{HostID: hostID, Instances: raw}
 }
 
 func ridealongMsg(hostID string, r *RidealongStateMsg) LRRidealongMsg {
@@ -907,6 +1020,16 @@ func condocMsg(hostID string, c *CondocStateMsg) LRCondocMsg {
 		StepNum:   c.StepNum,
 		StatusMsg: c.StatusMsg,
 	}
+}
+
+// fcTargeted addresses cmd to one FC instance on a host: LR runs
+// "__fc:<instance> <cmd>" on that instance only, and a bare cmd on its
+// default instance.
+func fcTargeted(fc, cmd string) string {
+	if fc == "" {
+		return cmd
+	}
+	return "__fc:" + fc + " " + cmd
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -989,22 +1112,106 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				s.sendHostSnapshot(c, payload.HostID)
 			}
 		case "lr-command":
+			// fc picks one FC instance on the host (see
+			// local-representative/fcinstances.go); empty leaves it to LR.
 			var payload struct {
 				HostID string `json:"host_id"`
+				FC     string `json:"fc"`
 				Cmd    string `json:"cmd"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
 				payload.HostID != "" && payload.Cmd != "" && s.reprServer != nil {
-				s.reprServer.SendCommand(payload.HostID, payload.Cmd)
+				s.reprServer.SendCommand(payload.HostID, fcTargeted(payload.FC, payload.Cmd))
 			}
 		case "lr-ridealong-command":
 			var payload struct {
 				HostID string `json:"host_id"`
+				FC     string `json:"fc"`
 				Action string `json:"action"`
 			}
 			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
 				payload.HostID != "" && payload.Action != "" && s.reprServer != nil {
-				s.reprServer.SendCommand(payload.HostID, "__ridealong:"+payload.Action)
+				s.reprServer.SendCommand(payload.HostID, fcTargeted(payload.FC, "__ridealong:"+payload.Action))
+			}
+		case "lr-control-run":
+			// The host's control tab -- see local-representative/control.go.
+			var payload struct {
+				HostID         string            `json:"host_id"`
+				Sequence       string            `json:"sequence"`
+				Controls       map[string]string `json:"controls"`
+				RecordOverride string            `json:"record_override"` // a node, "none", or "" for the sequence's own recordings
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Sequence != "" && !strings.ContainsAny(payload.Sequence, " \n") &&
+				!strings.ContainsAny(payload.RecordOverride, " \n") && s.reprServer != nil {
+				cmd := "__control:run " + payload.Sequence
+				if payload.RecordOverride != "" {
+					cmd += " --record " + payload.RecordOverride
+				}
+				if len(payload.Controls) > 0 {
+					values, _ := json.Marshal(payload.Controls)
+					cmd += " " + string(values)
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
+			}
+		case "lr-control-lib":
+			// The host's control tab definer/composer: the request is passed
+			// on as-is ("__control:lib <json>") and the host's answer comes
+			// back as "control-reply".
+			var payload struct {
+				HostID  string          `json:"host_id"`
+				Request json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && len(payload.Request) > 0 && s.reprServer != nil {
+				var compact bytes.Buffer
+				if err := json.Compact(&compact, payload.Request); err != nil {
+					break
+				}
+				if compact.Len() > maxControlLibCommand {
+					// Representable reads a line at a time, up to 64 KiB; a
+					// longer one would drop the host's connection.
+					var req struct {
+						Req string `json:"req"`
+						Op  string `json:"op"`
+					}
+					_ = json.Unmarshal(payload.Request, &req)
+					reply, _ := json.Marshal(map[string]any{"req": req.Req, "op": req.Op, "success": false,
+						"error": fmt.Sprintf("too large to send to %s through agent-coordinator (%d KiB, the limit is %d KiB) -- import it on that host's own control tab", payload.HostID, compact.Len()>>10, maxControlLibCommand>>10)})
+					s.sendToClient(c, "lr-control-reply", LRControlReplyMsg{HostID: payload.HostID, Reply: reply})
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, "__control:lib "+compact.String())
+			}
+		case "lr-control-cancel":
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__control:cancel")
+			}
+		case "lr-control-continue":
+			// The continue button on a host's step waiting for the user.
+			var payload struct {
+				HostID string `json:"host_id"`
+				Run    string `json:"run"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" &&
+				!strings.ContainsAny(payload.Run, " \n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, strings.TrimSpace("__control:continue "+payload.Run))
+			}
+		case "lr-worker-submit":
+			// The host's worker tab prompt box -- see worker.go.
+			var payload struct {
+				HostID string `json:"host_id"`
+				Prompt string `json:"prompt"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				cmd, err := workerSubmitCommand(payload.Prompt)
+				if err != nil {
+					s.sendToClient(c, "lr-worker-reply", workerReplyMsg(payload.HostID, err))
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
 			}
 		case "lr-launch-app":
 			var payload struct {
@@ -1373,15 +1580,23 @@ func main() {
 			hs.condoccer = nil
 			hs.sessions = nil
 			hs.convo = nil
+			hs.robot = nil
 			hs.files = nil
 			hs.debugLog = nil
 			hs.chainCall = nil
 			hs.stateboard = nil
 			hs.lrHTTPPort = ""
+			hs.fcInstances = nil
+			hs.control = nil
+			hs.controlLib = nil
+			hs.worker = nil
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
 			s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, State: ""})
+			s.broadcast("lr-fc-instances", fcInstancesMsg(name, nil))
+			s.broadcast("lr-control-state", LRControlMsg{HostID: name})
+			s.broadcast("lr-control-library", LRControlLibraryMsg{HostID: name})
 			s.broadcast("lr-ridealong-state", LRRidealongMsg{HostID: name, Active: false})
 			s.broadcast("lr-condoc-state", LRCondocMsg{HostID: name, Active: false})
 			s.broadcast("lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1389,12 +1604,15 @@ func main() {
 			s.broadcast("lr-condoccer-state", LRCondoccerMsg{HostID: name, Available: false})
 			s.broadcast("lr-sessions-state", LRSessionsMsg{HostID: name, Available: false})
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
+			s.broadcast("lr-robot-state", LRRobotMsg{HostID: name, Available: false})
+			s.broadcast("lr-worker-state", workerMsg(name, nil))
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
 			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
 			s.broadcast("lr-stateboard-state", LRStateboardMsg{HostID: name, Active: false})
 			s.setModeMismatch(name, false, "")
 			s.broadcastTCAvailability()
+			s.broadcastControlNodes()
 		}
 	})
 
@@ -1423,6 +1641,9 @@ func main() {
 			// even if the aggregate hasn't changed (broadcastTCAvailability
 			// below only re-pushes to hosts on a change).
 			s.sendTCAvailabilityTo(name)
+			// Every host's control tab offers the connected nodes, this one
+			// now among them.
+			s.broadcastControlNodes()
 		}
 
 		switch dataType {
@@ -1440,8 +1661,43 @@ func main() {
 				hs.mu.Lock()
 				hs.fcState = payload.State
 				hs.mu.Unlock()
-				s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, State: payload.State})
+				s.broadcast("lr-fc-state", LRFCStateMsg{HostID: name, FC: payload.FC, State: payload.State})
 			}
+		case "fc-log":
+			var payload FCLogMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				s.broadcast("lr-fc-log", LRFCLogMsg{HostID: name, FC: payload.FC, Line: payload.Line, Kind: payload.Kind})
+			}
+		case "fc-instances":
+			var payload struct {
+				Instances json.RawMessage `json:"instances"`
+			}
+			if err := json.Unmarshal(data, &payload); err == nil {
+				hs.mu.Lock()
+				hs.fcInstances = payload.Instances
+				hs.mu.Unlock()
+				s.broadcast("lr-fc-instances", fcInstancesMsg(name, payload.Instances))
+			}
+		case "control-state":
+			hs.mu.Lock()
+			hs.control = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-control-state", LRControlMsg{HostID: name, Control: data})
+		case "control-library":
+			hs.mu.Lock()
+			hs.controlLib = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-control-library", LRControlLibraryMsg{HostID: name, Library: data})
+		case "control-reply":
+			s.broadcast("lr-control-reply", LRControlReplyMsg{HostID: name, Reply: data})
+		case "node-capture", "node-fetch", "node-record":
+			// A control sequence on this host wants another node's
+			// screenshot, files or screen recording -- see controlnodes.go.
+			s.relayNodeRequest(dataType, name, data)
+		case "node-capture-result", "node-fetch-result", "node-record-result":
+			s.relayNodeResult(strings.TrimSuffix(dataType, "-result"), name, data)
+		case "control-nodes-request":
+			s.sendControlNodes(name, s.connectedHostNames())
 		case "ridealong-state":
 			var payload RidealongStateMsg
 			if err := json.Unmarshal(data, &payload); err == nil {
@@ -1521,6 +1777,26 @@ func main() {
 				s.broadcast("lr-convo-state", convoMsg(name, cv))
 				s.broadcastTCAvailability()
 			}
+		case "robot-state":
+			var payload RobotStateMsg
+			if err := json.Unmarshal(data, &payload); err == nil {
+				var rb *RobotStateMsg
+				if payload.HTTPPort != "" {
+					rb = &payload
+				}
+				hs.mu.Lock()
+				hs.robot = rb
+				hs.mu.Unlock()
+				s.broadcast("lr-robot-state", robotMsg(name, rb))
+			}
+		case "worker-state":
+			// The host's worker tab -- see worker.go.
+			hs.mu.Lock()
+			hs.worker = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-worker-state", workerMsg(name, data))
+		case "worker-reply":
+			s.broadcast("lr-worker-reply", LRWorkerReplyMsg{HostID: name, Reply: data})
 		case "lr-http":
 			var payload LRHTTPMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

@@ -52,6 +52,14 @@ type lrState struct {
 	// a future "manage-on-connect" instance (not yet implemented) is neither
 	// terminated by a restart nor carried forward here.
 	ManagedApps []string `json:"managed_apps,omitempty"`
+
+	// CondoccerRoot is the working dir condoccer last reported (see
+	// getCondoccerRoot), including any runtime "Set Working Dir" change, so
+	// the condoccer relaunched by the instance replacing this one comes back
+	// scanning the same place rather than reverting to --condoccer-root --
+	// Step4SubstepDPrompt.md Revision C. Empty when no condoccer has
+	// reported and no --condoccer-root was given.
+	CondoccerRoot string `json:"condoccer_root,omitempty"`
 }
 
 // currentState captures the live LR-specific state a restart should carry
@@ -68,6 +76,7 @@ func (s *Server) currentState() lrState {
 		st.ACHost, st.ACPort = ac.Host, ac.Port
 	}
 	st.ManagedApps = s.runningManagedTokens()
+	st.CondoccerRoot = s.getCondoccerRoot()
 	return st
 }
 
@@ -99,6 +108,8 @@ func loadPreviousState() (st lrState, ok bool) {
 // actually running when the restart was requested, which may differ from
 // whatever --auto-launch this instance happens to be relaunched with -- e.g.
 // an instance an operator had since terminated by hand shouldn't come back).
+// A restored CondoccerRoot likewise overrides --condoccer-root, but only when
+// one was carried; an empty one leaves cfg's value in place.
 func (st lrState) applyToConfig(cfg *appConfig) {
 	cfg.autoConnect = st.AutoConnect
 	if st.ACHost != "" {
@@ -108,4 +119,7 @@ func (st lrState) applyToConfig(cfg *appConfig) {
 		cfg.acPort = st.ACPort
 	}
 	cfg.autoLaunch = st.ManagedApps
+	if st.CondoccerRoot != "" {
+		cfg.condoccerRoot = st.CondoccerRoot
+	}
 }

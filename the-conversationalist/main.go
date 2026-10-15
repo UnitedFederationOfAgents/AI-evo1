@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"representable"
@@ -47,6 +49,10 @@ type wsClient struct {
 	transcribeMu sync.Mutex
 	transcribe   *transcribeSession
 	finalText    strings.Builder
+
+	// notepadSeq is the highest "set-notepad" seq accepted from this tab,
+	// guarded by Server.notepadMu -- see notepad.go.
+	notepadSeq uint64
 }
 
 // Server manages WebSocket clients and this the-conversationalist's
@@ -74,10 +80,41 @@ type Server struct {
 
 	// awsRegion is the AWS region AWS Transcribe streaming sessions are
 	// started in (see transcribe.go). Empty defers to the AWS SDK's own
-	// default region resolution (env/shared config/instance role) -- see
-	// Revision D's note that we lean on host-level AWS credentials/config
-	// rather than anything app-managed.
+	// default region resolution (env/shared config/instance role), then to
+	// defaultAWSRegion with a warning -- see Revision D's note that we lean on
+	// host-level AWS credentials/config rather than anything app-managed.
 	awsRegion string
+
+	// Transcription-engine availability (see transcribe_status.go).
+	// transcribeProbe is nil in production (checkTranscribeAccess is used);
+	// tests swap in a stub so they don't depend on real AWS access.
+	transcribeStatusMu sync.Mutex
+	transcribeStatus   TranscribeStatusMsg
+	transcribeChecking bool
+	transcribeProbe    func(ctx context.Context) TranscribeStatusMsg
+
+	// Shared notepad text and its revision counter (see notepad.go).
+	notepadMu   sync.Mutex
+	notepadText string
+	notepadRev  uint64
+
+	// notesFile is where the "To Notes" buttons append (see notes.go);
+	// notesMu serializes those appends.
+	notesMu   sync.Mutex
+	notesFile string
+
+	// Polly voice and engine for the notepad's Polly button (see polly.go).
+	// pollyURL overrides Polly's regional endpoint; only tests set it.
+	pollyVoice  string
+	pollyEngine string
+	pollyURL    string
+
+	// startedAt is when this process started. Reported (as started_at) in
+	// self-info and convo-state so every UI down the chain -- TC's own, LR's
+	// and AC's -- can tell a fresh start or restart apart from a reconnect to
+	// the same process, and speak "application running" once per start
+	// (condocs/initialRobotImpls/Step5Prompt.md, Revision D).
+	startedAt time.Time
 }
 
 func newServer() *Server {
@@ -85,8 +122,12 @@ func newServer() *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients:    make(map[*wsClient]bool),
-		reprStatus: "disconnected",
+		clients:     make(map[*wsClient]bool),
+		reprStatus:  "disconnected",
+		notesFile:   defaultNotesFile(),
+		pollyVoice:  defaultPollyVoice,
+		pollyEngine: defaultPollyEngine,
+		startedAt:   time.Now(),
 	}
 }
 
@@ -123,8 +164,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Send initial representable connection status and self-info.
 	go s.sendReprStatus(c)
-	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
+	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version, StartedAt: s.startedAt.UnixMilli()})
 	go s.sendModeMismatch(c)
+	go s.sendNotepad(c)
+	go s.sendTranscribeStatus(c)
 
 	// Write pump.
 	go func() {
@@ -221,6 +264,41 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	case "save-transcript":
 		s.saveTranscript(c)
+
+	case "clear-transcript":
+		s.clearTranscript(c)
+
+	// Manual "Recheck" of transcription-engine availability: see
+	// transcribe_status.go.
+	case "recheck-transcribe":
+		s.refreshTranscribeStatus()
+
+	// Shared notepad: see notepad.go.
+	case "set-notepad":
+		var p struct {
+			Text string `json:"text"`
+			Seq  uint64 `json:"seq"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setNotepad(c, p.Text, p.Seq)
+
+	// "To Notes" buttons: see notes.go.
+	case "append-notes":
+		var p struct {
+			Source string `json:"source"`
+			Text   string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAppendNotes(c, p.Source, p.Text)
+
+	// Notepad's Polly button: see polly.go.
+	case "polly-speak":
+		var p struct {
+			ID   uint64 `json:"id"`
+			Text string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handlePollySpeak(c, p.ID, p.Text)
 	}
 }
 
@@ -297,15 +375,24 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
-	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role)")
+	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role -- else "+defaultAWSRegion+")")
+	notesFile := flag.String("notes-file", "", "file the \"To Notes\" buttons append to (default ~/notes-input.txt)")
+	pollyVoice := flag.String("polly-voice", defaultPollyVoice, "AWS Polly voice for the notepad's Polly button")
+	pollyEngine := flag.String("polly-engine", defaultPollyEngine, "AWS Polly engine (standard, neural, ...); the voice must support it")
 	flag.Parse()
 
 	s := newServer()
+	s.pollyVoice = *pollyVoice
+	s.pollyEngine = *pollyEngine
 	s.httpPort = *port
 	s.name = *name
 	s.devMode = *devMode
 	s.awsRegion = *awsRegion
+	if *notesFile != "" {
+		s.notesFile = *notesFile
+	}
 	go watchRestartSignal()
+	go s.watchTranscribeStatus()
 
 	if *autoConnect {
 		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",

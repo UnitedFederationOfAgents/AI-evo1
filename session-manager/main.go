@@ -4,11 +4,13 @@ import (
 	"embed"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -163,6 +165,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
+	// Each message runs in its own goroutine, where a panic would take the
+	// whole process down -- e.g. on session data this code didn't expect.
+	// Report it to the client instead.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("handling %q: panic: %v\n%s", m.Type, r, debug.Stack())
+			s.sendToClient(c, "error", fmt.Sprintf("%s: internal error: %v", m.Type, r))
+		}
+	}()
 	switch m.Type {
 	case "connect":
 		// Manual connect: the widget lets an instance started without
@@ -236,8 +247,34 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		json.Unmarshal(m.Payload, &p)
 		s.sendSessionView(c, strings.TrimSpace(p.ID))
 
+	case "view-processed":
+		var p struct {
+			ID     string `json:"id"`
+			Record string `json:"record"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.sendProcessedView(c, strings.TrimSpace(p.ID), strings.TrimSpace(p.Record))
+
 	case "archive-sessions":
 		s.handleArchiveSessions(c)
+
+	// Notes and resources attached to a session -- see annotations.go.
+	case "add-note":
+		var p struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAddNote(c, strings.TrimSpace(p.ID), p.Text)
+
+	case "add-resource":
+		var p struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Content string `json:"content"` // base64
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAddResource(c, strings.TrimSpace(p.ID), strings.TrimSpace(p.Name), p.Content)
 	}
 }
 
@@ -246,6 +283,7 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/api/resource", s.handleResource)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.

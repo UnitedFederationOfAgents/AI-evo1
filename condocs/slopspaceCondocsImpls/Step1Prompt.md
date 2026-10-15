@@ -98,3 +98,49 @@ Let's revise based on the following:
 - We do not need a second checkout during a turn because we can watch the expected location
 
 Let's do the pointer repo settings now with this understanding and then revise the decision points and restate them based on the updated understanding.
+
+
+prompt: [`8e40243`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8e40243b1fa0e223cde027cc06a8d36a607a8520) → reply: [`88b11bd`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/88b11bdc0b86c5f9b6a0f07586e91fc5ba6d8f11)
+
+## Reply B
+
+I added the pointer repo settings to the Slopspace tab and revised `docs/SlopspaceControlScheme.md` for Revision B. Nothing has been built, run or tested: `go test`, `tsc`, `git diff` and listing the AI-sandboxing directory all needed approval that wasn't given, so I've only checked the code by reading it. Changes are uncommitted.
+
+**Pointer repo settings:**
+- **Backend:** the new file is `condoccer/pointer.go`. It holds the repo, branch and path, defaulting to `je-sidestuff/sloppo`, `main` and `../sloppo`. They can be set with new `--pointer-*` flags or from the UI.
+- **Path:** a relative path resolves against the git repo condoccer was started in, so `../sloppo` sits next to AI-evo1.
+- **Clone and pull:** both use HTTPS with the PAT from `TF_VAR_github_pat`. The token is passed through environment variables, so it is never written to the clone's `.git/config`.
+- **Pulling:** a pull runs on startup, whenever the setting changes, every minute, and when you press Pull.
+- **Status:** shows whether the repo is missing, cloning, ready, or unusable (wrong remote or wrong branch).
+- **Pointer list:** read-only. The sidebar shows each `pointers/*.yaml` with its phase and step.
+- **Frontend:** the Slopspace tab now has a pointer repo panel with Clone, Pull and Set Pointer Repo.
+- **Tests:** added in `condoccer/pointer_test.go`, not yet run.
+
+**Design doc:** the doc now lists six settled decisions: condoccer runs the lifecycle, turns queue one at a time, HTTPS+PAT everywhere, the UI watches the condoc where it's expected to be, PR code is new, and the pointer setting is done.
+
+**Open decisions (my recommendation in brackets):**
+1. How condoccer calls dungeon-keeper [import its Go packages].
+2. How the turn queue works [one first-in-first-out queue per condoccer, saved as a `queued` phase in each pointer so it survives a restart].
+3. Who deploys and returns slopspaces [condoccer, since turns are one at a time; it always returns, even when the agent fails].
+4. Pointer file layout [one YAML file per condoc].
+5. Branch check [run against every repo's remote, while editing and again on accept].
+6. Commit messages and per-repo links.
+7. How the UI finds the condoc during a turn [read the slopspace's deploy state each tick, and don't treat the file being briefly missing as stale].
+8. First-cut scope [retry and revert come later].
+9. Phases [`queued` before a turn, then `pr_proposed`, `pr_open`, `merged`].
+10. Where the PR code goes [a new `dungeon-keeper/pkg/pullrequest` package using the GitHub REST API]. I couldn't open AI-sandboxing from here, so it hasn't been reviewed yet.
+11. Keeping the PAT out of dungeon-keeper's own clones, which currently write it into `.git/config` [fix it].
+12. Agent/model choice [stored per condoc].
+13. Where condoccer runs relative to the worker.
+
+The next step is the dungeon-keeper groundwork. The PR package can be built alongside it once its location is decided.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

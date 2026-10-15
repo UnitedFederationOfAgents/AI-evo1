@@ -100,6 +100,43 @@ export interface RootMsg {
   root: string
 }
 
+// PointerEntry summarizes one pointer file (pointers/*.yaml) in the slopspace
+// pointer repo -- see condoccer/pointer.go.
+export interface PointerEntry {
+  file: string
+  name: string
+  phase: string
+  step?: string
+  substep?: string
+  iteration?: string
+  branch?: string
+  condocRepo?: string
+  targets?: string[]
+}
+
+// PointerConfig is the configurable part of the pointer repo setting ("Set
+// Pointer Repo"). A relative path resolves server-side against the git repo
+// condoccer was started in.
+export interface PointerConfig {
+  repo: string
+  branch: string
+  path: string
+}
+
+export type PointerRepoState ='missing' | 'cloning' | 'invalid' | 'ready'
+
+// PointerStatus is the slopspace tab's pointer repo setting and its state on
+// disk -- sent on connect and whenever either changes.
+export interface PointerStatus extends PointerConfig {
+  resolvedPath: string
+  state: PointerRepoState
+  message?: string
+  lastPull?: string
+  pullError?: string
+  tokenAvailable: boolean
+  pointers: PointerEntry[]
+}
+
 // ModeMismatchMsg discloses that the connected local-representative's
 // dev-mode status differs from this condoccer's own. mismatched: false
 // clears a prior disclosure.
@@ -116,6 +153,7 @@ export type ServerMsg =
   | { type: 'self-info'; payload: SelfInfoMsg }
   | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
   | { type: 'root'; payload: RootMsg }
+  | { type: 'pointer'; payload: PointerStatus }
 
 export interface ActionRequest {
   action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit' | 'add_resource'

@@ -642,6 +642,9 @@ type Server struct {
 	// Step2Prompt.md.
 	tcMu        sync.RWMutex
 	tcAvailable bool
+
+	// pointer is the slopspace tab's pointer repo -- see pointer.go.
+	pointer pointerState
 }
 
 func newServer(root string) *Server {
@@ -840,6 +843,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// Send initial condoc list and representable connection status.
 	go s.sendList(c)
 	go s.sendRoot(c)
+	go s.sendPointer(c)
 	go s.sendReprStatus(c)
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
@@ -945,6 +949,21 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		if err := s.setRoot(p.Root); err != nil {
 			s.sendToClient(c, "error", map[string]string{"message": err.Error()})
 		}
+
+	case "set-pointer":
+		var p PointerConfig
+		json.Unmarshal(m.Payload, &p)
+		if err := s.setPointer(p); err != nil {
+			s.sendToClient(c, "error", map[string]string{"message": err.Error()})
+		}
+
+	case "clone-pointer":
+		if err := s.clonePointer(); err != nil {
+			s.sendToClient(c, "error", map[string]string{"message": err.Error()})
+		}
+
+	case "pull-pointer":
+		s.pullPointer()
 
 	// get-diff/get-file-diff carry the condoc's path so git runs against
 	// that condoc's own repo (see condocRepoRoot), not the scan root.
@@ -1533,6 +1552,9 @@ func main() {
 	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
 	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
 	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
+	pointerRepo := flag.String("pointer-repo", defaultPointerRepo, "slopspace pointer repo (owner/name, cloned over HTTPS with TF_VAR_github_pat); changeable from the UI")
+	pointerBranch := flag.String("pointer-branch", defaultPointerBranch, "branch of the pointer repo condoccer pulls and pushes")
+	pointerPath := flag.String("pointer-path", defaultPointerPath, "where the pointer repo is checked out; relative paths resolve against the git repo holding --root")
 	flag.Parse()
 
 	absRoot, err := filepath.Abs(*root)
@@ -1544,7 +1566,19 @@ func main() {
 	s.httpPort = *port
 	s.name = *name
 	s.devMode = *devMode
+
+	pointerCfg, err := validatePointerConfig(PointerConfig{Repo: *pointerRepo, Branch: *pointerBranch, Path: *pointerPath})
+	if err != nil {
+		log.Fatal("invalid pointer repo: ", err)
+	}
+	pointerBase := findGitRoot(absRoot)
+	if pointerBase == "" {
+		pointerBase = absRoot
+	}
+	s.initPointer(pointerCfg, pointerBase)
+
 	go s.watchLoop()
+	go s.pointerLoop()
 	go watchRestartSignal()
 
 	if *autoConnect {

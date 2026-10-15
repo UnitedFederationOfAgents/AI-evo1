@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { detectTextFormat } from './textformat'
 import { HostFilePicker } from './HostFilePicker'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
+import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, PointerConfig, PointerStatus, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
 
@@ -48,6 +48,8 @@ function useCondocWS() {
   const [root, setRoot] = useState('')
   const [rootGen, setRootGen] = useState(0)
   const rootRef = useRef('')
+  // The slopspace tab's pointer repo (see pointer.go); null until reported.
+  const [pointer, setPointer] = useState<PointerStatus | null>(null)
   const [diffFiles, setDiffFiles] = useState<string[]>([])
   const [diffFilesLoaded, setDiffFilesLoaded] = useState(false)
   const [fileDiffContent, setFileDiffContent] = useState<string | null>(null)
@@ -105,6 +107,21 @@ function useCondocWS() {
     },
     [send],
   )
+
+  const setPointerRepo = useCallback(
+    (cfg: PointerConfig) => {
+      send('set-pointer', cfg)
+    },
+    [send],
+  )
+
+  const clonePointerRepo = useCallback(() => {
+    send('clone-pointer', {})
+  }, [send])
+
+  const pullPointerRepo = useCallback(() => {
+    send('pull-pointer', {})
+  }, [send])
 
   // path is the condoc whose repo the diff runs against -- the working dir
   // may sit above several repos (see condocRepoRoot on the server).
@@ -204,6 +221,8 @@ function useCondocWS() {
             }
             rootRef.current = p.root
             setRoot(p.root)
+          } else if (msg.type === 'pointer') {
+            setPointer(msg.payload as PointerStatus)
           } else if (msg.type === 'diff-list') {
             const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
             setDiffFiles(p.files ?? [])
@@ -244,6 +263,10 @@ function useCondocWS() {
     root,
     rootGen,
     setWorkingDir,
+    pointer,
+    setPointerRepo,
+    clonePointerRepo,
+    pullPointerRepo,
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
@@ -306,6 +329,104 @@ function WorkingDirControl({ root, onSet }: { root: string; onSet: (dir: string)
       <button type="submit" className="btn-primary working-dir-btn">Set</button>
       <button type="button" className="btn-secondary working-dir-btn" onClick={() => setEditing(false)}>Cancel</button>
     </form>
+  )
+}
+
+const POINTER_STATE_LABEL: Record<PointerStatus['state'], string> = {
+  missing: 'Not cloned',
+  cloning: 'Cloning…',
+  invalid: 'Not usable',
+  ready: 'Ready',
+}
+
+// PointerRepoControl ("Set Pointer Repo") is the slopspace tab's counterpart
+// to WorkingDirControl: the condoc pointer repo (owner/name), the branch
+// condoccer pulls/pushes, and where it is checked out. When nothing is at the
+// path it offers to clone (HTTPS + the server's GitHub PAT).
+function PointerRepoControl({
+  pointer,
+  onSet,
+  onClone,
+  onPull,
+}: {
+  pointer: PointerStatus
+  onSet: (cfg: PointerConfig) => void
+  onClone: () => void
+  onPull: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState<PointerConfig>({ repo: '', branch: '', path: '' })
+
+  if (editing) {
+    const submit = () => {
+      const cfg = { repo: draft.repo.trim(), branch: draft.branch.trim(), path: draft.path.trim() }
+      if (cfg.repo !== pointer.repo || cfg.branch !== pointer.branch || cfg.path !== pointer.path) onSet(cfg)
+      setEditing(false)
+    }
+    const field = (key: keyof PointerConfig, label: string, placeholder: string) => (
+      <label className="pointer-field">
+        <span className="working-dir-label">{label}</span>
+        <input
+          className="working-dir-input"
+          value={draft[key]}
+          spellCheck={false}
+          placeholder={placeholder}
+          onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+          onKeyDown={(e) => { if (e.key === 'Escape') setEditing(false) }}
+        />
+      </label>
+    )
+    return (
+      <form className="working-dir pointer-repo" onSubmit={(e) => { e.preventDefault(); submit() }}>
+        {field('repo', 'Pointer repo', 'owner/name')}
+        {field('branch', 'Branch', 'main')}
+        {field('path', 'Path', '../sloppo (relative to the repo condoccer started in)')}
+        <div className="pointer-actions">
+          <button type="submit" className="btn-primary working-dir-btn">Set</button>
+          <button type="button" className="btn-secondary working-dir-btn" onClick={() => setEditing(false)}>Cancel</button>
+        </div>
+      </form>
+    )
+  }
+
+  return (
+    <div className="working-dir pointer-repo">
+      <div className="pointer-field">
+        <span className="working-dir-label">Pointer repo</span>
+        <code className="working-dir-path">{pointer.repo}@{pointer.branch}</code>
+      </div>
+      <div className="pointer-field">
+        <span className="working-dir-label">Path</span>
+        <code className="working-dir-path" title={pointer.resolvedPath}>{pointer.resolvedPath}</code>
+      </div>
+      <div className="pointer-field">
+        <span className="working-dir-label">State</span>
+        <span className={`pointer-state pointer-state-${pointer.state}`}>{POINTER_STATE_LABEL[pointer.state]}</span>
+        {pointer.state === 'ready' && pointer.lastPull && (
+          <span className="pointer-note">pulled {new Date(pointer.lastPull).toLocaleTimeString()}</span>
+        )}
+      </div>
+      {pointer.message && <div className="pointer-message">{pointer.message}</div>}
+      {pointer.state === 'ready' && pointer.pullError && <div className="pointer-message">{pointer.pullError}</div>}
+      {!pointer.tokenAvailable && (
+        <div className="pointer-note">No GitHub token on the server (TF_VAR_github_pat) — only public repos can be cloned or pulled.</div>
+      )}
+      <div className="pointer-actions">
+        {pointer.state === 'missing' && (
+          <button className="btn-primary working-dir-btn" onClick={onClone}>Clone {pointer.repo}</button>
+        )}
+        {pointer.state === 'ready' && (
+          <button className="btn-secondary working-dir-btn" onClick={onPull}>Pull</button>
+        )}
+        <button
+          className="btn-secondary working-dir-btn"
+          disabled={pointer.state === 'cloning'}
+          onClick={() => { setDraft({ repo: pointer.repo, branch: pointer.branch, path: pointer.path }); setEditing(true) }}
+        >
+          Set Pointer Repo
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -1203,6 +1324,7 @@ interface SidebarProps {
   onSelectTab: (tab: ControlSchemeTab) => void
   hideCompleted: boolean
   onSetHideCompleted: (hide: boolean) => void
+  pointer: PointerStatus | null
   condocs: CondocInfo[]
   activeState: CondocState | null
   selectedCondocPath: string | null
@@ -1241,6 +1363,7 @@ function Sidebar({
   onSelectTab,
   hideCompleted,
   onSetHideCompleted,
+  pointer,
   condocs,
   activeState,
   selectedCondocPath,
@@ -1307,8 +1430,28 @@ function Sidebar({
           ))}
         </div>
         {tab === 'slopspace' ? (
+          // Read-only for now: the pointers the pointer repo holds, with
+          // where each condoc's progression is. Opening/driving them comes
+          // with proposal/accept (docs/SlopspaceControlScheme.md).
           <div className="nav-list">
-            <div className="nav-empty">Slopspace condocs are not supported yet.</div>
+            {pointer?.state !== 'ready' && (
+              <div className="nav-empty">Set up the pointer repo to see slopspace condocs.</div>
+            )}
+            {pointer?.state === 'ready' && pointer.pointers.length === 0 && (
+              <div className="nav-empty">No pointers in {pointer.repo} yet.</div>
+            )}
+            {pointer?.state === 'ready' && pointer.pointers.map((p) => (
+              <div key={p.file} className="nav-item nav-item-readonly" title={p.file}>
+                <span className="nav-item-name">{p.name}</span>
+                <div className="nav-item-meta">
+                  {p.phase && <span className={`badge badge-${p.phase}`}>{p.phase.replace(/_/g, ' ')}</span>}
+                  {p.step && <span className="step-label">step {p.step}{p.substep ? `.${p.substep}` : ''}{p.iteration ? ` ${p.iteration}` : ''}</span>}
+                </div>
+                {p.targets && p.targets.length > 0 && (
+                  <span className="nav-item-subtitle">→ {p.targets.join(', ')}</span>
+                )}
+              </div>
+            ))}
           </div>
         ) : (
         <>
@@ -2824,6 +2967,10 @@ export default function App() {
     root,
     rootGen,
     setWorkingDir,
+    pointer,
+    setPointerRepo,
+    clonePointerRepo,
+    pullPointerRepo,
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
@@ -3159,6 +3306,7 @@ export default function App() {
           onSelectTab={setTab}
           hideCompleted={hideCompleted}
           onSetHideCompleted={handleSetHideCompleted}
+          pointer={pointer}
           condocs={condocs}
           activeState={activeState}
           selectedCondocPath={selectedCondocPath}
@@ -3208,7 +3356,22 @@ export default function App() {
 
         {navLevel === 'condoc-list' && tab === 'slopspace' && (
           <div className="empty-state empty-state-list">
-            <div>Slopspace mode is coming soon.</div>
+            <div>
+              <span className={`conn-dot ${connected ? 'connected' : 'disconnected'}`} />
+              {!connected
+                ? 'Connecting…'
+                : pointer?.state === 'ready'
+                  ? 'Slopspace condocs are listed read-only for now — proposing and running them comes next.'
+                  : 'Set up the condoc pointer repo to use slopspace condocs'}
+            </div>
+            {connected && pointer && (
+              <PointerRepoControl
+                pointer={pointer}
+                onSet={(cfg) => { setError(null); setPointerRepo(cfg) }}
+                onClone={() => { setError(null); clonePointerRepo() }}
+                onPull={pullPointerRepo}
+              />
+            )}
           </div>
         )}
 

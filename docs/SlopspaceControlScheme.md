@@ -1,14 +1,24 @@
 # Slopspace Control Scheme
 
-How condoccer runs a condoc under the `slopspace` control scheme. This is the second control scheme, alongside `same-repo`. It covers the target flow, what dungeon-keeper can already do, what is missing, the decisions still open, and the order to build things in.
+How condoccer runs a condoc under the `slopspace` control scheme. This is the second control scheme, alongside `same-repo`. It covers the target flow, what dungeon-keeper can already do, what is missing, the decisions (settled and open), and the order to build things in.
 
-Originating condoc: [SlopspaceCondocs](../condocs/SlopspaceCondocs.md), Step 1 Revision A.
+Originating condoc: [SlopspaceCondocs](../condocs/SlopspaceCondocs.md), Step 1 Revisions A and B.
+
+## Revision B Changes
+
+These changes from Revision B settle or reshape several earlier decisions:
+
+- **No simultaneous execution.** Agent turns queue, one at a time. Successive turns may belong to different condocs, so condoccer can go back and forth between condocs on each invocation. "N condocs" means N *in flight*, not N running at once.
+- **HTTPS + PAT everywhere**, including the pointer repo, in place of ssh.
+- **PR management is new code.** AI-sandboxing is the reference starting point, but the implementation is new, and where it lives is an open decision (D10).
+- **No second checkout during a turn.** The UI watches the condoc where it is expected to be: at the slopspace path when idle, and at the deploy path while deployed.
+- **Pointer repo settings are implemented.** See [Status](#status).
 
 ## Target Flow
 
 1. **Pointer repo.** The top-level setting is a *condoc pointer repo*, used instead of a working dir.
    - Defaults: repo `je-sidestuff/sloppo`, target branch `main`, workspace path `../sloppo`.
-   - If the path is missing, condoccer offers to clone the repo. It clones over ssh by default.
+   - If the path is missing, condoccer offers to clone the repo over HTTPS, using the GitHub PAT.
    - Condoccer pushes to and pulls from the target branch regularly. The pointer repo records each condoc's state (step, substep, iteration, phase), so anyone can see where a condoc has got to.
    - Each pointer names 1-N **target repos**, which must all be different. It also names the **condoc repo** where the condoc files live (default: `sloppo` itself).
 2. **Proposal.** Once a valid pointer repo is set, condoccer can propose new condocs.
@@ -17,7 +27,7 @@ Originating condoc: [SlopspaceCondocs](../condocs/SlopspaceCondocs.md), Step 1 R
 3. **Accept.** Accepting creates the condoc's slopspace. Every target repo and the condoc repo gets a writespace, checked out on the new branch.
 4. **Progression.** This looks and feels like `same-repo`: steps, revisions, substeps and resources. Underneath, it is different:
    - Each agent turn goes like this: deploy the slopspace, send a work signal to the dungeon-keeper `agent-worker`, wait, then undeploy (return).
-   - Each condoc has its own slopspace, so one condoccer can run N condocs in parallel.
+   - Each condoc has its own slopspace, and only one is deployed at a time. Turns from different condocs are queued and run in order, so one condoccer can interleave N condocs.
    - After each turn, condoccer commits and pushes in every repo that changed.
    - The condoc links **each repo/commit pair** for every reply, not just one commit.
 5. **Propose PR.** In this scheme, completing a condoc leads into a new `propose PR` phase.
@@ -27,6 +37,32 @@ Originating condoc: [SlopspaceCondocs](../condocs/SlopspaceCondocs.md), Step 1 R
 6. **PR.** While PRs are open the condoc is in the `PR` phase.
    - The UI shows when the PRs are mergeable and then offers a **Merge** control.
    - Pressing Merge merges the PRs.
+
+## Status
+
+### Done: pointer repo settings (Step 1 Revision B)
+
+- **Backend** (`condoccer/pointer.go`):
+  - The config is repo (`owner/name`, or a pasted GitHub URL), branch and path. It is seeded from `--pointer-repo`, `--pointer-branch` and `--pointer-path`, which default to `je-sidestuff/sloppo`, `main` and `../sloppo`, and can be changed from the UI.
+  - A relative path resolves against the git repo holding `--root`, fixed at startup. That makes `../sloppo` a sibling checkout in the same workspace.
+  - The repo state is reported as one of:
+    - `missing`: nothing at the path.
+    - `cloning`.
+    - `invalid`: not a git repo, `origin` is not the configured repo, or HEAD is not on the target branch.
+    - `ready`.
+- **Clone and pull** go over HTTPS. The PAT comes from `TF_VAR_github_pat`, which is the variable dungeon-keeper uses, with `GH_TOKEN` and `GITHUB_TOKEN` as fallbacks.
+  - The PAT is passed as an `Authorization` header through `GIT_CONFIG_*` environment variables. It never appears in argv or `.git/config`. Without a token, public repos still work.
+  - A ready repo is pulled with `pull --rebase` on startup, whenever the config changes, every minute, and when the UI's **Pull** button is pressed.
+- **Pointer listing.** `pointers/*.yaml` files are summarized as name, phase, step/substep/iteration, branch, condoc repo and targets.
+  - The parser is shallow and has no dependencies. It handles top-level scalars, the `state:` map, and the `targets:` list.
+  - `gopkg.in/yaml.v3` comes in when the full spec is read and written (step 3).
+- **WebSocket messages:**
+  - `pointer`: the status, sent on connect and whenever it changes.
+  - `set-pointer`, `clone-pointer` and `pull-pointer`: sent by the client.
+- **Frontend:** the Slopspace tab's main pane shows a `PointerRepoControl` with the repo@branch, the resolved path and the state.
+  - It offers **Clone** when the repo is missing and **Pull** when it is ready, plus a **Set Pointer Repo** form.
+  - The sidebar lists the pointers read-only, with phase and step.
+- **Tests:** `condoccer/pointer_test.go` covers remote normalization, config validation, pointer parsing, and the `missing` → `invalid` → `ready` → `invalid` state transitions against a local git repo.
 
 ## What Exists Today
 
@@ -42,81 +78,93 @@ Originating condoc: [SlopspaceCondocs](../condocs/SlopspaceCondocs.md), Step 1 R
 | Capability | Where | Status for this scheme |
 |---|---|---|
 | Create / list / delete slopspace | `pkg/slopspace` `Create/List/Delete` | Usable as-is |
-| Deploy / return slopspace | `Deploy(id, agentType)` / `Return(id)` | Usable. **One deploy path per agent type** (`/agent/agent-worker`) |
-| Shared writespace clone pool | `pkg/writespace` `CloneRepo` (clone, or `pull --rebase` if it already exists) | Usable. **HTTPS + `TF_VAR_github_pat` only** |
+| Deploy / return slopspace | `Deploy(id, agentType)` / `Return(id)` | Usable. One deploy path per agent type (`/agent/agent-worker`), which fits one-at-a-time turns |
+| Shared writespace clone pool | `pkg/writespace` `CloneRepo` (clone, or `pull --rebase` if it already exists) | Usable. HTTPS + `TF_VAR_github_pat`, which matches the transport we settled on. Note that it embeds the PAT in the clone URL, so the PAT ends up in `.git/config` |
 | Add a repo to a slopspace's writespaces on a new branch | `AddWritespaceRepo` (copy, `checkout -b <ref>`, `.git` moved to `writespaces-secure`) | Usable. Doesn't check whether the branch already exists on the remote |
 | Commit and push writespace repos | `WriteRepoChanges` / `WriteAllRepoChanges` | Usable. **Doesn't return the commit SHA.** `WriteAll` keeps only the last error |
 | Readspace repos (read-only context) | `AddReadspaceRepo` | Not needed for the first cut |
 | Work signals | `pkg/worksignal` (`ongoing/` → `complete/`, holder, events, captured output) | Usable |
 | Slopspace work | `processSlopspaceWork` | **Uses whatever slopspace is currently deployed for its agent type, or creates a fresh one.** Signals carry no slopspace ID. Doesn't return the slopspace if the agent fails |
 | In-place work | `processInPlaceWork` (`work_location`) | Usable as-is for the propose-PR tempdir call |
-| Concurrency | Watch loop, one signal at a time | Agent runs are serialized per worker |
+| Concurrency | Watch loop, one signal at a time | Matches the queued model |
 | LR integration | `repr.go` pushes `worker-state` | Lets LR's worker tab show condoc turns for free |
-| PR creation / merge | — | **Does not exist anywhere in the repo** (no `gh` usage) |
+| PR creation / merge | — | Not in this repo. AI-sandboxing is the reference; the implementation is new (D10) |
 
 ## Considerations
 
-- **Something new has to drive the lifecycle.** In `same-repo`, federation-command does the real work. For `slopspace`, *something* must create slopspaces, send signals, write replies, push, and raise PRs, and condoccer is the only component that sees all N condocs (see D1).
-- **Parallelism is really interleaving.** With one deploy path per agent type and a worker that handles one signal at a time, N condocs can be *in flight* at once (waiting on humans, waiting for PRs). Agent turns still run one after another unless we add per-slopspace deploy paths or more workers (D3).
-- **Deploy/return races.** The worker uses "whatever is deployed". If condoccer deploys slopspace B before the worker has returned A, B's turn could run in A's slopspace. The worker also leaves a slopspace deployed when the agent fails. Either condoccer serializes deploys strictly, or signals name their slopspace and the worker owns deploy and return (D3, D4).
-- **Condoc files vanish while deployed.** `Deploy` *moves* writespaces to `/agent/agent-worker`. During a turn, the condoc repo's files are no longer at the slopspace path, but the UI still has to render the condoc (D9).
+- **Something new has to drive the lifecycle.** In `same-repo`, federation-command does the real work. For `slopspace`, *something* must create slopspaces, send signals, write replies, push, and raise PRs. Condoccer is the only component that sees every condoc and owns the turn queue (D1).
+- **One turn at a time, many condocs in flight.** Condoccer keeps a FIFO of pending turns across all its condocs and runs the head of the queue: deploy, signal, wait, return, commit and push. Then it moves on to the next turn, which may belong to a different condoc. Condocs waiting on a human or on PRs hold no slot (D3).
+- **Deploy/return must be strictly paired.** The worker uses "whatever is deployed", so the next deploy must not start until the previous slopspace has been returned. The worker also leaves a slopspace deployed when the agent fails, so either condoccer always returns it after the signal completes, or the worker does it in a `defer` (D3).
+- **Watching the condoc during a turn.** `Deploy` *moves* the writespaces to the deploy path, so the condoc file's location depends on the slopspace's deploy state. The UI resolves the path from `SLOPSPACE.json` on each read: the slopspace root when idle, `/agent/agent-worker/...` when deployed. No extra checkout is needed (D7).
 - **Who writes the reply.** In `same-repo` the handler captures the agent's terminal output and writes `## Reply` itself. We keep that: the worker records output as a work-signal event, and condoccer writes the reply into the condoc repo writespace *after* return, then commits.
-- **Commit links per repo.** The reply preamble becomes a list of `owner/repo@sha` links instead of the single prompt→reply pair. `WriteRepoChanges` has to report SHAs and take a message (D8).
-- **Two auth paths.** The pointer repo is cloned over ssh by default, but dungeon-keeper's writespaces use HTTPS+PAT. PR creation and merging also need a token (D6).
-- **Branch uniqueness across repos.** This needs `git ls-remote --heads` on every target repo plus the condoc repo, done at accept time. `AddWritespaceRepo` only fails when the branch exists *locally* (D7).
-- **Pointer repo contention.** Several condoccers, or several condocs in one condoccer, push to the same `main`. One pointer file per condoc keeps conflicts to `pull --rebase` retries. The lock currently lives in the condoc repo; for slopspace condocs, a holder field in the pointer replaces it (D4, D5).
-- **Retry and revert are multi-repo.** The current retry rewrites history in one repo. Here it has to reset every target repo plus the condoc repo, and leave a take branch in each (D10).
-- **Merging is not atomic.** N+1 PRs can't be merged as a unit, so partial failure has to be a visible state (D12).
-- **The Hide Completed filter needs updating.** Slopspace condocs pass through `completed` on the way to `pr_proposed`, `pr_open` and `merged`. The filter on that tab should key off `merged`, not `completed` (D11).
+- **Commit links per repo.** The reply preamble becomes a list of `owner/repo@sha` links instead of the single prompt→reply pair. `WriteRepoChanges` has to report SHAs and take a message (D6).
+- **One auth path.** Everything uses HTTPS + one PAT: pointer clone and push, dungeon-keeper writespaces, PR create and merge. The PAT is scoped to the pointer repo, the condoc repo and every target. Condoccer's pointer clone keeps the token out of `.git/config`, but dungeon-keeper's writespace clones don't yet (D11).
+- **Branch uniqueness across repos.** This needs `git ls-remote --heads` on every target repo plus the condoc repo, done at accept time. `AddWritespaceRepo` only fails when the branch exists *locally* (D5).
+- **Pointer repo contention.** Several condoccers, or several condocs in one condoccer, push to the same `main`. One pointer file per condoc keeps conflicts down to `pull --rebase` retries. For slopspace condocs, a `holder` field in the pointer replaces the `.condoc` lock (D4).
+- **Retry and revert are multi-repo.** The current retry rewrites history in one repo. Here it has to reset every target repo plus the condoc repo, and leave a take branch in each (D8).
+- **Merging is not atomic.** N+1 PRs can't be merged as a unit, so partial failure has to be a visible state (D10).
+- **The Hide Completed filter needs updating.** Slopspace condocs pass through `completed` on the way to `pr_proposed`, `pr_open` and `merged`. Once that tab gets a filter, it should key off `merged`, not `completed` (D9).
 
 ## Decision Points
 
-Each decision lists its options. **Rec** marks the one I recommend.
+**Settled** marks a decision that has been made. **Rec** marks the option I recommend for an open decision. The numbering is new for Revision B. The Revision A numbers appear in brackets.
 
-### D1 — Who is the slopspace handler?
-- a. **Rec:** the condoccer backend. It already runs for a long time, owns the UI, and has to see every condoc to propose them and run them in parallel. It drives dungeon-keeper directly.
-- b. Extend federation-command's `CondocSession`. It holds one session per TUI, so it doesn't fit N condocs.
-- c. A new daemon. This makes the "pointer repo" idea cleaner, but it is one more process for LR to manage.
+### Settled
 
-### D2 — How does condoccer call dungeon-keeper?
-- a. **Rec:** import `dungeon-keeper/pkg/{slopspace,writespace,worksignal,types}` as a Go module. Condoccer already pulls in `representable` and `ufa-version` the same way. The worker itself stays a separate `watch` process.
+- **S1. Who is the slopspace handler** [A: D1]? **The condoccer backend.** It owns the UI and the turn queue, and it sees every condoc. federation-command's one-session-per-TUI model and a new daemon were both rejected.
+- **S2. Concurrency** [A: D3]? **Turns are queued, one at a time.** Consecutive turns may belong to different condocs. Real parallel turns, from several workers or per-slopspace deploy paths, are out of scope for now.
+- **S3. Git transport** [A: D6]? **HTTPS + PAT everywhere**, including the pointer repo (now implemented). ssh is dropped as the default.
+- **S4. Watching the condoc during a turn** [A: D9]? **Watch the expected location.** Condoccer resolves the condoc file's path from the slopspace's deploy state and reads it from there. There is no second checkout.
+- **S5. PR implementation** [A: D12, partly]. **New code**, using AI-sandboxing's PR handling as the reference. Where the code goes is still open (D10).
+- **S6. Pointer repo setting** [A: plan step 1]. Repo, branch and path are configured, with clone-if-missing, a periodic pull, and a read-only listing. See [Status](#status).
+
+### Open
+
+#### D1 — How does condoccer call dungeon-keeper? [A: D2]
+- a. **Rec:** import `dungeon-keeper/pkg/{slopspace,writespace,worksignal,types}` as a Go module through a `replace` directive, the same way condoccer already pulls in `representable`. The worker stays a separate `watch` process.
 - b. Shell out to the `dungeon-keeper` CLI. This decouples the two but means parsing human-readable output.
-- c. Go through local-representative (`submit` over representable). This extends the existing worker-tab path, but slopspace management isn't exposed there.
+- c. Go through local-representative (`submit` over representable). Slopspace management isn't exposed there.
 
-### D3 — How are agent turns made concurrent?
-- a. **Rec (first cut):** serialize. Condoccer keeps a FIFO of pending turns and a single deploy lock for `agent-worker`. N condocs are in flight, and their turns are queued.
-- b. Add `slopspace_id` to `WorkSignal`. The worker then deploys that slopspace (to `/agent/agent-worker/<id>`, or the fixed path) and returns it itself. This removes the race and makes (c) possible later. **Rec as a dungeon-keeper change paired with (a).**
-- c. Several worker processes, each with its own `AGENT_SLOPSPACE_ROOT`/`WorkerID`. This gives real parallel agent turns but needs procman/LR support.
+#### D2 — Turn queue shape [new; follows from S2]
+- Scope of the queue:
+  - a. **Rec:** one global FIFO per condoccer.
+  - b. Per agent type. Only `agent-worker` exists today, so this adds nothing yet.
+- Ordering:
+  - a. **Rec:** plain FIFO, so each condoc's turns keep their order and different condocs interleave.
+  - b. Round-robin across condocs, so one busy condoc can't starve the others.
+- Whether the queue survives a condoccer restart:
+  - a. **Rec:** yes. Store `state.phase: queued` in each pointer, and rebuild the queue from the pointers on startup.
+  - b. In memory only. A restart drops queued turns back to `awaiting_action`.
+- The UI shows each condoc's queue position.
 
-### D4 — Who deploys and returns?
-- a. Condoccer deploys, the worker returns (today's behavior). This needs a fix so the slopspace is returned when the agent fails.
-- b. **Rec:** the worker owns both, keyed on the signal's `slopspace_id` (see D3b), always returning in a `defer`. Condoccer only creates the slopspace, sends signals, and handles commit and push.
+#### D3 — Who deploys and returns? [A: D4, reshaped by S2]
+Because turns are serialized, condoccer can safely own the deploy/return pair.
+- a. **Rec (first cut):** condoccer deploys, sends the signal, waits for `complete/`, then returns the slopspace. It returns whether the agent succeeded or failed. There are no dungeon-keeper signal changes. The only dungeon-keeper fix is to stop the worker returning the slopspace itself, or make that return a no-op when the slopspace has already been returned, so the two don't race.
+- b. Add `slopspace_id` to `WorkSignal`. The worker then deploys that ID and returns it in a `defer`. This is more robust if another client ever shares the worker. It is a larger dungeon-keeper change.
 
-### D5 — Pointer repo layout and spec
-- a. **Rec:** one file per condoc, `pointers/<Name>-<startTime>.yaml`, holding:
-  - static spec: `name`, `startTime`, `controlScheme: slopspace`, `branch`, `condocRepo`, `condocPath`, `targets[]`
+#### D4 — Pointer repo layout and spec [A: D5]
+- a. **Rec:** one file per condoc, `pointers/<Name>-<startTime>.yaml`. The listing parser already expects this layout.
+  - static spec: `name`, `startTime`, `controlScheme: slopspace`, `branch`, `condocRepo`, `condocPath`, `targets[]` (as `- repo: owner/name`), `agent`
   - runtime: `slopspaceId`, `holder` (condoccer host/instance), `state{phase, step, substep, iteration}`, `prs[]`, `updatedAt`
   - Condoc files go under `condocs/` in the condoc repo, laid out as they are today.
 - b. A single `index.yaml` listing every condoc. Easier to scan, but every update conflicts.
 - c. The state lives only in the condoc-yaml header inside the condoc file. Simpler, but then the state sits on the condoc *branch* rather than on the pointer's `main`.
 - Sub-decisions:
-  - How often to push pointer updates. Rec: on every phase change, not every tick.
+  - How often to push pointer updates. Rec: on every phase change, including `queued`, not every tick.
   - Whether proposals that were never accepted are committed. Rec: yes, as `phase: proposed`, so they show up on other hosts.
+  - How to handle a push conflict. Rec: `pull --rebase` and retry up to 3 times. Each condoccer only writes the pointer files it holds, so the rebase never conflicts.
 
-### D6 — Git transport and credentials
-- a. ssh everywhere. dungeon-keeper's `CloneRepo` gains an ssh URL mode.
-- b. **Rec:** ssh for the pointer repo, which is what the brief asks for. Keep HTTPS+PAT for dungeon-keeper writespaces, and use the same PAT through `gh` (or the REST API) for PRs. Make the transport configurable per repo later.
-- c. HTTPS+PAT everywhere, including the pointer clone. Contradicts the "ssh by default" requirement.
-
-### D7 — Branch validation
-- When: a. live while editing (advisory) and again on accept (blocking). **Rec.** b. Only on accept.
-- How: `git ls-remote --heads <remote> <branch>` on each target repo and the condoc repo.
+#### D5 — Branch validation [A: D7]
+- When:
+  - a. **Rec:** live while editing (advisory) and again on accept (blocking).
+  - b. Only on accept.
+- How: `git ls-remote --heads https://github.com/<repo>.git <branch>`, with the PAT passed the same way as the pointer clone, on each target repo and the condoc repo.
 - On conflict: block and offer to bump the default branch's timestamp.
 - Can the condoc repo also be one of the targets?
   - a. **Rec:** no. Keep them distinct for now, so the agent's code changes and the condoc bookkeeping don't share a commit.
   - b. Yes, with the two collapsed into one writespace.
 
-### D8 — Commits, messages and links
+#### D6 — Commits, messages and links [A: D8]
 - Extend `WriteRepoChanges` to return `(sha string, changed bool, err)`, and make `WriteAllRepoChanges` return per-repo results with every error kept.
 - Message convention, all repos: `condoc: <Name> step N <iteration> reply`. For the condoc repo, the prompt edit is its own commit made before deploying: `… prompt`.
 - Link format in the reply preamble:
@@ -124,34 +172,42 @@ Each decision lists its options. **Rec** marks the one I recommend.
   - b. One inline sentence.
   - c. A YAML block.
 
-### D9 — How the UI reads condoc content during a turn
-- a. **Rec:** condoccer keeps a checkout of the condoc branch in the workspace and pulls after each push, for example a `git worktree` of `../sloppo` on the condoc branch. Rendering never touches the slopspace.
-- b. Read from the slopspace's root, or from its deploy path if `SLOPSPACE.json` says it is deployed.
-- c. Make the condoc repo a readspace for the agent and keep condoccer as the only writer. This conflicts with the brief, which gives the condoc repo a writespace.
+#### D7 — Resolving the "expected location" [new; follows from S4]
+- Where the path comes from:
+  - a. **Rec:** read `SLOPSPACE.json` on each poll tick. When it says the slopspace is deployed, read from `<deployPath>/writespaces/<condocRepo>/…`; otherwise read from `<slopspaceRoot>/writespaces/<condocRepo>/…`.
+  - b. Condoccer tracks deploy state itself and skips the file read. This is cheaper, but it drifts if anything else deploys or returns the slopspace.
+- During the move itself the file briefly exists in neither place. Rec: keep showing the last rendered state and don't treat "not found" as staleness while a turn is in flight.
+- The agent edits the condoc in place during a turn, so the UI shows those edits live. This is a bonus over `same-repo`.
 
-### D10 — Scope of iteration types in the first cut
+#### D8 — Scope of iteration types in the first cut [A: D10]
 - a. **Rec:** handoff, revision, substep and resources first. Retry and revert come later, as a multi-repo version of `runCondocRetryGitSequence` with a take branch per repo.
 - b. Everything at parity before shipping.
 
-### D11 — Phase model for slopspace condocs
-- Add `pr_proposed`, `pr_open` and `merged` after `completed`. `!COMPLETED!` on a slopspace condoc moves it to `pr_proposed` rather than ending it.
-- Phases go in the pointer `state.phase` (D5) and are mirrored in the condoc file, for example as `## PR Proposed` / `## PR Raised` / `## Condoc Merged` sections, so the history stays readable.
+#### D9 — Phase model for slopspace condocs [A: D11]
+- Add `queued` (D2) before `agent_running`. Add `pr_proposed`, `pr_open` and `merged` after `completed`. `!COMPLETED!` on a slopspace condoc moves it to `pr_proposed` rather than ending it.
+- Phases go in the pointer `state.phase` (D4) and are mirrored in the condoc file, for example as `## PR Proposed` / `## PR Raised` / `## Condoc Merged` sections, so the history stays readable.
+- The slopspace tab's Hide filter keys off `merged`.
 - Slopspace teardown:
   - a. **Rec:** delete the slopspace on `merged`.
   - b. Delete it as soon as the PRs are raised.
 
-### D12 — PR template, raising and merging
+#### D10 — PR management: location and behavior [A: D12, reshaped by S5]
+- **Where the new code lives:**
+  - a. **Rec:** a new `dungeon-keeper/pkg/pullrequest` package. It sits beside the writespace code that already holds the repos and the PAT, condoccer imports it like the other dungeon-keeper packages (D1), and the dungeon-keeper CLI can expose it for manual use.
+  - b. A new top-level Go module (`pr-keeper` or similar), shared by condoccer and anything else that needs it. Cleaner ownership, but one more module.
+  - c. Inside condoccer (`condoccer/pr.go`). Quickest, but it can't be reused.
+- **API:**
+  - a. **Rec:** the GitHub REST API with the PAT (`net/http`). There is no new binary dependency, and it uses the same token as everything else.
+  - b. The `gh` CLI. Less code, but it has to be installed and authenticated on the host.
+  - What to take from AI-sandboxing: check its create/merge/mergeability logic and what it handles at the edges, and port what fits. I couldn't read it from this session, so it hasn't been reviewed yet.
 - **Tempdir contents** for the in-place call:
   - the condoc files
   - for each repo, `git diff <base>...<branch>` plus the log
   - the pointer spec
 - **YAML schema:** `prs: [{repo, title, body, base}]`, with the condoc repo included. Optionally a shared `summary` that is reused in every body.
-- **Regenerate with instruction:** a new in-place signal that includes the previous YAML and the instruction.
-- **Raising PRs:**
-  - a. **Rec:** `gh pr create` for each repo.
-  - b. The GitHub REST API with the PAT.
-- Each PR body links its sibling PRs.
-- **Mergeability:** poll `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. The Merge button is enabled only when *all* PRs are mergeable.
+- **Regenerate with instruction:** a new in-place signal that includes the previous YAML and the instruction. It goes through the same turn queue (D2).
+- **Raising PRs:** one per repo. Each PR body links its sibling PRs (create first, then edit the bodies).
+- **Mergeability:** poll `mergeable` / `mergeable_state` and the check runs. The Merge button is enabled only when *all* PRs are mergeable.
 - **Merge method:**
   - a. **Rec:** merge commit, which keeps the per-revision SHAs that the condoc links point to.
   - b. Squash.
@@ -159,34 +215,39 @@ Each decision lists its options. **Rec** marks the one I recommend.
 - **Merge order and partial failure:** merge the target repos first and the condoc repo last. If one fails, stop, show the PR states repo by repo, and allow a retry.
 - **After merge:** delete the branches (rec: yes, except take branches), mark `merged`, and update the pointer.
 
-### D13 — Agent/model selection for worker turns
-- a. **Rec:** a default agent/model in the condoccer config, which the proposal form can override per condoc. Store it in the pointer spec.
+#### D11 — PAT handling in dungeon-keeper writespaces [new; follows from S3]
+- a. **Rec:** change `CloneRepo` to the same header-via-env approach as the pointer clone, so the PAT isn't written into `.git/config`. That matters because deploy moves `.git` into the agent's reach through `writespaces-secure`.
+- b. Leave it as is. It works, but the token sits in every writespace clone's remote URL.
+
+#### D12 — Agent/model selection for worker turns [A: D13]
+- a. **Rec:** a default agent/model in the condoccer config, which the proposal form can override per condoc. Store it in the pointer spec (`agent`).
 - b. Use the current fedcom agent, which isn't available to condoccer.
 
-### D14 — Where things run
-- Condoccer and the `agent-worker` must share `/host-agent-files` (slopspaces, work signals) and `/agent`. Is condoccer expected to run in the worker's container or on the host alongside it?
+#### D13 — Where things run [A: D14]
+- Condoccer and the `agent-worker` must share `/host-agent-files` (slopspaces, work signals) and `/agent`, the deploy path condoccer watches (S4). Is condoccer expected to run in the worker's container or on the host alongside it?
 - Rec: on the host for now, with `SLOPSPACES_DIR`/`WORK_SIGNALS_DIR` read from the same env vars dungeon-keeper uses.
 
 ## Implementation Plan (next steps)
 
-1. **Pointer repo setting and Slopspace tab, read-only**
-   - Add the pointer repo config (repo, branch, path) next to the working-dir root picker, with the clone-over-ssh offer.
-   - Settle the pointer file format (D5).
-   - The Slopspace tab lists the pointers it finds, with their phase.
+1. ~~**Pointer repo setting and Slopspace tab, read-only.**~~ Done in Step 1 Revision B; see [Status](#status).
 2. **dungeon-keeper groundwork**
-   - Add `slopspace_id` to signals, and have the worker deploy and return with return-on-failure (D3b/D4).
-   - Make `WriteRepoChanges` return SHAs, with per-repo results and a commit message (D8).
-   - Add a remote-branch existence check helper (D7).
+   - Make `WriteRepoChanges` return SHAs, with per-repo results and a commit message (D6).
+   - Make deploy and return safe for condoccer to own: no double return, and the slopspace is returned when the agent fails (D3a).
+   - Add a remote-branch existence check helper (D5).
+   - Keep the PAT out of `.git/config` (D11).
    - Add tests in `pkg/slopspace` and `main_test.go`.
 3. **Proposal and accept**
+   - Add `gopkg.in/yaml.v3` and full pointer read/write, plus pointer push with rebase-retry (D4).
    - Proposal form for targets, condoc repo, branch and agent/model, which writes a `phase: proposed` pointer.
    - On accept: validate the branch, clone the writespaces, create the slopspace and `AddWritespaceRepo` each repo on the branch, write the condoc template into the condoc repo, push the branch everywhere, and update the pointer.
 4. **Progression**
-   - Turn queue (D3a). Prompt commit, then signal, then wait for completion.
+   - Turn queue (D2): mark the condoc `queued`, then prompt commit, deploy, signal, wait, and return.
+   - Expected-location watching (D7).
    - After return: write the reply with per-repo links, then commit and push changed repos.
    - Update the pointer state. Reuse the same-repo step/revision/substep UI components on the Slopspace tab.
-5. **Propose PR:** the in-place tempdir signal, the YAML editor, regenerate, and accept to raise the PRs (D12).
-6. **PR phase and Merge:** mergeability polling, the Merge control, ordered merging, partial-failure display, and teardown (D11/D12).
-7. **Later:** multi-repo retry and revert (D10), and real parallel agent turns with several workers (D3c).
+5. **PR management package** (D10): decide the location, review AI-sandboxing, and implement create, mergeability and merge against the REST API.
+6. **Propose PR:** the in-place tempdir signal, the YAML editor, regenerate, and accept to raise the PRs.
+7. **PR phase and Merge:** mergeability polling, the Merge control, ordered merging, partial-failure display, and teardown (D9/D10).
+8. **Later:** multi-repo retry and revert (D8).
 
-Steps 1 and 2 are independent and can run in either order. Step 3 needs both.
+Step 2 is next. Step 5 can be built in parallel with steps 2-4 once D10's location is chosen. Step 3 needs step 2.

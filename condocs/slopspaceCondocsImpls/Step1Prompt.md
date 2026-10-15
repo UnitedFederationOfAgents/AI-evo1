@@ -52,3 +52,48 @@ For the 'slopspace' control scheme:
     - Pressing merge will merge the PR
 
 Let's begin by documenting this way forward and commenting on the next steps in implementation, as well as discretely enumerating any decision points we must address (and ideally enumerating potential decisions within).
+
+
+prompt: [`a475cf8`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a475cf841df8db8abe3a9651aeeaa3f6073bc743) → reply: [`1781828`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/178182876a5d2b820d398f39f7b0f967605c1558)
+
+## Reply A
+
+I wrote the design doc at `docs/SlopspaceControlScheme.md`. It sets out the slopspace flow you described and compares it with what dungeon-keeper and the condoc handler can do today. It also lists 14 decision points, each with options and a recommendation, and a 7-step build plan. No code changed, and the doc is not committed.
+
+**Main things I found in the code:**
+- **The handler would have to move.** In same-repo mode, federation-command does the real work (one session per TUI) and condoccer only writes directives. To run N condocs in parallel, the condoccer backend has to become the handler for slopspace condocs, using dungeon-keeper's Go packages directly.
+- **dungeon-keeper gaps:**
+  - It has one deploy path per agent type, and the worker uses "whatever slopspace is deployed", with no slopspace ID in the work signal. So "N parallel condocs" really means N in flight with agent turns run one after another, unless we change that.
+  - The worker doesn't return the slopspace when the agent fails.
+  - The commit-and-push call doesn't report commit SHAs, which the per-repo/commit links need.
+  - Its repo clones only use HTTPS with a token, but the pointer repo should default to ssh.
+  - Nothing in the repo creates or merges PRs yet.
+- **Condoc files disappear during a turn.** Deploying *moves* the condoc repo's files into the agent's workspace, so the UI needs its own checkout of the condoc branch to keep showing the condoc.
+
+**Decisions to make (my recommendation in brackets):**
+1. Who runs the lifecycle [condoccer].
+2. How condoccer calls dungeon-keeper [import its Go packages].
+3. How turns run concurrently [queue them now; add a slopspace ID to signals].
+4. Who deploys and returns slopspaces [the worker, keyed on that ID, always returning].
+5. Pointer repo layout [one YAML file per condoc].
+6. Git transport and credentials [ssh for the pointer repo, HTTPS token for writespaces and PRs].
+7. Branch-uniqueness check [checked against every repo's remote; condoc repo kept separate from targets].
+8. Commit messages and per-repo link format.
+9. How the UI reads the condoc during a turn [a local checkout of the condoc branch].
+10. First-cut scope [retry/revert across several repos comes later].
+11. New phases after completed: `pr_proposed`, `pr_open`, `merged`.
+12. PR template format, how PRs are raised and merged, and handling a merge that fails partway.
+13. Agent/model choice [stored per condoc].
+14. Where condoccer runs relative to the worker.
+
+**Suggested first steps:** pointer repo settings with a read-only Slopspace tab, and the dungeon-keeper fixes above. These two can be done in either order, and the proposal/accept step needs both.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

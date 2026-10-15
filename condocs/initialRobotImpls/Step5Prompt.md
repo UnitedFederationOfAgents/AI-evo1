@@ -155,6 +155,11 @@ I added a test, `TestRolloverAfterIdleDaysSkipsIntermediateDays`, for the 3-day 
 [Step 5 Substep G](Step5SubstepGPrompt.md)
 
 
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep G is now active. Interact with the substep file (Step5SubstepGPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

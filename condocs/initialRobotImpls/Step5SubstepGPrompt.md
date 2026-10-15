@@ -433,11 +433,6 @@ In the files tab's **select from host** picker (in both LR and AC), clicking a f
 - **Other changes:** the picker is updated in `HostFilePicker.tsx`, and all four copies are still identical. I also changed both apps' `App.tsx`, added two tests to `hostfiles_test.go`, and added a short note to LR's README.
 
 
-## <REPLACE-Revision|Retry> P
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1792092289 (Thu Oct 15 07:24:49 PM UTC 2026).

@@ -89,11 +89,12 @@ I wrote the design doc at `docs/SlopspaceControlScheme.md`. It sets out the slop
 **Suggested first steps:** pointer repo settings with a read-only Slopspace tab, and the dungeon-keeper fixes above. These two can be done in either order, and the proposal/accept step needs both.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Let's revise based on the following:
+- We do not want N executions simultaneously for now, they may queue - but we may go back and forth between different condocs each invocation
+- We can go with https+PAT after all, let's prefer that over ssh
+- We can look at AI-sandboxing for a PR management starting point, but it will be new impls. We can discuss where to best locate that code.
+- We do not need a second checkout during a turn because we can watch the expected location
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's do the pointer repo settings now with this understanding and then revise the decision points and restate them based on the updated understanding.

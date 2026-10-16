@@ -136,11 +136,11 @@ I added the pointer repo settings to the Slopspace tab and revised `docs/Slopspa
 The next step is the dungeon-keeper groundwork. The PR package can be built alongside it once its location is decided.
 
 
-## <REPLACE-Revision|Retry> C
+## Substep C - Add System Navigation and Status Improvements to Support New Connectivity
 
-<REPLACE-PROMPT>
+[Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep C is now active. Interact with the substep file (Step1SubstepCPrompt.md).

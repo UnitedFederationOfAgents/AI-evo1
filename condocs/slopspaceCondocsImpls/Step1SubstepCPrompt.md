@@ -74,11 +74,6 @@ I added a "dev branch" readout with a "switch" control to the per-host system di
 The backend changes are in `local-representative/repowatch.go`, plus small additions in its `main.go` and `procman.go` and AC's `main.go`. New tests are in `local-representative/repowatch_test.go` and `agent-coordinator/repostate_test.go`, not yet run. The frontend changes are in both apps' `App.tsx`, `types.ts` and `index.css`, and I added a short note to `docs/DevMode.md`.
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+The white colour is ugly alongside the rest of the controls. Let's get a green colour similar to 'rebuild'.

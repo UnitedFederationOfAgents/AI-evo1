@@ -51,11 +51,10 @@ I moved the AWS identity check into LR: it now finds its own credentials and mak
 For the AC double-click and missing-"providers" reports, I found nothing wrong in AC's source, and the built AC bundle (`frontend/dist`) already contains the providers and double-click code. My best guess is that the AC you tested was running an older build: in a current build, hovering a sub-app row shows "double-click to open its tab". So please restart AC after rebuilding. None of this has been run: `go test`, `go vet` and the frontend build all needed approval that wasn't given.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Now let's add a 'dev branch' field to the system dialogs.
 
+This will go in the same dialog as the 'DEV-REPO' section in the per-host section (but not in the global view) and will list the current branch the host is watching. We will also have a 'switch' button which will let us pick the branch from available options.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In the global dialog we will get a similar control under 'rebuild all' only this one will control the full set. If different LRs are watching different branches we will see '<differs>'. Using the 'switch' control here will switch all of the LRs.

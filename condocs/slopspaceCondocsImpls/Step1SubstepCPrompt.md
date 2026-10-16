@@ -88,11 +88,6 @@ The "switch" buttons on the dev-branch control are now the same green as "rebuil
 The change is a new `sys-btn-branch` style in both apps' `index.css`, applied to the buttons in both `App.tsx` files. LR's stylesheet didn't have the grey style, so I added it there. I haven't type-checked or built it, because running the frontend type-check needed approval that wasn't given, and the changes are uncommitted.
 
 
-## <REPLACE-Revision|Retry> D
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1792152270 (Fri Oct 16 12:04:30 PM UTC 2026).

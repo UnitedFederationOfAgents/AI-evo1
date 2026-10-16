@@ -141,6 +141,11 @@ The next step is the dungeon-keeper groundwork. The PR package can be built alon
 [Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep C is now active. Interact with the substep file (Step1SubstepCPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

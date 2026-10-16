@@ -27,11 +27,6 @@ Decisions for you:
 The backend changes are in `local-representative/connectivity.go` (plus small additions to its `procman.go` and `main.go`) and `agent-coordinator/main.go`. The frontend changes are in both apps' `App.tsx` and `index.css`. A new test, `TestConnectedGitHubPAT` in `local-representative/connectivity_test.go`, covers connect, restart, override and disconnect, but hasn't been run.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+Let's adjust it so that we do not save the plaintext token to disk. It's fine that it's ephemeral and will not survive a restart.

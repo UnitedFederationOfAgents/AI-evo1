@@ -968,7 +968,7 @@ body {
 .sys-row-failed { background: #241717; }
 /* Process rows are clickable to open the version drill-down below the table
    (see SystemProcDetails/procRowKey) -- Step5Prompt.md Revision J. */
-.sys-row-clickable { cursor: pointer; }
+.sys-row-clickable { cursor: pointer; user-select: none; } /* double-click opens the app's tab rather than selecting text */
 .sys-row-clickable:hover { background: #262626; }
 .sys-row-selected { background: #16324a; }
 .sys-row-selected:hover { background: #1a3a56; }

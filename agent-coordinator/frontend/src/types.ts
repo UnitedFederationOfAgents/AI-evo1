@@ -181,7 +181,7 @@ export interface LRSystemStateMsg {
   active: boolean
   self: ProcInfo
   managed: ProcInfo[]
-  connections?: ConnectionInfo[] // absent for an older LR -- see ConnectionInfo
+  connections?: ConnectionInfo[] | null // null/absent for an older LR -- see ConnectionInfo
 }
 
 // LRRepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,

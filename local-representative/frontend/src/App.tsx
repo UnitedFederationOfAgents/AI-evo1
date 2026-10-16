@@ -9,6 +9,12 @@ import { detectTextFormat } from './textformat'
 const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
+// isTab narrows an app name (e.g. a ProcInfo.name) to one of the dashboard's
+// tabs -- every managed sub-application has a same-named tab.
+function isTab(name: string): name is Tab {
+  return (TABS as readonly string[]).includes(name)
+}
+
 // Tabs whose content is another app's own UI, embedded via same-origin
 // iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
 // Step1Prompt.md Revision A: "nested UI" tabs). These skip the service-name
@@ -861,12 +867,14 @@ function SystemProcRow({
   onTerminate,
   onRestart,
   onSetAutoUpdate,
+  onOpen,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
   onRestart?: () => void
   onSetAutoUpdate?: (enabled: boolean) => void
+  onOpen?: () => void // double-click: go to this app's own tab (Step1SubstepCPrompt.md)
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -877,7 +885,11 @@ function SystemProcRow({
     : proc.name
 
   return (
-    <div className={`sys-row sys-row-${proc.status}`}>
+    <div
+      className={`sys-row sys-row-${proc.status}${onOpen ? ' sys-row-openable' : ''}`}
+      onDoubleClick={onOpen}
+      title={onOpen ? 'double-click to open its tab' : undefined}
+    >
       <span className="sys-col sys-col-name">
         <span className="sys-col-name-main">
           {label}
@@ -1093,6 +1105,7 @@ function SystemPanel({
   onRebuild,
   onSetAutoRebuild,
   onSetAutoUpdate,
+  onOpenTab,
 }: {
   state: SystemStateMsg | null
   fcInstances: FCInstanceInfo[]
@@ -1103,6 +1116,7 @@ function SystemPanel({
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
   onSetAutoUpdate: (enabled: boolean) => void
+  onOpenTab: (tab: Tab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const troughEntries = useTrough(repoState.last_error)
@@ -1149,7 +1163,13 @@ function SystemPanel({
         </div>
         <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} onSetAutoUpdate={onSetAutoUpdate} />
         {state.managed.map(p => (
-          <SystemProcRow key={p.instance_id} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
+          <SystemProcRow
+            key={p.instance_id}
+            proc={p}
+            nowSec={nowSec}
+            onTerminate={onTerminate}
+            onOpen={isTab(p.name) ? () => onOpenTab(p.name as Tab) : undefined}
+          />
         ))}
         {state.managed.length === 0 && (
           <div className="sys-row sys-row-none">no managed applications</div>
@@ -2895,6 +2915,7 @@ export default function App() {
                   onRebuild={rebuildRepo}
                   onSetAutoRebuild={setAutoRebuild}
                   onSetAutoUpdate={setAutoUpdate}
+                  onOpenTab={goToTab}
                 />
               ) : activeTab === 'files' && viewerFileId ? (
                 <FileViewer

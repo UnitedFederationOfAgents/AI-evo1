@@ -1266,6 +1266,9 @@ body {
 }
 
 .sys-row-failed { background: #241717; }
+/* double-click opens the app's tab (Step1SubstepCPrompt.md) -- no text selection */
+.sys-row-openable { cursor: pointer; user-select: none; }
+.sys-row-openable:hover { background: #262626; }
 
 .sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

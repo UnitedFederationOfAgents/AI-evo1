@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-
-	"ufa-loader/awsprincipal"
 )
 
 // clearProviderEnv removes every credential source detect looks at, so each
@@ -56,7 +54,7 @@ func TestConnectivityVerifiesBothProviders(t *testing.T) {
 	notified := 0
 	w := newConnectivityWatch(func() { notified++ })
 	w.githubAPI = fakeGitHub(t, "good", "octocat")
-	w.awsIdentity = func(_ context.Context, c awsprincipal.Credentials) (string, error) {
+	w.awsIdentity = func(_ context.Context, c awsCredentials) (string, error) {
 		if c.AccessKeyID != "AKIATEST" {
 			return "", errors.New("wrong key")
 		}

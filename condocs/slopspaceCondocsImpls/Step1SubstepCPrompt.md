@@ -40,3 +40,22 @@ There are several errors here:
 We also see that the 'ufa-loader' has gained intelligence on the AWS principal, but we want to keep ufa-loader as dumb as we can. LR should be able to inspect for itself with an STS call chain if it needs additional information.
 
 Let's fix these issues now.
+
+
+prompt: [`fc18748`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fc18748fdb7af5640e65b634db6f935d01a6679b) → reply: [`eeab02f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/eeab02fc1827b25805089740f4787e104101d08d)
+
+## Reply A
+
+I moved the AWS identity check into LR: it now finds its own credentials and makes its own signed STS GetCallerIdentity call (`local-representative/awssts.go`, with tests in `awssts_test.go`). I deleted `ufa-loader/awsprincipal/identity.go` and its test, so LR no longer imports `awsprincipal`. I also fixed AC so it always passes on a host's connections list, even an empty one, letting the per-host "providers" section show "no provider credentials present" correctly; added double-click-to-open-tab on the rows of LR's own dashboard system tab; and turned off text selection on double-clickable rows.
+
+For the AC double-click and missing-"providers" reports, I found nothing wrong in AC's source, and the built AC bundle (`frontend/dist`) already contains the providers and double-click code. My best guess is that the AC you tested was running an older build: in a current build, hovering a sub-app row shows "double-click to open its tab". So please restart AC after rebuilding. None of this has been run: `go test`, `go vet` and the frontend build all needed approval that wasn't given.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

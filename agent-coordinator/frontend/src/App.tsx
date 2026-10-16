@@ -1663,11 +1663,11 @@ function ProviderIcon({ provider }: { provider: string }) {
 // ProvidersPanel is the per-host system tab's "providers" section: always
 // shown, with one sub-section per provider that host holds credentials for
 // -- see local-representative/connectivity.go.
-function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] }) {
+function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] | null }) {
   return (
     <div className="sys-providers">
       <div className="sys-providers-header">providers</div>
-      {connections === undefined ? (
+      {connections == null ? (
         <div className="sys-providers-none">this host's LR doesn't report provider connections</div>
       ) : connections.length === 0 ? (
         <div className="sys-providers-none">no provider credentials present</div>
@@ -3063,7 +3063,7 @@ function TopologyNodeCard({
   isSelf?: boolean
   services?: ServiceStatus[]
   managed?: ProcInfo[]
-  connections?: ConnectionInfo[]
+  connections?: ConnectionInfo[] | null
   devMode?: boolean
   selected?: boolean
   outOfDate?: boolean

@@ -9,8 +9,6 @@ import (
 	"slices"
 	"sync"
 	"time"
-
-	"ufa-loader/awsprincipal"
 )
 
 // Connectivity checks: which outside providers this host holds credentials
@@ -23,7 +21,7 @@ const (
 	// connectivityPollInterval is how often working credentials are
 	// re-checked; connectivityRetryInterval is used instead while any check
 	// is failing, so a freshly-created ufa-loader principal that AWS hasn't
-	// accepted yet (see awsprincipal.Provision) turns ok promptly.
+	// accepted yet turns ok promptly.
 	connectivityPollInterval  = 5 * time.Minute
 	connectivityRetryInterval = 30 * time.Second
 	connectivityCheckTimeout  = 20 * time.Second
@@ -55,12 +53,13 @@ type ConnectionInfo struct {
 var githubTokenEnvVars = []string{"TF_VAR_github_pat", "GH_TOKEN", "GITHUB_TOKEN"}
 
 // connectivityWatch periodically detects and verifies provider credentials.
-// The awsIdentity/githubAPI/http fields exist so tests can stand in for the
-// real services.
+// The awsIdentity/stsEndpoint/githubAPI/http fields exist so tests can
+// stand in for the real services.
 type connectivityWatch struct {
 	notify func()
 
-	awsIdentity func(ctx context.Context, creds awsprincipal.Credentials) (string, error)
+	awsIdentity func(ctx context.Context, creds awsCredentials) (string, error)
+	stsEndpoint string
 	githubAPI   string
 	http        *http.Client
 
@@ -69,12 +68,14 @@ type connectivityWatch struct {
 }
 
 func newConnectivityWatch(notify func()) *connectivityWatch {
-	return &connectivityWatch{
+	w := &connectivityWatch{
 		notify:      notify,
-		awsIdentity: awsprincipal.CallerIdentity,
+		stsEndpoint: defaultSTSEndpoint,
 		githubAPI:   defaultGitHubAPI,
 		http:        &http.Client{Timeout: connectivityCheckTimeout},
 	}
+	w.awsIdentity = w.awsCallerIdentity
+	return w
 }
 
 // connections returns a copy of the latest check results; nil-safe so the
@@ -159,9 +160,9 @@ type presentProvider struct {
 // detect lists the providers whose credentials are present, AWS first.
 func (w *connectivityWatch) detect() []presentProvider {
 	var out []presentProvider
-	if creds, ok := awsprincipal.ResolveCredentials(); ok {
+	if creds, source, ok := resolveAWSCredentials(); ok {
 		out = append(out, presentProvider{
-			info: ConnectionInfo{Provider: "aws", Status: connChecking, Source: awsCredentialSource()},
+			info: ConnectionInfo{Provider: "aws", Status: connChecking, Source: source},
 			verify: func(ctx context.Context) (string, error) {
 				return w.awsIdentity(ctx, creds)
 			},
@@ -181,19 +182,10 @@ func (w *connectivityWatch) detect() []presentProvider {
 	return out
 }
 
-// awsCredentialSource names where awsprincipal.ResolveCredentials found its
-// keys -- the environment (as ufa-loader leaves its temporary principal) or
-// a shared-file profile.
-func awsCredentialSource() string {
-	if os.Getenv("AWS_ACCESS_KEY_ID") != "" && os.Getenv("AWS_SECRET_ACCESS_KEY") != "" {
-		return "environment"
-	}
-	for _, k := range []string{"AWS_PROFILE", "AWS_DEFAULT_PROFILE"} {
-		if p := os.Getenv(k); p != "" {
-			return "profile " + p
-		}
-	}
-	return "profile default"
+// awsCallerIdentity is the default awsIdentity: STS GetCallerIdentity via
+// LR's own signer (awssts.go).
+func (w *connectivityWatch) awsCallerIdentity(ctx context.Context, creds awsCredentials) (string, error) {
+	return stsCallerIdentity(ctx, w.http, w.stsEndpoint, creds, time.Now())
 }
 
 // githubLogin returns the login tok authenticates as (GET /user).

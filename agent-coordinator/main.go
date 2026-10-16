@@ -472,9 +472,10 @@ type LRSystemStateMsg struct {
 	Active  bool       `json:"active"`
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
-	// Connections is omitted (rather than empty) for an older LR that
-	// doesn't report them, and whenever Active is false.
-	Connections []ConnectionInfo `json:"connections,omitempty"`
+	// Connections is always sent, so the per-host "providers" section can
+	// tell "no credentials present" ([]) from an older LR that doesn't
+	// report them, or Active being false (null).
+	Connections []ConnectionInfo `json:"connections"`
 }
 
 // LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser

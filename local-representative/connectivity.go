@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -59,14 +57,13 @@ var githubTokenEnvVars = []string{"TF_VAR_github_pat", "GH_TOKEN", "GITHUB_TOKEN
 
 // Connected providers (Step1SubstepEPrompt.md): the "providers" section's
 // "connect" control hands LR a credential at runtime. Only GitHub, by PAT,
-// so far. A connected credential is kept in connectedGitHubPATFile under
-// the connections dir (0600) so it survives restarts, takes precedence over
-// any environment credential for the same provider, and is passed to every
+// so far. A connected credential is held in memory only -- never written
+// to disk, so it's gone once LR restarts -- takes precedence over any
+// environment credential for the same provider, and is passed to every
 // managed app LR launches afterwards as TF_VAR_github_pat (see childEnv).
 const (
-	connectedSource        = "connected"
-	connectedGitHubPATEnv  = "TF_VAR_github_pat"
-	connectedGitHubPATFile = "github-pat"
+	connectedSource       = "connected"
+	connectedGitHubPATEnv = "TF_VAR_github_pat"
 )
 
 // connectableProviders lists the providers the "connect" control accepts.
@@ -83,11 +80,9 @@ type connectivityWatch struct {
 	githubAPI   string
 	http        *http.Client
 
-	// connectionsDir holds connected credentials; empty keeps them in
-	// memory only. wake asks watchLoop to re-check now rather than at its
-	// next poll, after a connect/disconnect.
-	connectionsDir string
-	wake           chan struct{}
+	// wake asks watchLoop to re-check now rather than at its next poll,
+	// after a connect/disconnect.
+	wake chan struct{}
 
 	mu        sync.RWMutex
 	conns     []ConnectionInfo
@@ -96,46 +91,17 @@ type connectivityWatch struct {
 
 func newConnectivityWatch(notify func()) *connectivityWatch {
 	w := &connectivityWatch{
-		notify:         notify,
-		stsEndpoint:    defaultSTSEndpoint,
-		githubAPI:      defaultGitHubAPI,
-		http:           &http.Client{Timeout: connectivityCheckTimeout},
-		connectionsDir: defaultConnectionsDir(),
-		wake:           make(chan struct{}, 1),
+		notify:      notify,
+		stsEndpoint: defaultSTSEndpoint,
+		githubAPI:   defaultGitHubAPI,
+		http:        &http.Client{Timeout: connectivityCheckTimeout},
+		wake:        make(chan struct{}, 1),
 	}
 	w.awsIdentity = w.awsCallerIdentity
-	w.loadConnected()
 	return w
 }
 
-// defaultConnectionsDir is ~/.ufa/connections, alongside ufa-configurable's
-// ~/.ufa/config.
-func defaultConnectionsDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".ufa", "connections")
-}
-
-// loadConnected picks up a GitHub PAT connected before a restart.
-func (w *connectivityWatch) loadConnected() {
-	if w.connectionsDir == "" {
-		return
-	}
-	data, err := os.ReadFile(filepath.Join(w.connectionsDir, connectedGitHubPATFile))
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Printf("connectivity: reading connected GitHub PAT: %v", err)
-		}
-		return
-	}
-	w.mu.Lock()
-	w.githubPAT = strings.TrimSpace(string(data))
-	w.mu.Unlock()
-}
-
-// connect stores credential as provider's connected credential and
+// connect keeps credential (in memory) as provider's connected credential and
 // re-checks straight away. The credential itself never appears in the
 // returned error or the log.
 func (w *connectivityWatch) connect(provider, credential string) error {
@@ -149,20 +115,6 @@ func (w *connectivityWatch) connect(provider, credential string) error {
 	if strings.ContainsAny(tok, " \t\r\n") {
 		return errors.New("GitHub PAT contains whitespace")
 	}
-	if w.connectionsDir != "" {
-		if err := os.MkdirAll(w.connectionsDir, 0o700); err != nil {
-			return fmt.Errorf("creating %s: %w", w.connectionsDir, err)
-		}
-		path := filepath.Join(w.connectionsDir, connectedGitHubPATFile)
-		tmp := path + ".tmp"
-		if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
-			return fmt.Errorf("saving GitHub PAT: %w", err)
-		}
-		if err := os.Rename(tmp, path); err != nil {
-			os.Remove(tmp)
-			return fmt.Errorf("saving GitHub PAT: %w", err)
-		}
-	}
 	w.mu.Lock()
 	w.githubPAT = tok
 	w.mu.Unlock()
@@ -175,11 +127,6 @@ func (w *connectivityWatch) connect(provider, credential string) error {
 func (w *connectivityWatch) disconnect(provider string) error {
 	if provider != "github" {
 		return fmt.Errorf("provider %q can't be disconnected (supported: %s)", provider, strings.Join(connectableProviders, ", "))
-	}
-	if w.connectionsDir != "" {
-		if err := os.Remove(filepath.Join(w.connectionsDir, connectedGitHubPATFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("removing saved GitHub PAT: %w", err)
-		}
 	}
 	w.mu.Lock()
 	w.githubPAT = ""

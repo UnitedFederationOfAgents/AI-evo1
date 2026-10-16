@@ -19,8 +19,6 @@ func clearProviderEnv(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", missing)
 	t.Setenv("AWS_CONFIG_FILE", missing)
-	// Connected credentials live under $HOME/.ufa/connections.
-	t.Setenv("HOME", t.TempDir())
 }
 
 func fakeGitHub(t *testing.T, goodToken, login string) string {
@@ -132,9 +130,9 @@ func TestConnectedGitHubPAT(t *testing.T) {
 		t.Errorf("childEnv = %q", env)
 	}
 
-	// Survives a restart.
-	if again := newConnectivityWatch(nil); len(again.childEnv()) != 1 {
-		t.Error("connected PAT wasn't reloaded by a new watch")
+	// Held in memory only: a restarted LR doesn't have it.
+	if again := newConnectivityWatch(nil); again.childEnv() != nil {
+		t.Error("connected PAT was picked up by a new watch; it shouldn't be persisted")
 	}
 
 	// Disconnecting falls back to the environment's token.
@@ -147,9 +145,6 @@ func TestConnectedGitHubPAT(t *testing.T) {
 	w.check()
 	if got := w.connections(); len(got) != 1 || got[0].Source != "GH_TOKEN" || got[0].Status != connFailed {
 		t.Errorf("connections after disconnect = %+v, want the failed GH_TOKEN entry", got)
-	}
-	if again := newConnectivityWatch(nil); again.childEnv() != nil {
-		t.Error("disconnected PAT was reloaded by a new watch")
 	}
 }
 

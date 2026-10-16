@@ -30,3 +30,20 @@ The backend changes are in `local-representative/connectivity.go` (plus small ad
 ## Revision A
 
 Let's adjust it so that we do not save the plaintext token to disk. It's fine that it's ephemeral and will not survive a restart.
+
+
+prompt: [`0a4568d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0a4568de660c698d22f3c04201079abc95a7d89e) → reply: [`5b5c175`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/5b5c17582dd7c7ed8c23e60c720c7ea1e2f58f26)
+
+## Reply A
+
+I changed it so a connected GitHub PAT is kept only in LR's memory and never written to disk, so it's gone when LR restarts. I removed the code in `local-representative/connectivity.go` that saved, reloaded and deleted `~/.ufa/connections/github-pat`; "disconnect" now just clears the in-memory token, and the imports that only that code used are gone. `TestConnectedGitHubPAT` now checks that a restarted LR does not have the token. Nothing has been built or tested yet, because `go test` needed approval that wasn't given, and none of the edits are committed.
+
+
+## <REPLACE-Revision|Retry> B
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

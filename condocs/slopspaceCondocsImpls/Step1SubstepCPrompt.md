@@ -77,3 +77,22 @@ The backend changes are in `local-representative/repowatch.go`, plus small addit
 ## Revision C
 
 The white colour is ugly alongside the rest of the controls. Let's get a green colour similar to 'rebuild'.
+
+
+prompt: [`7f660ea`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7f660ea8b7f243472d809e7fbbd94a8e667abafe) → reply: [`abbb515`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/abbb51518a002c0f2586970fb39025d8691cba4d)
+
+## Reply C
+
+The "switch" buttons on the dev-branch control are now the same green as "rebuild", both in the per-host dialogs and in the "switch all" control under "rebuild all". They had been showing in the browser's default white because they had no colour of their own. I also made the picker's "cancel" button plain grey, matching the other neutral buttons, so it doesn't show up white either.
+
+The change is a new `sys-btn-branch` style in both apps' `index.css`, applied to the buttons in both `App.tsx` files. LR's stylesheet didn't have the grey style, so I added it there. I haven't type-checked or built it, because running the frontend type-check needed approval that wasn't given, and the changes are uncommitted.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

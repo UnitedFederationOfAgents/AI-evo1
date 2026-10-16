@@ -1147,14 +1147,14 @@ function BranchSwitcher({ repoState, onSwitch }: { repoState: RepoStateMsg; onSw
       <div className="sys-repo-controls">
         {picking ? (
           <>
-            <button className="sys-btn" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+            <button className="sys-btn sys-btn-branch" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
               switch
             </button>
-            <button className="sys-btn" onClick={() => setPicking(false)}>cancel</button>
+            <button className="sys-btn sys-btn-neutral" onClick={() => setPicking(false)}>cancel</button>
           </>
         ) : (
           <button
-            className="sys-btn"
+            className="sys-btn sys-btn-branch"
             disabled={disabled}
             onClick={open}
             title={blocker ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}

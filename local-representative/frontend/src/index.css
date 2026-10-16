@@ -1496,6 +1496,24 @@ body {
   padding: 2px 4px;
 }
 
+/* Same green as .sys-btn-rebuild (Step1SubstepCPrompt.md Revision C). */
+.sys-btn-branch {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.sys-btn-branch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* Plain grey for the branch picker's "cancel". */
+.sys-btn-neutral {
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #ccc;
+}
+
+.sys-btn-neutral:hover:not(:disabled) { background: #4a4a4a; }
+
 /* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
 
 .sys-trough {

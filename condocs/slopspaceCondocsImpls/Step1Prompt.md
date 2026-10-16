@@ -230,11 +230,11 @@ While tracing the step flow I found and fixed two bugs in the existing code that
 Retry, revert, resources and the git diff views are not available for slopspace condocs yet; each returns an error instead. I also updated `docs/SlopspaceControlScheme.md` with what's now in place.
 
 
-## <REPLACE-Revision|Retry> E
+## Substep E - Add Ability to Connect Providers
 
-<REPLACE-PROMPT>
+[Step 1 Substep E](Step1SubstepEPrompt.md)
 
 
 ## Human-Prompt
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Substep E is now active. Interact with the substep file (Step1SubstepEPrompt.md).

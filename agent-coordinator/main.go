@@ -387,6 +387,13 @@ type RepoStateMsg struct {
 	Head               string `json:"head,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
 	CondocLocked       bool   `json:"condoc_locked,omitempty"`
+
+	// Branch/Branches/SwitchError: the "dev branch" the LR is watching, the
+	// branches a "switch" may pick from, and the last refused/failed switch
+	// -- Step1SubstepCPrompt.md Revision B.
+	Branch      string   `json:"branch,omitempty"`
+	Branches    []string `json:"branches,omitempty"`
+	SwitchError string   `json:"switch_error,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -483,18 +490,21 @@ type LRSystemStateMsg struct {
 // local-representative/repowatch.go). Watched is false both when that LR
 // isn't watching a repo and when it isn't connected.
 type LRRepoStateMsg struct {
-	HostID             string `json:"host_id"`
-	Watched            bool   `json:"watched"`
-	Root               string `json:"root,omitempty"`
-	Dirty              bool   `json:"dirty"`
-	RebuildReady       bool   `json:"rebuild_ready"`
-	Building           bool   `json:"building"`
-	AutoRebuild        bool   `json:"auto_rebuild"`
-	AutoRebuildPending bool   `json:"auto_rebuild_pending,omitempty"`
-	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
-	Head               string `json:"head,omitempty"`
-	LastError          string `json:"last_error,omitempty"`
-	CondocLocked       bool   `json:"condoc_locked,omitempty"`
+	HostID             string   `json:"host_id"`
+	Watched            bool     `json:"watched"`
+	Root               string   `json:"root,omitempty"`
+	Dirty              bool     `json:"dirty"`
+	RebuildReady       bool     `json:"rebuild_ready"`
+	Building           bool     `json:"building"`
+	AutoRebuild        bool     `json:"auto_rebuild"`
+	AutoRebuildPending bool     `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int      `json:"auto_rebuild_seconds,omitempty"`
+	Head               string   `json:"head,omitempty"`
+	LastError          string   `json:"last_error,omitempty"`
+	CondocLocked       bool     `json:"condoc_locked,omitempty"`
+	Branch             string   `json:"branch,omitempty"`
+	Branches           []string `json:"branches,omitempty"`
+	SwitchError        string   `json:"switch_error,omitempty"`
 }
 
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
@@ -1026,6 +1036,9 @@ func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
 		Head:               r.Head,
 		LastError:          r.LastError,
 		CondocLocked:       r.CondocLocked,
+		Branch:             r.Branch,
+		Branches:           r.Branches,
+		SwitchError:        r.SwitchError,
 	}
 }
 
@@ -1286,6 +1299,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					state = "on"
 				}
 				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
+			}
+		case "lr-switch-branch":
+			// The dev-branch "switch" control (Step1SubstepCPrompt.md
+			// Revision B); the global view's "switch all" just sends one of
+			// these per watched host. LR validates the name against its own
+			// branch list -- this only rejects ones that couldn't survive the
+			// "__system:<verb> <arg>" framing.
+			var payload struct {
+				HostID string `json:"host_id"`
+				Branch string `json:"branch"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Branch != "" &&
+				!strings.ContainsAny(payload.Branch, " \t\r\n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:switch-branch "+payload.Branch)
 			}
 		case "lr-set-auto-update":
 			var payload struct {

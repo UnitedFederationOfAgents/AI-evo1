@@ -192,6 +192,12 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
   }, [])
 
+  // Checks out a different branch in the host's watched dev-repo -- the
+  // "dev branch" switch control (Step1SubstepCPrompt.md Revision B).
+  const sendLRSwitchBranch = useCallback((hostId: string, branch: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-switch-branch', payload: { host_id: hostId, branch } }))
+  }, [])
+
   // Toggles whether the given host's LR restarts itself the instant an
   // update becomes available, instead of waiting for the "restart and
   // update LR" control -- see docs/DevMode.md "Loader".
@@ -548,7 +554,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -1241,12 +1247,18 @@ function Trough({ entries }: { entries: TroughEntry[] }) {
 // changes. It's selectable, plain, and reads "rebuild" only once HEAD has
 // moved since the last build with the repo clean; otherwise it's disabled.
 // Rendered only when that host's LR was actually launched with --dev-repo.
+//
+// onSwitchBranch, when given, adds the "dev branch" row (Step1SubstepCPrompt.md
+// Revision B) -- the per-host system tab passes it; the global view's
+// details pane deliberately doesn't, since its own "switch all" control
+// under "rebuild all" covers every host at once.
 function RepoWatchPanel({
-  repoState, onRebuild, onSetAutoRebuild,
+  repoState, onRebuild, onSetAutoRebuild, onSwitchBranch,
 }: {
   repoState: LRRepoStateMsg | undefined
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch?: (branch: string) => void
 }) {
   if (!repoState?.watched) return null
 
@@ -1294,6 +1306,92 @@ function RepoWatchPanel({
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
       )}
+      {onSwitchBranch && (
+        <BranchSwitcher
+          branch={repoState.branch || '(detached)'}
+          branches={repoState.branches ?? []}
+          current={repoState.branch}
+          disabledReason={branchSwitchBlocker([repoState])}
+          error={repoState.switch_error}
+          onSwitch={onSwitchBranch}
+        />
+      )}
+    </div>
+  )
+}
+
+// branchSwitchBlocker returns why a dev-branch switch can't happen right now
+// on any of the given watched repos, or null if it can -- the same refusals
+// local-representative's switchBranch enforces server-side (dirty, building,
+// condoc lock), surfaced up front so the switch button disables itself.
+function branchSwitchBlocker(repos: LRRepoStateMsg[]): string | null {
+  if (repos.some(r => r.dirty)) return 'uncommitted changes — commit or revert to enable switching'
+  if (repos.some(r => r.building)) return 'a rebuild is running'
+  if (repos.some(r => r.condoc_locked)) return 'a condoc is mid-transition (.condoc lock file present)'
+  return null
+}
+
+// BranchSwitcher is the "dev branch" readout plus its "switch" control
+// (Step1SubstepCPrompt.md Revision B): shows the branch being watched and,
+// once "switch" is pressed, a picker over the available branches with a
+// confirming "switch" and a "cancel". Used both per-host (inside
+// RepoWatchPanel) and in the global view under "rebuild all", where branch
+// reads "<differs>" when the hosts disagree and a switch goes to every host.
+function BranchSwitcher({
+  branch, branches, current, disabledReason, error, onSwitch,
+}: {
+  branch: string
+  branches: string[]
+  current?: string
+  disabledReason: string | null
+  error?: string
+  onSwitch: (branch: string) => void
+}) {
+  const [picking, setPicking] = useState(false)
+  const [choice, setChoice] = useState('')
+  const disabled = !!disabledReason || branches.length === 0
+
+  const open = () => {
+    setChoice(current && branches.includes(current) ? current : branches[0] ?? '')
+    setPicking(true)
+  }
+  const confirm = () => {
+    if (choice) onSwitch(choice)
+    setPicking(false)
+  }
+
+  return (
+    <div className="sys-branch">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-branch</span>
+        {picking ? (
+          <select className="sys-branch-select" value={choice} onChange={e => setChoice(e.target.value)}>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <span className="sys-branch-name" title={branch}>{branch}</span>
+        )}
+      </div>
+      <div className="sys-repo-controls">
+        {picking ? (
+          <>
+            <button className="sys-btn" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+              switch
+            </button>
+            <button className="sys-btn" onClick={() => setPicking(false)}>cancel</button>
+          </>
+        ) : (
+          <button
+            className="sys-btn"
+            disabled={disabled}
+            onClick={open}
+            title={disabledReason ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}
+          >
+            switch
+          </button>
+        )}
+      </div>
+      {error && <div className="sys-repo-error" title={error}>last branch switch failed: {error}</div>}
     </div>
   )
 }
@@ -1703,7 +1801,7 @@ function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] | null
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate, onOpenTab,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch, onSetAutoUpdate, onOpenTab,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -1717,6 +1815,7 @@ function SystemPanel({
   onRestartManaged: (hostId: string, id: string) => void
   onRebuild: (hostId: string) => void
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  onSwitchBranch: (hostId: string, branch: string) => void
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
   onOpenTab: (tab: LRTab) => void
 }) {
@@ -1764,6 +1863,7 @@ function SystemPanel({
         repoState={repoState}
         onRebuild={() => onRebuild(hostId)}
         onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
+        onSwitchBranch={branch => onSwitchBranch(hostId, branch)}
       />
       {fcRunning && fcRows.map(row => (
         <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
@@ -3194,7 +3294,7 @@ function TopologyNodeCard({
 // selective-restart effect as "host update all" but generalized to every
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -3205,6 +3305,7 @@ function GlobalTopologyPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
@@ -3265,6 +3366,23 @@ function GlobalTopologyPanel({
   const allAutoRebuildOn = watchedHosts.length > 0 && watchedHosts.every(h => !!hostData[h.id]?.repo?.auto_rebuild)
   const handleSetAutoRebuildAll = (enabled: boolean) =>
     watchedHosts.forEach(h => sendLRSetAutoRebuild(h.id, enabled))
+
+  // Network-wide "dev branch" control under "rebuild all"
+  // (Step1SubstepCPrompt.md Revision B): reads the one branch every watched
+  // host is on, or "<differs>" when they disagree; offers every branch any
+  // of them reports; and a switch is sent to every watched host at once.
+  const watchedRepos = watchedHosts.map(h => hostData[h.id]!.repo!)
+  const watchedBranches = new Set(watchedRepos.map(r => r.branch || '(detached)'))
+  const allBranchesLabel = watchedBranches.size === 0 ? '—'
+    : watchedBranches.size === 1 ? [...watchedBranches][0]
+    : '<differs>'
+  const allBranchOptions = [...new Set(watchedRepos.flatMap(r => r.branches ?? []))].sort()
+  const commonBranch = watchedBranches.size === 1 ? watchedRepos[0]?.branch : undefined
+  const switchErrors = watchedHosts
+    .filter(h => hostData[h.id]?.repo?.switch_error)
+    .map(h => `${h.label}: ${hostData[h.id]!.repo!.switch_error}`)
+  const handleSwitchBranchAll = (branch: string) =>
+    watchedHosts.forEach(h => sendLRSwitchBranch(h.id, branch))
 
   // "network update all": the same selective-restart effect as "host update
   // all" above, generalized to every connected host's LR plus AC -- each
@@ -3441,6 +3559,16 @@ function GlobalTopologyPanel({
                 </label>
               </div>
             )}
+            {devMode && watchedHosts.length > 0 && (
+              <BranchSwitcher
+                branch={allBranchesLabel}
+                branches={allBranchOptions}
+                current={commonBranch}
+                disabledReason={branchSwitchBlocker(watchedRepos)}
+                error={switchErrors.length > 0 ? switchErrors.join('; ') : undefined}
+                onSwitch={handleSwitchBranchAll}
+              />
+            )}
             <div className="topo-controls-buttons">
               <button
                 className={`sys-btn sys-btn-restart${acWillUpdate ? ' sys-btn-restart-update' : ''}`}
@@ -3516,7 +3644,7 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -3527,6 +3655,7 @@ function GlobalSystemPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
@@ -3561,6 +3690,7 @@ function GlobalSystemPanel({
           sendLRRestartApp={sendLRRestartApp}
           sendLRRebuildApp={sendLRRebuildApp}
           sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          sendLRSwitchBranch={sendLRSwitchBranch}
           sendLRSetAutoUpdate={sendLRSetAutoUpdate}
           acLoaderManaged={acLoaderManaged}
           acUpdateAvailable={acUpdateAvailable}
@@ -3579,7 +3709,7 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, activeTab, setActiveTab,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -3590,6 +3720,7 @@ function GlobalView({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
@@ -3657,6 +3788,7 @@ function GlobalView({
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               acLoaderManaged={acLoaderManaged}
               acUpdateAvailable={acUpdateAvailable}
@@ -3777,7 +3909,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -3795,6 +3927,7 @@ function LRView({
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
   importHostFiles: (hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
@@ -4008,6 +4141,7 @@ function LRView({
                     onRestartManaged={sendLRRestartManagedApp}
                     onRebuild={sendLRRebuildApp}
                     onSetAutoRebuild={sendLRSetAutoRebuild}
+                    onSwitchBranch={sendLRSwitchBranch}
                     onSetAutoUpdate={sendLRSetAutoUpdate}
                     onOpenTab={setActiveTab}
                   />
@@ -4356,7 +4490,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -4555,6 +4689,7 @@ export default function App() {
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               uploadFiles={uploadFiles}
               importHostFiles={importHostFiles}
@@ -4574,6 +4709,7 @@ export default function App() {
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               activeTab={activeTab}
               setActiveTab={setActiveTab}

@@ -45,3 +45,18 @@ func TestRepoStateCondocLockedRoundTrips(t *testing.T) {
 		t.Fatalf("re-encoded LRRepoStateMsg missing/false condoc_locked: %v", roundTripped)
 	}
 }
+
+// TestRepoStateBranchRoundTrips is the same guard for the dev-branch fields
+// (Step1SubstepCPrompt.md Revision B).
+func TestRepoStateBranchRoundTrips(t *testing.T) {
+	raw := []byte(`{"watched":true,"branch":"main","branches":["main","other"],"switch_error":"nope"}`)
+
+	var rs RepoStateMsg
+	if err := json.Unmarshal(raw, &rs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msg := repoStateMsg("host-1", &rs)
+	if msg.Branch != "main" || len(msg.Branches) != 2 || msg.Branches[1] != "other" || msg.SwitchError != "nope" {
+		t.Fatalf("repoStateMsg dropped dev-branch fields: %+v", msg)
+	}
+}

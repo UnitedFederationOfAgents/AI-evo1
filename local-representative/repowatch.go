@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +74,18 @@ type RepoStateMsg struct {
 
 	Head      string `json:"head,omitempty"`
 	LastError string `json:"last_error,omitempty"` // most recent rebuild failure, if any
+
+	// Branch is the branch the watched repo currently has checked out --
+	// the "dev branch" this LR is watching (pollAndMaybePull follows its
+	// upstream) -- or "" when HEAD is detached. Branches lists every branch
+	// a "switch" (see switchBranch) may pick from: local branches plus
+	// remote-tracking ones with their remote prefix stripped, deduplicated
+	// and sorted. SwitchError is the most recent refused/failed switch, if
+	// any, cleared by the next successful one. Per
+	// condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md Revision B.
+	Branch      string   `json:"branch,omitempty"`
+	Branches    []string `json:"branches,omitempty"`
+	SwitchError string   `json:"switch_error,omitempty"`
 }
 
 // repoWatch is local-representative's dev-repo watcher for a single git
@@ -98,6 +112,9 @@ type repoWatch struct {
 	head        string
 	builtHead   string // HEAD as of the last successful rebuild (the watcher's starting HEAD before the first one)
 	lastErr     string
+	branch      string   // see RepoStateMsg.Branch
+	branches    []string // see RepoStateMsg.Branches
+	switchErr   string   // see RepoStateMsg.SwitchError
 
 	// autoRebuildDeadline/autoRebuildArmedHead track the 90s debounce timer
 	// (autoRebuildDebounce): zero deadline means no auto-rebuild is pending.
@@ -128,6 +145,8 @@ func newRepoWatch(root string, notify func()) *repoWatch {
 		w.head = head
 		w.builtHead = head
 	}
+	w.branch, _ = w.currentBranch()
+	w.branches, _ = w.listBranches()
 	// Seed building from the '.building' lock file itself (Revision I), so a
 	// build already running when LR (re)starts -- e.g. one that outlived an
 	// auto-update restart, or one kicked off by hand -- is reflected right
@@ -188,6 +207,9 @@ func (w *repoWatch) snapshot() RepoStateMsg {
 		Head:         w.head,
 		LastError:    w.lastErr,
 		CondocLocked: w.condocLockPresent(),
+		Branch:       w.branch,
+		Branches:     slices.Clone(w.branches),
+		SwitchError:  w.switchErr,
 	}
 	if !w.autoRebuildDeadline.IsZero() {
 		msg.AutoRebuildPending = true
@@ -214,6 +236,57 @@ func (w *repoWatch) runGit(args ...string) (string, error) {
 
 func (w *repoWatch) headSHA() (string, error) {
 	return w.runGit("rev-parse", "--short", "HEAD")
+}
+
+// currentBranch returns the checked-out branch's short name, or "" when HEAD
+// is detached.
+func (w *repoWatch) currentBranch() (string, error) {
+	b, err := w.runGit("rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if b == "HEAD" {
+		return "", nil
+	}
+	return b, nil
+}
+
+// listBranches returns every branch switchBranch may pick from -- see
+// RepoStateMsg.Branches.
+func (w *repoWatch) listBranches() ([]string, error) {
+	out, err := w.runGit("for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes")
+	if err != nil {
+		return nil, err
+	}
+	return parseBranchRefs(out), nil
+}
+
+// parseBranchRefs turns 'git for-each-ref --format=%(refname)' output into
+// the deduplicated, sorted list listBranches reports: refs/heads/X is X,
+// refs/remotes/<remote>/X is also X (git switch's default --guess creates
+// the local tracking branch on demand), and each remote's symbolic HEAD is
+// skipped.
+func parseBranchRefs(out string) []string {
+	seen := map[string]bool{}
+	var branches []string
+	for _, ref := range strings.Split(out, "\n") {
+		ref = strings.TrimSpace(ref)
+		var name string
+		if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+			name = b
+		} else if r, ok := strings.CutPrefix(ref, "refs/remotes/"); ok {
+			if _, b, found := strings.Cut(r, "/"); found && b != "HEAD" {
+				name = b
+			}
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		branches = append(branches, name)
+	}
+	sort.Strings(branches)
+	return branches
 }
 
 // isDirty reports whether the repo has modified unstaged or staged changes,
@@ -263,13 +336,28 @@ func (w *repoWatch) pollAndMaybePull() bool {
 		log.Printf("dev-repo: git rev-parse HEAD failed: %v", err)
 		return false
 	}
+	// Branch/branch-list failures are logged but don't abort the poll: they
+	// only feed the "dev branch" readout, not rebuild readiness.
+	branch, err := w.currentBranch()
+	if err != nil {
+		log.Printf("dev-repo: git rev-parse --abbrev-ref HEAD failed: %v", err)
+	}
+	branches, err := w.listBranches()
+	if err != nil {
+		log.Printf("dev-repo: git for-each-ref failed: %v", err)
+	}
 
 	w.mu.Lock()
-	oldDirty, oldHead := w.dirty, w.head
+	oldDirty, oldHead, oldBranch, oldBranches := w.dirty, w.head, w.branch, w.branches
 	oldReady := w.rebuildReadyLocked()
 	w.dirty = dirty
 	w.head = head
-	changed := oldDirty != dirty || oldHead != head || oldReady != w.rebuildReadyLocked()
+	w.branch = branch
+	if branches != nil {
+		w.branches = branches
+	}
+	changed := oldDirty != dirty || oldHead != head || oldReady != w.rebuildReadyLocked() ||
+		oldBranch != w.branch || !slices.Equal(oldBranches, w.branches)
 	w.mu.Unlock()
 	return changed
 }
@@ -456,6 +544,69 @@ func (w *repoWatch) requestRebuild() {
 	}()
 }
 
+// requestSwitchBranch handles an operator-driven "switch" of the watched
+// repo's checked-out branch (the system tab's dev-branch control, or
+// agent-coordinator's "__system:switch-branch <name>", per
+// condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md Revision B). Runs in
+// its own goroutine under opMu, like requestRebuild, so it never overlaps a
+// poll/pull or a build. The switch moves HEAD away from builtHead, so the
+// rebuild button (and auto-rebuild's debounce, if on) picks the new branch
+// up the usual way.
+func (w *repoWatch) requestSwitchBranch(name string) {
+	go func() {
+		w.opMu.Lock()
+		defer w.opMu.Unlock()
+		err := w.switchBranch(name)
+		w.mu.Lock()
+		if err != nil {
+			w.switchErr = err.Error()
+			log.Printf("dev-repo: switch to branch %q failed: %v", name, err)
+		} else {
+			w.switchErr = ""
+		}
+		w.mu.Unlock()
+		w.pollAndMaybePull()
+		w.notify()
+	}()
+}
+
+// switchBranch does the actual checkout for requestSwitchBranch, refusing
+// while the repo is dirty (switching would carry or clobber uncommitted
+// work), while a build is running, while a condoc holds its '.condoc' lock,
+// and for any name not in the reported branch list. Callers must hold opMu.
+func (w *repoWatch) switchBranch(name string) error {
+	if name == "" || strings.HasPrefix(name, "-") {
+		return fmt.Errorf("invalid branch name %q", name)
+	}
+	w.mu.RLock()
+	current, building, known := w.branch, w.building, slices.Contains(w.branches, name)
+	w.mu.RUnlock()
+	if name == current {
+		return nil
+	}
+	if !known {
+		return fmt.Errorf("unknown branch %q", name)
+	}
+	if building || w.buildLockPresent() {
+		return fmt.Errorf("a rebuild is running")
+	}
+	if w.condocLockPresent() {
+		return fmt.Errorf("a condoc is mid-transition (.condoc lock file present)")
+	}
+	dirty, err := w.isDirty()
+	if err != nil {
+		return fmt.Errorf("git diff HEAD: %v", err)
+	}
+	if dirty {
+		return fmt.Errorf("uncommitted changes -- commit or revert first")
+	}
+	log.Printf("dev-repo: switching to branch %q", name)
+	if out, err := w.runGit("switch", name); err != nil {
+		return fmt.Errorf("git switch %s: %v (%s)", name, err, out)
+	}
+	return nil
+}
+
 // repoRootFromCWD resolves the git repository root for --dev-repo: LR must be
 // launched from inside a git repository (the working directory or one of its
 // parents), per the prompt.
@@ -495,6 +646,19 @@ func (s *Server) requestRebuild(reason string) {
 	}
 	log.Printf("system: rebuild requested (%s)", reason)
 	s.repoWatch.requestRebuild()
+}
+
+// switchBranch handles a dev-branch "switch" request -- the system tab's
+// WebSocket "switch-branch" or agent-coordinator's
+// "__system:switch-branch <name>". A no-op (logged) when no repo is being
+// watched.
+func (s *Server) switchBranch(name string) {
+	if s.repoWatch == nil {
+		log.Printf("system: branch switch to %q requested but no repo is being watched (launch with --dev-repo)", name)
+		return
+	}
+	log.Printf("system: branch switch to %q requested", name)
+	s.repoWatch.requestSwitchBranch(name)
 }
 
 // setAutoRebuild toggles the dev-repo watcher's auto-rebuild flag -- the

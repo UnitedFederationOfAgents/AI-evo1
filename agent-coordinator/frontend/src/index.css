@@ -1058,6 +1058,11 @@ body {
    before building. */
 .sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
 .sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B):
+   inside the dev-repo panel per-host, and under "rebuild all" globally. */
+.sys-branch { display: flex; flex-direction: column; gap: 6px; }
+.sys-branch-name { color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sys-branch-select { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 4px; }
 
 /* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
 .sys-trough { border: 1px solid #3c3c3c; border-radius: 4px; background: #111; }

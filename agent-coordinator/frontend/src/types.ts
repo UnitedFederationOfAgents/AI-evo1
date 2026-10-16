@@ -208,6 +208,12 @@ export interface LRRepoStateMsg {
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
   // is never rebuilt out from under.
   condoc_locked?: boolean
+  // The "dev branch" this LR is watching ('' / absent when HEAD is
+  // detached), every branch a "switch" may pick from, and the last
+  // refused/failed switch -- Step1SubstepCPrompt.md Revision B.
+  branch?: string
+  branches?: string[]
+  switch_error?: string
 }
 
 export interface CondocInfo {

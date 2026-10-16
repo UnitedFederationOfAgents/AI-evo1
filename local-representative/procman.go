@@ -783,6 +783,12 @@ func (s *Server) handleSystemCommand(raw string) {
 		s.requestRebuild("operator")
 	case "auto-rebuild":
 		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
+	case "switch-branch":
+		if arg == "" {
+			log.Printf("system: remote switch-branch command missing target")
+			return
+		}
+		s.switchBranch(arg)
 	case "auto-update":
 		s.setAutoUpdate(arg == "on" || arg == "true" || arg == "1")
 	default:

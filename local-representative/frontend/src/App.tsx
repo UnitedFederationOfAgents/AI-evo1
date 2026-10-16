@@ -207,6 +207,14 @@ function useStatusWS() {
     }
   }, [])
 
+  // Checks out a different branch in the watched dev-repo -- the "dev
+  // branch" switch control (Step1SubstepCPrompt.md Revision B).
+  const switchBranch = useCallback((branch: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'switch-branch', payload: { branch } }))
+    }
+  }, [])
+
   // Toggles whether this LR restarts itself the instant an update becomes
   // available, instead of waiting for the "update and restart" button --
   // see docs/DevMode.md "Loader".
@@ -386,7 +394,7 @@ function useStatusWS() {
   return {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, submitWork,
   }
 }
 
@@ -1040,10 +1048,12 @@ function RepoWatchPanel({
   repoState,
   onRebuild,
   onSetAutoRebuild,
+  onSwitchBranch,
 }: {
   repoState: RepoStateMsg
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch: (branch: string) => void
 }) {
   if (!repoState.watched) return null
 
@@ -1091,6 +1101,71 @@ function RepoWatchPanel({
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>
       )}
+      <BranchSwitcher repoState={repoState} onSwitch={onSwitchBranch} />
+    </div>
+  )
+}
+
+// BranchSwitcher is the dev-repo panel's "dev branch" readout plus its
+// "switch" control (Step1SubstepCPrompt.md Revision B): shows the branch
+// being watched and, once "switch" is pressed, a picker over the available
+// branches with a confirming "switch" and a "cancel". Disabled for the same
+// reasons LR's switchBranch refuses server-side (dirty, building, condoc
+// lock), so those surface up front.
+function BranchSwitcher({ repoState, onSwitch }: { repoState: RepoStateMsg; onSwitch: (branch: string) => void }) {
+  const [picking, setPicking] = useState(false)
+  const [choice, setChoice] = useState('')
+  const branches = repoState.branches ?? []
+  const blocker = repoState.dirty ? 'uncommitted changes — commit or revert to enable switching'
+    : repoState.building ? 'a rebuild is running'
+    : repoState.condoc_locked ? 'a condoc is mid-transition (.condoc lock file present)'
+    : null
+  const disabled = !!blocker || branches.length === 0
+
+  const open = () => {
+    const current = repoState.branch
+    setChoice(current && branches.includes(current) ? current : branches[0] ?? '')
+    setPicking(true)
+  }
+  const confirm = () => {
+    if (choice) onSwitch(choice)
+    setPicking(false)
+  }
+
+  return (
+    <div className="sys-branch">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-branch</span>
+        {picking ? (
+          <select className="sys-branch-select" value={choice} onChange={e => setChoice(e.target.value)}>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <span className="sys-branch-name" title={repoState.branch}>{repoState.branch || '(detached)'}</span>
+        )}
+      </div>
+      <div className="sys-repo-controls">
+        {picking ? (
+          <>
+            <button className="sys-btn" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+              switch
+            </button>
+            <button className="sys-btn" onClick={() => setPicking(false)}>cancel</button>
+          </>
+        ) : (
+          <button
+            className="sys-btn"
+            disabled={disabled}
+            onClick={open}
+            title={blocker ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}
+          >
+            switch
+          </button>
+        )}
+      </div>
+      {repoState.switch_error && (
+        <div className="sys-repo-error" title={repoState.switch_error}>last branch switch failed: {repoState.switch_error}</div>
+      )}
     </div>
   )
 }
@@ -1104,6 +1179,7 @@ function SystemPanel({
   onRestart,
   onRebuild,
   onSetAutoRebuild,
+  onSwitchBranch,
   onSetAutoUpdate,
   onOpenTab,
 }: {
@@ -1115,6 +1191,7 @@ function SystemPanel({
   onRestart: () => void
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch: (branch: string) => void
   onSetAutoUpdate: (enabled: boolean) => void
   onOpenTab: (tab: Tab) => void
 }) {
@@ -1146,7 +1223,7 @@ function SystemPanel({
 
   return (
     <div className="sys-panel">
-      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} />
+      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} onSwitchBranch={onSwitchBranch} />
       {fcRunning && fcRows.map(row => (
         <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
           {row.label} control: <strong>{fcControl(row.state)}</strong>
@@ -2738,7 +2815,7 @@ export default function App() {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
     acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, submitWork,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -2914,6 +2991,7 @@ export default function App() {
                   onRestart={restartApp}
                   onRebuild={rebuildRepo}
                   onSetAutoRebuild={setAutoRebuild}
+                  onSwitchBranch={switchBranch}
                   onSetAutoUpdate={setAutoUpdate}
                   onOpenTab={goToTab}
                 />

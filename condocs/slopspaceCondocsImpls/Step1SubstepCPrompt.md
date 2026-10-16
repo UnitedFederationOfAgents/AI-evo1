@@ -58,3 +58,27 @@ Now let's add a 'dev branch' field to the system dialogs.
 This will go in the same dialog as the 'DEV-REPO' section in the per-host section (but not in the global view) and will list the current branch the host is watching. We will also have a 'switch' button which will let us pick the branch from available options.
 
 In the global dialog we will get a similar control under 'rebuild all' only this one will control the full set. If different LRs are watching different branches we will see '<differs>'. Using the 'switch' control here will switch all of the LRs.
+
+
+prompt: [`cbd159e`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/cbd159eca846237aa6b4628410e2d3811879ef46) → reply: [`0a013fe`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0a013febfc0c1f5d8a4a6ac0edaa5ed19943fe5e)
+
+## Reply B
+
+I added a "dev branch" readout with a "switch" control to the per-host system dialogs, and a "switch all" control under "rebuild all" in the global view that shows `<differs>` when hosts are on different branches. None of it has been run: `go test`, `gofmt` and the frontend builds all needed approval that wasn't given, so I've only checked it by reading. The changes are uncommitted.
+
+- **LR backend:** the dev-repo watcher now reports the current branch and the list of branches you can pick, built from local and remote branches. A new `switch-branch` command (from LR's own dashboard, or `__system:switch-branch <name>` from AC) runs `git switch`. It refuses while the repo is dirty, a rebuild is running, or a `.condoc` lock is present, and shows the reason in the panel. Switching moves HEAD, so the rebuild button and auto-rebuild treat it like any other new commit.
+- **Per-host view:** the branch row sits inside the dev-repo section, in both AC's per-host system tab and LR's own dashboard. AC's global view details pane deliberately doesn't show it.
+- **Global view:** the control under "rebuild all" lists every branch any watched host reports and sends the switch to every watched host. It's disabled if any host is dirty, building or condoc-locked.
+- **Condoc lock:** the `.condoc` lock is present while a condoc agent is running, so switching will be greyed out for much of a condoc run.
+
+The backend changes are in `local-representative/repowatch.go`, plus small additions in its `main.go` and `procman.go` and AC's `main.go`. New tests are in `local-representative/repowatch_test.go` and `agent-coordinator/repostate_test.go`, not yet run. The frontend changes are in both apps' `App.tsx`, `types.ts` and `index.css`, and I added a short note to `docs/DevMode.md`.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

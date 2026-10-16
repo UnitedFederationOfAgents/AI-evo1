@@ -185,6 +185,12 @@ export interface RepoStateMsg {
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
   // is never rebuilt out from under.
   condoc_locked?: boolean
+  // The "dev branch" being watched ('' / absent when HEAD is detached),
+  // every branch a "switch" may pick from, and the last refused/failed
+  // switch -- Step1SubstepCPrompt.md Revision B.
+  branch?: string
+  branches?: string[]
+  switch_error?: string
 }
 
 // The worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md): what the

@@ -1468,6 +1468,34 @@ body {
   white-space: nowrap;
 }
 
+/* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B). */
+.sys-branch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sys-branch-name {
+  color: #9c9c9c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.sys-branch-select {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  background: #1a1a1a;
+  color: #ccc;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
 /* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
 
 .sys-trough {

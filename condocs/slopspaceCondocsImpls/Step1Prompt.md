@@ -141,11 +141,17 @@ The next step is the dungeon-keeper groundwork. The PR package can be built alon
 [Step 1 Substep C](Step1SubstepCPrompt.md)
 
 
-## <REPLACE-Revision|Retry> C
+## Revision C
 
-<REPLACE-PROMPT>
+For our slopspace condocs we do not need the 'pull' control because this should be a permanent repetitious pull sequence.
 
+Let's continue the implementation.
 
-## Human-Prompt
+1-5 -- as-proposed.
+6 - Commit messages will be boring and similar to those existing ones for same-repo condocs for now. The condoc pointer will only have a link to the condoc, the condoc itself will have the per-repo links (for each step in the same manner as same-repo)
+7-9 -- as-proposed.
+10 - This can be shared code that condoccer and/or dungeon-keeper can pull it, we will use it later for claudomation as well. We'll do a first cut here and then we can review the architecture soon after and make adjustments as-needed.
+11-12 -- as-proposed.
+13 - The condoccer keeps running from the same PWD where it is currently running. It should not be coupled to the worker, it should only need to submit work files and watch for completion files for a maximally loose coupling.
 
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will implement this functionality now. This should put us in a position to execute the full slopspaces condoc lifecycle.

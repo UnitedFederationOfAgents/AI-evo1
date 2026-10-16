@@ -30,11 +30,13 @@ I added the provider connectivity icons, the per-host "providers" section, and d
 New tests are in `local-representative/connectivity_test.go` and `ufa-loader/awsprincipal/identity_test.go`, not yet run. The frontend changes are in both `App.tsx`, `types.ts` and `index.css` files.
 
 
-## <REPLACE-Revision|Retry> A
+## Revision A
 
-<REPLACE-PROMPT>
+There are several errors here:
+- Double-click navigation does not work in either case, the global system dialog does not bring us anywhere
+- The per-host system dialog brings up an application panel when we click on a row but does not take us to
+- It seems like much of the implementation may have been missed on AC, we see the 'providers' dialog only on LR
 
+We also see that the 'ufa-loader' has gained intelligence on the AWS principal, but we want to keep ufa-loader as dumb as we can. LR should be able to inspect for itself with an STS call chain if it needs additional information.
 
-## Human-Prompt
-
-When done add '!HANDOFF!' or '!COMPLETED!' to return to the parent step.
+Let's fix these issues now.

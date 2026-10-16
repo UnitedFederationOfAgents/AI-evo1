@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { detectTextFormat } from './textformat'
 import { HostFilePicker } from './HostFilePicker'
-import type { ActionRequest, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, PointerConfig, PointerStatus, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, StepSummary, TCAvailabilityMsg } from './types'
+import type { ActionRequest, BranchCheck, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, PointerConfig, PointerEntry, PointerStatus, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, SlopspaceProposal, StepSummary, TCAvailabilityMsg } from './types'
 
 // ---- WebSocket hook ----
 
@@ -119,9 +119,35 @@ function useCondocWS() {
     send('clone-pointer', {})
   }, [send])
 
-  const pullPointerRepo = useCallback(() => {
-    send('pull-pointer', {})
-  }, [send])
+  // Slopspace condocs (see slopspace.go): propose/edit, then everything
+  // else is keyed on the pointer's stem.
+  const [branchCheck, setBranchCheck] = useState<{ branch: string; checks: BranchCheck[] } | null>(null)
+
+  const slopPropose = useCallback(
+    (p: SlopspaceProposal) => {
+      send('slop-propose', p)
+    },
+    [send],
+  )
+
+  const slopCheckBranch = useCallback(
+    (repos: string[], branch: string) => {
+      setBranchCheck(null)
+      send('slop-check-branch', { repos, branch })
+    },
+    [send],
+  )
+
+  const slopSend = useCallback(
+    (
+      type: 'slop-withdraw' | 'slop-accept' | 'slop-resubmit' | 'slop-merge' | 'slop-save-pr-template' | 'slop-regenerate-prs' | 'slop-accept-prs',
+      stem: string,
+      extra?: { template?: string; instruction?: string },
+    ) => {
+      send(type, { stem, ...extra })
+    },
+    [send],
+  )
 
   // path is the condoc whose repo the diff runs against -- the working dir
   // may sit above several repos (see condocRepoRoot on the server).
@@ -223,6 +249,9 @@ function useCondocWS() {
             setRoot(p.root)
           } else if (msg.type === 'pointer') {
             setPointer(msg.payload as PointerStatus)
+          } else if (msg.type === 'slop-branch-check') {
+            const p = msg.payload as { branch: string; checks: BranchCheck[] | null }
+            setBranchCheck({ branch: p.branch, checks: p.checks ?? [] })
           } else if (msg.type === 'diff-list') {
             const p = msg.payload as { fromCommit: string; toCommit: string; files: string[] }
             setDiffFiles(p.files ?? [])
@@ -266,7 +295,10 @@ function useCondocWS() {
     pointer,
     setPointerRepo,
     clonePointerRepo,
-    pullPointerRepo,
+    branchCheck,
+    slopPropose,
+    slopCheckBranch,
+    slopSend,
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
@@ -342,17 +374,16 @@ const POINTER_STATE_LABEL: Record<PointerStatus['state'], string> = {
 // PointerRepoControl ("Set Pointer Repo") is the slopspace tab's counterpart
 // to WorkingDirControl: the condoc pointer repo (owner/name), the branch
 // condoccer pulls/pushes, and where it is checked out. When nothing is at the
-// path it offers to clone (HTTPS + the server's GitHub PAT).
+// path it offers to clone (HTTPS + the server's GitHub PAT). There is no
+// manual pull: the server pulls it continuously.
 function PointerRepoControl({
   pointer,
   onSet,
   onClone,
-  onPull,
 }: {
   pointer: PointerStatus
   onSet: (cfg: PointerConfig) => void
   onClone: () => void
-  onPull: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState<PointerConfig>({ repo: '', branch: '', path: '' })
@@ -408,15 +439,14 @@ function PointerRepoControl({
       </div>
       {pointer.message && <div className="pointer-message">{pointer.message}</div>}
       {pointer.state === 'ready' && pointer.pullError && <div className="pointer-message">{pointer.pullError}</div>}
+      {pointer.state === 'ready' && pointer.pushError && <div className="pointer-message">{pointer.pushError} (retried after the next pull)</div>}
+      {pointer.holder && <div className="pointer-note">This condoccer holds condocs as {pointer.holder}.</div>}
       {!pointer.tokenAvailable && (
         <div className="pointer-note">No GitHub token on the server (TF_VAR_github_pat) — only public repos can be cloned or pulled.</div>
       )}
       <div className="pointer-actions">
         {pointer.state === 'missing' && (
           <button className="btn-primary working-dir-btn" onClick={onClone}>Clone {pointer.repo}</button>
-        )}
-        {pointer.state === 'ready' && (
-          <button className="btn-secondary working-dir-btn" onClick={onPull}>Pull</button>
         )}
         <button
           className="btn-secondary working-dir-btn"
@@ -595,8 +625,9 @@ type NavLevel = 'condoc-list' | 'condoc' | 'step' | 'substep' | 'files-changed' 
 // Top-level tab on the condoc list, one per control scheme (see the
 // condoc-yaml `controlScheme` field). 'same-repo' is everything condoccer
 // has done so far -- condocs whose state lives in the scanned repo itself.
-// 'slopspace' is a placeholder until that mode is implemented -- see
-// condocs/SlopspaceCondocs.md.
+// 'slopspace' is condocs driven through a pointer repo, each in its own
+// slopspace -- see docs/SlopspaceControlScheme.md. Their condoc paths are
+// "slopspace:<stem>"; past the list they use the same views as same-repo.
 type ControlSchemeTab = 'same-repo' | 'slopspace'
 
 const CONTROL_SCHEME_TABS: { id: ControlSchemeTab; label: string }[] = [
@@ -643,8 +674,8 @@ function saveHideCompleted(hide: boolean) {
 
 interface NavHashState {
   navLevel: NavLevel
-  // Only meaningful at the condoc-list level: every deeper level is a
-  // same-repo condoc.
+  // Only meaningful at the condoc-list level: deeper levels carry the
+  // scheme in the condoc path ("slopspace:" prefix).
   tab: ControlSchemeTab
   condocPath: string | null
   stepNum: number | null
@@ -767,10 +798,14 @@ const PHASE_LABELS: Record<Phase, string> = {
   agent_running: 'Running',
   awaiting_action: 'Awaiting Action',
   completed: 'Completed',
+  queued: 'Queued',
+  pr_proposed: 'Propose PR',
+  pr_open: 'PR Open',
+  merged: 'Merged',
 }
 
 function PhaseBadge({ phase }: { phase: Phase }) {
-  return <span className={`badge badge-${phase}`}>{PHASE_LABELS[phase]}</span>
+  return <span className={`badge badge-${phase}`}>{PHASE_LABELS[phase] ?? phase}</span>
 }
 
 // ---- Step section parser ----
@@ -1325,6 +1360,10 @@ interface SidebarProps {
   hideCompleted: boolean
   onSetHideCompleted: (hide: boolean) => void
   pointer: PointerStatus | null
+  // The slopspace tab's selection: a stem, '' for the new-proposal form, or
+  // null for nothing.
+  selectedPointerStem: string | null
+  onSelectPointer: (p: PointerEntry | null) => void
   condocs: CondocInfo[]
   activeState: CondocState | null
   selectedCondocPath: string | null
@@ -1364,6 +1403,8 @@ function Sidebar({
   hideCompleted,
   onSetHideCompleted,
   pointer,
+  selectedPointerStem,
+  onSelectPointer,
   condocs,
   activeState,
   selectedCondocPath,
@@ -1430,10 +1471,19 @@ function Sidebar({
           ))}
         </div>
         {tab === 'slopspace' ? (
-          // Read-only for now: the pointers the pointer repo holds, with
-          // where each condoc's progression is. Opening/driving them comes
-          // with proposal/accept (docs/SlopspaceControlScheme.md).
+          // The pointers the pointer repo holds, with where each condoc's
+          // progression is. A proposal (or a condoc another condoccer
+          // holds) opens in the main pane; an accepted one opens in the
+          // condoc views, read from its slopspace.
           <div className="nav-list">
+            {pointer?.state === 'ready' && (
+              <div
+                className={`nav-item nav-item-new${selectedPointerStem === '' ? ' selected' : ''}`}
+                onClick={() => onSelectPointer(null)}
+              >
+                <span className="nav-item-name">+ Propose a condoc</span>
+              </div>
+            )}
             {pointer?.state !== 'ready' && (
               <div className="nav-empty">Set up the pointer repo to see slopspace condocs.</div>
             )}
@@ -1441,11 +1491,19 @@ function Sidebar({
               <div className="nav-empty">No pointers in {pointer.repo} yet.</div>
             )}
             {pointer?.state === 'ready' && pointer.pointers.map((p) => (
-              <div key={p.file} className="nav-item nav-item-readonly" title={p.file}>
+              <div
+                key={p.file}
+                className={`nav-item${selectedPointerStem === p.stem ? ' selected' : ''}${p.heldHere ? '' : ' nav-item-readonly'}`}
+                title={p.heldHere ? p.file : `${p.file} -- held by ${p.holder || 'nobody'}`}
+                onClick={() => onSelectPointer(p)}
+              >
                 <span className="nav-item-name">{p.name}</span>
                 <div className="nav-item-meta">
-                  {p.phase && <span className={`badge badge-${p.phase}`}>{p.phase.replace(/_/g, ' ')}</span>}
+                  {p.phase && <PhaseBadge phase={p.phase as Phase} />}
                   {p.step && <span className="step-label">step {p.step}{p.substep ? `.${p.substep}` : ''}{p.iteration ? ` ${p.iteration}` : ''}</span>}
+                  {p.running && <span className="spinner" title="turn running" />}
+                  {!p.running && p.queuePos ? <span className="step-label">#{p.queuePos} in queue</span> : null}
+                  {p.error && <span className="badge badge-error" title={p.error}>error</span>}
                 </div>
                 {p.targets && p.targets.length > 0 && (
                   <span className="nav-item-subtitle">→ {p.targets.join(', ')}</span>
@@ -2943,6 +3001,332 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
   )
 }
 
+// ---- Slopspace condocs (see condoccer/slopspace.go) ----
+
+type SlopSend = (
+  type: 'slop-withdraw' | 'slop-accept' | 'slop-resubmit' | 'slop-merge' | 'slop-save-pr-template' | 'slop-regenerate-prs' | 'slop-accept-prs',
+  stem: string,
+  extra?: { template?: string; instruction?: string },
+) => void
+
+function splitRepos(text: string): string[] {
+  return text.split(/[\s,]+/).map((r) => r.trim()).filter(Boolean)
+}
+
+// ProposalForm proposes a new slopspace condoc, or edits one still proposed:
+// its targets (1-N, all different), the repo the condoc itself lives in, the
+// branch (must not exist yet in any of them) and the agent/model its turns
+// run with.
+function ProposalForm({
+  pointer,
+  entry,
+  branchCheck,
+  onPropose,
+  onCheckBranch,
+}: {
+  pointer: PointerStatus
+  entry: PointerEntry | null
+  branchCheck: { branch: string; checks: BranchCheck[] } | null
+  onPropose: (p: SlopspaceProposal) => void
+  onCheckBranch: (repos: string[], branch: string) => void
+}) {
+  const initial = () => ({
+    name: entry?.name ?? '',
+    description: entry?.description ?? '',
+    targets: (entry?.targets ?? []).join('\n'),
+    condocRepo: entry?.condocRepo ?? pointer.repo,
+    branch: entry?.branch ?? '',
+    agent: entry?.agent ?? pointer.defaultAgent ?? '',
+    model: entry?.model ?? pointer.defaultModel ?? '',
+  })
+  const [draft, setDraft] = useState(initial)
+  // Re-seed when another proposal is selected (or this one is saved).
+  const seedKey = `${entry?.stem ?? ''}|${entry?.file ?? ''}|${entry?.branch ?? ''}|${(entry?.targets ?? []).join(',')}`
+  useEffect(() => { setDraft(initial()) }, [seedKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const repos = [...splitRepos(draft.targets), draft.condocRepo.trim()].filter(Boolean)
+  const field = (key: keyof typeof draft, label: string, placeholder: string, disabled = false) => (
+    <label className="pointer-field">
+      <span className="working-dir-label">{label}</span>
+      <input
+        className="working-dir-input"
+        value={draft[key]}
+        spellCheck={false}
+        disabled={disabled}
+        placeholder={placeholder}
+        onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+      />
+    </label>
+  )
+  const check = branchCheck && branchCheck.branch === draft.branch.trim() ? branchCheck.checks : null
+
+  return (
+    <form
+      className="working-dir pointer-repo slop-form"
+      onSubmit={(e) => {
+        e.preventDefault()
+        onPropose({
+          stem: entry?.stem,
+          name: draft.name.trim(),
+          description: draft.description,
+          targets: splitRepos(draft.targets),
+          condocRepo: draft.condocRepo.trim(),
+          branch: draft.branch.trim(),
+          agent: draft.agent.trim(),
+          model: draft.model.trim(),
+        })
+      }}
+    >
+      {field('name', 'Name', 'MyCondoc (letters, digits, - and _)', !!entry)}
+      <label className="pointer-field slop-field-block">
+        <span className="working-dir-label">Description</span>
+        <textarea
+          className="working-dir-input slop-textarea"
+          rows={3}
+          value={draft.description}
+          placeholder="What the condoc is for"
+          onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+        />
+      </label>
+      <label className="pointer-field slop-field-block">
+        <span className="working-dir-label">Targets</span>
+        <textarea
+          className="working-dir-input slop-textarea"
+          rows={3}
+          spellCheck={false}
+          value={draft.targets}
+          placeholder={'owner/repo, one per line'}
+          onChange={(e) => setDraft({ ...draft, targets: e.target.value })}
+        />
+      </label>
+      {field('condocRepo', 'Condoc repo', 'owner/name (not one of the targets)')}
+      {field('branch', 'Branch', entry ? '' : 'blank: condoc/<Name>-<startTime>/main')}
+      {field('agent', 'Agent', 'claude')}
+      {field('model', 'Model', "blank: the agent's default")}
+      {check && (
+        <ul className="slop-branch-check">
+          {check.map((c) => (
+            <li key={c.repo} className={c.error || c.exists ? 'slop-bad' : 'slop-good'}>
+              {c.repo}: {c.error ? c.error : c.exists ? 'branch already exists' : 'free'}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="pointer-actions">
+        <button type="submit" className="btn-primary working-dir-btn">{entry ? 'Save Proposal' : 'Propose'}</button>
+        <button
+          type="button"
+          className="btn-secondary working-dir-btn"
+          disabled={!draft.branch.trim() || repos.length === 0}
+          title={draft.branch.trim() ? '' : 'The default branch is picked when proposing'}
+          onClick={() => onCheckBranch(repos, draft.branch.trim())}
+        >
+          Check Branch
+        </button>
+      </div>
+    </form>
+  )
+}
+
+// PointerDetails is the read-only summary of a pointer.
+function PointerDetails({ entry }: { entry: PointerEntry }) {
+  return (
+    <div className="slop-details">
+      <div className="slop-row">
+        <PhaseBadge phase={entry.phase as Phase} />
+        {entry.step && <span className="step-label">step {entry.step}{entry.substep ? `.${entry.substep}` : ''}{entry.iteration ? ` ${entry.iteration}` : ''}</span>}
+        {entry.running && <span className="step-label"><span className="spinner" /> {entry.turnKind?.replace(/_/g, ' ')} turn {entry.turnStage}</span>}
+        {!entry.running && entry.queuePos ? <span className="step-label">#{entry.queuePos} in the turn queue</span> : null}
+        {entry.deployed && <span className="step-label">slopspace deployed</span>}
+      </div>
+      <div className="slop-row"><span className="working-dir-label">Branch</span><code>{entry.branch}</code></div>
+      <div className="slop-row"><span className="working-dir-label">Targets</span><code>{(entry.targets ?? []).join(', ')}</code></div>
+      <div className="slop-row">
+        <span className="working-dir-label">Condoc</span>
+        {entry.condocUrl ? <a href={entry.condocUrl} target="_blank" rel="noreferrer">{entry.condocRepo}/{entry.condocPath}</a> : <code>{entry.condocRepo}</code>}
+      </div>
+      {(entry.agent || entry.model) && (
+        <div className="slop-row"><span className="working-dir-label">Agent</span><code>{entry.agent}{entry.model ? ` / ${entry.model}` : ''}</code></div>
+      )}
+      {!entry.heldHere && <div className="pointer-note">Held by {entry.holder || 'nobody'} — shown read-only.</div>}
+      {entry.description && <div className="slop-description">{entry.description}</div>}
+    </div>
+  )
+}
+
+// SlopspacePanel is a slopspace condoc's own controls, shown above its
+// condoc views (and with its pointer on the list): its error with Resubmit,
+// the propose-PR template (edit / regenerate with an instruction / accept),
+// and the raised PRs with Merge once every one is mergeable.
+function SlopspacePanel({ entry, onSend }: { entry: PointerEntry; onSend: SlopSend }) {
+  const [template, setTemplate] = useState(entry.prTemplate ?? '')
+  const [dirty, setDirty] = useState(false)
+  const [instruction, setInstruction] = useState('')
+  useEffect(() => {
+    if (!dirty) setTemplate(entry.prTemplate ?? '')
+  }, [entry.prTemplate, dirty])
+
+  const prs = entry.prs ?? []
+  const allReady = prs.length > 0 && prs.every((p) => p.ready || p.state === 'merged')
+  const held = entry.heldHere
+
+  return (
+    <div className="slop-panel">
+      <PointerDetails entry={entry} />
+      {entry.error && (
+        <div className="slop-error">
+          <div>{entry.error}</div>
+          {held && (
+            <button className="btn-primary working-dir-btn" onClick={() => onSend('slop-resubmit', entry.stem)}>Resubmit</button>
+          )}
+        </div>
+      )}
+
+      {entry.phase === 'pr_proposed' && (
+        <div className="slop-prs">
+          <h3>Propose PRs</h3>
+          <textarea
+            className="working-dir-input slop-textarea slop-template"
+            rows={14}
+            spellCheck={false}
+            value={template}
+            disabled={!held}
+            onChange={(e) => { setTemplate(e.target.value); setDirty(true) }}
+          />
+          {held && (
+            <>
+              <div className="pointer-actions">
+                <button
+                  className="btn-primary working-dir-btn"
+                  onClick={() => { onSend('slop-accept-prs', entry.stem, { template }); setDirty(false) }}
+                >
+                  Accept &amp; Raise PRs
+                </button>
+                <button
+                  className="btn-secondary working-dir-btn"
+                  disabled={!dirty}
+                  onClick={() => { onSend('slop-save-pr-template', entry.stem, { template }); setDirty(false) }}
+                >
+                  Save Edits
+                </button>
+              </div>
+              <div className="pointer-actions">
+                <input
+                  className="working-dir-input"
+                  value={instruction}
+                  placeholder="Instruction for regenerating the proposal"
+                  onChange={(e) => setInstruction(e.target.value)}
+                />
+                <button
+                  className="btn-secondary working-dir-btn"
+                  disabled={!instruction.trim()}
+                  onClick={() => {
+                    onSend('slop-regenerate-prs', entry.stem, { template: dirty ? template : '', instruction })
+                    setInstruction('')
+                    setDirty(false)
+                  }}
+                >
+                  Regenerate
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {(entry.phase === 'pr_open' || entry.phase === 'merged') && prs.length > 0 && (
+        <div className="slop-prs">
+          <h3>Pull Requests</h3>
+          <ul className="slop-pr-list">
+            {prs.map((p) => (
+              <li key={`${p.repo}#${p.number}`}>
+                <a href={p.url} target="_blank" rel="noreferrer">{p.repo}#{p.number}</a>
+                <span className={`slop-pr-status ${p.state === 'merged' || p.ready ? 'slop-good' : 'slop-bad'}`}>
+                  {p.state === 'merged' ? 'merged' : p.status}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {entry.phase === 'pr_open' && held && (
+            <button
+              className="btn-primary working-dir-btn"
+              disabled={!allReady}
+              title={allReady ? 'Merge every PR, targets first and the condoc repo last' : 'Every PR has to be mergeable first'}
+              onClick={() => onSend('slop-merge', entry.stem)}
+            >
+              Merge
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// SlopspacePointerView is the slopspace tab's main pane for a selected
+// pointer: a proposal's form with Accept/Withdraw, or the pointer's panel
+// with a way into its condoc views.
+function SlopspacePointerView({
+  pointer,
+  entry,
+  branchCheck,
+  onPropose,
+  onCheckBranch,
+  onSend,
+  onOpen,
+}: {
+  pointer: PointerStatus
+  entry: PointerEntry | null
+  branchCheck: { branch: string; checks: BranchCheck[] } | null
+  onPropose: (p: SlopspaceProposal) => void
+  onCheckBranch: (repos: string[], branch: string) => void
+  onSend: SlopSend
+  onOpen: (path: string) => void
+}) {
+  if (!entry) {
+    return (
+      <div className="slop-view">
+        <h2>Propose a condoc</h2>
+        <ProposalForm pointer={pointer} entry={null} branchCheck={branchCheck} onPropose={onPropose} onCheckBranch={onCheckBranch} />
+      </div>
+    )
+  }
+  if (entry.phase === 'proposed') {
+    return (
+      <div className="slop-view">
+        <h2>{entry.name} <PhaseBadge phase="proposed" /></h2>
+        {entry.heldHere ? (
+          <>
+            <ProposalForm pointer={pointer} entry={entry} branchCheck={branchCheck} onPropose={onPropose} onCheckBranch={onCheckBranch} />
+            {entry.error && <div className="slop-error">{entry.error}</div>}
+            <div className="pointer-actions">
+              <button className="btn-primary working-dir-btn" onClick={() => onSend('slop-accept', entry.stem)}>
+                Accept — create the slopspace
+              </button>
+              <button className="btn-secondary working-dir-btn" onClick={() => onSend('slop-withdraw', entry.stem)}>
+                Withdraw
+              </button>
+            </div>
+          </>
+        ) : (
+          <PointerDetails entry={entry} />
+        )}
+      </div>
+    )
+  }
+  return (
+    <div className="slop-view">
+      <h2>{entry.name}</h2>
+      <SlopspacePanel entry={entry} onSend={onSend} />
+      {entry.slopspaceId && entry.heldHere && entry.phase !== 'merged' && (
+        <div className="pointer-actions">
+          <button className="btn-primary working-dir-btn" onClick={() => onOpen(entry.path)}>Open Condoc</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ---- Root app ----
 
 export default function App() {
@@ -2970,7 +3354,10 @@ export default function App() {
     pointer,
     setPointerRepo,
     clonePointerRepo,
-    pullPointerRepo,
+    branchCheck,
+    slopPropose,
+    slopCheckBranch,
+    slopSend,
     connectRepr,
     disconnectRepr,
     setAutoConnectRepr,
@@ -3008,6 +3395,10 @@ export default function App() {
   const [selectedDiffFile, setSelectedDiffFile] = useState<string | null>(initialNav.selectedDiffFile)
   const [selectedDiffHunkIdx, setSelectedDiffHunkIdx] = useState<number | null>(initialNav.selectedDiffHunkIdx)
   const [diffReturnLevel, setDiffReturnLevel] = useState<'step' | 'substep'>(initialNav.diffReturnLevel)
+  // The slopspace tab's list-level selection: a pointer stem, '' for the
+  // new-proposal form, null for nothing.
+  const [selectedPointerStem, setSelectedPointerStem] = useState<string | null>(null)
+  const selectedPointer = pointer?.pointers.find((p) => p.stem === selectedPointerStem) ?? null
 
   // Mobile nav drawer: the sidebar becomes an off-canvas panel below the
   // `mobile-breakpoint` width (see index.css). Desktop layout is untouched —
@@ -3030,6 +3421,30 @@ export default function App() {
     setNavLevel('condoc')
     subscribe(path)
     setError(null)
+  }
+
+  // An accepted condoc this condoccer holds opens straight into the condoc
+  // views; anything else (a proposal, another holder's, a merged one) opens
+  // its pointer in the main pane.
+  const handleSelectPointer = (p: PointerEntry | null) => {
+    setError(null)
+    if (p && p.heldHere && p.slopspaceId && p.phase !== 'proposed' && p.phase !== 'merged') {
+      setSelectedPointerStem(p.stem)
+      handleSelectCondoc(p.path)
+      return
+    }
+    setSelectedPointerStem(p ? p.stem : '')
+  }
+
+  const handleSlopPropose = (p: SlopspaceProposal) => {
+    setError(null)
+    slopPropose(p)
+  }
+
+  const handleSlopSend: SlopSend = (type, stem, extra) => {
+    setError(null)
+    if (type === 'slop-withdraw') setSelectedPointerStem(null)
+    slopSend(type, stem, extra)
   }
 
   const handleSelectStep = (num: number) => {
@@ -3307,6 +3722,8 @@ export default function App() {
           hideCompleted={hideCompleted}
           onSetHideCompleted={handleSetHideCompleted}
           pointer={pointer}
+          selectedPointerStem={selectedPointerStem}
+          onSelectPointer={handleSelectPointer}
           condocs={condocs}
           activeState={activeState}
           selectedCondocPath={selectedCondocPath}
@@ -3354,6 +3771,19 @@ export default function App() {
           </div>
         )}
 
+        {navLevel === 'condoc-list' && tab === 'slopspace' && connected && pointer?.state === 'ready' &&
+          selectedPointerStem !== null && (selectedPointerStem === '' || selectedPointer) && (
+          <SlopspacePointerView
+            pointer={pointer}
+            entry={selectedPointer}
+            branchCheck={branchCheck}
+            onPropose={handleSlopPropose}
+            onCheckBranch={slopCheckBranch}
+            onSend={handleSlopSend}
+            onOpen={handleSelectCondoc}
+          />
+        )}
+
         {navLevel === 'condoc-list' && tab === 'slopspace' && (
           <div className="empty-state empty-state-list">
             <div>
@@ -3361,7 +3791,7 @@ export default function App() {
               {!connected
                 ? 'Connecting…'
                 : pointer?.state === 'ready'
-                  ? 'Slopspace condocs are listed read-only for now — proposing and running them comes next.'
+                  ? 'Select a slopspace condoc, or propose one'
                   : 'Set up the condoc pointer repo to use slopspace condocs'}
             </div>
             {connected && pointer && (
@@ -3369,10 +3799,13 @@ export default function App() {
                 pointer={pointer}
                 onSet={(cfg) => { setError(null); setPointerRepo(cfg) }}
                 onClone={() => { setError(null); clonePointerRepo() }}
-                onPull={pullPointerRepo}
               />
             )}
           </div>
+        )}
+
+        {navLevel !== 'condoc-list' && activeState?.slopspace && (
+          <SlopspacePanel entry={activeState.slopspace} onSend={handleSlopSend} />
         )}
 
         {navLevel === 'condoc-list' && tab === 'same-repo' && (

@@ -85,6 +85,10 @@ type CondocState struct {
 	// condocs/initialShellsSessionManagerAndTheConversationalistImpls/Step1Prompt.md
 	// Revision C.
 	CompletedSubstepContents map[string]string `json:"completedSubstepContents,omitempty"`
+
+	// Slopspace is the condoc's pointer, for a slopspace condoc only (see
+	// slopCondocState).
+	Slopspace *PointerEntry `json:"slopspace,omitempty"`
 }
 
 // wsMsg is the wire format for WebSocket messages.
@@ -645,6 +649,9 @@ type Server struct {
 
 	// pointer is the slopspace tab's pointer repo -- see pointer.go.
 	pointer pointerState
+
+	// slop is the slopspace control scheme's handler state -- see slopspace.go.
+	slop slopState
 }
 
 func newServer(root string) *Server {
@@ -779,10 +786,18 @@ func (s *Server) sendRoot(c *wsClient) {
 	s.sendToClient(c, "root", RootMsg{Root: s.getRoot()})
 }
 
-func (s *Server) sendCondocState(c *wsClient, relPath string) {
+// condocStateFor is the full state of the condoc at relPath, a same-repo
+// path under the working dir or a "slopspace:<stem>" one.
+func (s *Server) condocStateFor(relPath string) (CondocState, error) {
+	if isSlopspacePath(relPath) {
+		return s.slopCondocState(relPath)
+	}
 	root := s.getRoot()
-	absPath := filepath.Join(root, relPath)
-	state, err := getCondocState(root, absPath)
+	return getCondocState(root, filepath.Join(root, relPath))
+}
+
+func (s *Server) sendCondocState(c *wsClient, relPath string) {
+	state, err := s.condocStateFor(relPath)
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
 		return
@@ -804,12 +819,14 @@ func (s *Server) broadcastList() {
 }
 
 func (s *Server) broadcastCondocUpdate(relPath string) {
-	root := s.getRoot()
-	absPath := filepath.Join(root, relPath)
-	state, err := getCondocState(root, absPath)
+	state, err := s.condocStateFor(relPath)
 	if err != nil {
 		return
 	}
+	s.broadcastCondocState(relPath, state)
+}
+
+func (s *Server) broadcastCondocState(relPath string, state CondocState) {
 	msg := s.marshalMsg("condoc", state)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -962,8 +979,57 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 			s.sendToClient(c, "error", map[string]string{"message": err.Error()})
 		}
 
-	case "pull-pointer":
-		s.pullPointer()
+	// Slopspace condocs (see slopspace.go). Each is keyed on the pointer's
+	// stem; a failure is reported back to the client that asked.
+	case "slop-propose":
+		var p SlopspaceProposal
+		json.Unmarshal(m.Payload, &p)
+		s.replyErr(c, s.slopPropose(p))
+
+	case "slop-check-branch":
+		var p struct {
+			Repos  []string `json:"repos"`
+			Branch string   `json:"branch"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		var repos []string
+		for _, r := range p.Repos {
+			if r = normalizeRepo(r); r != "" {
+				repos = append(repos, r)
+			}
+		}
+		s.sendToClient(c, "slop-branch-check", map[string]interface{}{
+			"branch": strings.TrimSpace(p.Branch),
+			"checks": slopCheckBranch(repos, strings.TrimSpace(p.Branch)),
+		})
+
+	case "slop-withdraw", "slop-accept", "slop-resubmit", "slop-merge",
+		"slop-save-pr-template", "slop-regenerate-prs", "slop-accept-prs":
+		var p struct {
+			Stem        string `json:"stem"`
+			Template    string `json:"template"`
+			Instruction string `json:"instruction"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		var err error
+		switch m.Type {
+		case "slop-withdraw":
+			err = s.slopDeleteProposal(p.Stem)
+		case "slop-accept":
+			err = s.slopAccept(p.Stem)
+		case "slop-resubmit":
+			err = s.slopResubmit(p.Stem)
+		case "slop-merge":
+			err = s.slopMerge(p.Stem)
+		case "slop-save-pr-template":
+			err = s.slopSavePRTemplate(p.Stem, p.Template)
+		case "slop-regenerate-prs":
+			err = s.slopRegeneratePRs(p.Stem, p.Instruction, p.Template)
+		case "slop-accept-prs":
+			err = s.slopAcceptPRs(p.Stem, p.Template)
+		}
+		s.replyErr(c, err)
+		s.broadcastCondocUpdate(slopPathPrefix + p.Stem)
 
 	// get-diff/get-file-diff carry the condoc's path so git runs against
 	// that condoc's own repo (see condocRepoRoot), not the scan root.
@@ -988,13 +1054,33 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 	}
 }
 
+// replyErr reports err, if any, to the client whose request caused it.
+func (s *Server) replyErr(c *wsClient, err error) {
+	if err != nil {
+		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
+	}
+}
+
 func (s *Server) performAction(action ActionRequest) error {
+	if isSlopspacePath(action.Path) {
+		return s.slopPerformAction(action)
+	}
 	root := s.getRoot()
 	absPath := filepath.Join(root, action.Path)
 	info, err := detectPhase(root, absPath)
 	if err != nil {
 		return err
 	}
+	return s.applyAction(root, absPath, info, action, true)
+}
+
+// applyAction makes the file edit a UI action stands for, on the condoc
+// whose main file is absPath under root. The handler -- federation-command
+// for a same-repo condoc, condoccer itself for a slopspace one -- reacts to
+// the directive the edit leaves. sameRepo gates what only works in the
+// working dir: resources (which go through the working dir's .condoc lock)
+// and the resubmit recovery commit.
+func (s *Server) applyAction(root, absPath string, info CondocInfo, action ActionRequest, sameRepo bool) error {
 
 	// activeFile is the file that receives directives (substep if active, else step or main).
 	activeFile := absPath
@@ -1076,9 +1162,15 @@ func (s *Server) performAction(action ActionRequest) error {
 		return appendToFile(activeFile, "\n"+directive+"\n")
 
 	case "add_resource":
+		if !sameRepo {
+			return fmt.Errorf("resources can't be added to slopspace condocs yet")
+		}
 		return s.addResource(absPath, info, action)
 
 	case "resubmit":
+		if !sameRepo {
+			return fmt.Errorf("resubmit a slopspace condoc through its pointer")
+		}
 		// Stage and commit any outstanding working-tree changes so that the
 		// agent coordinator's git pull --rebase can succeed after it picks up
 		// the !HANDOFF! directive written below. Runs in the condoc's own
@@ -1128,6 +1220,9 @@ func logLineIsCommitHeader(line string) bool {
 // the repo to run git in. An empty path (an older frontend) falls back to the
 // scan root's repo.
 func (s *Server) diffRepoRoot(condocRel string) (string, error) {
+	if isSlopspacePath(condocRel) {
+		return "", fmt.Errorf("diffs aren't available for slopspace condocs yet -- follow the per-repo commit links in the reply")
+	}
 	if filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
 		return "", fmt.Errorf("invalid condoc path")
 	}
@@ -1435,6 +1530,21 @@ func (s *Server) watchLoop() {
 		s.mu.RUnlock()
 
 		for relPath := range subscribed {
+			if isSlopspacePath(relPath) {
+				// Read from wherever the files are right now (D7); the
+				// fingerprint is the whole state, so a queue or turn-stage
+				// change on the pointer refreshes the view too.
+				state, err := s.slopCondocState(relPath)
+				if err != nil {
+					continue
+				}
+				b, _ := json.Marshal(state)
+				if lastContent[relPath] != string(b) {
+					lastContent[relPath] = string(b)
+					s.broadcastCondocState(relPath, state)
+				}
+				continue
+			}
 			absPath := filepath.Join(root, relPath)
 			info, err := detectPhase(root, absPath)
 			if err != nil {
@@ -1555,6 +1665,8 @@ func main() {
 	pointerRepo := flag.String("pointer-repo", defaultPointerRepo, "slopspace pointer repo (owner/name, cloned over HTTPS with TF_VAR_github_pat); changeable from the UI")
 	pointerBranch := flag.String("pointer-branch", defaultPointerBranch, "branch of the pointer repo condoccer pulls and pushes")
 	pointerPath := flag.String("pointer-path", defaultPointerPath, "where the pointer repo is checked out; relative paths resolve against the git repo holding --root")
+	slopAgent := flag.String("slop-agent", "claude", "agent new slopspace condoc proposals default to")
+	slopModel := flag.String("slop-model", "", "model new slopspace condoc proposals default to (blank: the agent's default)")
 	flag.Parse()
 
 	absRoot, err := filepath.Abs(*root)
@@ -1576,9 +1688,13 @@ func main() {
 		pointerBase = absRoot
 	}
 	s.initPointer(pointerCfg, pointerBase)
+	s.initSlopspace()
+	s.slop.agent, s.slop.model = strings.TrimSpace(*slopAgent), strings.TrimSpace(*slopModel)
 
 	go s.watchLoop()
 	go s.pointerLoop()
+	go s.slopLoop()
+	go s.slopTurnLoop()
 	go watchRestartSignal()
 
 	if *autoConnect {

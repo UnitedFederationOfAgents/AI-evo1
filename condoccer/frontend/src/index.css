@@ -394,7 +394,78 @@ body {
   max-width: 560px;
 }
 
-.nav-item.nav-item-readonly { cursor: default; }
+/* Another condoccer's condoc: still selectable, shown read-only. */
+.nav-item.nav-item-readonly { opacity: 0.7; }
+.nav-item.nav-item-new .nav-item-name { color: #4da6ff; }
+
+/* ---- Slopspace condocs (proposal form, pointer view, condoc panel) ---- */
+
+.badge-queued      { background: #1e2a3a; color: #8ab4e0; }
+.badge-pr_proposed { background: #2e1f3d; color: #c58af0; }
+.badge-pr_open     { background: #2e1f3d; color: #c58af0; }
+.badge-merged      { background: #1a3a1a; color: #4ec94e; }
+.badge-error       { background: #4a1414; color: #ff7070; }
+
+.slop-view {
+  padding: 16px 24px;
+  overflow-y: auto;
+}
+
+.slop-view h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.slop-form { max-width: 640px; }
+.slop-field-block { align-items: flex-start; }
+.slop-textarea { resize: vertical; font-family: monospace; }
+.slop-template { width: 100%; max-width: none; }
+
+.slop-branch-check {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+}
+
+.slop-good { color: #4ec94e; }
+.slop-bad  { color: #e07020; }
+
+.slop-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 24px;
+  border-bottom: 1px solid #333;
+  background: #1b1b1f;
+}
+
+.slop-details { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.slop-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.slop-row .working-dir-label { width: 64px; flex-shrink: 0; }
+.slop-description { color: #999; white-space: pre-wrap; }
+
+.slop-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid #6a2a2a;
+  border-radius: 3px;
+  color: #ff9a9a;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slop-prs h3 { margin: 0 0 6px; font-size: 13px; }
+.slop-prs .pointer-actions { justify-content: flex-start; }
+.slop-pr-list { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
+.slop-pr-list li { display: flex; gap: 10px; }
+.slop-pr-status { font-size: 11px; }
 
 /* ---- Detail view (single pane) ---- */
 

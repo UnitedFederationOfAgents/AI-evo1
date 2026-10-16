@@ -877,7 +877,9 @@ func (s *Server) driveSpec(stem string, spec *PointerSpec) error {
 	}
 
 	switch info.Phase {
-	case PhaseAwaitingStep:
+	// A filled-in step template reads as proposed (its step file doesn't
+	// exist yet) until the handoff below starts it.
+	case PhaseAwaitingStep, PhaseProposed:
 		content, err := readFileString(main)
 		if err != nil {
 			return err
@@ -888,8 +890,14 @@ func (s *Server) driveSpec(stem string, spec *PointerSpec) error {
 		case handoffDirectiveRe.MatchString(content):
 			return s.slopStartStep(spec, meta, main, content)
 		}
+		if info.Phase == PhaseProposed {
+			return nil // mid-edit; never a pointer phase once accepted
+		}
 
-	case PhaseAwaitingAction:
+	// detectPhase reads a step or substep file holding a directive as
+	// agent_running (in the same-repo scheme the handler is about to act),
+	// so the directives are looked for in both phases.
+	case PhaseAwaitingAction, PhaseAgentRunning:
 		active := filepath.Join(root, info.StepFile)
 		if info.SubstepFile != "" {
 			active = filepath.Join(root, info.SubstepFile)
@@ -924,6 +932,9 @@ func (s *Server) driveSpec(stem string, spec *PointerSpec) error {
 				}
 			}
 			return s.slopStartRevision(spec, meta, active, content, info)
+		}
+		if info.Phase == PhaseAgentRunning {
+			return nil // no directive and no turn: nothing to mirror
 		}
 
 	case PhaseCompleted:
@@ -1347,6 +1358,7 @@ func (s *Server) runTurn(stem string) error {
 			os.Remove(filepath.Join(meta.RootPath, slopReplyFile))
 			spec.Turn = nil
 			spec.Iteration = t.Letter
+			spec.Phase = "" // forces syncSpecState to save the cleared turn
 			root := slopCondocRoot(meta, spec.CondocRepo)
 			info, err := detectPhase(root, filepath.Join(root, filepath.FromSlash(spec.CondocPath)))
 			if err != nil {

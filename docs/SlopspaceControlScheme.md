@@ -52,17 +52,44 @@ These changes from Revision B settle or reshape several earlier decisions:
     - `ready`.
 - **Clone and pull** go over HTTPS. The PAT comes from `TF_VAR_github_pat`, which is the variable dungeon-keeper uses, with `GH_TOKEN` and `GITHUB_TOKEN` as fallbacks.
   - The PAT is passed as an `Authorization` header through `GIT_CONFIG_*` environment variables. It never appears in argv or `.git/config`. Without a token, public repos still work.
-  - A ready repo is pulled with `pull --rebase` on startup, whenever the config changes, every minute, and when the UI's **Pull** button is pressed.
+  - A ready repo is pulled with `pull --rebase --autostash` on startup, whenever the config changes, and every 15 seconds. There is no manual Pull (Revision C). After each pull, local pointer commits that a failed push left behind are pushed.
 - **Pointer listing.** `pointers/*.yaml` files are summarized as name, phase, step/substep/iteration, branch, condoc repo and targets.
   - The parser is shallow and has no dependencies. It handles top-level scalars, the `state:` map, and the `targets:` list.
   - `gopkg.in/yaml.v3` comes in when the full spec is read and written (step 3).
 - **WebSocket messages:**
   - `pointer`: the status, sent on connect and whenever it changes.
-  - `set-pointer`, `clone-pointer` and `pull-pointer`: sent by the client.
+  - `set-pointer` and `clone-pointer`: sent by the client.
 - **Frontend:** the Slopspace tab's main pane shows a `PointerRepoControl` with the repo@branch, the resolved path and the state.
-  - It offers **Clone** when the repo is missing and **Pull** when it is ready, plus a **Set Pointer Repo** form.
-  - The sidebar lists the pointers read-only, with phase and step.
+  - It offers **Clone** when the repo is missing, plus a **Set Pointer Repo** form.
 - **Tests:** `condoccer/pointer_test.go` covers remote normalization, config validation, pointer parsing, and the `missing` → `invalid` → `ready` → `invalid` state transitions against a local git repo.
+
+### Done: the full lifecycle, first cut (Step 1 Revisions C and D)
+
+Not yet built or run end to end; see the Step 1 replies.
+
+- **Pointer spec** (`condoccer/slopspec.go`, `miniyaml.go`): the whole `pointers/<Name>-<startTime>.yaml` is read and written (D4). It uses a small built-in YAML subset rather than `yaml.v3`. The listing uses the full spec and falls back to the shallow parser for files it can't read. Only the condoccer named in `holder` drives a condoc; other condoccers show it read-only.
+- **Pointer writes:** every phase change commits that one pointer file and pushes, rebasing and retrying on conflict. Turn stages are only written locally, so a restart resumes them without a push per stage.
+- **Handler** (`condoccer/slopspace.go`), with condoccer as the handler (S1):
+  - **Propose, edit, withdraw and accept.** Accept checks the branch on every repo's remote, clones the writespaces, creates the slopspace with each repo on the branch, writes the condoc with step 1 templated, and publishes the branch everywhere.
+  - **Driver.** Every 2 seconds it reads each held condoc from its expected location (D7) and reacts to the same `!HANDOFF!`/`!COMPLETED!` directives the same-repo UI writes. That covers start step, revision, substep, complete substep/step/condoc. The condoc-file edits are ported from federation-command into `condoccer/condocfiles.go`.
+  - **Turn queue (D2).** One FIFO, rebuilt from the pointers on startup. A turn moves through `queued → deployed → signalled → returned → replied`, and its stage is saved after each. Condoccer deploys, writes the work signal, waits for the worker's `complete/` file, and returns the slopspace (D3, D13). It then commits and pushes each changed target and writes the reply with one commit line per repo, and the condoc repo is committed last (D6).
+  - **Propose PR.** It runs an in-place turn in a tempdir inside the slopspace, holding the condoc, each repo's diff and log, and the pointer. The agent writes `prs.yaml` there. If that file is unusable, a default template is filled in and the reason is shown.
+  - **Raise PRs.** The template can be edited, regenerated with an instruction, or accepted. Accepting raises one PR per repo, links the sibling PRs, and records them in the condoc.
+  - **Merge.** Mergeability is polled every 30 seconds. Merge is enabled once every PR is mergeable. It merges the targets first and the condoc repo last, using merge commits, then deletes the branches and the slopspace.
+- **PR code** lives in the new top-level `pr-keeper` module (D10b, chosen in Revision C as shared code for later claudomation use). It uses the GitHub REST API with the PAT.
+- **dungeon-keeper:**
+  - `WriteRepoChanges` returns SHAs.
+  - New `RepoHead` and `PushRepo` helpers.
+  - The worker leaves a slopspace someone else deployed for that deployer to return.
+  - The PAT is kept out of `.git/config` (`pkg/gitauth`).
+- **Frontend:**
+  - The Slopspace tab lists the pointers with their phase, queue position, a running spinner and any error, plus **+ Propose a condoc**.
+  - A proposal opens a form with **Check Branch**, **Accept** and **Withdraw**.
+  - An accepted condoc opens in the same condoc/step/substep views as same-repo. Above them sits a slopspace panel with the condoc's state, **Resubmit** on error, the PR template editor (**Accept & Raise PRs** / **Save Edits** / **Regenerate**), and the PR list with **Merge**.
+- **Not in the first cut:**
+  - retry and revert (D8)
+  - resources
+  - the git diff views; the per-repo commit links in each reply stand in for them
 
 ## What Exists Today
 
@@ -230,6 +257,8 @@ Because turns are serialized, condoccer can safely own the deploy/return pair.
 ## Implementation Plan (next steps)
 
 1. ~~**Pointer repo setting and Slopspace tab, read-only.**~~ Done in Step 1 Revision B; see [Status](#status).
+Steps 2–7 are done in a first cut (Step 1 Revisions C and D; see [Status](#status)). What's left is step 8, a first end-to-end run, and the architecture review of `pr-keeper` agreed in Revision C.
+
 2. **dungeon-keeper groundwork**
    - Make `WriteRepoChanges` return SHAs, with per-repo results and a commit message (D6).
    - Make deploy and return safe for condoccer to own: no double return, and the slopspace is returned when the agent fails (D3a).
@@ -249,5 +278,3 @@ Because turns are serialized, condoccer can safely own the deploy/return pair.
 6. **Propose PR:** the in-place tempdir signal, the YAML editor, regenerate, and accept to raise the PRs.
 7. **PR phase and Merge:** mergeability polling, the Merge control, ordered merging, partial-failure display, and teardown (D9/D10).
 8. **Later:** multi-repo retry and revert (D8).
-
-Step 2 is next. Step 5 can be built in parallel with steps 2-4 once D10's location is chosen. Step 3 needs step 2.

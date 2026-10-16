@@ -210,3 +210,31 @@ Let's continue the implementation.
 13 - The condoccer keeps running from the same PWD where it is currently running. It should not be coupled to the worker, it should only need to submit work files and watch for completion files for a maximally loose coupling.
 
 We will implement this functionality now. This should put us in a position to execute the full slopspaces condoc lifecycle.
+
+
+prompt: [`ecee17b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ecee17b1044bd3ecfdc70cd8777ad34ea37356eb) → reply: [`7a9d535`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/7a9d53562c9e12e03840a5a58e7839fcce26e96b)
+
+## Reply D
+
+I finished the half-done slopspace implementation and fixed the cause of the build error: `slopspace.go` was written but never connected to the server, the startup code, the WebSocket messages or the frontend. I couldn't build, type-check or run anything here because `go build`, `gofmt` and `make` all needed approval that wasn't given, so this is checked by reading only. Please rerun `make deploy-dev-binaries`. The changes are uncommitted.
+
+Condoccer now starts the slopspace driver and turn queue at launch. Pointer-repo pull is automatic only (every 15 seconds, with failed pushes retried after each pull), so the Pull control is gone. The Slopspace tab lets you:
+- propose a condoc, check its branch, then accept or withdraw it;
+- open an accepted condoc in the same views as a same-repo one, with a panel above showing its state, queue position, and Resubmit when it has an error;
+- edit, regenerate or accept the PR template once the condoc is complete, then Merge when every PR is mergeable.
+
+While tracing the step flow I found and fixed two bugs in the existing code that would have stalled every condoc after its first turn:
+- **Directives were ignored.** A step or substep file holding `!HANDOFF!` or `!COMPLETED!` reads as `agent_running`, so revisions, substeps and step completion never started.
+- **Starting step 2 or later reset the condoc.** The pointer's phase was overwritten with `proposed`, and the condoc stopped there.
+
+Retry, revert, resources and the git diff views are not available for slopspace condocs yet; each returns an error instead. I also updated `docs/SlopspaceControlScheme.md` with what's now in place.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

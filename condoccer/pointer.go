@@ -7,9 +7,10 @@ package main
 // target branch, holding one pointer file per condoc (pointers/*.yaml) that
 // records where that condoc's progression is and which repos it targets.
 //
-// This is the read-only first cut: configure the repo/branch/path, clone it
-// when missing, keep it pulled, and list the pointers it holds. Proposing,
-// accepting and pushing pointer updates come later.
+// This file configures the repo/branch/path, clones it when missing, keeps it
+// pulled (continuously -- there is no manual pull, Revision C) and lists the
+// pointers it holds. Proposing, accepting and driving condocs through their
+// pointers is slopspace.go.
 
 import (
 	"encoding/base64"
@@ -32,8 +33,9 @@ const (
 	defaultPointerPath   = "../sloppo"
 
 	// pointerPullInterval is how often a ready pointer repo is pulled in the
-	// background so pointers written by other condoccers show up.
-	pointerPullInterval = time.Minute
+	// background so pointers written by other condoccers show up. It is the
+	// only pull there is, so it runs often.
+	pointerPullInterval = 15 * time.Second
 
 	// pointerDir holds the per-condoc pointer files inside the pointer repo.
 	pointerDir = "pointers"
@@ -50,17 +52,39 @@ type PointerConfig struct {
 	Path   string `json:"path"`
 }
 
-// PointerEntry is one pointer file's summary, as listed on the slopspace tab.
+// PointerEntry is one pointer file's summary, as listed on the slopspace tab
+// (see entryFromSpec and decoratePointerEntry).
 type PointerEntry struct {
-	File       string   `json:"file"` // relative to the pointer repo root
-	Name       string   `json:"name"`
-	Phase      string   `json:"phase"`
-	Step       string   `json:"step,omitempty"`
-	Substep    string   `json:"substep,omitempty"`
-	Iteration  string   `json:"iteration,omitempty"`
-	Branch     string   `json:"branch,omitempty"`
-	CondocRepo string   `json:"condocRepo,omitempty"`
-	Targets    []string `json:"targets,omitempty"`
+	File        string   `json:"file"` // relative to the pointer repo root
+	Stem        string   `json:"stem"`
+	Path        string   `json:"path"` // the condoc path the UI subscribes to: "slopspace:<stem>"
+	Name        string   `json:"name"`
+	Phase       string   `json:"phase"`
+	Step        string   `json:"step,omitempty"`
+	Substep     string   `json:"substep,omitempty"`
+	Iteration   string   `json:"iteration,omitempty"`
+	Branch      string   `json:"branch,omitempty"`
+	CondocRepo  string   `json:"condocRepo,omitempty"`
+	Targets     []string `json:"targets,omitempty"`
+	CondocPath  string   `json:"condocPath,omitempty"`
+	CondocURL   string   `json:"condocUrl,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Agent       string   `json:"agent,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	StartTime   int64    `json:"startTime,omitempty"`
+	SlopspaceID string   `json:"slopspaceId,omitempty"`
+	Holder      string   `json:"holder,omitempty"`
+	Error       string   `json:"error,omitempty"`
+	PRTemplate  string   `json:"prTemplate,omitempty"`
+	TurnKind    string   `json:"turnKind,omitempty"`
+	TurnStage   string   `json:"turnStage,omitempty"`
+	PRs         []PRLive `json:"prs,omitempty"`
+
+	// Known only to this condoccer.
+	HeldHere bool `json:"heldHere"`
+	QueuePos int  `json:"queuePos,omitempty"` // 1-based position in the turn queue
+	Running  bool `json:"running,omitempty"`  // its turn is the one running
+	Deployed bool `json:"deployed,omitempty"` // its slopspace is deployed
 }
 
 // PointerStatus is the "pointer" WebSocket payload, sent on connect and
@@ -79,7 +103,11 @@ type PointerStatus struct {
 	Message        string         `json:"message,omitempty"`
 	LastPull       string         `json:"lastPull,omitempty"` // RFC3339 time of the last successful pull
 	PullError      string         `json:"pullError,omitempty"`
+	PushError      string         `json:"pushError,omitempty"` // the last pointer push failed; retried after each pull
 	TokenAvailable bool           `json:"tokenAvailable"`
+	Holder         string         `json:"holder"` // this condoccer's holder ID (see slopHolder)
+	DefaultAgent   string         `json:"defaultAgent,omitempty"`
+	DefaultModel   string         `json:"defaultModel,omitempty"`
 	Pointers       []PointerEntry `json:"pointers"`
 }
 
@@ -92,7 +120,8 @@ type pointerState struct {
 	cloneErr  string
 	lastPull  time.Time
 	pullErr   string
-	opRunning bool // a clone or pull is running; serializes git work on the repo
+	pushErr   string
+	opRunning bool // a clone, pull or pointer write is running; serializes git work on the repo
 }
 
 // githubToken returns the PAT used for pointer repo git operations, read from
@@ -209,13 +238,28 @@ func (s *Server) initPointer(cfg PointerConfig, base string) {
 	s.pointer.mu.Unlock()
 }
 
-// pointerStatus inspects the configured pointer repo on disk.
+// pointerStatus inspects the configured pointer repo on disk and lists its
+// pointers.
 func (s *Server) pointerStatus() PointerStatus {
+	st := s.pointerRepoStatus()
+	st.Holder = s.slopHolder()
+	st.DefaultAgent, st.DefaultModel = s.slop.agent, s.slop.model
+	if st.State == "ready" {
+		for _, e := range readPointers(st.ResolvedPath) {
+			st.Pointers = append(st.Pointers, s.decoratePointerEntry(e))
+		}
+	}
+	return st
+}
+
+// pointerRepoStatus is pointerStatus without the pointer listing -- the
+// cheap check slopspace.go makes before every pointer read or write.
+func (s *Server) pointerRepoStatus() PointerStatus {
 	p := &s.pointer
 	p.mu.Lock()
 	cfg, base := p.cfg, p.base
 	cloning, cloneErr := p.cloning, p.cloneErr
-	lastPull, pullErr := p.lastPull, p.pullErr
+	lastPull, pullErr, pushErr := p.lastPull, p.pullErr, p.pushErr
 	p.mu.Unlock()
 
 	st := PointerStatus{
@@ -223,6 +267,7 @@ func (s *Server) pointerStatus() PointerStatus {
 		ResolvedPath:   resolvePointerPath(base, cfg.Path),
 		TokenAvailable: githubToken() != "",
 		PullError:      pullErr,
+		PushError:      pushErr,
 		Pointers:       []PointerEntry{},
 	}
 	if !lastPull.IsZero() {
@@ -283,11 +328,12 @@ func (s *Server) pointerStatus() PointerStatus {
 	}
 
 	st.State = "ready"
-	st.Pointers = readPointers(st.ResolvedPath)
 	return st
 }
 
 // readPointers lists and summarizes every pointers/*.yaml (or .yml) file.
+// A file the spec parser can't read (e.g. hand-written) still lists, from
+// the shallow parsePointerFile.
 func readPointers(repoRoot string) []PointerEntry {
 	var files []string
 	for _, pat := range []string{"*.yaml", "*.yml"} {
@@ -301,8 +347,15 @@ func readPointers(repoRoot string) []PointerEntry {
 		if err != nil {
 			continue
 		}
-		e := parsePointerFile(string(b))
-		e.File, _ = filepath.Rel(repoRoot, f)
+		rel, _ := filepath.Rel(repoRoot, f)
+		var e PointerEntry
+		if spec, err := parsePointerSpec(string(b)); err == nil {
+			e = entryFromSpec(spec, filepath.ToSlash(rel))
+		} else {
+			e = parsePointerFile(string(b))
+			e.File = filepath.ToSlash(rel)
+			e.Stem = strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		}
 		if e.Name == "" {
 			e.Name = strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
 		}
@@ -414,6 +467,7 @@ func (s *Server) setPointer(cfg PointerConfig) error {
 		s.pointer.cfg = cfg
 		s.pointer.cloneErr = ""
 		s.pointer.pullErr = ""
+		s.pointer.pushErr = ""
 		s.pointer.lastPull = time.Time{}
 	}
 	s.pointer.mu.Unlock()
@@ -448,7 +502,7 @@ func (s *Server) endPointerOp() {
 // gitAuthEnv) into its resolved path, checked out on the target branch. Only
 // valid while the path is missing.
 func (s *Server) clonePointer() error {
-	if st := s.pointerStatus(); st.State != "missing" {
+	if st := s.pointerRepoStatus(); st.State != "missing" {
 		return fmt.Errorf("pointer repo is %s, not missing -- nothing to clone", st.State)
 	}
 	cfg, path, ok := s.beginPointerOp()
@@ -494,9 +548,11 @@ func (s *Server) clonePointer() error {
 }
 
 // pullPointer fast-forwards (rebasing any local commits) the pointer repo
-// onto origin's target branch. A no-op unless the repo is ready.
+// onto origin's target branch, then pushes any local commits an earlier push
+// failed to deliver. Uncommitted turn-stage writes (see writeSpec) are
+// stashed around the rebase. A no-op unless the repo is ready.
 func (s *Server) pullPointer() {
-	if s.pointerStatus().State != "ready" {
+	if s.pointerRepoStatus().State != "ready" {
 		return
 	}
 	cfg, path, ok := s.beginPointerOp()
@@ -505,9 +561,15 @@ func (s *Server) pullPointer() {
 	}
 	defer s.endPointerOp()
 
-	cmd := exec.Command("git", "-C", path, "pull", "--rebase", "origin", cfg.Branch)
+	cmd := exec.Command("git", "-C", path, "pull", "-q", "--rebase", "--autostash", "origin", cfg.Branch)
 	cmd.Env = gitAuthEnv()
 	out, err := cmd.CombinedOutput()
+	if err == nil {
+		ahead, _ := exec.Command("git", "-C", path, "rev-list", "--count", "origin/"+cfg.Branch+"..HEAD").Output()
+		if n := strings.TrimSpace(string(ahead)); n != "" && n != "0" {
+			s.pushPointerLocked(cfg, path)
+		}
+	}
 
 	s.pointer.mu.Lock()
 	if s.pointer.cfg != cfg {

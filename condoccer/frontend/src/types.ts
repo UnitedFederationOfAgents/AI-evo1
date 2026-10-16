@@ -4,6 +4,12 @@ export type Phase =
   | 'agent_running'
   | 'awaiting_action'
   | 'completed'
+  // Slopspace condocs only (see condoccer/slopspace.go): a turn waiting in
+  // the queue, then propose-PR, PRs open and merged after completion.
+  | 'queued'
+  | 'pr_proposed'
+  | 'pr_open'
+  | 'merged'
 
 export interface CondocInfo {
   path: string
@@ -55,6 +61,8 @@ export interface CondocState {
   // and control returns to the step -- see substepContent/substepIterations,
   // which are only ever populated for a *currently active* substep.
   completedSubstepContents?: Record<string, string>
+  // slopspace is the condoc's pointer -- set for slopspace condocs only.
+  slopspace?: PointerEntry
 }
 
 export type ReprStatus = 'disconnected' | 'connecting' | 'connected'
@@ -100,10 +108,22 @@ export interface RootMsg {
   root: string
 }
 
+// PRLive is a raised PR as last seen on GitHub -- see slopspace.go.
+export interface PRLive {
+  repo: string
+  number: number
+  url: string
+  state: string // open, closed, merged
+  status: string // mergeability, e.g. "mergeable", "checks pending", "conflicts"
+  ready: boolean
+}
+
 // PointerEntry summarizes one pointer file (pointers/*.yaml) in the slopspace
-// pointer repo -- see condoccer/pointer.go.
+// pointer repo -- see condoccer/pointer.go and slopspace.go's entryFromSpec.
 export interface PointerEntry {
   file: string
+  stem: string
+  path: string // "slopspace:<stem>", the condoc path to subscribe to
   name: string
   phase: string
   step?: string
@@ -112,6 +132,42 @@ export interface PointerEntry {
   branch?: string
   condocRepo?: string
   targets?: string[]
+  condocPath?: string
+  condocUrl?: string
+  description?: string
+  agent?: string
+  model?: string
+  startTime?: number
+  slopspaceId?: string
+  holder?: string
+  error?: string
+  prTemplate?: string
+  turnKind?: string
+  turnStage?: string
+  prs?: PRLive[]
+  heldHere: boolean
+  queuePos?: number
+  running?: boolean
+  deployed?: boolean
+}
+
+// SlopspaceProposal is the propose form: new when stem is empty, an edit of a
+// still-proposed condoc otherwise.
+export interface SlopspaceProposal {
+  stem?: string
+  name: string
+  description: string
+  targets: string[]
+  condocRepo: string
+  branch: string
+  agent: string
+  model: string
+}
+
+export interface BranchCheck {
+  repo: string
+  exists: boolean
+  error?: string
 }
 
 // PointerConfig is the configurable part of the pointer repo setting ("Set
@@ -133,7 +189,11 @@ export interface PointerStatus extends PointerConfig {
   message?: string
   lastPull?: string
   pullError?: string
+  pushError?: string
   tokenAvailable: boolean
+  holder: string
+  defaultAgent?: string
+  defaultModel?: string
   pointers: PointerEntry[]
 }
 

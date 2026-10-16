@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"dungeon-keeper/pkg/gitauth"
 	"dungeon-keeper/pkg/types"
 )
 
@@ -77,17 +78,13 @@ func (m *Manager) CloneRepo(ownerRepo string) (*RepoMetadata, error) {
 		return nil, fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	// Get GitHub PAT from environment
-	pat := os.Getenv("TF_VAR_github_pat")
-	if pat == "" {
+	if gitauth.Token() == "" {
 		return nil, fmt.Errorf("TF_VAR_github_pat environment variable not set")
 	}
 
-	// Clone using gh with PAT authentication
-	// gh repo clone owner/repo -- path
-	cloneURL := fmt.Sprintf("https://%s@github.com/%s/%s.git", pat, owner, repo)
-	cmd := exec.Command("git", "clone", cloneURL, repoPath)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("GH_TOKEN=%s", pat))
+	// Clone over HTTPS with the PAT supplied as a header (see gitauth), so
+	// it never lands in the clone's .git/config.
+	cmd := gitauth.Command("", "clone", gitauth.RepoURL(ownerRepo), repoPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone repository: %w\nOutput: %s", err, string(output))
@@ -127,8 +124,13 @@ func (m *Manager) updateRepo(owner, repo string) (*RepoMetadata, error) {
 		return nil, fmt.Errorf("failed to read metadata: %w", err)
 	}
 
+	// Clones made before gitauth embedded the PAT in origin's URL.
+	if err := gitauth.ScrubRemote(repoPath, owner+"/"+repo); err != nil {
+		return nil, err
+	}
+
 	// Pull --rebase
-	cmd := exec.Command("git", "-C", repoPath, "pull", "--rebase")
+	cmd := gitauth.Command(repoPath, "pull", "--rebase")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to pull --rebase: %w\nOutput: %s", err, string(output))

@@ -3,14 +3,18 @@ package slopspace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"dungeon-keeper/pkg/gitauth"
 	"dungeon-keeper/pkg/types"
+	"dungeon-keeper/pkg/writespace"
 
 	"github.com/google/uuid"
 )
@@ -355,6 +359,11 @@ func (m *Manager) AddWritespaceRepo(id string, owner, repo string, ref string, s
 		return fmt.Errorf("failed to copy repository: %w", err)
 	}
 
+	// The shared clone keeps its bookkeeping file in its own working tree;
+	// left here it would be swept into the first commit WriteRepoChanges
+	// makes on the slopspace branch.
+	os.Remove(filepath.Join(destPath, writespace.MetadataFile))
+
 	// Create and switch to the new branch (ref is required for writespaces).
 	if ref != "" {
 		if err := gitCheckoutNewBranch(destPath, ref); err != nil {
@@ -380,16 +389,28 @@ func (m *Manager) AddWritespaceRepo(id string, owner, repo string, ref string, s
 	return nil
 }
 
+// RepoWriteResult is the outcome of writing one writespace repo's changes.
+type RepoWriteResult struct {
+	Repo    string `json:"repo"`    // owner/name
+	SHA     string `json:"sha"`     // HEAD after the write: the new commit when Changed, else the existing HEAD
+	Changed bool   `json:"changed"` // a commit was made and pushed
+}
+
 // WriteRepoChanges pushes changes from a slopspace's writespace repo back to the remote.
 // The .git directory is restored from writespaces-secure, changes are committed and pushed.
-func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage string) error {
+// It reports the resulting HEAD so callers can link the commit (see
+// docs/SlopspaceControlScheme.md, D6); with nothing to commit, nothing is pushed and
+// Changed is false.
+func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage string) (RepoWriteResult, error) {
+	result := RepoWriteResult{Repo: owner + "/" + repo}
+
 	metadata, err := m.Get(id)
 	if err != nil {
-		return err
+		return result, err
 	}
 
 	if metadata.Deployed {
-		return fmt.Errorf("cannot write repo changes while deployed - return the slopspace first")
+		return result, fmt.Errorf("cannot write repo changes while deployed - return the slopspace first")
 	}
 
 	repoPath := filepath.Join(metadata.RootPath, WriteSpacesDir, ReposDir, owner, repo)
@@ -397,12 +418,12 @@ func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage 
 
 	// Check if the repo exists
 	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		return fmt.Errorf("writespace repo does not exist: %s/%s", owner, repo)
+		return result, fmt.Errorf("writespace repo does not exist: %s/%s", owner, repo)
 	}
 
 	// Check if the secure git directory exists
 	if _, err := os.Stat(secureGitPath); os.IsNotExist(err) {
-		return fmt.Errorf("secure git directory not found for: %s/%s", owner, repo)
+		return result, fmt.Errorf("secure git directory not found for: %s/%s", owner, repo)
 	}
 
 	// Temporarily restore .git directory
@@ -410,7 +431,7 @@ func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage 
 	if err := os.Rename(secureGitPath, gitDir); err != nil {
 		// Fall back to copy
 		if err := copyDirContents(secureGitPath, gitDir); err != nil {
-			return fmt.Errorf("failed to restore .git directory: %w", err)
+			return result, fmt.Errorf("failed to restore .git directory: %w", err)
 		}
 	}
 
@@ -423,17 +444,18 @@ func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage 
 
 	// Add all changes
 	if err := gitAddAll(repoPath); err != nil {
-		return fmt.Errorf("failed to add changes: %w", err)
+		return result, fmt.Errorf("failed to add changes: %w", err)
 	}
 
 	// Check if there are changes to commit
 	hasChanges, err := gitHasChanges(repoPath)
 	if err != nil {
-		return fmt.Errorf("failed to check for changes: %w", err)
+		return result, fmt.Errorf("failed to check for changes: %w", err)
 	}
 
 	if !hasChanges {
-		return nil // No changes to push
+		result.SHA, _ = gitHead(repoPath)
+		return result, nil // No changes to push
 	}
 
 	// Commit changes
@@ -441,57 +463,106 @@ func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage 
 		commitMessage = "Automated commit from dungeon-keeper"
 	}
 	if err := gitCommit(repoPath, commitMessage); err != nil {
-		return fmt.Errorf("failed to commit changes: %w", err)
+		return result, fmt.Errorf("failed to commit changes: %w", err)
 	}
+	result.SHA, _ = gitHead(repoPath)
 
 	// Push changes
 	if err := gitPush(repoPath); err != nil {
-		return fmt.Errorf("failed to push changes: %w", err)
+		return result, fmt.Errorf("failed to push changes: %w", err)
 	}
+	result.Changed = true
 
-	return nil
+	return result, nil
 }
 
-// WriteAllRepoChanges pushes changes from all writespace repos in a slopspace.
-func (m *Manager) WriteAllRepoChanges(id string, commitMessage string) error {
+// WritespaceRepos lists the owner/name of every writespace repo in a slopspace.
+// It reads writespaces-secure, which never moves, so it works while deployed too.
+func (m *Manager) WritespaceRepos(id string) ([]string, error) {
 	metadata, err := m.Get(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	reposPath := filepath.Join(metadata.RootPath, WriteSpacesDir, ReposDir)
-	if _, err := os.Stat(reposPath); os.IsNotExist(err) {
-		return nil // No repos to push
-	}
-
-	// Walk through owner directories
+	reposPath := filepath.Join(metadata.RootPath, WriteSpacesSecure, ReposDir)
 	owners, err := os.ReadDir(reposPath)
 	if err != nil {
-		return fmt.Errorf("failed to read repos directory: %w", err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read repos directory: %w", err)
 	}
 
-	var lastErr error
+	var repos []string
 	for _, owner := range owners {
 		if !owner.IsDir() {
 			continue
 		}
-		ownerPath := filepath.Join(reposPath, owner.Name())
-		repos, err := os.ReadDir(ownerPath)
+		entries, err := os.ReadDir(filepath.Join(reposPath, owner.Name()))
 		if err != nil {
 			continue
 		}
-
-		for _, repo := range repos {
-			if !repo.IsDir() {
-				continue
-			}
-			if err := m.WriteRepoChanges(id, owner.Name(), repo.Name(), commitMessage); err != nil {
-				lastErr = err
+		for _, repo := range entries {
+			if repo.IsDir() {
+				repos = append(repos, owner.Name()+"/"+repo.Name())
 			}
 		}
 	}
+	return repos, nil
+}
 
-	return lastErr
+// WriteAllRepoChanges pushes changes from all writespace repos in a slopspace. It
+// writes every repo even when one fails, returning each repo's result and every
+// error joined together.
+func (m *Manager) WriteAllRepoChanges(id string, commitMessage string) ([]RepoWriteResult, error) {
+	repos, err := m.WritespaceRepos(id)
+	if err != nil {
+		return nil, err
+	}
+
+	var results []RepoWriteResult
+	var errs []error
+	for _, ownerRepo := range repos {
+		owner, repo, _ := strings.Cut(ownerRepo, "/")
+		res, err := m.WriteRepoChanges(id, owner, repo, commitMessage)
+		results = append(results, res)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", ownerRepo, err))
+		}
+	}
+
+	return results, errors.Join(errs...)
+}
+
+// RepoHead returns the HEAD commit of a slopspace writespace repo. It reads the
+// .git dir in writespaces-secure directly, so it works while deployed too.
+func (m *Manager) RepoHead(id string, owner, repo string) (string, error) {
+	metadata, err := m.Get(id)
+	if err != nil {
+		return "", err
+	}
+	secureGitPath := filepath.Join(metadata.RootPath, WriteSpacesSecure, ReposDir, owner, repo)
+	out, err := exec.Command("git", "--git-dir", secureGitPath, "rev-parse", "HEAD").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// PushRepo pushes a slopspace writespace repo's branch as it stands, whether or
+// not anything new was committed -- e.g. to publish a freshly created branch on
+// every repo of a slopspace at once. It works while deployed too.
+func (m *Manager) PushRepo(id string, owner, repo string) error {
+	metadata, err := m.Get(id)
+	if err != nil {
+		return err
+	}
+	secureGitPath := filepath.Join(metadata.RootPath, WriteSpacesSecure, ReposDir, owner, repo)
+	cmd := gitauth.Command("", "--git-dir", secureGitPath, "push", "--set-upstream", "origin", "HEAD")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("push %s/%s: %w: %s", owner, repo, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // gitCheckout checks out an existing ref in a repository.
@@ -555,14 +626,20 @@ func gitPush(repoPath string) error {
 	return nil
 }
 
-// newGitCommand creates a new git command with the PAT set.
-func newGitCommand(repoPath string, args ...string) *exec.Cmd {
-	cmd := exec.Command("git", append([]string{"-C", repoPath}, args...)...)
-	pat := os.Getenv("TF_VAR_github_pat")
-	if pat != "" {
-		cmd.Env = append(os.Environ(), fmt.Sprintf("GH_TOKEN=%s", pat))
+// gitHead returns a repository's HEAD commit.
+func gitHead(repoPath string) (string, error) {
+	out, err := newGitCommand(repoPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", err
 	}
-	return cmd
+	return strings.TrimSpace(string(out)), nil
+}
+
+// newGitCommand creates a new git command with the PAT supplied as an auth
+// header (see gitauth), so pushes authenticate without the token ever being
+// written into the repo.
+func newGitCommand(repoPath string, args ...string) *exec.Cmd {
+	return gitauth.Command(repoPath, args...)
 }
 
 // GetDeployedID returns the ID of the currently deployed slopspace for the given agent type, if any.

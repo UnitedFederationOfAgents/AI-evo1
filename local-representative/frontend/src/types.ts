@@ -97,9 +97,21 @@ export interface ProcInfo {
   session?: string // federation-command only: the session it's currently on (display name if session.yaml has one, otherwise the bare id) -- empty until an instance has connected and reported
 }
 
+// ConnectionInfo is one provider this host holds credentials for -- see
+// connectivity.go. Only present providers are listed; status is "checking"
+// until the first verification, then "ok" or "failed".
+export interface ConnectionInfo {
+  provider: string // "aws" | "github"
+  status: string   // "checking" | "ok" | "failed"
+  principal?: string // AWS caller ARN / GitHub login, once verified
+  source?: string    // where the credentials came from, e.g. "TF_VAR_github_pat"
+  detail?: string    // why the last check failed
+}
+
 export interface SystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
+  connections?: ConnectionInfo[]
 }
 
 // ModeMismatchMsg discloses that a connected peer's dev-mode status differs

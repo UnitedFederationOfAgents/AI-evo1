@@ -260,6 +260,10 @@ type Server struct {
 	// (and selfVersion.available() reports false) otherwise.
 	selfVersion *selfVersionWatch
 
+	// connectivity detects and verifies this host's provider credentials
+	// (AWS, GitHub) for the system tab -- see connectivity.go.
+	connectivity *connectivityWatch
+
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
@@ -1761,6 +1765,8 @@ func main() {
 			go s.selfVersion.watchLoop()
 		}
 	}
+	s.connectivity = newConnectivityWatch(s.broadcastSystemState)
+	go s.connectivity.watchLoop()
 	s.devMode = cfg.devMode
 	s.dev = cfg.dev
 	if s.devMode {

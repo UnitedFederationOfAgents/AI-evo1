@@ -165,11 +165,23 @@ export interface TCAvailabilityMsg {
   available: boolean
 }
 
+// ConnectionInfo is one provider a host holds credentials for -- see
+// local-representative/connectivity.go. Only present providers are listed;
+// status is "checking" until the first verification, then "ok" or "failed".
+export interface ConnectionInfo {
+  provider: string // "aws" | "github"
+  status: string   // "checking" | "ok" | "failed"
+  principal?: string // AWS caller ARN / GitHub login, once verified
+  source?: string    // where the credentials came from, e.g. "TF_VAR_github_pat"
+  detail?: string    // why the last check failed
+}
+
 export interface LRSystemStateMsg {
   host_id: string
   active: boolean
   self: ProcInfo
   managed: ProcInfo[]
+  connections?: ConnectionInfo[] // absent for an older LR -- see ConnectionInfo
 }
 
 // LRRepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,

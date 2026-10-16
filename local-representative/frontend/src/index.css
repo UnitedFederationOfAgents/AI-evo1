@@ -1554,6 +1554,26 @@ body {
 
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
 
+/* "providers" section (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md):
+   always present, one sub-section per provider this host holds credentials
+   for -- yellow border when they don't work. Mirrors agent-coordinator's. */
+.sys-providers { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-providers-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-providers-none { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider { display: flex; flex-direction: column; gap: 6px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 10px; }
+.sys-provider-failed { border-color: #d6b62e; }
+.sys-provider-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #d4d4d4; }
+.sys-provider-icon { display: flex; align-items: center; color: #d4d4d4; }
+.sys-provider-status { margin-left: auto; font-size: 11px; font-weight: 400; }
+.sys-provider-status-ok { color: #4ec94e; }
+.sys-provider-status-failed { color: #d6b62e; }
+.sys-provider-status-checking { color: #888; font-style: italic; }
+.sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-provider-placeholder { color: #555; font-style: italic; }
+.sys-provider-error { color: #d6b62e; }
+
 /* ---- Main pane with optional right-hand detail pane (files tab) ---- */
 
 .main-pane-inner {

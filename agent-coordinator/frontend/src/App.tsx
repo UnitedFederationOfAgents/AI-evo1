@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, useContext, createCo
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
@@ -978,12 +978,13 @@ function procRowKey(proc: ProcInfo): string {
 }
 
 function SystemProcRow({
-  proc, nowSec, selected, onSelect, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
+  proc, nowSec, selected, onSelect, onOpen, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
   selected?: boolean
   onSelect?: () => void
+  onOpen?: () => void // double-click: go to this app's own tab (Step1SubstepCPrompt.md)
   onTerminate?: (id: string) => void
   onRestart?: () => void
   onRestartManaged?: (id: string) => void
@@ -1001,7 +1002,10 @@ function SystemProcRow({
     <div
       className={`sys-row sys-row-${proc.status}${onSelect ? ' sys-row-clickable' : ''}${selected ? ' sys-row-selected' : ''}`}
       onClick={onSelect}
-      title={onSelect ? 'click for version details' : undefined}
+      onDoubleClick={onOpen}
+      title={onSelect
+        ? (onOpen ? 'click for version details, double-click to open its tab' : 'click for version details')
+        : undefined}
     >
       <span className="sys-col sys-col-name">
         <span className="sys-col-name-main">
@@ -1609,8 +1613,97 @@ function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => vo
   )
 }
 
+// isLRTab narrows an app name (e.g. a ProcInfo.name) to one of a host
+// view's tabs -- every managed sub-application has a same-named tab.
+function isLRTab(name: string): name is LRTab {
+  return (LR_TABS as readonly string[]).includes(name)
+}
+
+/* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) ---- */
+
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub' }
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+function connectionStatusLabel(status: string): string {
+  return status === 'ok' ? 'connected' : status === 'failed' ? 'not working' : 'checking…'
+}
+
+// connectionTitle is a provider icon's hover text: who the credentials
+// authenticate as, or why they don't.
+function connectionTitle(c: ConnectionInfo): string {
+  const label = providerLabel(c.provider)
+  if (c.status === 'ok') return `${label} — ${c.principal ?? 'connected'}`
+  if (c.status === 'failed') return `${label} — credentials not working${c.detail ? `: ${c.detail}` : ''}`
+  return `${label} — checking credentials…`
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  if (provider === 'github') {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    )
+  }
+  if (provider === 'aws') {
+    return (
+      <svg viewBox="0 0 28 16" width="24" height="14" aria-hidden="true">
+        <text x="14" y="9" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor" fontFamily="sans-serif">aws</text>
+        <path d="M5 11.5 Q14 16 23 11.5" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M20.6 10.6 L23.2 11.4 L22.3 13.8" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return <span>{providerLabel(provider)}</span>
+}
+
+// ProvidersPanel is the per-host system tab's "providers" section: always
+// shown, with one sub-section per provider that host holds credentials for
+// -- see local-representative/connectivity.go.
+function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] }) {
+  return (
+    <div className="sys-providers">
+      <div className="sys-providers-header">providers</div>
+      {connections === undefined ? (
+        <div className="sys-providers-none">this host's LR doesn't report provider connections</div>
+      ) : connections.length === 0 ? (
+        <div className="sys-providers-none">no provider credentials present</div>
+      ) : connections.map(c => (
+        <div key={c.provider} className={`sys-provider sys-provider-${c.status}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
+            <span className="sys-provider-name">{providerLabel(c.provider)}</span>
+            <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+          </div>
+          <div className="sys-readout-row">
+            <span className="sys-readout-label">principal</span>
+            <span className="sys-readout-value">
+              {c.principal || <span className="sys-readout-placeholder">{c.status === 'checking' ? 'not yet verified' : 'unknown'}</span>}
+            </span>
+          </div>
+          {c.source && (
+            <div className="sys-readout-row">
+              <span className="sys-readout-label">credentials from</span>
+              <span className="sys-readout-value">{c.source}</span>
+            </div>
+          )}
+          {c.status === 'failed' && c.detail && (
+            <div className="sys-readout-row">
+              <span className="sys-readout-label">error</span>
+              <span className="sys-readout-value sys-provider-error">{c.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function SystemPanel({
-  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate, onOpenTab,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -1625,6 +1718,7 @@ function SystemPanel({
   onRebuild: (hostId: string) => void
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  onOpenTab: (tab: LRTab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   // Which process row's drill-down is open, keyed by procRowKey -- cleared
@@ -1702,6 +1796,7 @@ function SystemPanel({
             onSelect={() => setSelectedKey(k => k === procRowKey(p) ? null : procRowKey(p))}
             onTerminate={id => onTerminate(hostId, id)}
             onRestartManaged={id => onRestartManaged(hostId, id)}
+            onOpen={isLRTab(p.name) ? () => onOpenTab(p.name as LRTab) : undefined}
           />
         ))}
         {managed.length === 0 && (
@@ -1728,6 +1823,7 @@ function SystemPanel({
           )
         })}
       </div>
+      <ProvidersPanel connections={state.connections} />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -2952,19 +3048,34 @@ function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolea
 // individual FC/CO/W box's own green border once it's connected but out of
 // date (see subAppOutOfDate) -- LR/AC never get one; the card-level halo
 // already implies it for LR.
+//
+// connections adds a bar of provider icons (AWS, GitHub) above the boxes --
+// unlike the boxes, an icon is only drawn at all when that host holds the
+// credentials, with a yellow border once they've failed verification (see
+// local-representative/connectivity.go). onOpen drives double-click
+// navigation: the card opens that host's system tab, a sub-app box that
+// sub-app's own tab (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md).
 function TopologyNodeCard({
-  label, status, isSelf, services, managed, devMode, selected, outOfDate, onClick,
+  label, status, isSelf, services, managed, connections, devMode, selected, outOfDate, onClick, onOpen,
 }: {
   label: string
   status?: string
   isSelf?: boolean
   services?: ServiceStatus[]
   managed?: ProcInfo[]
+  connections?: ConnectionInfo[]
   devMode?: boolean
   selected?: boolean
   outOfDate?: boolean
   onClick?: () => void
+  onOpen?: (tab: LRTab) => void
 }) {
+  // A sub-app box's double-click handler -- stops the event reaching the
+  // card's own (which would open the system tab instead).
+  const openTab = (tab: LRTab) => onOpen
+    ? (e: React.MouseEvent) => { e.stopPropagation(); onOpen(tab) }
+    : undefined
+
   const fcHealthy = serviceHealthy(services, 'federation-command')
   const coHealthy = serviceHealthy(services, 'condoccer')
   const tcHealthy = serviceHealthy(services, 'convo')
@@ -2989,6 +3100,7 @@ function TopologyNodeCard({
       className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}${outOfDate ? ' topo-node-outdated' : ''}`}
       title={outOfDate ? "this host's LR is behind the dev branch it's tracking — see details & control" : undefined}
       onClick={onClick}
+      onDoubleClick={onOpen ? () => onOpen('system') : undefined}
     >
       <div className="topo-node-header">
         {status && <span className={`host-dot ${hostDotClass(status)}`} />}
@@ -2996,6 +3108,15 @@ function TopologyNodeCard({
         {isSelf && <span className="topo-node-self-tag">self</span>}
       </div>
       <div className="topo-node-diagram">
+        {connections && connections.length > 0 && (
+          <div className="topo-node-row topo-node-conns">
+            {connections.map(c => (
+              <span key={c.provider} className={`topo-conn-icon topo-conn-${c.status}`} title={connectionTitle(c)}>
+                <ProviderIcon provider={c.provider} />
+              </span>
+            ))}
+          </div>
+        )}
         <div className="topo-node-row topo-node-row-top">
           {isSelf && <span className="topo-node-box topo-node-box-ac">AC</span>}
           <span className="topo-node-box topo-node-box-lr">LR</span>
@@ -3004,26 +3125,32 @@ function TopologyNodeCard({
           <span
             className={subAppBoxClass(fcHealthy, fcManaged, !!fcOutdated)}
             title={fcOutdated ? "federation-command is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('federation-command')}
           >FC</span>
           <span
             className={subAppBoxClass(coHealthy, coManaged, !!coOutdated)}
             title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('condoccer')}
           >CO</span>
           <span
             className={subAppBoxClass(tcHealthy, tcManaged, !!tcOutdated)}
             title={tcOutdated ? "convo is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('convo')}
           >TC</span>
           <span
             className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
             title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('sessions')}
           >SM</span>
           <span
             className={subAppBoxClass(rbHealthy, rbManaged, !!rbOutdated)}
             title={rbOutdated ? "robot is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('robot')}
           >RB</span>
           <span
             className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('worker')}
           >W</span>
         </div>
       </div>
@@ -3068,8 +3195,9 @@ function TopologyNodeCard({
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
+  onOpenHost: (hostId: string, tab: LRTab) => void
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
@@ -3178,10 +3306,12 @@ function GlobalTopologyPanel({
             isSelf
             services={hostData[selfHost.id]?.lrState?.services}
             managed={hostData[selfHost.id]?.system?.managed}
+            connections={hostData[selfHost.id]?.system?.connections}
             devMode={devMode}
             selected={selectedHostId === selfHost.id}
             outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
             onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
+            onOpen={tab => onOpenHost(selfHost.id, tab)}
           />
         ) : (
           <TopologyNodeCard label="agent-coordinator" isSelf />
@@ -3194,10 +3324,12 @@ function GlobalTopologyPanel({
             status={h.status}
             services={hostData[h.id]?.lrState?.services}
             managed={hostData[h.id]?.system?.managed}
+            connections={hostData[h.id]?.system?.connections}
             devMode={devMode}
             selected={selectedHostId === h.id}
             outOfDate={devMode && hostOutOfDate(hostData[h.id])}
             onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}
+            onOpen={tab => onOpenHost(h.id, tab)}
           />
         ))}
       </div>
@@ -3385,8 +3517,9 @@ function GlobalTopologyPanel({
 
 function GlobalSystemPanel({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
+  onOpenHost: (hostId: string, tab: LRTab) => void
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
@@ -3435,6 +3568,7 @@ function GlobalSystemPanel({
           acStartedAt={acStartedAt}
           sendACRestartApp={sendACRestartApp}
           sendACSetAutoUpdate={sendACSetAutoUpdate}
+          onOpenHost={onOpenHost}
         />
       ) : (
         <div className="service-empty">not yet implemented</div>
@@ -3446,8 +3580,9 @@ function GlobalSystemPanel({
 
 function GlobalView({
   hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles, onOpenHost,
 }: {
+  onOpenHost: (hostId: string, tab: LRTab) => void
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
@@ -3529,6 +3664,7 @@ function GlobalView({
               acStartedAt={acStartedAt}
               sendACRestartApp={sendACRestartApp}
               sendACSetAutoUpdate={sendACSetAutoUpdate}
+              onOpenHost={onOpenHost}
             />
           )
         ) : (
@@ -3873,6 +4009,7 @@ function LRView({
                     onRebuild={sendLRRebuildApp}
                     onSetAutoRebuild={sendLRSetAutoRebuild}
                     onSetAutoUpdate={sendLRSetAutoUpdate}
+                    onOpenTab={setActiveTab}
                   />
                 )
               )}
@@ -4253,6 +4390,14 @@ export default function App() {
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
 
+  // Double-click navigation from the global topology view
+  // (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md): a host card
+  // opens that host's system tab, a sub-app box that sub-app's tab.
+  const handleOpenHostTab = (id: string, tab: LRTab) => {
+    if (id !== selectedHostId) handleSelectHost(id)
+    setActiveTab(tab)
+  }
+
   // "At least one file store available" (Step1SubstepCPrompt.md): AC has no
   // file store of its own -- a screenshot can only ever land somewhere by
   // relaying through the selected host's local-representative (same route
@@ -4441,6 +4586,7 @@ export default function App() {
               hasHighlighted={!!firstHighlighted}
               onGoToHighlighted={goToFirstHighlighted}
               uploadFiles={uploadFiles}
+              onOpenHost={handleOpenHostTab}
             />
           )}
         </div>

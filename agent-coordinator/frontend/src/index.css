@@ -896,6 +896,20 @@ body {
    applies without .topo-node-box-healthy already being set. */
 .topo-node-box-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 6px 1px rgba(224, 168, 62, 0.45); }
 
+/* Connectivity icon bar above the boxes (Step1SubstepCPrompt.md): an icon is
+   only drawn when that host holds the provider's credentials at all, so
+   there's no unlit state -- just a yellow border once they've failed
+   verification (see local-representative/connectivity.go). */
+.topo-node { user-select: none; } /* double-click navigates rather than selecting text */
+.topo-conn-icon {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  color: #d4d4d4;
+}
+.topo-conn-checking { color: #777; }
+.topo-conn-failed { border-color: #d6b62e; box-shadow: 0 0 0 1px rgba(214, 182, 46, 0.35); }
+
 .topo-details {
   width: 240px;
   flex-shrink: 0;
@@ -1007,6 +1021,22 @@ body {
 .sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
 .sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* "providers" section (Step1SubstepCPrompt.md): always present, one
+   sub-section per provider the host holds credentials for -- yellow border
+   when they don't work, matching the topology card's connectivity icon. */
+.sys-providers { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-providers-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-providers-none { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider { display: flex; flex-direction: column; gap: 6px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 10px; }
+.sys-provider-failed { border-color: #d6b62e; }
+.sys-provider-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #d4d4d4; }
+.sys-provider-icon { display: flex; align-items: center; color: #d4d4d4; }
+.sys-provider-status { margin-left: auto; font-size: 11px; font-weight: 400; }
+.sys-provider-status-ok { color: #4ec94e; }
+.sys-provider-status-failed { color: #d6b62e; }
+.sys-provider-status-checking { color: #888; font-style: italic; }
+.sys-provider-error { color: #d6b62e; }
 
 /* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) -- mirrors this
    host's LR system tab, forwarded up as "lr-repo-state" ---- */

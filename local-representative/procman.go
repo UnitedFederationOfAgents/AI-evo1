@@ -98,6 +98,9 @@ type VersionMsg struct {
 type SystemStateMsg struct {
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
+	// Connections lists the providers this host holds credentials for --
+	// see connectivity.go. Empty (never null) when there are none.
+	Connections []ConnectionInfo `json:"connections"`
 }
 
 // launchSpec describes how to start one managed application.
@@ -396,7 +399,8 @@ func (s *Server) systemState() SystemStateMsg {
 			PendingVersion:  s.selfVersion.pending(),
 			AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		},
-		Managed: procs,
+		Managed:     procs,
+		Connections: append([]ConnectionInfo{}, s.connectivity.connections()...),
 	}
 }
 

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
 import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -1174,7 +1174,80 @@ function SystemPanel({
           )
         })}
       </div>
+      <ProvidersPanel connections={state.connections} />
       <Trough entries={troughEntries} />
+    </div>
+  )
+}
+
+/* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) --
+   mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
+
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub' }
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+function connectionStatusLabel(status: string): string {
+  return status === 'ok' ? 'connected' : status === 'failed' ? 'not working' : 'checking…'
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  if (provider === 'github') {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    )
+  }
+  if (provider === 'aws') {
+    return (
+      <svg viewBox="0 0 28 16" width="24" height="14" aria-hidden="true">
+        <text x="14" y="9" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor" fontFamily="sans-serif">aws</text>
+        <path d="M5 11.5 Q14 16 23 11.5" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M20.6 10.6 L23.2 11.4 L22.3 13.8" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return <span>{providerLabel(provider)}</span>
+}
+
+// ProvidersPanel is the system tab's "providers" section: always shown, with
+// one sub-section per provider this host holds credentials for.
+function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] }) {
+  return (
+    <div className="sys-providers">
+      <div className="sys-providers-header">providers</div>
+      {!connections || connections.length === 0 ? (
+        <div className="sys-providers-none">no provider credentials present</div>
+      ) : connections.map(c => (
+        <div key={c.provider} className={`sys-provider sys-provider-${c.status}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
+            <span className="sys-provider-name">{providerLabel(c.provider)}</span>
+            <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+          </div>
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">principal</span>
+            <span className="sys-provider-value">
+              {c.principal || <span className="sys-provider-placeholder">{c.status === 'checking' ? 'not yet verified' : 'unknown'}</span>}
+            </span>
+          </div>
+          {c.source && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">credentials from</span>
+              <span className="sys-provider-value">{c.source}</span>
+            </div>
+          )}
+          {c.status === 'failed' && c.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{c.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   )
 }

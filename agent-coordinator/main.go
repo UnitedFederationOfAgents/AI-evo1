@@ -353,8 +353,22 @@ type ProcInfo struct {
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.
 type SystemStateMsg struct {
-	Self    ProcInfo   `json:"self"`
-	Managed []ProcInfo `json:"managed"`
+	Self        ProcInfo         `json:"self"`
+	Managed     []ProcInfo       `json:"managed"`
+	Connections []ConnectionInfo `json:"connections"`
+}
+
+// ConnectionInfo mirrors local-representative/connectivity.go's: one
+// provider (AWS, GitHub) that host holds credentials for, and whether they
+// currently work. Drives the topology card's connectivity icons and the
+// per-host system tab's "providers" section (see
+// condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md).
+type ConnectionInfo struct {
+	Provider  string `json:"provider"`
+	Status    string `json:"status"`
+	Principal string `json:"principal,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 // RepoStateMsg mirrors local-representative's dev-repo watcher payload (see
@@ -458,6 +472,9 @@ type LRSystemStateMsg struct {
 	Active  bool       `json:"active"`
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
+	// Connections is omitted (rather than empty) for an older LR that
+	// doesn't report them, and whenever Active is false.
+	Connections []ConnectionInfo `json:"connections,omitempty"`
 }
 
 // LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
@@ -879,7 +896,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	if system != nil {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{
-			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed,
+			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections,
 		})
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1729,7 +1746,7 @@ func main() {
 				hs.system = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-system-state", LRSystemStateMsg{
-					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed,
+					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections,
 				})
 			}
 		case "repo-state":

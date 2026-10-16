@@ -198,6 +198,16 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-switch-branch', payload: { host_id: hostId, branch } }))
   }, [])
 
+  // The per-host "providers" section's "connect"/"disconnect" controls
+  // (Step1SubstepEPrompt.md): hand the host's LR a credential to use -- only
+  // a GitHub PAT so far -- or have it forget one it was handed.
+  const sendLRConnectProvider = useCallback((hostId: string, provider: string, token: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-connect-provider', payload: { host_id: hostId, provider, token } }))
+  }, [])
+  const sendLRDisconnectProvider = useCallback((hostId: string, provider: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-disconnect-provider', payload: { host_id: hostId, provider } }))
+  }, [])
+
   // Toggles whether the given host's LR restarts itself the instant an
   // update becomes available, instead of waiting for the "restart and
   // update LR" control -- see docs/DevMode.md "Loader".
@@ -554,7 +564,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -1758,13 +1768,85 @@ function ProviderIcon({ provider }: { provider: string }) {
   return <span>{providerLabel(provider)}</span>
 }
 
+// CONNECTABLE_PROVIDERS are the providers the "connect" control offers
+// (Step1SubstepEPrompt.md) -- local-representative/connectivity.go's
+// connectableProviders, with how each is connected.
+const CONNECTABLE_PROVIDERS: { provider: string, method: string, placeholder: string }[] = [
+  { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
+]
+
+// ProviderConnectForm is the "connect" control: a provider picker and a
+// masked credential field. Whitespace is rejected here because the
+// credential travels as one word of a "__system:connect" command.
+function ProviderConnectForm({ onConnect, onCancel }: {
+  onConnect: (provider: string, token: string) => void
+  onCancel: () => void
+}) {
+  const [provider, setProvider] = useState(CONNECTABLE_PROVIDERS[0].provider)
+  const [token, setToken] = useState('')
+  const spec = CONNECTABLE_PROVIDERS.find(p => p.provider === provider) ?? CONNECTABLE_PROVIDERS[0]
+  const trimmed = token.trim()
+  const invalid = trimmed === '' || /\s/.test(trimmed)
+  const submit = () => {
+    if (invalid) return
+    onConnect(provider, trimmed)
+    setToken('')
+  }
+  return (
+    <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
+      <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
+        {CONNECTABLE_PROVIDERS.map(p => (
+          <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
+        ))}
+      </select>
+      <input
+        className="sys-provider-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={spec.placeholder}
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        autoFocus
+      />
+      <button type="submit" className="sys-btn sys-btn-branch" disabled={invalid}
+        title={invalid && trimmed !== '' ? 'a token can\'t contain whitespace' : `use this ${spec.method} for ${providerLabel(provider)} on this host`}>
+        connect
+      </button>
+      <button type="button" className="sys-btn sys-btn-neutral" onClick={onCancel}>cancel</button>
+    </form>
+  )
+}
+
 // ProvidersPanel is the per-host system tab's "providers" section: always
 // shown, with one sub-section per provider that host holds credentials for
-// -- see local-representative/connectivity.go.
-function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] | null }) {
+// -- see local-representative/connectivity.go -- plus the "connect" control
+// (Step1SubstepEPrompt.md). A provider connected through it (source
+// "connected") takes precedence over the host's environment credentials
+// and gets a "disconnect", which falls back to them.
+function ProvidersPanel({ connections, onConnect, onDisconnect }: {
+  connections?: ConnectionInfo[] | null
+  onConnect: (provider: string, token: string) => void
+  onDisconnect: (provider: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
   return (
     <div className="sys-providers">
-      <div className="sys-providers-header">providers</div>
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">providers</span>
+        {!connecting && connections != null && (
+          <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+            title="give this host credentials for a provider (GitHub PAT)">
+            connect
+          </button>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          onConnect={(provider, token) => { onConnect(provider, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
       {connections == null ? (
         <div className="sys-providers-none">this host's LR doesn't report provider connections</div>
       ) : connections.length === 0 ? (
@@ -1775,6 +1857,12 @@ function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] | null
             <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
             <span className="sys-provider-name">{providerLabel(c.provider)}</span>
             <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+            {c.source === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(c.provider)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
           </div>
           <div className="sys-readout-row">
             <span className="sys-readout-label">principal</span>
@@ -1801,7 +1889,8 @@ function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] | null
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch, onSetAutoUpdate, onOpenTab,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch, onSetAutoUpdate,
+  onConnectProvider, onDisconnectProvider, onOpenTab,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -1817,6 +1906,8 @@ function SystemPanel({
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
   onSwitchBranch: (hostId: string, branch: string) => void
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  onConnectProvider: (hostId: string, provider: string, token: string) => void
+  onDisconnectProvider: (hostId: string, provider: string) => void
   onOpenTab: (tab: LRTab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1923,7 +2014,11 @@ function SystemPanel({
           )
         })}
       </div>
-      <ProvidersPanel connections={state.connections} />
+      <ProvidersPanel
+        connections={state.connections}
+        onConnect={(provider, token) => onConnectProvider(hostId, provider, token)}
+        onDisconnect={provider => onDisconnectProvider(hostId, provider)}
+      />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -3909,7 +4004,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -3929,8 +4024,10 @@ function LRView({
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
   sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  sendLRConnectProvider: (hostId: string, provider: string, token: string) => void
+  sendLRDisconnectProvider: (hostId: string, provider: string) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
-  importHostFiles: (hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
+  importHostFiles:(hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -4143,6 +4240,8 @@ function LRView({
                     onSetAutoRebuild={sendLRSetAutoRebuild}
                     onSwitchBranch={sendLRSwitchBranch}
                     onSetAutoUpdate={sendLRSetAutoUpdate}
+                    onConnectProvider={sendLRConnectProvider}
+                    onDisconnectProvider={sendLRDisconnectProvider}
                     onOpenTab={setActiveTab}
                   />
                 )
@@ -4490,7 +4589,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -4691,6 +4790,8 @@ export default function App() {
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
               sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              sendLRConnectProvider={sendLRConnectProvider}
+              sendLRDisconnectProvider={sendLRDisconnectProvider}
               uploadFiles={uploadFiles}
               importHostFiles={importHostFiles}
               activeTab={activeTab}

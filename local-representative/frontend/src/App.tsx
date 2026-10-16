@@ -215,6 +215,20 @@ function useStatusWS() {
     }
   }, [])
 
+  // The providers section's "connect"/"disconnect" controls
+  // (Step1SubstepEPrompt.md): hand this LR a credential to use -- only a
+  // GitHub PAT so far -- or have it forget one it was handed.
+  const connectProvider = useCallback((provider: string, token: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'connect-provider', payload: { provider, token } }))
+    }
+  }, [])
+  const disconnectProvider = useCallback((provider: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'disconnect-provider', payload: { provider } }))
+    }
+  }, [])
+
   // Toggles whether this LR restarts itself the instant an update becomes
   // available, instead of waiting for the "update and restart" button --
   // see docs/DevMode.md "Loader".
@@ -394,7 +408,7 @@ function useStatusWS() {
   return {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, submitWork,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, submitWork,
   }
 }
 
@@ -1181,6 +1195,8 @@ function SystemPanel({
   onSetAutoRebuild,
   onSwitchBranch,
   onSetAutoUpdate,
+  onConnectProvider,
+  onDisconnectProvider,
   onOpenTab,
 }: {
   state: SystemStateMsg | null
@@ -1193,6 +1209,8 @@ function SystemPanel({
   onSetAutoRebuild: (enabled: boolean) => void
   onSwitchBranch: (branch: string) => void
   onSetAutoUpdate: (enabled: boolean) => void
+  onConnectProvider: (provider: string, token: string) => void
+  onDisconnectProvider: (provider: string) => void
   onOpenTab: (tab: Tab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1271,7 +1289,7 @@ function SystemPanel({
           )
         })}
       </div>
-      <ProvidersPanel connections={state.connections} />
+      <ProvidersPanel connections={state.connections} onConnect={onConnectProvider} onDisconnect={onDisconnectProvider} />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -1310,12 +1328,85 @@ function ProviderIcon({ provider }: { provider: string }) {
   return <span>{providerLabel(provider)}</span>
 }
 
+// CONNECTABLE_PROVIDERS are the providers the "connect" control offers
+// (Step1SubstepEPrompt.md) -- connectivity.go's connectableProviders, with
+// how each is connected.
+const CONNECTABLE_PROVIDERS: { provider: string, method: string, placeholder: string }[] = [
+  { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
+]
+
+// ProviderConnectForm is the "connect" control: a provider picker and a
+// masked credential field. Whitespace is rejected to match
+// agent-coordinator's copy, where the credential travels as one word of a
+// "__system:connect" command.
+function ProviderConnectForm({ onConnect, onCancel }: {
+  onConnect: (provider: string, token: string) => void
+  onCancel: () => void
+}) {
+  const [provider, setProvider] = useState(CONNECTABLE_PROVIDERS[0].provider)
+  const [token, setToken] = useState('')
+  const spec = CONNECTABLE_PROVIDERS.find(p => p.provider === provider) ?? CONNECTABLE_PROVIDERS[0]
+  const trimmed = token.trim()
+  const invalid = trimmed === '' || /\s/.test(trimmed)
+  const submit = () => {
+    if (invalid) return
+    onConnect(provider, trimmed)
+    setToken('')
+  }
+  return (
+    <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
+      <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
+        {CONNECTABLE_PROVIDERS.map(p => (
+          <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
+        ))}
+      </select>
+      <input
+        className="sys-provider-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={spec.placeholder}
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        autoFocus
+      />
+      <button type="submit" className="sys-btn sys-btn-branch" disabled={invalid}
+        title={invalid && trimmed !== '' ? 'a token can\'t contain whitespace' : `use this ${spec.method} for ${providerLabel(provider)} on this host`}>
+        connect
+      </button>
+      <button type="button" className="sys-btn sys-btn-neutral" onClick={onCancel}>cancel</button>
+    </form>
+  )
+}
+
 // ProvidersPanel is the system tab's "providers" section: always shown, with
-// one sub-section per provider this host holds credentials for.
-function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] }) {
+// one sub-section per provider this host holds credentials for, plus the
+// "connect" control (Step1SubstepEPrompt.md). A provider connected through
+// it (source "connected") takes precedence over this host's environment
+// credentials and gets a "disconnect", which falls back to them.
+function ProvidersPanel({ connections, onConnect, onDisconnect }: {
+  connections?: ConnectionInfo[]
+  onConnect: (provider: string, token: string) => void
+  onDisconnect: (provider: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
   return (
     <div className="sys-providers">
-      <div className="sys-providers-header">providers</div>
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">providers</span>
+        {!connecting && (
+          <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+            title="give this host credentials for a provider (GitHub PAT)">
+            connect
+          </button>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          onConnect={(provider, token) => { onConnect(provider, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
       {!connections || connections.length === 0 ? (
         <div className="sys-providers-none">no provider credentials present</div>
       ) : connections.map(c => (
@@ -1324,6 +1415,12 @@ function ProvidersPanel({ connections }: { connections?: ConnectionInfo[] }) {
             <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
             <span className="sys-provider-name">{providerLabel(c.provider)}</span>
             <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+            {c.source === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(c.provider)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
           </div>
           <div className="sys-provider-row">
             <span className="sys-provider-label">principal</span>
@@ -2815,7 +2912,7 @@ export default function App() {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
     acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, submitWork,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, submitWork,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -2993,6 +3090,8 @@ export default function App() {
                   onSetAutoRebuild={setAutoRebuild}
                   onSwitchBranch={switchBranch}
                   onSetAutoUpdate={setAutoUpdate}
+                  onConnectProvider={connectProvider}
+                  onDisconnectProvider={disconnectProvider}
                   onOpenTab={goToTab}
                 />
               ) : activeTab === 'files' && viewerFileId ? (

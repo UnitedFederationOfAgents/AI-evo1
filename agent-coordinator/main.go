@@ -1315,6 +1315,30 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				!strings.ContainsAny(payload.Branch, " \t\r\n") && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__system:switch-branch "+payload.Branch)
 			}
+		case "lr-connect-provider":
+			// The per-host "providers" section's "connect" control
+			// (Step1SubstepEPrompt.md): hands the host's LR a credential to
+			// use -- only a GitHub PAT so far, which LR checks. Never logged.
+			var payload struct {
+				HostID   string `json:"host_id"`
+				Provider string `json:"provider"`
+				Token    string `json:"token"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Provider != "" && payload.Token != "" &&
+				!strings.ContainsAny(payload.Provider+payload.Token, " \t\r\n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:connect "+payload.Provider+" "+payload.Token)
+			}
+		case "lr-disconnect-provider":
+			var payload struct {
+				HostID   string `json:"host_id"`
+				Provider string `json:"provider"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Provider != "" &&
+				!strings.ContainsAny(payload.Provider, " \t\r\n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:disconnect "+payload.Provider)
+			}
 		case "lr-set-auto-update":
 			var payload struct {
 				HostID  string `json:"host_id"`

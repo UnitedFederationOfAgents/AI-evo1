@@ -1622,6 +1622,12 @@ body {
 .sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
 .sys-provider-placeholder { color: #555; font-style: italic; }
 .sys-provider-error { color: #d6b62e; }
+/* The "connect" control (Step1SubstepEPrompt.md). */
+.sys-providers-heading { display: flex; align-items: center; gap: 8px; }
+.sys-providers-heading .sys-btn { margin-left: auto; }
+.sys-provider-connect { display: flex; align-items: center; gap: 6px; }
+.sys-provider-connect .sys-branch-select { flex: 0 0 auto; }
+.sys-provider-token { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 6px; }
 
 /* ---- Main pane with optional right-hand detail pane (files tab) ---- */
 

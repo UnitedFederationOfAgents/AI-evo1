@@ -748,6 +748,9 @@ func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
 //	__system:rebuild
 //	__system:auto-rebuild <on|off>
 //	__system:auto-update <on|off>
+//	__system:switch-branch <name>
+//	__system:connect <provider> <credential>
+//	__system:disconnect <provider>
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -791,8 +794,22 @@ func (s *Server) handleSystemCommand(raw string) {
 		s.switchBranch(arg)
 	case "auto-update":
 		s.setAutoUpdate(arg == "on" || arg == "true" || arg == "1")
+	case "connect":
+		provider, credential, _ := strings.Cut(arg, " ")
+		if provider == "" {
+			log.Printf("system: remote connect command missing provider")
+			return
+		}
+		s.connectProvider(provider, credential)
+	case "disconnect":
+		if arg == "" {
+			log.Printf("system: remote disconnect command missing provider")
+			return
+		}
+		s.disconnectProvider(arg)
 	default:
-		log.Printf("system: ignoring unrecognised remote system command %q", raw)
+		// Only the verb: the rest may be a credential.
+		log.Printf("system: ignoring unrecognised remote system command %q", verb)
 	}
 }
 
@@ -1053,6 +1070,9 @@ func (s *Server) launchManaged(app string) (string, error) {
 	if spec.buildEnv != nil {
 		cmd.Env = append(cmd.Env, spec.buildEnv(s, id)...)
 	}
+	// A connected provider credential overrides LR's own environment's (exec
+	// keeps the last of duplicate keys) -- see connectivity.go.
+	cmd.Env = append(cmd.Env, s.connectivity.childEnv()...)
 	// Own process group so terminate can signal the whole child tree (terminal
 	// wrapper included).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

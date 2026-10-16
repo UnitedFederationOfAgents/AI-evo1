@@ -1313,6 +1313,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
 				s.switchBranch(payload.Branch)
 			}
+		case "connect-provider":
+			var payload struct {
+				Provider string `json:"provider"`
+				Token    string `json:"token"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Provider != "" {
+				s.connectProvider(payload.Provider, payload.Token)
+			}
+		case "disconnect-provider":
+			var payload struct {
+				Provider string `json:"provider"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Provider != "" {
+				s.disconnectProvider(payload.Provider)
+			}
 		case "set-auto-update":
 			var payload struct {
 				Enabled bool `json:"enabled"`

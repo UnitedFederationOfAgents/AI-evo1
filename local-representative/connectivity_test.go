@@ -19,6 +19,8 @@ func clearProviderEnv(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing")
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", missing)
 	t.Setenv("AWS_CONFIG_FILE", missing)
+	// Connected credentials live under $HOME/.ufa/connections.
+	t.Setenv("HOME", t.TempDir())
 }
 
 func fakeGitHub(t *testing.T, goodToken, login string) string {
@@ -101,6 +103,53 @@ func TestConnectivityRejectedGitHubToken(t *testing.T) {
 	got := w.connections()
 	if len(got) != 1 || got[0].Provider != "github" || got[0].Status != connFailed || got[0].Principal != "" || got[0].Detail == "" {
 		t.Errorf("connections = %+v, want one failed github entry with a detail", got)
+	}
+}
+
+func TestConnectedGitHubPAT(t *testing.T) {
+	clearProviderEnv(t)
+	t.Setenv("GH_TOKEN", "env-token")
+
+	w := newConnectivityWatch(nil)
+	w.githubAPI = fakeGitHub(t, "connected-token", "octocat")
+	if err := w.connect("aws", "x"); err == nil {
+		t.Error("connect accepted an unsupported provider")
+	}
+	if err := w.connect("github", "bad token"); err == nil {
+		t.Error("connect accepted a PAT with whitespace")
+	}
+	if err := w.connect("github", " connected-token\n"); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if failed := w.check(); failed {
+		t.Fatalf("check failed: %+v", w.connections())
+	}
+	want := ConnectionInfo{Provider: "github", Status: connOK, Principal: "octocat", Source: connectedSource}
+	if got := w.connections(); len(got) != 1 || got[0] != want {
+		t.Errorf("connections = %+v, want [%+v]", got, want)
+	}
+	if env := w.childEnv(); len(env) != 1 || env[0] != "TF_VAR_github_pat=connected-token" {
+		t.Errorf("childEnv = %q", env)
+	}
+
+	// Survives a restart.
+	if again := newConnectivityWatch(nil); len(again.childEnv()) != 1 {
+		t.Error("connected PAT wasn't reloaded by a new watch")
+	}
+
+	// Disconnecting falls back to the environment's token.
+	if err := w.disconnect("github"); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	if env := w.childEnv(); env != nil {
+		t.Errorf("childEnv after disconnect = %q, want none", env)
+	}
+	w.check()
+	if got := w.connections(); len(got) != 1 || got[0].Source != "GH_TOKEN" || got[0].Status != connFailed {
+		t.Errorf("connections after disconnect = %+v, want the failed GH_TOKEN entry", got)
+	}
+	if again := newConnectivityWatch(nil); again.childEnv() != nil {
+		t.Error("disconnected PAT was reloaded by a new watch")
 	}
 }
 

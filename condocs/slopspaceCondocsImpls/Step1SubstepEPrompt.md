@@ -39,11 +39,10 @@ prompt: [`0a4568d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0
 I changed it so a connected GitHub PAT is kept only in LR's memory and never written to disk, so it's gone when LR restarts. I removed the code in `local-representative/connectivity.go` that saved, reloaded and deleted `~/.ufa/connections/github-pat`; "disconnect" now just clears the in-memory token, and the imports that only that code used are gone. `TestConnectedGitHubPAT` now checks that a restarted LR does not have the token. Nothing has been built or tested yet, because `go test` needed approval that wasn't given, and none of the edits are committed.
 
 
-## <REPLACE-Revision|Retry> B
+## Revision B
 
-<REPLACE-PROMPT>
+Now let's create a new section below 'providers' called agents & models in the per-host system tab for AC and LR UIs.
 
+This section will be a similar idea to 'providers' but it will specifically focus on agents and models available. It will perform inspection through the ambiguous-agent layer (similarly to how FC will).
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+After this interaction we will expect to see that we have claude available (and what models).

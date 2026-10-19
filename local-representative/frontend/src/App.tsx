@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
 import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -226,6 +226,14 @@ function useStatusWS() {
   const disconnectProvider = useCallback((provider: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'disconnect-provider', payload: { provider } }))
+    }
+  }, [])
+
+  // The "agents & models" section's "re-inspect" control
+  // (Step1SubstepEPrompt.md Revision B).
+  const inspectAgents = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'inspect-agents' }))
     }
   }, [])
 
@@ -1197,6 +1205,7 @@ function SystemPanel({
   onSetAutoUpdate,
   onConnectProvider,
   onDisconnectProvider,
+  onInspectAgents,
   onOpenTab,
 }: {
   state: SystemStateMsg | null
@@ -1211,6 +1220,7 @@ function SystemPanel({
   onSetAutoUpdate: (enabled: boolean) => void
   onConnectProvider: (provider: string, token: string) => void
   onDisconnectProvider: (provider: string) => void
+  onInspectAgents: () => void
   onOpenTab: (tab: Tab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -1290,6 +1300,7 @@ function SystemPanel({
         })}
       </div>
       <ProvidersPanel connections={state.connections} onConnect={onConnectProvider} onDisconnect={onDisconnectProvider} />
+      <AgentsPanel agents={state.agents} nowSec={nowSec} onInspect={onInspectAgents} />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -1442,6 +1453,92 @@ function ProvidersPanel({ connections, onConnect, onDisconnect }: {
           )}
         </div>
       ))}
+    </div>
+  )
+}
+
+/* ---- Agents & models (condocs/slopspaceCondocsImpls/Step1SubstepEPrompt.md Revision B) --
+   mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
+
+// AgentsPanel is the system tab's "agents & models" section, below
+// "providers": the AI agents this host can run and their models, as the
+// ambiguous-agent layer reports them (ambiguous-agent --inspect, run by LR
+// -- see local-representative/agents.go). Installed agents get a card each;
+// the rest are listed on one line.
+function AgentsPanel({ agents, nowSec, onInspect }: {
+  agents?: AgentsState
+  nowSec: number
+  onInspect: () => void
+}) {
+  const installed = agents?.agents.filter(a => a.installed) ?? []
+  const missing = agents?.agents.filter(a => !a.installed) ?? []
+  const checking = !agents || agents.status === 'checking'
+  return (
+    <div className="sys-providers sys-agents">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">agents &amp; models</span>
+        {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+        <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+          title="ask ambiguous-agent again which agents and models this host has">
+          {checking ? 'inspecting…' : 're-inspect'}
+        </button>
+      </div>
+      {agents?.status === 'failed' && (
+        <div className="sys-provider-row">
+          <span className="sys-provider-label">error</span>
+          <span className="sys-provider-value sys-provider-error">{agents.detail || 'inspection failed'}</span>
+        </div>
+      )}
+      {!agents ? (
+        <div className="sys-providers-none">not reported by this host</div>
+      ) : installed.length === 0 && agents.status !== 'checking' ? (
+        <div className="sys-providers-none">no agents available</div>
+      ) : installed.map(a => (
+        <div key={a.name} className={`sys-provider ${a.detail ? 'sys-provider-failed' : ''}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-name">{a.name}</span>
+            {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
+            <span className="sys-provider-status sys-provider-status-ok">available</span>
+          </div>
+          {a.version && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">version</span>
+              <span className="sys-provider-value">{a.version}</span>
+            </div>
+          )}
+          {a.path && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">path</span>
+              <span className="sys-provider-value">{a.path}</span>
+            </div>
+          )}
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">models</span>
+            {a.models && a.models.length > 0 ? (
+              <span className="sys-agent-models">
+                {a.models.map(m => (
+                  <span key={m} className="sys-agent-model">{m}{m === a.default_model ? ' (default)' : ''}</span>
+                ))}
+              </span>
+            ) : (
+              <span className="sys-provider-value">
+                <span className="sys-provider-placeholder">
+                  {a.model_selection ? 'none listed' : 'no model selection (uses its built-in default)'}
+                </span>
+              </span>
+            )}
+          </div>
+          {a.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{a.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="sys-agents-missing">not installed: {missing.map(a => a.name).join(', ')}</div>
+      )}
     </div>
   )
 }
@@ -3092,6 +3189,7 @@ export default function App() {
                   onSetAutoUpdate={setAutoUpdate}
                   onConnectProvider={connectProvider}
                   onDisconnectProvider={disconnectProvider}
+                  onInspectAgents={inspectAgents}
                   onOpenTab={goToTab}
                 />
               ) : activeTab === 'files' && viewerFileId ? (

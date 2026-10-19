@@ -245,6 +245,7 @@ func main() {
 		execMode   bool
 		listAgents bool
 		listModels bool
+		inspect    bool
 		showVer    bool
 		addDirs    string
 		prompt     string
@@ -262,6 +263,7 @@ func main() {
 	flag.BoolVar(&execMode, "x", false, "Execute mode: full access including command execution")
 	flag.BoolVar(&listAgents, "list-agents", false, "List available agents")
 	flag.BoolVar(&listModels, "list-models", false, "List available models for an agent (use -a to specify agent)")
+	flag.BoolVar(&inspect, "inspect", false, "Report every agent's availability and models as JSON (use -a to inspect one agent)")
 	flag.BoolVar(&showVer, "version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	flag.StringVar(&addDirs, "add-dirs", "", "Colon-separated list of directories to add (for agent records access)")
 	flag.StringVar(&prompt, "prompt", "", "Prompt to send to the agent (alternative to positional argument)")
@@ -275,6 +277,7 @@ Usage:
   ambiguous-agent [options] <prompt>
   ambiguous-agent --list-agents
   ambiguous-agent --list-models [-a <agent>]
+  ambiguous-agent --inspect [-a <agent>]
 
 Modes (mutually exclusive, default is -r):
   -p    Prompt mode: chat only, no file access
@@ -292,6 +295,8 @@ Options:
                          Use 'default' for current session, copies to temp dir
   --list-agents         List available agents and exit
   --list-models         List available models for an agent (use -a to specify)
+  --inspect             Report agent availability and models as JSON (all
+                         agents, or just -a <agent>)
   --version             Print version and exit
 
 Environment:
@@ -318,6 +323,15 @@ Examples:
 	// Handle --list-agents
 	if listAgents {
 		printAgentList()
+		return
+	}
+
+	// Handle --inspect (machine-readable; see inspect.go)
+	if inspect {
+		if err := printInspection(os.Stdout, agent); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -713,9 +727,25 @@ func printModelList(agent string) {
 // For agents that support dynamic listing (opencode, grok), runs the appropriate command
 // For agents without dynamic listing support, returns an error message
 func queryModelsForAgent(agent string, config *AgentConfig) []string {
+	models, err := listModelsForAgent(agent, config)
+	if err != nil {
+		fmt.Println(errorStyle.Render(err.Error()))
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("ensure '%s' is installed and available on PATH", config.Command)))
+		return nil
+	}
+	if len(models) == 0 && config.ModelFlag != "" {
+		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
+	}
+	return models
+}
+
+// listModelsForAgent is queryModelsForAgent without the printing, shared with
+// --inspect (see inspect.go). Agents without model selection, or without a
+// known model list, yield no models and no error.
+func listModelsForAgent(agent string, config *AgentConfig) ([]string, error) {
 	// First check if agent has any model support
 	if config.ModelFlag == "" {
-		return nil
+		return nil, nil
 	}
 
 	// For agents that support dynamic model listing
@@ -724,9 +754,7 @@ func queryModelsForAgent(agent string, config *AgentConfig) []string {
 		cmd := exec.Command("opencode", "models")
 		output, err := cmd.Output()
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("failed to query models from opencode: %v", err)))
-			fmt.Println(sessionStyle.Render("ensure 'opencode' is installed and available on PATH"))
-			return nil
+			return nil, fmt.Errorf("failed to query models from opencode: %v", err)
 		}
 		// Parse output, one model per line
 		var models []string
@@ -737,25 +765,19 @@ func queryModelsForAgent(agent string, config *AgentConfig) []string {
 				models = append(models, line)
 			}
 		}
-		return models
+		return models, nil
 
 	case "grok":
 		cmd := exec.Command("grok", "models")
 		output, err := cmd.Output()
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("failed to query models from grok: %v", err)))
-			fmt.Println(sessionStyle.Render("ensure 'grok' is installed and available on PATH"))
-			return nil
+			return nil, fmt.Errorf("failed to query models from grok: %v", err)
 		}
-		return parseGrokModels(string(output))
+		return parseGrokModels(string(output)), nil
 
 	default:
 		// For agents without dynamic model listing, use the static list from config
-		if len(config.Models) > 0 {
-			return config.Models
-		}
-		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
-		return nil
+		return config.Models, nil
 	}
 }
 

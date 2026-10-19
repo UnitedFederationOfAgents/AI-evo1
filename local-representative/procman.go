@@ -101,6 +101,9 @@ type SystemStateMsg struct {
 	// Connections lists the providers this host holds credentials for --
 	// see connectivity.go. Empty (never null) when there are none.
 	Connections []ConnectionInfo `json:"connections"`
+	// Agents is the "agents & models" section: which AI agents (and models)
+	// this host can run, per ambiguous-agent -- see agents.go.
+	Agents AgentsState `json:"agents"`
 }
 
 // launchSpec describes how to start one managed application.
@@ -401,6 +404,7 @@ func (s *Server) systemState() SystemStateMsg {
 		},
 		Managed:     procs,
 		Connections: append([]ConnectionInfo{}, s.connectivity.connections()...),
+		Agents:      s.agents.snapshot(),
 	}
 }
 
@@ -751,6 +755,7 @@ func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
 //	__system:switch-branch <name>
 //	__system:connect <provider> <credential>
 //	__system:disconnect <provider>
+//	__system:inspect-agents
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -807,6 +812,8 @@ func (s *Server) handleSystemCommand(raw string) {
 			return
 		}
 		s.disconnectProvider(arg)
+	case "inspect-agents":
+		s.agents.reinspect()
 	default:
 		// Only the verb: the rest may be a credential.
 		log.Printf("system: ignoring unrecognised remote system command %q", verb)

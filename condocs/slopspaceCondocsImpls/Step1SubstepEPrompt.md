@@ -46,3 +46,28 @@ Now let's create a new section below 'providers' called agents & models in the p
 This section will be a similar idea to 'providers' but it will specifically focus on agents and models available. It will perform inspection through the ambiguous-agent layer (similarly to how FC will).
 
 After this interaction we will expect to see that we have claude available (and what models).
+
+
+prompt: [`0a72ba1`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/0a72ba12e2bb7fcc368585901306f4c68178770e) → reply: [`8599f96`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/8599f96150a218c03d75629e12a2695922348e20)
+
+## Reply B
+
+I added an "agents & models" section below "providers" in the system tab of both AC and LR, but none of it has been built or run. `go build`, `go test`, `gofmt` and `git status` all needed approval that wasn't given, so I've only checked it by reading. The changes are uncommitted.
+
+The data comes from a new `--inspect` flag on ambiguous-agent that prints JSON (`ambiguous-agent/inspect.go`): for each agent, whether it's installed, its path, its version (from `--version`) and its models. LR runs it when it starts, every 10 minutes and when you press "re-inspect", and sends the result with the rest of the system-tab data (`local-representative/agents.go`). AC passes it through and handles "re-inspect" for each host. Each installed agent gets a card with its version, path and models; the agents that aren't installed are listed on one line. FC can use the same `--inspect` output later.
+
+Decisions for you:
+- **Claude's model list is old:** ambiguous-agent has no way to ask the `claude` CLI for its models, so it reports a fixed list in its code: `opus`, `sonnet`, `haiku` and three dated IDs from the Claude 4 era. Once you have this working you'll see Claude listed, but with those models, not the current ones, until that list is updated.
+- **Not recorded:** LR runs the inspection directly, without wrapping it in clauditable the way FC does for `--list-models`, so these regular checks don't fill the agent records with noise.
+
+New tests, `TestInspect` and `TestAgentsWatch`, cover the inspection itself and LR's handling of its results, but haven't been run.
+
+
+## <REPLACE-Revision|Retry> C
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

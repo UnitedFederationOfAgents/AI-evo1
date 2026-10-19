@@ -356,6 +356,31 @@ type SystemStateMsg struct {
 	Self        ProcInfo         `json:"self"`
 	Managed     []ProcInfo       `json:"managed"`
 	Connections []ConnectionInfo `json:"connections"`
+	Agents      *AgentsState     `json:"agents"`
+}
+
+// AgentsState mirrors local-representative/agents.go's: which AI agents (and
+// models) that host can run, per its ambiguous-agent -- the per-host system
+// tab's "agents & models" section (Step1SubstepEPrompt.md Revision B).
+type AgentsState struct {
+	Status       string      `json:"status"`
+	Detail       string      `json:"detail,omitempty"`
+	DefaultAgent string      `json:"default_agent,omitempty"`
+	Agents       []AgentInfo `json:"agents"`
+	CheckedAt    int64       `json:"checked_at,omitempty"`
+}
+
+// AgentInfo mirrors local-representative/agents.go's: one agent and its models.
+type AgentInfo struct {
+	Name           string   `json:"name"`
+	Command        string   `json:"command"`
+	Installed      bool     `json:"installed"`
+	Path           string   `json:"path,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	ModelSelection bool     `json:"model_selection"`
+	DefaultModel   string   `json:"default_model,omitempty"`
+	Models         []string `json:"models,omitempty"`
+	Detail         string   `json:"detail,omitempty"`
 }
 
 // ConnectionInfo mirrors local-representative/connectivity.go's: one
@@ -483,6 +508,9 @@ type LRSystemStateMsg struct {
 	// tell "no credentials present" ([]) from an older LR that doesn't
 	// report them, or Active being false (null).
 	Connections []ConnectionInfo `json:"connections"`
+	// Agents is null when that LR predates the "agents & models" section
+	// (or isn't connected).
+	Agents *AgentsState `json:"agents"`
 }
 
 // LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
@@ -907,7 +935,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	if system != nil {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{
-			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections,
+			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections, Agents: system.Agents,
 		})
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1338,6 +1366,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				payload.HostID != "" && payload.Provider != "" &&
 				!strings.ContainsAny(payload.Provider, " \t\r\n") && s.reprServer != nil {
 				s.reprServer.SendCommand(payload.HostID, "__system:disconnect "+payload.Provider)
+			}
+		case "lr-inspect-agents":
+			// The "agents & models" section's "re-inspect" control
+			// (Step1SubstepEPrompt.md Revision B).
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:inspect-agents")
 			}
 		case "lr-set-auto-update":
 			var payload struct {
@@ -1799,7 +1836,7 @@ func main() {
 				hs.system = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-system-state", LRSystemStateMsg{
-					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections,
+					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections, Agents: payload.Agents,
 				})
 			}
 		case "repo-state":

@@ -1628,6 +1628,12 @@ body {
 .sys-provider-connect { display: flex; align-items: center; gap: 6px; }
 .sys-provider-connect .sys-branch-select { flex: 0 0 auto; }
 .sys-provider-token { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 6px; }
+/* "agents & models" (Step1SubstepEPrompt.md Revision B) reuses the providers styles. */
+.sys-agents-checked { font-size: 11px; color: #555; }
+.sys-agent-tag { font-size: 10px; font-weight: 400; color: #888; border: 1px solid #3c3c3c; border-radius: 3px; padding: 0 4px; }
+.sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
+.sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
 
 /* ---- Main pane with optional right-hand detail pane (files tab) ---- */
 

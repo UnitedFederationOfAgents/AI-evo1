@@ -108,10 +108,33 @@ export interface ConnectionInfo {
   detail?: string    // why the last check failed
 }
 
+// AgentInfo is one agent in the "agents & models" section, as
+// ambiguous-agent --inspect reports it (see local-representative/agents.go).
+export interface AgentInfo {
+  name: string
+  command: string
+  installed: boolean
+  path?: string
+  version?: string
+  model_selection: boolean
+  default_model?: string
+  models?: string[]
+  detail?: string // why listing its models failed
+}
+
+export interface AgentsState {
+  status: string // "checking" | "ok" | "failed"
+  detail?: string
+  default_agent?: string
+  agents: AgentInfo[]
+  checked_at?: number
+}
+
 export interface SystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
   connections?: ConnectionInfo[]
+  agents?: AgentsState
 }
 
 // ModeMismatchMsg discloses that a connected peer's dev-mode status differs

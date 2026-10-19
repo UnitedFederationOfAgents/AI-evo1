@@ -182,6 +182,33 @@ export interface LRSystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
   connections?: ConnectionInfo[] | null // null/absent for an older LR -- see ConnectionInfo
+  agents?: AgentsState | null // null/absent for an older LR -- see AgentsState
+}
+
+// AgentInfo is one agent in the per-host "agents & models" section, as that
+// host's ambiguous-agent --inspect reports it (see
+// local-representative/agents.go).
+export interface AgentInfo {
+  name: string
+  command: string
+  installed: boolean
+  path?: string
+  version?: string
+  model_selection: boolean
+  default_model?: string
+  models?: string[]
+  detail?: string // why listing its models failed
+}
+
+// AgentsState is which AI agents (and models) a host can run. status is
+// "checking" until LR's first inspection finishes, then "ok", or "failed"
+// (with detail) when its ambiguous-agent couldn't be found or run.
+export interface AgentsState {
+  status: string
+  detail?: string
+  default_agent?: string
+  agents: AgentInfo[]
+  checked_at?: number
 }
 
 // LRRepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,

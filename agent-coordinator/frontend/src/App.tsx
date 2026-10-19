@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, useContext, createCo
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
@@ -206,6 +206,12 @@ function useCoordinatorWS() {
   }, [])
   const sendLRDisconnectProvider = useCallback((hostId: string, provider: string) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-disconnect-provider', payload: { host_id: hostId, provider } }))
+  }, [])
+
+  // The per-host "agents & models" section's "re-inspect" control
+  // (Step1SubstepEPrompt.md Revision B).
+  const sendLRInspectAgents = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-inspect-agents', payload: { host_id: hostId } }))
   }, [])
 
   // Toggles whether the given host's LR restarts itself the instant an
@@ -1888,9 +1894,96 @@ function ProvidersPanel({ connections, onConnect, onDisconnect }: {
   )
 }
 
+// AgentsPanel is the per-host system tab's "agents & models" section, below
+// "providers" (Step1SubstepEPrompt.md Revision B): the AI agents that host
+// can run and their models, as its ambiguous-agent layer reports them
+// (ambiguous-agent --inspect, run by its LR -- see
+// local-representative/agents.go). Installed agents get a card each; the
+// rest are listed on one line. Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
+function AgentsPanel({ agents, nowSec, onInspect }: {
+  agents?: AgentsState | null
+  nowSec: number
+  onInspect: () => void
+}) {
+  const installed = agents?.agents.filter(a => a.installed) ?? []
+  const missing = agents?.agents.filter(a => !a.installed) ?? []
+  const checking = agents?.status === 'checking'
+  return (
+    <div className="sys-providers sys-agents">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">agents &amp; models</span>
+        {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+        {agents != null && (
+          <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+            title="ask this host's ambiguous-agent again which agents and models it has">
+            {checking ? 'inspecting…' : 're-inspect'}
+          </button>
+        )}
+      </div>
+      {agents?.status === 'failed' && (
+        <div className="sys-provider-row">
+          <span className="sys-provider-label">error</span>
+          <span className="sys-provider-value sys-provider-error">{agents.detail || 'inspection failed'}</span>
+        </div>
+      )}
+      {agents == null ? (
+        <div className="sys-providers-none">this host's LR doesn't report agents</div>
+      ) : installed.length === 0 && agents.status !== 'checking' ? (
+        <div className="sys-providers-none">no agents available</div>
+      ) : installed.map(a => (
+        <div key={a.name} className={`sys-provider ${a.detail ? 'sys-provider-failed' : ''}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-name">{a.name}</span>
+            {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
+            <span className="sys-provider-status sys-provider-status-ok">available</span>
+          </div>
+          {a.version && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">version</span>
+              <span className="sys-provider-value">{a.version}</span>
+            </div>
+          )}
+          {a.path && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">path</span>
+              <span className="sys-provider-value">{a.path}</span>
+            </div>
+          )}
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">models</span>
+            {a.models && a.models.length > 0 ? (
+              <span className="sys-agent-models">
+                {a.models.map(m => (
+                  <span key={m} className="sys-agent-model">{m}{m === a.default_model ? ' (default)' : ''}</span>
+                ))}
+              </span>
+            ) : (
+              <span className="sys-provider-value">
+                <span className="sys-provider-placeholder">
+                  {a.model_selection ? 'none listed' : 'no model selection (uses its built-in default)'}
+                </span>
+              </span>
+            )}
+          </div>
+          {a.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{a.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="sys-agents-missing">not installed: {missing.map(a => a.name).join(', ')}</div>
+      )}
+    </div>
+  )
+}
+
 function SystemPanel({
   hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch, onSetAutoUpdate,
-  onConnectProvider, onDisconnectProvider, onOpenTab,
+  onConnectProvider, onDisconnectProvider, onInspectAgents, onOpenTab,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -1908,6 +2001,7 @@ function SystemPanel({
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
   onConnectProvider: (hostId: string, provider: string, token: string) => void
   onDisconnectProvider: (hostId: string, provider: string) => void
+  onInspectAgents: (hostId: string) => void
   onOpenTab: (tab: LRTab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
@@ -2019,6 +2113,7 @@ function SystemPanel({
         onConnect={(provider, token) => onConnectProvider(hostId, provider, token)}
         onDisconnect={provider => onDisconnectProvider(hostId, provider)}
       />
+      <AgentsPanel agents={state.agents} nowSec={nowSec} onInspect={() => onInspectAgents(hostId)} />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -4242,6 +4337,7 @@ function LRView({
                     onSetAutoUpdate={sendLRSetAutoUpdate}
                     onConnectProvider={sendLRConnectProvider}
                     onDisconnectProvider={sendLRDisconnectProvider}
+                    onInspectAgents={sendLRInspectAgents}
                     onOpenTab={setActiveTab}
                   />
                 )

@@ -308,6 +308,25 @@ func (w *repoWatch) isDirty() (bool, error) {
 	return diff != "", nil
 }
 
+// rebaseInProgress reports whether a rebase is stopped partway in the repo
+// (git keeps its state in rebase-merge/ or rebase-apply/ until it finishes
+// or is aborted). HEAD is detached for as long as it is.
+func (w *repoWatch) rebaseInProgress() bool {
+	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
+		p, err := w.runGit("rev-parse", "--git-path", dir)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(w.root, p)
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // pollAndMaybePull re-derives dirty/head from the repo, pulling a clean
 // repo's upstream forward first if it has moved ahead. Callers must hold
 // opMu. Returns true if the reported snapshot changed.
@@ -318,7 +337,16 @@ func (w *repoWatch) pollAndMaybePull() bool {
 		return false
 	}
 
-	if !dirty {
+	if !dirty && w.condocLockPresent() {
+		// condoccer commits its lock/step commits straight onto this branch
+		// while '.condoc' is present; rebasing underneath it races those
+		// commits, and replaying a local lock commit over a remote one is the
+		// conflict that left the dev branch detached (Step1SubstepEPrompt.md
+		// Revision G). Pull once the condoc is idle again.
+	} else if !dirty && w.rebaseInProgress() {
+		// Someone else's rebase is stopped here; leave it for them.
+		log.Printf("dev-repo: a rebase is in progress, not pulling")
+	} else if !dirty {
 		// Only a clean repo checks for and pulls in remote changes --
 		// rebasing over uncommitted work is exactly the conflict this avoids.
 		if _, err := w.runGit("fetch"); err != nil {
@@ -328,6 +356,16 @@ func (w *repoWatch) pollAndMaybePull() bool {
 				log.Printf("dev-repo: upstream is %d commit(s) ahead of HEAD, pulling --rebase", n)
 				if out, err := w.runGit("pull", "--rebase"); err != nil {
 					log.Printf("dev-repo: git pull --rebase failed: %v (%s)", err, out)
+					// A conflicting rebase stops with HEAD detached partway
+					// through; put the branch back where it was rather than
+					// leaving the dev repo stranded off its branch.
+					if w.rebaseInProgress() {
+						if out, err := w.runGit("rebase", "--abort"); err != nil {
+							log.Printf("dev-repo: git rebase --abort failed: %v (%s)", err, out)
+						} else {
+							log.Printf("dev-repo: aborted the failed rebase; branch left as it was")
+						}
+					}
 				}
 			}
 		}

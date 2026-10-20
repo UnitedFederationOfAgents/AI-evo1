@@ -191,3 +191,31 @@ We have also had a bug occur where the 'dev-branch' has become detached from our
 We'll take a look and correct any such bugs that are obviously visible.
 
 Any bugs which are less obvious we will respond about instead and explain how we can better isolate them instead.
+
+
+prompt: [`1c8fdf3`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1c8fdf3196e99e863f9b677d015841bc59e5cc96) → reply: [`1c8c1b0`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1c8c1b0be74d4443d21e004e4c6def3553304008)
+
+## Reply G
+
+I found one clear bug that can detach the dev branch and fixed it in `local-representative/repowatch.go`. None of it has been built or run, because `go test` needed approval that wasn't given, and the changes are uncommitted.
+
+- **The bug:** LR checks the dev repo regularly and runs `git pull --rebase` when it's clean and the remote branch is ahead. If that rebase hits a conflict, git stops partway with HEAD detached. LR only logged the failure and left the repo stuck that way. It's especially likely on laptop01: while a condoc runs there, condoccer commits a tracked `.condoc` lock file straight onto the dev branch. So when another host pushes to the same branch, LR's rebase replays those local commits over the remote ones.
+- **The fix:** after a failed pull, LR now runs `git rebase --abort`, which puts the branch back where it was. It also doesn't pull while `.condoc` is present, or while someone else's rebase is already stopped in the repo.
+- **Tests:** `TestRepoWatchPullConflictKeepsBranch` and `TestRepoWatchNoPullWhileCondocLocked`, in `repowatch_test.go`, cover the conflict case and the lock case.
+
+How to confirm the cause on laptop01:
+- **Check the reflog:** `git reflog -20` in the dev repo shows what moved HEAD. A `rebase (start)` entry points to this bug; a `checkout: moving from … to <sha>` entry means some other command did it.
+- **Check LR's log:** look for `git pull --rebase failed` at about the time it happened.
+- **Rule out a nested slopspace folder:** dungeon-keeper runs `git -C <dir>` on slopspace folders that have no `.git` of their own. If git finds no repo in a folder, it uses the nearest repo above it. So if `SLOPSPACES_DIR` or `AGENT_SLOPSPACE_ROOT` on laptop01 is inside the dev repo, slopspace commands would act on the dev repo itself. The defaults are under `/host-agent-files` and `/agent`, so this only matters if they've been changed.
+
+If the reflog doesn't show a rebase, the next step would be to have LR log every change to HEAD or the branch along with the previous value. That would catch the culprit the next time it happens.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

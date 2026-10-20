@@ -134,6 +134,75 @@ func TestRepoWatchPollAndMaybePull(t *testing.T) {
 	}
 }
 
+// cloneTestRepo clones origin into a new temp dir, returning it.
+func cloneTestRepo(t *testing.T, origin string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "clone")
+	if out, err := exec.Command("git", "clone", "-q", origin, dir).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v (%s)", err, out)
+	}
+	return dir
+}
+
+// TestRepoWatchPullConflictKeepsBranch verifies a pull --rebase that
+// conflicts is aborted, leaving the dev repo on its branch rather than
+// detached partway through the rebase (Step1SubstepEPrompt.md Revision G).
+func TestRepoWatchPullConflictKeepsBranch(t *testing.T) {
+	origin := initTestRepo(t, "true")
+	dir := cloneTestRepo(t, origin)
+	rw := newRepoWatch(dir, func() {})
+
+	commitChange(t, origin, "upstream\n")
+	commitChange(t, dir, "local\n")
+	localHead, err := rw.headSHA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rw.pollAndMaybePull()
+	snap := rw.snapshot()
+	if snap.Branch == "" {
+		t.Errorf("expected the dev repo to stay on its branch after a conflicting pull, got a detached HEAD")
+	}
+	if rw.rebaseInProgress() {
+		t.Errorf("expected the failed rebase to be aborted")
+	}
+	if snap.Head != localHead {
+		t.Errorf("expected HEAD back at the local commit %s, got %s", localHead, snap.Head)
+	}
+}
+
+// TestRepoWatchNoPullWhileCondocLocked verifies a clean repo isn't pulled
+// while a condoc holds its '.condoc' lock -- condoccer is committing onto
+// the branch then.
+func TestRepoWatchNoPullWhileCondocLocked(t *testing.T) {
+	origin := initTestRepo(t, "true")
+	dir := cloneTestRepo(t, origin)
+	rw := newRepoWatch(dir, func() {})
+	before, err := rw.headSHA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commitChange(t, origin, "upstream\n")
+	lock := filepath.Join(dir, ".condoc")
+	if err := os.WriteFile(lock, []byte("locked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Head; got != before {
+		t.Errorf("expected no pull while .condoc is present: HEAD moved %s -> %s", before, got)
+	}
+
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Head; got == before {
+		t.Errorf("expected the pull to go ahead once .condoc is gone")
+	}
+}
+
 // TestRepoWatchRebuildSuccessClearsRebuildReady verifies a successful
 // 'make deploy-dev-binaries' run records the built HEAD, clears
 // rebuild_ready (a clean repo has nothing left to rebuild), and notifies --

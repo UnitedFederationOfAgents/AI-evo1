@@ -249,11 +249,8 @@ prompt: [`25c2552`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/2
 I've wired Add Resources into slopspace condocs; nothing has been built or tested. `go build` needed approval that wasn't given, so I've only checked the changes by reading them, and all three sources (Highlighted, Upload/select from host, Voice Note) go through the same code as same-repo. Resources always go into the condoc repo's Impls folder inside the slopspace, never into a target repo, and they're committed with the next prompt commit, as in same-repo. In `condoccer/resources.go` the resource code now takes the condoc's root rather than assuming the working dir. Uploads and the `/api/resource/` file links now also work for slopspace condocs, adding a resource is refused while a turn is in flight, and `main.go` no longer rejects it. I updated the affected tests and the "Resources" entry in `docs/SlopspaceControlScheme.md`; the frontend already sends the right condoc path, so it didn't change, and everything is uncommitted.
 
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
+Now - probably at the end of substep E - we have introduced a bug where the networked LR instances watching the dev repo are not keeping up.
 
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+They do not want to pull changes to sync with the latest updates on provisioner01. Let's fix this and reply with what we need to do to manually catch up (probably just a 'git pull').

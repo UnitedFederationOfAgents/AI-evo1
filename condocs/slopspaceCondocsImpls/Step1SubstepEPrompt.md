@@ -172,11 +172,6 @@ The agent tiles on AC's topology cards now show a small image for each agent, dr
 
 I haven't run the type-check: it needed approval that wasn't given, so I've only checked the change by reading it. The changes are uncommitted, in `agent-coordinator/frontend/src/App.tsx` (a new `AgentIcon` next to `ProviderIcon`) and `agent-coordinator/frontend/src/index.css`.
 
-## <REPLACE-Revision|Retry> F
+## Revision F
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's switch the 'show-dev' toggle to be the more attractive green palette.

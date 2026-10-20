@@ -175,3 +175,20 @@ I haven't run the type-check: it needed approval that wasn't given, so I've only
 ## Revision F
 
 Let's switch the 'show-dev' toggle to be the more attractive green palette.
+
+
+prompt: [`1d82374`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1d8237431df8ba4a37fa4164cf23c2cba50b65b9) → reply: [`482a84c`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/482a84c82982dc8283587e4aa31eb0a40f02b733)
+
+## Reply F
+
+The "show-dev" toggle in AC's and LR's "agents & models" section now uses the same green as the "rebuild" button: dark green background, green border and green text, with a green checkbox. It gets brighter on hover and while it's switched on. The change is CSS only, in both apps' `frontend/src/index.css`. I haven't built it or looked at it in the UI, and it's uncommitted. The "brighter while on" style relies on a newer CSS feature (`:has`), so very old browsers will show the plain green whether it's on or off.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

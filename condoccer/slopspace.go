@@ -188,12 +188,24 @@ func (s *Server) pointerReadyPath() (PointerConfig, string, error) {
 	return st.PointerConfig, st.ResolvedPath, nil
 }
 
+// readSpec reads a pointer file under the pointer op: mid-pull the checkout
+// is detached for the rebase (so it reads as not ready) and the autostash
+// hides uncommitted turn-stage writes, and a read in that window used to
+// fail -- dropping the error setSpecError was recording -- or see a stale
+// spec.
 func (s *Server) readSpec(stem string) (PointerSpec, error) {
-	_, path, err := s.pointerReadyPath()
-	if err != nil {
-		return PointerSpec{}, err
+	if st := s.pointerRepoStatus(); st.State == "missing" || st.State == "cloning" {
+		return PointerSpec{}, fmt.Errorf("the pointer repo is %s", st.State)
 	}
-	b, err := os.ReadFile(pointerSpecPath(path, stem))
+	s.acquirePointerOp()
+	b, err := func() ([]byte, error) {
+		defer s.endPointerOp()
+		_, path, err := s.pointerReadyPath()
+		if err != nil {
+			return nil, err
+		}
+		return os.ReadFile(pointerSpecPath(path, stem))
+	}()
 	if err != nil {
 		return PointerSpec{}, err
 	}
@@ -762,8 +774,14 @@ type pointerFileSpec struct {
 	spec PointerSpec
 }
 
-// readHeldSpecs lists the specs this condoccer holds.
+// readHeldSpecs lists the specs this condoccer holds, read under the pointer
+// op for the same reason as readSpec.
 func (s *Server) readHeldSpecs() []pointerFileSpec {
+	if st := s.pointerRepoStatus(); st.State == "missing" || st.State == "cloning" {
+		return nil
+	}
+	s.acquirePointerOp()
+	defer s.endPointerOp()
 	_, path, err := s.pointerReadyPath()
 	if err != nil {
 		return nil
@@ -934,7 +952,7 @@ func (s *Server) driveSpec(stem string, spec *PointerSpec) error {
 			return s.slopStartRevision(spec, meta, active, content, info)
 		}
 		if info.Phase == PhaseAgentRunning {
-			return nil // no directive and no turn: nothing to mirror
+			return s.slopRecoverTurn(stem, info, content)
 		}
 
 	case PhaseCompleted:
@@ -951,6 +969,48 @@ func (s *Server) driveSpec(stem string, spec *PointerSpec) error {
 	}
 
 	return s.syncSpecState(spec, info, root)
+}
+
+// slopRecoverTurn picks back up a turn whose directive was consumed but
+// which never made it onto the pointer -- the start* handlers strip the
+// Human-Prompt and directive, then commit the condoc repo, then queue the
+// turn, so a failed commit or push in between left the active file reading
+// agent_running with no directive and no turn, and nothing ever ran it. The
+// pending turn is read back from the file: a Revision with no Reply, or a
+// step/substep with no Reply at all. The caller holds the claim.
+func (s *Server) slopRecoverTurn(stem string, info CondocInfo, content string) error {
+	// The caller's spec was read before the claim; only a fresh read can
+	// rule out a turn the queue has just recorded.
+	spec, err := s.readHeldSpec(stem)
+	if err != nil {
+		return err
+	}
+	if spec.Turn != nil || spec.Error != "" {
+		return nil
+	}
+	turn := &PointerTurn{Stage: stageQueued}
+	var msg string
+	switch letter := pendingRevisionLetter(content); {
+	case letter != "" && info.SubstepFile != "":
+		turn.Kind, turn.Letter = turnSubstepRevision, letter
+		msg = fmt.Sprintf("condoc: step %d substep %s revision %s prompt", info.StepNum, info.SubstepLetter, letter)
+	case letter != "":
+		turn.Kind, turn.Letter = turnRevision, letter
+		msg = fmt.Sprintf("condoc: step %d revision %s prompt", info.StepNum, letter)
+	case cfReplyHeadingRe.MatchString(content):
+		return fmt.Errorf("step %d reads as running but has no turn and nothing pending to run -- add a Revision with the !HANDOFF! directive to continue", info.StepNum)
+	case info.SubstepFile != "":
+		turn.Kind = turnSubstep
+		msg = fmt.Sprintf("condoc: step %d substep %s started", info.StepNum, info.SubstepLetter)
+	default:
+		turn.Kind = turnStep
+		msg = fmt.Sprintf("condoc: step %d started", info.StepNum)
+	}
+	log.Printf("slopspace %s: recovering a stranded %s turn", stem, turn.Kind)
+	if err := s.commitCondocRepo(&spec, msg); err != nil {
+		return err
+	}
+	return s.queueTurn(&spec, turn, info.StepNum, info.SubstepLetter)
 }
 
 // syncSpecState mirrors the condoc files' phase and position into the

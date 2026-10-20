@@ -286,3 +286,31 @@ The slopsspace condocs are partially working, but we have an issue where they ha
 Let's see the 'Off The Rails' resource for context.
 
 Let's either fix this issue on the spot if it is simple, or instead begin a path to implement better feedback if it is not straightforward enough.
+
+
+prompt: [`edff93f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/edff93ff36a1aa1ab9b86ab23513fe290f5e65b9) → reply: [`ad6f41f`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/ad6f41fdc302a066382d128d45e6aa2048d445f6)
+
+## Reply G
+
+I've put in a fix for the off-the-rails condoc, but nothing has been built or run: `go vet` and `go test` both needed approval that wasn't given, so I've only checked the change by reading it. Changes are uncommitted.
+
+**Cause:** the screenshot shows Revision A with no reply, the step reading RUNNING, and the pointer at "awaiting action" with no error and nothing queued. That combination happens when a turn starts but never gets recorded:
+- **The turn gets lost:** starting a revision first strips the Human-Prompt section and `!HANDOFF!` from the step file, then commits and pushes the condoc repo, and only then records the turn on the pointer. If the commit or push fails in between, the step file reads as running but no turn exists. The driver treated that as "nothing to do", and Resubmit only clears a recorded error, so nothing could restart it.
+- **The error gets lost too:** the pointer repo is pulled with a rebase every 15 seconds, and during that pull it briefly looks invalid. Pointer reads didn't wait for the pull, so an error recorded in that window was dropped. That's why the panel showed no error at all.
+
+**Fix, in `condoccer/slopspace.go`:**
+- **Self-recovery:** when a condoc reads as running but has no turn, the driver now works out what was pending from the file and queues it again. That is either a Revision with no reply yet, or a step or substep with no reply at all. It re-reads the pointer first so it can't queue a turn twice. If nothing is pending it records an error you can see, instead of sitting there silently.
+- **Pointer reads wait for pulls:** reads now wait for any pull or push on the pointer repo to finish, so errors are no longer dropped. This also stops a read from seeing an out-of-date copy of a turn that's in progress, which could otherwise have sent the same turn to the agent twice.
+- **Small helper:** I added one pattern in `condoccer/condocfiles.go` to spot a reply heading.
+
+The stuck ImplementPhase2Iteration2 Revision A should be picked up and queued automatically within a couple of seconds once this build is deployed. You don't need to edit anything by hand.
+
+
+## <REPLACE-Revision|Retry> H
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

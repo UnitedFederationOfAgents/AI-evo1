@@ -24,6 +24,7 @@ var (
 	cfPromptBlockRe      = regexp.MustCompile("(?s)```prompt\n(.*?)\n```")
 	cfRevisionHeadingRe  = regexp.MustCompile(`(?m)^## Revision ([A-Z])$`)
 	cfReplyLetterRe      = regexp.MustCompile(`(?m)^## Reply ([A-Z])$`)
+	cfReplyHeadingRe     = regexp.MustCompile(`(?m)^## Reply(?: [A-Z])?$`)
 	cfRetryHeadingRe     = regexp.MustCompile(`(?m)^## Retry ([A-Z])(?:\s+\(from\s+(start|[A-Z])\))?$`)
 	cfRevertDirectiveRe  = regexp.MustCompile(`(?m)^!REVERT-(\d+)(?:-([A-Z])(?:-([A-Z]))?)?!\s*$`)
 	cfNextH2Re           = regexp.MustCompile(`(?m)^## `)

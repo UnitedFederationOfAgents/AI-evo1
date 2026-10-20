@@ -235,11 +235,8 @@ Retry, revert, resources and the git diff views are not available for slopspace 
 [Step 1 Substep E](Step1SubstepEPrompt.md)
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
+Let's now extend the slopspace condoc functionality to include the ability to add resources.
 
-
-## Human-Prompt
-
-Add the '!HANDOFF!' or '!COMPLETED!' directive.
+We will always have it so that these resources go into the condoc repo, rather than the target repos. (If the agent needs to transpose them for some reason it will be able to by virtue of having access to both repos within the slopspace)

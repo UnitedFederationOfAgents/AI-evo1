@@ -159,11 +159,6 @@ Decision for you:
 The backend changes are in `local-representative/agents.go`, `repowatch.go`, `connectivity.go` and `procman.go`, plus a comment in `agent-coordinator/main.go`. The frontend changes are in both apps' `App.tsx`, `types.ts` and `index.css`. AC's agents panel was using style classes its stylesheet didn't define, so I added them. A new test, `TestConnectedAgentToken` in `local-representative/agents_test.go`, covers connect, disconnect, the environment fallback and what launched apps receive, but hasn't been run.
 
 
-## <REPLACE-Revision|Retry> E
+## Revision E
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+For the tiles we need to make sure they show image icons similar to the provider tiles.

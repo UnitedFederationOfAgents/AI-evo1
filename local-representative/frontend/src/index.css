@@ -1634,6 +1634,9 @@ body {
 .sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
 .sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
 .sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
+/* Revision D: "show-dev" toggle + "connect" beside "re-inspect". */
+.sys-agents-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.sys-agents-showdev { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #888; cursor: pointer; }
 
 /* ---- Main pane with optional right-hand detail pane (files tab) ---- */
 

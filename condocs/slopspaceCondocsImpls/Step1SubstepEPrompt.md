@@ -141,3 +141,29 @@ Let's add a quick touch where if a host has a build error their row shows a smal
 In the host icons let's also add tiles for the agents (but not 'clod' - we'll hide 'clod' behind a 'show-dev' toggle that applies only to the per-host view. We will never see clod in the tiles)
 
 In our new 'Agents & Models' section we need an input for 'connect' as well, where we are able to authenticate claude through an oauth environment variable. (CLAUDE_CODE_OAUTH_TOKEN) This will make the agent functional by passing the authentication to launched sub-apps through the environment.
+
+
+prompt: [`363d7d6`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/363d7d6f25552f2c3a47ac9a1bb9597a2d8044b1) → reply: [`a9ed73b`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/a9ed73b5a2c13de687a5611c85f98f4ec5d2ca59)
+
+## Reply D
+
+I made all three Revision D changes, but none of it has been built or run: `go test`, `tsc` and `git diff` all needed approval that wasn't given, so I've only checked it by reading. The changes are uncommitted.
+
+- **Build-failure dot:** LR now reports a `build_failed` flag that is set when a rebuild fails and cleared only when a later rebuild succeeds. AC shows it as a small red dot on the host's sidebar row and next to the label on its topology card. The existing `last_error` behaves as before.
+- **Agent tiles:** each installed agent gets a small tile on its host's topology card. `clod` never gets a tile, and an agent with a Claude token shows with a blue border. In the per-host "agents & models" section (AC and LR), `clod` is hidden behind a "show-dev" checkbox, which is off by default.
+- **Claude connect:** "agents & models" now has a "connect" button that takes a `CLAUDE_CODE_OAUTH_TOKEN`. It goes through the same connect/disconnect commands as the GitHub PAT, so AC's backend logic is unchanged. LR keeps the token in memory only, never on disk. Every app LR launches afterwards gets it as `CLAUDE_CODE_OAUTH_TOKEN`; apps already running keep their old environment until restarted. The Claude card shows where its credential comes from and has a "disconnect" button.
+
+Decision for you:
+- **The token isn't checked:** LR doesn't verify it the way it does the GitHub PAT, so a bad token only shows up when a launched app tries to use Claude.
+
+The backend changes are in `local-representative/agents.go`, `repowatch.go`, `connectivity.go` and `procman.go`, plus a comment in `agent-coordinator/main.go`. The frontend changes are in both apps' `App.tsx`, `types.ts` and `index.css`. AC's agents panel was using style classes its stylesheet didn't define, so I added them. A new test, `TestConnectedAgentToken` in `local-representative/agents_test.go`, covers connect, disconnect, the environment fallback and what launched apps receive, but hasn't been run.
+
+
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

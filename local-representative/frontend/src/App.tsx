@@ -1300,7 +1300,13 @@ function SystemPanel({
         })}
       </div>
       <ProvidersPanel connections={state.connections} onConnect={onConnectProvider} onDisconnect={onDisconnectProvider} />
-      <AgentsPanel agents={state.agents} nowSec={nowSec} onInspect={onInspectAgents} />
+      <AgentsPanel
+        agents={state.agents}
+        nowSec={nowSec}
+        onInspect={onInspectAgents}
+        onConnect={onConnectProvider}
+        onDisconnect={onDisconnectProvider}
+      />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -1309,7 +1315,7 @@ function SystemPanel({
 /* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) --
    mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
 
-const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub' }
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub', claude: 'Claude' }
 
 function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider
@@ -1342,21 +1348,35 @@ function ProviderIcon({ provider }: { provider: string }) {
 // CONNECTABLE_PROVIDERS are the providers the "connect" control offers
 // (Step1SubstepEPrompt.md) -- connectivity.go's connectableProviders, with
 // how each is connected.
-const CONNECTABLE_PROVIDERS: { provider: string, method: string, placeholder: string }[] = [
+interface ConnectOption { provider: string, method: string, placeholder: string }
+
+const CONNECTABLE_PROVIDERS: ConnectOption[] = [
   { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
 ]
 
-// ProviderConnectForm is the "connect" control: a provider picker and a
-// masked credential field. Whitespace is rejected to match
+// CONNECTABLE_AGENTS are the agents the "agents & models" section's
+// "connect" offers (Revision D) -- agents.go's agentAuthEnv. They travel as
+// a provider named after the agent.
+const CONNECTABLE_AGENTS: ConnectOption[] = [
+  { provider: 'claude', method: 'OAuth token', placeholder: 'CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)' },
+]
+
+// DEV_AGENTS are ambiguous-agent's test agents, hidden in "agents & models"
+// unless its "show-dev" toggle is on.
+const DEV_AGENTS: ReadonlySet<string> = new Set(['clod'])
+
+// ProviderConnectForm is the "connect" control: a provider (or agent)
+// picker and a masked credential field. Whitespace is rejected to match
 // agent-coordinator's copy, where the credential travels as one word of a
 // "__system:connect" command.
-function ProviderConnectForm({ onConnect, onCancel }: {
+function ProviderConnectForm({ options = CONNECTABLE_PROVIDERS, onConnect, onCancel }: {
+  options?: ConnectOption[]
   onConnect: (provider: string, token: string) => void
   onCancel: () => void
 }) {
-  const [provider, setProvider] = useState(CONNECTABLE_PROVIDERS[0].provider)
+  const [provider, setProvider] = useState(options[0].provider)
   const [token, setToken] = useState('')
-  const spec = CONNECTABLE_PROVIDERS.find(p => p.provider === provider) ?? CONNECTABLE_PROVIDERS[0]
+  const spec = options.find(p => p.provider === provider) ?? options[0]
   const trimmed = token.trim()
   const invalid = trimmed === '' || /\s/.test(trimmed)
   const submit = () => {
@@ -1367,7 +1387,7 @@ function ProviderConnectForm({ onConnect, onCancel }: {
   return (
     <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
       <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
-        {CONNECTABLE_PROVIDERS.map(p => (
+        {options.map(p => (
           <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
         ))}
       </select>
@@ -1465,24 +1485,56 @@ function ProvidersPanel({ connections, onConnect, onDisconnect }: {
 // ambiguous-agent layer reports them (ambiguous-agent --inspect, run by LR
 // -- see local-representative/agents.go). Installed agents get a card each;
 // the rest are listed on one line.
-function AgentsPanel({ agents, nowSec, onInspect }: {
+//
+// Revision D adds a "connect" control for CONNECTABLE_AGENTS (Claude's
+// CLAUDE_CODE_OAUTH_TOKEN, which LR passes to every app it launches
+// afterwards) and a "show-dev" toggle, off by default, that the DEV_AGENTS
+// (clod) are hidden behind.
+function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
   agents?: AgentsState
   nowSec: number
   onInspect: () => void
+  onConnect: (agent: string, token: string) => void
+  onDisconnect: (agent: string) => void
 }) {
-  const installed = agents?.agents.filter(a => a.installed) ?? []
-  const missing = agents?.agents.filter(a => !a.installed) ?? []
+  const [connecting, setConnecting] = useState(false)
+  const [showDev, setShowDev] = useState(false)
+  const hasDev = agents?.agents.some(a => DEV_AGENTS.has(a.name)) ?? false
+  const shown = agents?.agents.filter(a => showDev || !DEV_AGENTS.has(a.name)) ?? []
+  const installed = shown.filter(a => a.installed)
+  const missing = shown.filter(a => !a.installed)
   const checking = !agents || agents.status === 'checking'
   return (
     <div className="sys-providers sys-agents">
       <div className="sys-providers-heading">
         <span className="sys-providers-header">agents &amp; models</span>
         {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
-        <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
-          title="ask ambiguous-agent again which agents and models this host has">
-          {checking ? 'inspecting…' : 're-inspect'}
-        </button>
+        <span className="sys-agents-controls">
+          {hasDev && (
+            <label className="sys-agents-showdev" title="also list ambiguous-agent's test agents (clod)">
+              <input type="checkbox" checked={showDev} onChange={e => setShowDev(e.target.checked)} />
+              show-dev
+            </label>
+          )}
+          {!connecting && (
+            <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+              title="give an agent on this host credentials (Claude OAuth token)">
+              connect
+            </button>
+          )}
+          <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+            title="ask ambiguous-agent again which agents and models this host has">
+            {checking ? 'inspecting…' : 're-inspect'}
+          </button>
+        </span>
       </div>
+      {connecting && (
+        <ProviderConnectForm
+          options={CONNECTABLE_AGENTS}
+          onConnect={(agent, token) => { onConnect(agent, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
       {agents?.status === 'failed' && (
         <div className="sys-provider-row">
           <span className="sys-provider-label">error</span>
@@ -1499,7 +1551,23 @@ function AgentsPanel({ agents, nowSec, onInspect }: {
             <span className="sys-provider-name">{a.name}</span>
             {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
             <span className="sys-provider-status sys-provider-status-ok">available</span>
+            {a.auth === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(a.name)}
+                title="forget the connected credential (falls back to any in LR's environment)">
+                disconnect
+              </button>
+            )}
           </div>
+          {CONNECTABLE_AGENTS.some(c => c.provider === a.name) && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">auth</span>
+              <span className="sys-provider-value">
+                {a.auth === 'connected' ? 'connected — passed to apps launched from now on'
+                  : a.auth ? `${a.auth} (LR's environment)`
+                  : <span className="sys-provider-placeholder">none passed — relies on the agent's own login, if any</span>}
+              </span>
+            </div>
+          )}
           {a.version && (
             <div className="sys-provider-row">
               <span className="sys-provider-label">version</span>

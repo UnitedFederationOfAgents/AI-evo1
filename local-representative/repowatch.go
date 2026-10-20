@@ -75,6 +75,12 @@ type RepoStateMsg struct {
 	Head      string `json:"head,omitempty"`
 	LastError string `json:"last_error,omitempty"` // most recent rebuild failure, if any
 
+	// BuildFailed is true from a failed rebuild until the next successful
+	// one -- unlike LastError, which a new rebuild clears as it starts -- so
+	// agent-coordinator's host row and topology card can keep a small red
+	// dot up meanwhile (Step1SubstepEPrompt.md Revision D).
+	BuildFailed bool `json:"build_failed,omitempty"`
+
 	// Branch is the branch the watched repo currently has checked out --
 	// the "dev branch" this LR is watching (pollAndMaybePull follows its
 	// upstream) -- or "" when HEAD is detached. Branches lists every branch
@@ -112,6 +118,7 @@ type repoWatch struct {
 	head        string
 	builtHead   string // HEAD as of the last successful rebuild (the watcher's starting HEAD before the first one)
 	lastErr     string
+	buildFailed bool     // see RepoStateMsg.BuildFailed
 	branch      string   // see RepoStateMsg.Branch
 	branches    []string // see RepoStateMsg.Branches
 	switchErr   string   // see RepoStateMsg.SwitchError
@@ -206,6 +213,7 @@ func (w *repoWatch) snapshot() RepoStateMsg {
 		AutoRebuild:  w.autoRebuild,
 		Head:         w.head,
 		LastError:    w.lastErr,
+		BuildFailed:  w.buildFailed,
 		CondocLocked: w.condocLockPresent(),
 		Branch:       w.branch,
 		Branches:     slices.Clone(w.branches),
@@ -388,9 +396,11 @@ func (w *repoWatch) rebuild() {
 	w.mu.Lock()
 	if buildErr != nil {
 		w.lastErr = fmt.Sprintf("%v: %s", buildErr, strings.TrimSpace(string(out)))
+		w.buildFailed = true
 		log.Printf("dev-repo: rebuild failed: %s", w.lastErr)
 	} else {
 		log.Printf("dev-repo: rebuild succeeded")
+		w.buildFailed = false
 		if headErr == nil {
 			w.builtHead = head
 		}

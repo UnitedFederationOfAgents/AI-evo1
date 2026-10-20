@@ -138,8 +138,18 @@ func (w *connectivityWatch) disconnect(provider string) error {
 // connectProvider handles the providers section's "connect" control -- the
 // system tab's WebSocket "connect-provider" or agent-coordinator's
 // "__system:connect <provider> <credential>". Failures are logged (without
-// the credential); success shows up as the provider's connection entry.
+// the credential); success shows up as the provider's connection entry. The
+// "agents & models" section's "connect" (Revision D) goes the same way, with
+// the agent's name as the provider -- see agentsWatch.connect.
 func (s *Server) connectProvider(provider, credential string) {
+	if s.agents.connectable(provider) {
+		if err := s.agents.connect(provider, credential); err != nil {
+			log.Printf("agents: connect %s: %v", provider, err)
+			return
+		}
+		log.Printf("agents: %s credential connected", provider)
+		return
+	}
 	if s.connectivity == nil {
 		return
 	}
@@ -153,6 +163,14 @@ func (s *Server) connectProvider(provider, credential string) {
 // disconnectProvider is connectProvider's "disconnect" counterpart
 // ("disconnect-provider" / "__system:disconnect <provider>").
 func (s *Server) disconnectProvider(provider string) {
+	if s.agents.connectable(provider) {
+		if err := s.agents.disconnect(provider); err != nil {
+			log.Printf("agents: disconnect %s: %v", provider, err)
+			return
+		}
+		log.Printf("agents: %s credential disconnected", provider)
+		return
+	}
 	if s.connectivity == nil {
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -41,7 +42,20 @@ type AgentInfo struct {
 	DefaultModel   string   `json:"default_model,omitempty"`
 	Models         []string `json:"models,omitempty"`
 	Detail         string   `json:"detail,omitempty"`
+
+	// Auth is where the agent's credential comes from, for a connectable
+	// agent (see agentAuthEnv): connectedSource once one is connected, else
+	// the env var's name when LR's own environment sets it, else "".
+	Auth string `json:"auth,omitempty"`
 }
+
+// Connected agents (Step1SubstepEPrompt.md Revision D): the "agents &
+// models" section's "connect" control hands LR an agent credential at
+// runtime -- only Claude, by OAuth token, so far. Like a connected provider
+// (connectivity.go) it's held in memory only and passed to every managed
+// app LR launches afterwards, here as the env var below, so an agent those
+// apps run through ambiguous-agent picks it up. LR doesn't verify it.
+var agentAuthEnv = map[string]string{"claude": "CLAUDE_CODE_OAUTH_TOKEN"}
 
 // AgentsState is SystemStateMsg.Agents. Status reuses the connection
 // statuses: connChecking until the first inspection finishes, then connOK,
@@ -64,8 +78,9 @@ type agentsWatch struct {
 
 	wake chan struct{}
 
-	mu    sync.RWMutex
-	state AgentsState
+	mu     sync.RWMutex
+	state  AgentsState
+	tokens map[string]string // connected agent credentials, by agent name
 }
 
 func newAgentsWatch(notify func(), resolve func() (string, error)) *agentsWatch {
@@ -75,7 +90,66 @@ func newAgentsWatch(notify func(), resolve func() (string, error)) *agentsWatch 
 		inspect: runAgentInspection,
 		wake:    make(chan struct{}, 1),
 		state:   AgentsState{Status: connChecking, Agents: []AgentInfo{}},
+		tokens:  map[string]string{},
 	}
+}
+
+// connectable reports whether the "connect" control accepts agent.
+func (w *agentsWatch) connectable(agent string) bool {
+	_, ok := agentAuthEnv[agent]
+	return w != nil && ok
+}
+
+// connect keeps credential (in memory) as agent's connected credential. The
+// credential itself never appears in the returned error or the log.
+func (w *agentsWatch) connect(agent, credential string) error {
+	if !w.connectable(agent) {
+		return fmt.Errorf("agent %q can't be connected", agent)
+	}
+	tok := strings.TrimSpace(credential)
+	if tok == "" {
+		return fmt.Errorf("%s token is empty", agentAuthEnv[agent])
+	}
+	if strings.ContainsAny(tok, " \t\r\n") {
+		return fmt.Errorf("%s token contains whitespace", agentAuthEnv[agent])
+	}
+	w.mu.Lock()
+	w.tokens[agent] = tok
+	w.mu.Unlock()
+	if w.notify != nil {
+		w.notify()
+	}
+	return nil
+}
+
+// disconnect forgets agent's connected credential, falling back to any in
+// LR's own environment.
+func (w *agentsWatch) disconnect(agent string) error {
+	if !w.connectable(agent) {
+		return fmt.Errorf("agent %q can't be disconnected", agent)
+	}
+	w.mu.Lock()
+	delete(w.tokens, agent)
+	w.mu.Unlock()
+	if w.notify != nil {
+		w.notify()
+	}
+	return nil
+}
+
+// childEnv is the KEY=VALUE entries a managed app gets on top of LR's own
+// environment so its agents use the connected credentials; nil-safe.
+func (w *agentsWatch) childEnv() []string {
+	if w == nil {
+		return nil
+	}
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	var env []string
+	for agent, tok := range w.tokens {
+		env = append(env, agentAuthEnv[agent]+"="+tok)
+	}
+	return env
 }
 
 // runAgentInspection is the default inspect: "<bin> --inspect".
@@ -115,6 +189,16 @@ func (w *agentsWatch) snapshot() AgentsState {
 	defer w.mu.RUnlock()
 	st := w.state
 	st.Agents = append([]AgentInfo{}, w.state.Agents...)
+	for i, a := range st.Agents {
+		env, ok := agentAuthEnv[a.Name]
+		switch {
+		case !ok:
+		case w.tokens[a.Name] != "":
+			st.Agents[i].Auth = connectedSource
+		case os.Getenv(env) != "":
+			st.Agents[i].Auth = env
+		}
+	}
 	return st
 }
 

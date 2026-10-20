@@ -1080,6 +1080,7 @@ func (s *Server) launchManaged(app string) (string, error) {
 	// A connected provider credential overrides LR's own environment's (exec
 	// keeps the last of duplicate keys) -- see connectivity.go.
 	cmd.Env = append(cmd.Env, s.connectivity.childEnv()...)
+	cmd.Env = append(cmd.Env, s.agents.childEnv()...) // likewise a connected agent's (agents.go)
 	// Own process group so terminate can signal the whole child tree (terminal
 	// wrapper included).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

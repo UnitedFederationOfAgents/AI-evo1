@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, useContext, createCo
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState, AgentInfo,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
@@ -579,9 +579,10 @@ function hostDotClass(status: string): string {
 }
 
 function HostSidebar({
-  hosts, selectedHostId, onSelect, onSelectGlobal,
+  hosts, hostData, selectedHostId, onSelect, onSelectGlobal,
 }: {
   hosts: Host[]
+  hostData: Record<string, HostClientState>
   selectedHostId: string | null
   onSelect: (id: string) => void
   onSelectGlobal: () => void
@@ -610,11 +611,19 @@ function HostSidebar({
           >
             <span className={`host-dot ${hostDotClass(host.status)}`} />
             <span className="host-label">{host.label}</span>
+            {hostData[host.id]?.repo?.build_failed && <BuildFailedDot />}
           </div>
         ))
       )}
     </div>
   )
+}
+
+// BuildFailedDot is the small red dot a host's sidebar row and topology card
+// carry from a failed rebuild until its next successful one -- see
+// LRRepoStateMsg.build_failed (Step1SubstepEPrompt.md Revision D).
+function BuildFailedDot() {
+  return <span className="host-build-failed" title="last rebuild failed — clears on the next successful rebuild" />
 }
 
 const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'] as const
@@ -1735,7 +1744,7 @@ function isLRTab(name: string): name is LRTab {
 
 /* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) ---- */
 
-const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub' }
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub', claude: 'Claude' }
 
 function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider
@@ -1777,20 +1786,34 @@ function ProviderIcon({ provider }: { provider: string }) {
 // CONNECTABLE_PROVIDERS are the providers the "connect" control offers
 // (Step1SubstepEPrompt.md) -- local-representative/connectivity.go's
 // connectableProviders, with how each is connected.
-const CONNECTABLE_PROVIDERS: { provider: string, method: string, placeholder: string }[] = [
+interface ConnectOption { provider: string, method: string, placeholder: string }
+
+const CONNECTABLE_PROVIDERS: ConnectOption[] = [
   { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
 ]
 
-// ProviderConnectForm is the "connect" control: a provider picker and a
-// masked credential field. Whitespace is rejected here because the
-// credential travels as one word of a "__system:connect" command.
-function ProviderConnectForm({ onConnect, onCancel }: {
+// CONNECTABLE_AGENTS are the agents the "agents & models" section's
+// "connect" offers (Revision D) -- local-representative/agents.go's
+// agentAuthEnv. They travel as a provider named after the agent.
+const CONNECTABLE_AGENTS: ConnectOption[] = [
+  { provider: 'claude', method: 'OAuth token', placeholder: 'CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)' },
+]
+
+// DEV_AGENTS are ambiguous-agent's test agents: hidden in "agents & models"
+// unless its "show-dev" toggle is on, and never drawn as topology tiles.
+const DEV_AGENTS: ReadonlySet<string> = new Set(['clod'])
+
+// ProviderConnectForm is the "connect" control: a provider (or agent)
+// picker and a masked credential field. Whitespace is rejected here because
+// the credential travels as one word of a "__system:connect" command.
+function ProviderConnectForm({ options = CONNECTABLE_PROVIDERS, onConnect, onCancel }: {
+  options?: ConnectOption[]
   onConnect: (provider: string, token: string) => void
   onCancel: () => void
 }) {
-  const [provider, setProvider] = useState(CONNECTABLE_PROVIDERS[0].provider)
+  const [provider, setProvider] = useState(options[0].provider)
   const [token, setToken] = useState('')
-  const spec = CONNECTABLE_PROVIDERS.find(p => p.provider === provider) ?? CONNECTABLE_PROVIDERS[0]
+  const spec = options.find(p => p.provider === provider) ?? options[0]
   const trimmed = token.trim()
   const invalid = trimmed === '' || /\s/.test(trimmed)
   const submit = () => {
@@ -1801,7 +1824,7 @@ function ProviderConnectForm({ onConnect, onCancel }: {
   return (
     <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
       <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
-        {CONNECTABLE_PROVIDERS.map(p => (
+        {options.map(p => (
           <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
         ))}
       </select>
@@ -1901,13 +1924,24 @@ function ProvidersPanel({ connections, onConnect, onDisconnect }: {
 // local-representative/agents.go). Installed agents get a card each; the
 // rest are listed on one line. Mirrors
 // local-representative/frontend/src/App.tsx's own copy.
-function AgentsPanel({ agents, nowSec, onInspect }: {
+//
+// Revision D adds a "connect" control for CONNECTABLE_AGENTS (Claude's
+// CLAUDE_CODE_OAUTH_TOKEN, which that host's LR passes to every app it
+// launches afterwards) and a "show-dev" toggle, off by default, that the
+// DEV_AGENTS (clod) are hidden behind.
+function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
   agents?: AgentsState | null
   nowSec: number
   onInspect: () => void
+  onConnect: (agent: string, token: string) => void
+  onDisconnect: (agent: string) => void
 }) {
-  const installed = agents?.agents.filter(a => a.installed) ?? []
-  const missing = agents?.agents.filter(a => !a.installed) ?? []
+  const [connecting, setConnecting] = useState(false)
+  const [showDev, setShowDev] = useState(false)
+  const hasDev = agents?.agents.some(a => DEV_AGENTS.has(a.name)) ?? false
+  const shown = agents?.agents.filter(a => showDev || !DEV_AGENTS.has(a.name)) ?? []
+  const installed = shown.filter(a => a.installed)
+  const missing = shown.filter(a => !a.installed)
   const checking = agents?.status === 'checking'
   return (
     <div className="sys-providers sys-agents">
@@ -1915,12 +1949,33 @@ function AgentsPanel({ agents, nowSec, onInspect }: {
         <span className="sys-providers-header">agents &amp; models</span>
         {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
         {agents != null && (
-          <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
-            title="ask this host's ambiguous-agent again which agents and models it has">
-            {checking ? 'inspecting…' : 're-inspect'}
-          </button>
+          <span className="sys-agents-controls">
+            {hasDev && (
+              <label className="sys-agents-showdev" title="also list ambiguous-agent's test agents (clod)">
+                <input type="checkbox" checked={showDev} onChange={e => setShowDev(e.target.checked)} />
+                show-dev
+              </label>
+            )}
+            {!connecting && (
+              <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+                title="give an agent on this host credentials (Claude OAuth token)">
+                connect
+              </button>
+            )}
+            <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+              title="ask this host's ambiguous-agent again which agents and models it has">
+              {checking ? 'inspecting…' : 're-inspect'}
+            </button>
+          </span>
         )}
       </div>
+      {connecting && (
+        <ProviderConnectForm
+          options={CONNECTABLE_AGENTS}
+          onConnect={(agent, token) => { onConnect(agent, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
       {agents?.status === 'failed' && (
         <div className="sys-provider-row">
           <span className="sys-provider-label">error</span>
@@ -1937,7 +1992,23 @@ function AgentsPanel({ agents, nowSec, onInspect }: {
             <span className="sys-provider-name">{a.name}</span>
             {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
             <span className="sys-provider-status sys-provider-status-ok">available</span>
+            {a.auth === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(a.name)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
           </div>
+          {CONNECTABLE_AGENTS.some(c => c.provider === a.name) && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">auth</span>
+              <span className="sys-provider-value">
+                {a.auth === 'connected' ? 'connected — passed to apps launched from now on'
+                  : a.auth ? `${a.auth} (LR's environment)`
+                  : <span className="sys-provider-placeholder">none passed — relies on the agent's own login, if any</span>}
+              </span>
+            </div>
+          )}
           {a.version && (
             <div className="sys-provider-row">
               <span className="sys-provider-label">version</span>
@@ -2113,7 +2184,13 @@ function SystemPanel({
         onConnect={(provider, token) => onConnectProvider(hostId, provider, token)}
         onDisconnect={provider => onDisconnectProvider(hostId, provider)}
       />
-      <AgentsPanel agents={state.agents} nowSec={nowSec} onInspect={() => onInspectAgents(hostId)} />
+      <AgentsPanel
+        agents={state.agents}
+        nowSec={nowSec}
+        onInspect={() => onInspectAgents(hostId)}
+        onConnect={(agent, token) => onConnectProvider(hostId, agent, token)}
+        onDisconnect={agent => onDisconnectProvider(hostId, agent)}
+      />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -3345,8 +3422,13 @@ function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolea
 // local-representative/connectivity.go). onOpen drives double-click
 // navigation: the card opens that host's system tab, a sub-app box that
 // sub-app's own tab (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md).
+//
+// Step1SubstepEPrompt.md Revision D adds a row of agent tiles below the
+// boxes -- one per agent installed on that host, never a DEV_AGENTS one
+// (double-click opens the system tab, where "agents & models" lists them) --
+// and buildFailed's small red dot beside the label (see BuildFailedDot).
 function TopologyNodeCard({
-  label, status, isSelf, services, managed, connections, devMode, selected, outOfDate, onClick, onOpen,
+  label, status, isSelf, services, managed, connections, agents, buildFailed, devMode, selected, outOfDate, onClick, onOpen,
 }: {
   label: string
   status?: string
@@ -3354,6 +3436,8 @@ function TopologyNodeCard({
   services?: ServiceStatus[]
   managed?: ProcInfo[]
   connections?: ConnectionInfo[] | null
+  agents?: AgentsState | null
+  buildFailed?: boolean
   devMode?: boolean
   selected?: boolean
   outOfDate?: boolean
@@ -3384,6 +3468,7 @@ function TopologyNodeCard({
   const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
   const rbOutdated = devMode && rbHealthy && subAppOutOfDate(managed, 'robot')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
+  const agentTiles = agents?.agents.filter(a => a.installed && !DEV_AGENTS.has(a.name)) ?? []
 
   return (
     <div
@@ -3395,6 +3480,7 @@ function TopologyNodeCard({
       <div className="topo-node-header">
         {status && <span className={`host-dot ${hostDotClass(status)}`} />}
         <span className="topo-node-label">{label}</span>
+        {buildFailed && <BuildFailedDot />}
         {isSelf && <span className="topo-node-self-tag">self</span>}
       </div>
       <div className="topo-node-diagram">
@@ -3443,9 +3529,27 @@ function TopologyNodeCard({
             onDoubleClick={openTab('worker')}
           >W</span>
         </div>
+        {agentTiles.length > 0 && (
+          <div className="topo-node-row topo-node-agents">
+            {agentTiles.map(a => (
+              <span key={a.name} className={`topo-agent-tile${a.auth ? ' topo-agent-tile-auth' : ''}`} title={agentTileTitle(a)}>
+                {a.name}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
+}
+
+// agentTileTitle is an agent tile's hover text: its version, and for a
+// connectable agent where its credential comes from.
+function agentTileTitle(a: AgentInfo): string {
+  const parts = [a.version ? `${a.name} — ${a.version}` : a.name]
+  if (a.auth) parts.push(`auth: ${a.auth}`)
+  else if (CONNECTABLE_AGENTS.some(c => c.provider === a.name)) parts.push('auth: none passed')
+  return parts.join('\n')
 }
 
 // GlobalTopologyPanel: main pane of host cards (left, agent-coordinator's own
@@ -3615,6 +3719,8 @@ function GlobalTopologyPanel({
             services={hostData[selfHost.id]?.lrState?.services}
             managed={hostData[selfHost.id]?.system?.managed}
             connections={hostData[selfHost.id]?.system?.connections}
+            agents={hostData[selfHost.id]?.system?.agents}
+            buildFailed={!!hostData[selfHost.id]?.repo?.build_failed}
             devMode={devMode}
             selected={selectedHostId === selfHost.id}
             outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
@@ -3633,6 +3739,8 @@ function GlobalTopologyPanel({
             services={hostData[h.id]?.lrState?.services}
             managed={hostData[h.id]?.system?.managed}
             connections={hostData[h.id]?.system?.connections}
+            agents={hostData[h.id]?.system?.agents}
+            buildFailed={!!hostData[h.id]?.repo?.build_failed}
             devMode={devMode}
             selected={selectedHostId === h.id}
             outOfDate={devMode && hostOutOfDate(hostData[h.id])}
@@ -4862,6 +4970,7 @@ export default function App() {
         <div className={`sidebar-wrap${mobileNavOpen ? ' mobile-open' : ''}`}>
           <HostSidebar
             hosts={hosts}
+            hostData={hostData}
             selectedHostId={selectedHostId}
             onSelect={handleSelectHost}
             onSelectGlobal={handleSelectGlobal}

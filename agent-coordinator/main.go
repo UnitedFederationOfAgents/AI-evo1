@@ -1346,7 +1346,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case "lr-connect-provider":
 			// The per-host "providers" section's "connect" control
 			// (Step1SubstepEPrompt.md): hands the host's LR a credential to
-			// use -- only a GitHub PAT so far, which LR checks. Never logged.
+			// use -- a GitHub PAT, which LR checks, or (from the "agents &
+			// models" section, Revision D) Claude's CLAUDE_CODE_OAUTH_TOKEN,
+			// with provider "claude". Never logged.
 			var payload struct {
 				HostID   string `json:"host_id"`
 				Provider string `json:"provider"`

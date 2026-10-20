@@ -269,6 +269,18 @@ body {
 .host-dot-disconnected { background: #cc4444; }
 .host-dot-unknown      { background: #666; }
 
+/* Last rebuild failed, until the next successful one (Step1SubstepEPrompt.md
+   Revision D) -- on the sidebar row and the topology card. */
+.host-build-failed {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #e05252;
+  box-shadow: 0 0 3px rgba(224, 82, 82, 0.6);
+}
+
 .host-item-text {
   display: flex;
   flex-direction: column;
@@ -910,6 +922,19 @@ body {
 .topo-conn-checking { color: #777; }
 .topo-conn-failed { border-color: #d6b62e; box-shadow: 0 0 0 1px rgba(214, 182, 46, 0.35); }
 
+/* Agent tiles below the boxes (Step1SubstepEPrompt.md Revision D): one per
+   agent installed on the host (never a dev agent such as clod); a blue
+   border once a connectable agent has a credential (connected or from LR's
+   environment). */
+.topo-node-agents { flex-wrap: wrap; justify-content: center; gap: 4px; }
+.topo-agent-tile {
+  display: flex; align-items: center; justify-content: center;
+  height: 16px; padding: 0 5px;
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 9px; color: #b0b0b0;
+}
+.topo-agent-tile-auth { border-color: #245a7a; color: #6ea6c9; }
+
 .topo-details {
   width: 240px;
   flex-shrink: 0;
@@ -1049,6 +1074,13 @@ body {
 .sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
 .sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
 .sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-provider-placeholder { color: #555; font-style: italic; }
+/* Revision D: "show-dev" toggle + "connect" beside "re-inspect". */
+.sys-agents-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.sys-agents-showdev { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #888; cursor: pointer; }
 
 /* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) -- mirrors this
    host's LR system tab, forwarded up as "lr-repo-state" ---- */

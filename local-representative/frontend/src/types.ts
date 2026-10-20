@@ -120,6 +120,10 @@ export interface AgentInfo {
   default_model?: string
   models?: string[]
   detail?: string // why listing its models failed
+  // Where a connectable agent's credential comes from (Step1SubstepEPrompt.md
+  // Revision D): "connected", the env var's name when LR's environment sets
+  // it, or absent.
+  auth?: string
 }
 
 export interface AgentsState {
@@ -203,6 +207,7 @@ export interface RepoStateMsg {
   auto_rebuild_seconds?: number
   head?: string
   last_error?: string
+  build_failed?: boolean // from a failed rebuild until the next successful one
   // True while condoccer's '.condoc' lock file sits at the repo root (see
   // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- forces
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition

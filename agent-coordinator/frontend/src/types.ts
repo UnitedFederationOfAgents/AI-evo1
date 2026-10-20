@@ -198,6 +198,10 @@ export interface AgentInfo {
   default_model?: string
   models?: string[]
   detail?: string // why listing its models failed
+  // Where a connectable agent's credential comes from (Step1SubstepEPrompt.md
+  // Revision D): "connected", the env var's name when that host's LR
+  // environment sets it, or absent.
+  auth?: string
 }
 
 // AgentsState is which AI agents (and models) a host can run. status is
@@ -230,6 +234,10 @@ export interface LRRepoStateMsg {
   auto_rebuild_seconds?: number
   head?: string
   last_error?: string
+  // From a failed rebuild until the next successful one (unlike last_error,
+  // which a new rebuild clears as it starts) -- drives the small red dot on
+  // the host's sidebar row and topology card (Step1SubstepEPrompt.md Revision D).
+  build_failed?: boolean
   // True while condoccer's '.condoc' lock file sits at the repo root (see
   // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- forces
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition

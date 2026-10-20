@@ -184,11 +184,10 @@ prompt: [`1d82374`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/1
 The "show-dev" toggle in AC's and LR's "agents & models" section now uses the same green as the "rebuild" button: dark green background, green border and green text, with a green checkbox. It gets brighter on hover and while it's switched on. The change is CSS only, in both apps' `frontend/src/index.css`. I haven't built it or looked at it in the UI, and it's uncommitted. The "brighter while on" style relies on a newer CSS feature (`:has`), so very old browsers will show the plain green whether it's on or off.
 
 
-## <REPLACE-Revision|Retry> G
+## Revision G
 
-<REPLACE-PROMPT>
+We have also had a bug occur where the 'dev-branch' has become detached from our laptop01 node for no clear reason. This could have to do with the new slopspace condocs logic because the laptop01 node is the only node exercising it so far as a managing host.
 
+We'll take a look and correct any such bugs that are obviously visible.
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Any bugs which are less obvious we will respond about instead and explain how we can better isolate them instead.

@@ -60,15 +60,35 @@ func resourceTargetFile(root string, info CondocInfo) (string, error) {
 // local-representative) or "voice-note" (Revision B -- dictated text, no
 // file at all). "upload"'s own source (Revision C) never reaches here; it's
 // a plain HTTP multipart POST handled by handleUploadResource instead.
-func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequest) error {
+//
+// root is what info's paths are relative to: the working dir for a
+// same-repo condoc, the slopspace's condoc repo for a slopspace one
+// (Revision E of condocs/slopspaceCondocsImpls/Step1Prompt.md). Either way
+// the files land in the condoc's own Impls folder, so a slopspace condoc's
+// resources always go into its condoc repo, never a target repo.
+func (s *Server) addResource(root, mainPath string, info CondocInfo, action ActionRequest, sameRepo bool) error {
 	switch action.ResourceType {
 	case "highlighted":
-		return s.addHighlightedResource(mainPath, info, action)
+		return s.addHighlightedResource(root, mainPath, info, action, sameRepo)
 	case "voice-note":
-		return s.addVoiceNoteResource(info, action)
+		return s.addVoiceNoteResource(root, info, action, sameRepo)
 	default:
 		return fmt.Errorf("unknown resource type: %q", action.ResourceType)
 	}
+}
+
+// lockForResources asserts the .condoc lock while a same-repo condoc's
+// resources are written, returning its release. A slopspace condoc's files
+// aren't in the working dir local-representative watches, and the caller's
+// claim on it (slopBeginEdit) already keeps the driver and turns away, so
+// there's nothing to lock.
+func (s *Server) lockForResources(info CondocInfo, sameRepo bool, why string) func() {
+	if !sameRepo {
+		return func() {}
+	}
+	repoRoot := s.condocRepoRoot(info.Path)
+	s.writeCondocLock(repoRoot, why)
+	return func() { s.removeCondocLock(repoRoot) }
 }
 
 // addHighlightedResource implements the "Highlighted" source of Add
@@ -80,8 +100,8 @@ func (s *Server) addResource(mainPath string, info CondocInfo, action ActionRequ
 // duration -- unlike an ordinary phase transition, this doesn't change
 // info.Phase, so nothing else would otherwise stop local-representative's
 // dev-repo watcher from rebuilding out from under the copy+edit.
-func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action ActionRequest) error {
-	targetFile, err := resourceTargetFile(s.getRoot(), info)
+func (s *Server) addHighlightedResource(root, mainPath string, info CondocInfo, action ActionRequest, sameRepo bool) error {
+	targetFile, err := resourceTargetFile(root, info)
 	if err != nil {
 		return err
 	}
@@ -90,9 +110,7 @@ func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action
 	// markdown edit: dropping new files into the condoc's Impls folder is
 	// itself a working-tree change local-representative's dev-repo watcher
 	// could notice, same as the file it links from.
-	repoRoot := s.condocRepoRoot(info.Path)
-	s.writeCondocLock(repoRoot, fmt.Sprintf("copying resources into %s", info.Name))
-	defer s.removeCondocLock(repoRoot)
+	defer s.lockForResources(info, sameRepo, fmt.Sprintf("copying resources into %s", info.Name))()
 
 	links, err := s.fetchHighlightedFiles(implDir(mainPath))
 	if err != nil {
@@ -116,19 +134,17 @@ func (s *Server) addHighlightedResource(mainPath string, info CondocInfo, action
 // lock like its siblings: it edits the step/substep file, a working-tree
 // change local-representative's dev-repo watcher could notice, even though
 // it never touches the Impls folder.
-func (s *Server) addVoiceNoteResource(info CondocInfo, action ActionRequest) error {
+func (s *Server) addVoiceNoteResource(root string, info CondocInfo, action ActionRequest, sameRepo bool) error {
 	if strings.TrimSpace(action.Content) == "" {
 		return fmt.Errorf("voice note has no dictated text")
 	}
 
-	targetFile, err := resourceTargetFile(s.getRoot(), info)
+	targetFile, err := resourceTargetFile(root, info)
 	if err != nil {
 		return err
 	}
 
-	repoRoot := s.condocRepoRoot(info.Path)
-	s.writeCondocLock(repoRoot, fmt.Sprintf("adding a voice-note resource to %s", info.Name))
-	defer s.removeCondocLock(repoRoot)
+	defer s.lockForResources(info, sameRepo, fmt.Sprintf("adding a voice-note resource to %s", info.Name))()
 
 	return insertResourceBlock(targetFile, action.ResourceName, action.Content, nil)
 }
@@ -367,13 +383,28 @@ func (s *Server) handleUploadResource(w http.ResponseWriter, r *http.Request) {
 // inserts the resulting "## Resource N" block. It writes the HTTP reply.
 func (s *Server) writeResourceFiles(w http.ResponseWriter, condocRel, name, description string, n int,
 	save func(i int, destDir string) (link resourceLink, label string, err error)) {
-	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
-		http.Error(w, "invalid condoc path", http.StatusBadRequest)
-		return
+	// A slopspace condoc ("slopspace:<stem>") is claimed for the whole write
+	// and resolved to its condoc repo, as for its other UI edits (see
+	// slopPerformAction); a same-repo one sits under the working dir.
+	sameRepo := !isSlopspacePath(condocRel)
+	var root, absPath string
+	if sameRepo {
+		if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+			http.Error(w, "invalid condoc path", http.StatusBadRequest)
+			return
+		}
+		root = s.getRoot()
+		absPath = filepath.Join(root, filepath.FromSlash(condocRel))
+	} else {
+		_, slopRoot, main, release, err := s.slopBeginEdit(strings.TrimPrefix(condocRel, slopPathPrefix))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		defer release()
+		root, absPath = slopRoot, main
 	}
 
-	root := s.getRoot()
-	absPath := filepath.Join(root, filepath.FromSlash(condocRel))
 	info, err := detectPhase(root, absPath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -388,9 +419,7 @@ func (s *Server) writeResourceFiles(w http.ResponseWriter, condocRel, name, desc
 	// Same lock discipline as addResource: assert it before the first
 	// uploaded byte lands in the Impls folder, not just around the markdown
 	// edit.
-	repoRoot := s.condocRepoRoot(info.Path)
-	s.writeCondocLock(repoRoot, fmt.Sprintf("uploading resources into %s", info.Name))
-	defer s.removeCondocLock(repoRoot)
+	defer s.lockForResources(info, sameRepo, fmt.Sprintf("uploading resources into %s", info.Name))()
 
 	destDir := implDir(absPath)
 	if err := os.MkdirAll(destDir, 0755); err != nil {
@@ -692,13 +721,15 @@ func (s *Server) handleResourceFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	condocRel := r.URL.Query().Get("condoc")
-	if condocRel == "" || filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
+	// resolveCondoc also finds a slopspace condoc's Impls folder in its
+	// condoc repo, wherever that is right now (idle or deployed).
+	_, mainPath, err := s.resolveCondoc(r.URL.Query().Get("condoc"))
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 
-	dir := implDir(filepath.Join(s.getRoot(), filepath.FromSlash(condocRel)))
+	dir := implDir(mainPath)
 	f, err := os.Open(filepath.Join(dir, filename))
 	if err != nil {
 		http.NotFound(w, r)

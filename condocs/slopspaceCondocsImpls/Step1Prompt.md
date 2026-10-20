@@ -240,3 +240,20 @@ Retry, revert, resources and the git diff views are not available for slopspace 
 Let's now extend the slopspace condoc functionality to include the ability to add resources.
 
 We will always have it so that these resources go into the condoc repo, rather than the target repos. (If the agent needs to transpose them for some reason it will be able to by virtue of having access to both repos within the slopspace)
+
+
+prompt: [`25c2552`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/25c25526f428cdf151b91d2e33f97cd7ced6b56a) → reply: [`fb5fdec`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fb5fdec441b638fc6329f39bce804b619e29bb1a)
+
+## Reply E
+
+I've wired Add Resources into slopspace condocs; nothing has been built or tested. `go build` needed approval that wasn't given, so I've only checked the changes by reading them, and all three sources (Highlighted, Upload/select from host, Voice Note) go through the same code as same-repo. Resources always go into the condoc repo's Impls folder inside the slopspace, never into a target repo, and they're committed with the next prompt commit, as in same-repo. In `condoccer/resources.go` the resource code now takes the condoc's root rather than assuming the working dir. Uploads and the `/api/resource/` file links now also work for slopspace condocs, adding a resource is refused while a turn is in flight, and `main.go` no longer rejects it. I updated the affected tests and the "Resources" entry in `docs/SlopspaceControlScheme.md`; the frontend already sends the right condoc path, so it didn't change, and everything is uncommitted.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

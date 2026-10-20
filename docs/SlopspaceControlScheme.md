@@ -86,9 +86,9 @@ Not yet built or run end to end; see the Step 1 replies.
   - The Slopspace tab lists the pointers with their phase, queue position, a running spinner and any error, plus **+ Propose a condoc**.
   - A proposal opens a form with **Check Branch**, **Accept** and **Withdraw**.
   - An accepted condoc opens in the same condoc/step/substep views as same-repo. Above them sits a slopspace panel with the condoc's state, **Resubmit** on error, the PR template editor (**Accept & Raise PRs** / **Save Edits** / **Regenerate**), and the PR list with **Merge**.
+- **Resources (Step 1 Revision E):** **Add Resources…** works the same as in same-repo, with all three sources (Highlighted, Upload/select from host, Voice Note). Resources always go into the condoc repo, in the condoc's Impls folder in the slopspace, and never into a target repo. The agent can copy them across itself, since both repos are in its slopspace. Adding a resource claims the condoc, the same as any other UI edit, so it's refused while a turn is in flight. No `.condoc` lock is needed, because the files aren't in the working dir. The files are committed along with the next prompt commit, as in same-repo. `/api/resource/` serves them from wherever the condoc repo currently is.
 - **Not in the first cut:**
   - retry and revert (D8)
-  - resources
   - the git diff views; the per-repo commit links in each reply stand in for them
 
 ## What Exists Today

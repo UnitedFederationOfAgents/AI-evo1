@@ -1078,8 +1078,8 @@ func (s *Server) performAction(action ActionRequest) error {
 // whose main file is absPath under root. The handler -- federation-command
 // for a same-repo condoc, condoccer itself for a slopspace one -- reacts to
 // the directive the edit leaves. sameRepo gates what only works in the
-// working dir: resources (which go through the working dir's .condoc lock)
-// and the resubmit recovery commit.
+// working dir: the resubmit recovery commit, and the .condoc lock resources
+// are written under.
 func (s *Server) applyAction(root, absPath string, info CondocInfo, action ActionRequest, sameRepo bool) error {
 
 	// activeFile is the file that receives directives (substep if active, else step or main).
@@ -1162,10 +1162,7 @@ func (s *Server) applyAction(root, absPath string, info CondocInfo, action Actio
 		return appendToFile(activeFile, "\n"+directive+"\n")
 
 	case "add_resource":
-		if !sameRepo {
-			return fmt.Errorf("resources can't be added to slopspace condocs yet")
-		}
-		return s.addResource(absPath, info, action)
+		return s.addResource(root, absPath, info, action, sameRepo)
 
 	case "resubmit":
 		if !sameRepo {

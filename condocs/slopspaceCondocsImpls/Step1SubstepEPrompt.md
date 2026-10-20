@@ -162,3 +162,22 @@ The backend changes are in `local-representative/agents.go`, `repowatch.go`, `co
 ## Revision E
 
 For the tiles we need to make sure they show image icons similar to the provider tiles.
+
+
+prompt: [`44bc902`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/44bc902c809a5bc5df68d714bf340c13d400c357) → reply: [`55cfda2`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/55cfda29e4ac5f9663a7ed251a64739b1187e858)
+
+## Reply E
+
+The agent tiles on AC's topology cards now show a small image for each agent, drawn the same way as the provider icons. Claude, Gemini, Codex, Copilot, opencode and Grok each have their own mark, coloured to match that agent; any other agent falls back to its name. The marks are my own rough approximations, not the official logos. The tile is now the same size and has the same border as a provider tile, the blue border for an agent with a Claude token stays, and hovering still shows the agent's name, version and credential.
+
+I haven't run the type-check: it needed approval that wasn't given, so I've only checked the change by reading it. The changes are uncommitted, in `agent-coordinator/frontend/src/App.tsx` (a new `AgentIcon` next to `ProviderIcon`) and `agent-coordinator/frontend/src/index.css`.
+
+
+## <REPLACE-Revision|Retry> F
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

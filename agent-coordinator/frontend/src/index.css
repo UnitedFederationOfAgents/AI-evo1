@@ -929,9 +929,9 @@ body {
 .topo-node-agents { flex-wrap: wrap; justify-content: center; gap: 4px; }
 .topo-agent-tile {
   display: flex; align-items: center; justify-content: center;
-  height: 16px; padding: 0 5px;
-  background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
-  font-size: 9px; color: #b0b0b0;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 9px; color: #d4d4d4;
 }
 .topo-agent-tile-auth { border-color: #245a7a; color: #6ea6c9; }
 

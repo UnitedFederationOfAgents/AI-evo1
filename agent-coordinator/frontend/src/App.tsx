@@ -1783,6 +1783,66 @@ function ProviderIcon({ provider }: { provider: string }) {
   return <span>{providerLabel(provider)}</span>
 }
 
+// AgentIcon is an agent tile's image (Step1SubstepEPrompt.md Revision E),
+// drawn like ProviderIcon: a small inline mark per ambiguous-agent agent
+// (ambiguous-agent/main.go's availableAgents), tinted after that agent's own
+// color there, falling back to the agent's name for one it doesn't know.
+function AgentIcon({ agent }: { agent: string }) {
+  switch (agent) {
+    case 'claude':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g stroke="#d97757" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M8 1.5V14.5M1.5 8H14.5M3.4 3.4L12.6 12.6M12.6 3.4L3.4 12.6" />
+          </g>
+        </svg>
+      )
+    case 'gemini':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M8 0C8 4.4 11.6 8 16 8C11.6 8 8 11.6 8 16C8 11.6 4.4 8 0 8C4.4 8 8 4.4 8 0Z" fill="#4e8cf7" />
+        </svg>
+      )
+    case 'codex':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="#a78bfa" strokeWidth="1.3">
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" />
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" transform="rotate(60 8 8)" />
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" transform="rotate(120 8 8)" />
+          </g>
+        </svg>
+      )
+    case 'copilot':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="#4fb3e8" strokeWidth="1.3" strokeLinejoin="round">
+            <path d="M2.5 7.5C2.5 4.5 4.8 2.5 8 2.5S13.5 4.5 13.5 7.5V11C13.5 12.4 11.2 13.5 8 13.5S2.5 12.4 2.5 11Z" />
+            <rect x="4.2" y="6" width="3" height="2.6" rx="1" />
+            <rect x="8.8" y="6" width="3" height="2.6" rx="1" />
+          </g>
+        </svg>
+      )
+    case 'opencode':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <rect x="2" y="2" width="12" height="12" fill="none" stroke="#4caf50" strokeWidth="1.5" />
+          <rect x="5.5" y="5.5" width="5" height="5" fill="#4caf50" />
+        </svg>
+      )
+    case 'grok':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M11.5 4.2A5 5 0 1 0 12.6 10" />
+            <path d="M14 1.5L5 14.5" />
+          </g>
+        </svg>
+      )
+  }
+  return <span>{agent}</span>
+}
+
 // CONNECTABLE_PROVIDERS are the providers the "connect" control offers
 // (Step1SubstepEPrompt.md) -- local-representative/connectivity.go's
 // connectableProviders, with how each is connected.
@@ -3533,7 +3593,7 @@ function TopologyNodeCard({
           <div className="topo-node-row topo-node-agents">
             {agentTiles.map(a => (
               <span key={a.name} className={`topo-agent-tile${a.auth ? ' topo-agent-tile-auth' : ''}`} title={agentTileTitle(a)}>
-                {a.name}
+                <AgentIcon agent={a.name} />
               </span>
             ))}
           </div>

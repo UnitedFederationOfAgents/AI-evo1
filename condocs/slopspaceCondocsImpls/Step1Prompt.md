@@ -275,12 +275,14 @@ In `repowatch_test.go` I replaced the old "no pull while locked" test with two: 
 1. In the dev repo, run `git status` to confirm the tree is clean, then `git pull --rebase`. If that host has a stray local commit and the rebase conflicts, run `git rebase --abort` and sort it out by hand.
 2. Rebuild so the fix is running everywhere, provisioner01 included. Until then, a lagging host will get stuck again on the next lock commit. The rebuild button is disabled while `.condoc` is present, and this condoc currently holds it. So either wait for the lock to be released, when auto-rebuild picks it up, or run `make deploy-dev-binaries` by hand.
 
+## Resource 2 -- Off the Rails
 
-## <REPLACE-Revision|Retry> G
+The slopsspace condocs are partially working, but we have an issue where they have fallen off the rails.
 
-<REPLACE-PROMPT>
+- [screenshot-1792500281100.png (laptop01-mugi)](34dffcf8_screenshot-1792500281100.png)
 
+## Revision G
 
-## Human-Prompt
+Let's see the 'Off The Rails' resource for context.
 
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+Let's either fix this issue on the spot if it is simple, or instead begin a path to implement better feedback if it is not straightforward enough.

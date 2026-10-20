@@ -1349,6 +1349,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Println(suffix)
 
+	case agentInspectDoneMsg:
+		output, exitCode := renderAgentInspectDone(msg, m.currentAgent, m.currentModel)
+		m.lastExitCode = exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, exitCode)
+		return m, tea.Println(output)
+
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
 		setPromptWidth(&m.input, m.input.Prompt, m.windowWidth)
@@ -3887,6 +3894,13 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
 
+	case "agent", "agent help", "agent model", "agent model help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaAgentHelpText())
+
+	case "agent list":
+		return m, inspectAgentsCmd("", false, line, cmdTime, deltaMs)
+
 	case "session archive":
 		clauditablePath, err := findBinary("clauditable")
 		if err != nil {
@@ -3930,6 +3944,18 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 		if sub == "session resource" || strings.HasPrefix(sub, "session resource ") {
 			return m.handleSessionResource(strings.TrimPrefix(sub, "session resource"), line, cmdTime, deltaMs)
 		}
+		if sub == "agent model list" || strings.HasPrefix(sub, "agent model list ") {
+			agent := strings.TrimSpace(strings.TrimPrefix(sub, "agent model list"))
+			if agent == "" {
+				agent = m.currentAgent
+			}
+			if !isValidAgent(agent) {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ufa agent model list: unknown agent '"+agent+"'") + "\n" +
+					sessionStyle.Render("use 'ufa agent list' to see available agents"))
+			}
+			return m, inspectAgentsCmd(agent, true, line, cmdTime, deltaMs)
+		}
 		if sub == "session select" {
 			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
 			if sp == nil {
@@ -3956,6 +3982,10 @@ func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64
 			unknown := strings.TrimPrefix(sub, "fc ")
 			return m, tea.Println(errorStyle.Render("ufa fc: unknown subcommand '"+unknown+"'")+"\n"+ufaFcHelpText())
 		}
+		if strings.HasPrefix(sub, "agent ") {
+			unknown := strings.TrimPrefix(sub, "agent ")
+			return m, tea.Println(errorStyle.Render("ufa agent: unknown subcommand '"+unknown+"'")+"\n"+ufaAgentHelpText())
+		}
 		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
 	}
 }
@@ -3970,8 +4000,9 @@ func ufaHelpText() string {
 		"  ufa head <sub>         head (instance) identification commands",
 		"  ufa session <sub>      session management commands",
 		"  ufa fc <sub>           federation-command auto-connect commands",
+		"  ufa agent <sub>        agents and models on this host",
 		"",
-		sessionStyle.Render("run 'ufa host help', 'ufa head help', 'ufa session help', or 'ufa fc help' for subcommands"),
+		sessionStyle.Render("run 'ufa host help', 'ufa head help', 'ufa session help', 'ufa fc help', or 'ufa agent help' for subcommands"),
 	}
 	return strings.Join(lines, "\n")
 }

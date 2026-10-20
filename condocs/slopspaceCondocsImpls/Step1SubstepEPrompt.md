@@ -120,3 +120,25 @@ make: *** [Makefile:86: deploy-dev-binaries] Error 1
 
 
 And we also need to add an entrypoint in FC 'ufa agent list' as well as 'ufa agent model list' to use these entrypoints.
+
+
+prompt: [`fb6fb48`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/fb6fb48b225a4e3fbc507254580d8d86d13737ca) → reply: [`bacdd6d`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/bacdd6dd029208627138d1caa9d4150f91b51907)
+
+## Reply C
+
+I fixed the build error and added `ufa agent list` and `ufa agent model list [<agent>]` to FC, but none of it has been built or run. `tsc`, `go test` and `sed` all needed approval that wasn't given, so I've only checked it by reading. The changes are uncommitted.
+
+- **Build error:** LR's frontend defined `inspectAgents` but never passed it out to the place that used it. AC's frontend had the same gap with `sendLRInspectAgents`, which would have been the next build failure; I fixed both (in each app's `frontend/src/App.tsx`).
+- **FC commands:** both run `ambiguous-agent --inspect` in the background so the shell doesn't freeze while it checks each agent. `ufa agent list` shows every agent with whether it's installed, its version and path, and marks the current and default agent. `ufa agent model list` shows that agent's models, defaulting to the current agent, and marks the default model and the one you've selected. They're also in the `ufa help` text and in `federation-command/README.md`.
+
+The new code is in `federation-command/agents.go`, wired into `federation-command/main.go`. A new test, `TestRenderAgentInspectDone` in `federation-command/agents_test.go`, covers the output of both commands but hasn't been run.
+
+
+## <REPLACE-Revision|Retry> D
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

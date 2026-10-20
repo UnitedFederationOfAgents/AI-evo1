@@ -570,7 +570,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -4099,7 +4099,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -4121,6 +4121,7 @@ function LRView({
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   sendLRConnectProvider: (hostId: string, provider: string, token: string) => void
   sendLRDisconnectProvider: (hostId: string, provider: string) => void
+  sendLRInspectAgents: (hostId: string) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
   importHostFiles:(hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
   activeTab: LRTab
@@ -4685,7 +4686,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -4888,6 +4889,7 @@ export default function App() {
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               sendLRConnectProvider={sendLRConnectProvider}
               sendLRDisconnectProvider={sendLRDisconnectProvider}
+              sendLRInspectAgents={sendLRInspectAgents}
               uploadFiles={uploadFiles}
               importHostFiles={importHostFiles}
               activeTab={activeTab}

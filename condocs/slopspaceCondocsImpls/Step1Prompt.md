@@ -235,6 +235,11 @@ Retry, revert, resources and the git diff views are not available for slopspace 
 [Step 1 Substep E](Step1SubstepEPrompt.md)
 
 
+## <REPLACE-Revision|Retry> E
+
+<REPLACE-PROMPT>
+
+
 ## Human-Prompt
 
-Substep E is now active. Interact with the substep file (Step1SubstepEPrompt.md).
+Add the '!HANDOFF!' or '!COMPLETED!' directive.

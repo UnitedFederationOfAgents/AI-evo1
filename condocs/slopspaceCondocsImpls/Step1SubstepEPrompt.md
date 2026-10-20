@@ -211,11 +211,6 @@ How to confirm the cause on laptop01:
 If the reflog doesn't show a rebase, the next step would be to have LR log every change to HEAD or the branch along with the previous value. That would catch the culprit the next time it happens.
 
 
-## <REPLACE-Revision|Retry> H
+## Substep Completed
 
-<REPLACE-PROMPT>
-
-
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+This substep was completed at 1792498061 (Tue Oct 20 12:07:41 PM UTC 2026).

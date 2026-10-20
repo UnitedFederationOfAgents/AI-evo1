@@ -134,11 +134,10 @@ I fixed the build error and added `ufa agent list` and `ufa agent model list [<a
 The new code is in `federation-command/agents.go`, wired into `federation-command/main.go`. A new test, `TestRenderAgentInspectDone` in `federation-command/agents_test.go`, covers the output of both commands but hasn't been run.
 
 
-## <REPLACE-Revision|Retry> D
+## Revision D
 
-<REPLACE-PROMPT>
+Let's add a quick touch where if a host has a build error their row shows a small and succinct indication until they get a successful rebuild - a small red dot should be enough. This can also be indicated in their host icons.
 
+In the host icons let's also add tiles for the agents (but not 'clod' - we'll hide 'clod' behind a 'show-dev' toggle that applies only to the per-host view. We will never see clod in the tiles)
 
-## Human-Prompt
-
-When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.
+In our new 'Agents & Models' section we need an input for 'connect' as well, where we are able to authenticate claude through an oauth environment variable. (CLAUDE_CODE_OAUTH_TOKEN) This will make the agent functional by passing the authentication to launched sub-apps through the environment.

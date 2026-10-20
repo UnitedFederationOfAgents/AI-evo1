@@ -254,3 +254,33 @@ I've wired Add Resources into slopspace condocs; nothing has been built or teste
 Now - probably at the end of substep E - we have introduced a bug where the networked LR instances watching the dev repo are not keeping up.
 
 They do not want to pull changes to sync with the latest updates on provisioner01. Let's fix this and reply with what we need to do to manually catch up (probably just a 'git pull').
+
+
+prompt: [`22420b7`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/22420b7792eb54d27a33f069a72dede46a655d3b) → reply: [`04a03f3`](https://github.com/UnitedFederationOfAgents/AI-evo1/commit/04a03f38b67b1d1dca25bf7521bac631379d8102)
+
+## Reply F
+
+I've fixed the bug that kept the other networked local-representative (LR) instances from pulling in provisioner01's updates, but I haven't built or run anything: `go test` and `gofmt` both needed approval that wasn't given, so I've only checked the change by reading it.
+
+**Cause:** Revision G in Substep E made the dev-repo watcher skip pulling whenever a `.condoc` lock file is present. That lock is tracked in git and pushed, so a follower LR pulls a "lock" commit along with everything else. From then on it sees the lock and never pulls again, including the "lock released" commit. It stays stuck at that point for good.
+
+**Fix:** in `local-representative/repowatch.go`, a held lock no longer stops pulling altogether. The watcher still fetches, then:
+- **No unpushed commits of its own** (the follower case): it fast-forwards with `git merge --ff-only @{u}`. That never replays a local commit, so it can't cause the Revision G conflict.
+- **Unpushed local commits** (the host running condoccer, mid-commit): it still holds off, as before.
+- **No lock:** it does the same `pull --rebase` as before.
+
+In `repowatch_test.go` I replaced the old "no pull while locked" test with two: one checks that a follower fast-forwards while locked, the other that a host with its own commits isn't rebased until the lock is gone. Changes are uncommitted.
+
+**To catch up manually**, on each lagging host:
+1. In the dev repo, run `git status` to confirm the tree is clean, then `git pull --rebase`. If that host has a stray local commit and the rebase conflicts, run `git rebase --abort` and sort it out by hand.
+2. Rebuild so the fix is running everywhere, provisioner01 included. Until then, a lagging host will get stuck again on the next lock commit. The rebuild button is disabled while `.condoc` is present, and this condoc currently holds it. So either wait for the lock to be released, when auto-rebuild picks it up, or run `make deploy-dev-binaries` by hand.
+
+
+## <REPLACE-Revision|Retry> G
+
+<REPLACE-PROMPT>
+
+
+## Human-Prompt
+
+When you are done add the '!HANDOFF!' or '!COMPLETED!' directive.

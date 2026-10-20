@@ -337,13 +337,7 @@ func (w *repoWatch) pollAndMaybePull() bool {
 		return false
 	}
 
-	if !dirty && w.condocLockPresent() {
-		// condoccer commits its lock/step commits straight onto this branch
-		// while '.condoc' is present; rebasing underneath it races those
-		// commits, and replaying a local lock commit over a remote one is the
-		// conflict that left the dev branch detached (Step1SubstepEPrompt.md
-		// Revision G). Pull once the condoc is idle again.
-	} else if !dirty && w.rebaseInProgress() {
+	if !dirty && w.rebaseInProgress() {
 		// Someone else's rebase is stopped here; leave it for them.
 		log.Printf("dev-repo: a rebase is in progress, not pulling")
 	} else if !dirty {
@@ -351,8 +345,26 @@ func (w *repoWatch) pollAndMaybePull() bool {
 		// rebasing over uncommitted work is exactly the conflict this avoids.
 		if _, err := w.runGit("fetch"); err != nil {
 			log.Printf("dev-repo: git fetch failed: %v", err)
-		} else if ahead, err := w.runGit("rev-list", "--count", "HEAD..@{u}"); err == nil {
-			if n, convErr := strconv.Atoi(ahead); convErr == nil && n > 0 {
+		} else if behind, err := w.runGit("rev-list", "--count", "HEAD..@{u}"); err == nil {
+			n, convErr := strconv.Atoi(behind)
+			if convErr != nil || n == 0 {
+				// Nothing to pull.
+			} else if w.condocLockPresent() {
+				// '.condoc' is tracked, so a follower LR pulls the lock in
+				// along with everything else; holding off on that alone would
+				// strand it there, never pulling the "lock released" commit
+				// (Step1Prompt.md Revision F). What actually needs avoiding is
+				// rebasing underneath condoccer's own unpushed lock/step
+				// commits on the host running it -- the conflict that left the
+				// dev branch detached (Step1SubstepEPrompt.md Revision G). So
+				// fast-forward only, which never replays a local commit.
+				if mine, err := w.runGit("rev-list", "--count", "@{u}..HEAD"); err == nil && mine == "0" {
+					log.Printf("dev-repo: upstream is %d commit(s) ahead of HEAD, fast-forwarding (condoc lock held)", n)
+					if out, err := w.runGit("merge", "--ff-only", "@{u}"); err != nil {
+						log.Printf("dev-repo: git merge --ff-only failed: %v (%s)", err, out)
+					}
+				}
+			} else {
 				log.Printf("dev-repo: upstream is %d commit(s) ahead of HEAD, pulling --rebase", n)
 				if out, err := w.runGit("pull", "--rebase"); err != nil {
 					log.Printf("dev-repo: git pull --rebase failed: %v (%s)", err, out)

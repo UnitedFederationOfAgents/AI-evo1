@@ -172,10 +172,11 @@ func TestRepoWatchPullConflictKeepsBranch(t *testing.T) {
 	}
 }
 
-// TestRepoWatchNoPullWhileCondocLocked verifies a clean repo isn't pulled
-// while a condoc holds its '.condoc' lock -- condoccer is committing onto
-// the branch then.
-func TestRepoWatchNoPullWhileCondocLocked(t *testing.T) {
+// TestRepoWatchFastForwardsWhileCondocLocked verifies a follower LR -- no
+// commits of its own -- keeps fast-forwarding while a '.condoc' lock is
+// present, since the tracked lock arrives by pull and would otherwise strand
+// it before the release (Step1Prompt.md Revision F).
+func TestRepoWatchFastForwardsWhileCondocLocked(t *testing.T) {
 	origin := initTestRepo(t, "true")
 	dir := cloneTestRepo(t, origin)
 	rw := newRepoWatch(dir, func() {})
@@ -185,13 +186,47 @@ func TestRepoWatchNoPullWhileCondocLocked(t *testing.T) {
 	}
 
 	commitChange(t, origin, "upstream\n")
+	if err := os.WriteFile(filepath.Join(dir, ".condoc"), []byte("locked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Head; got == before {
+		t.Errorf("expected a fast-forward while .condoc is present on a follower")
+	}
+}
+
+// TestRepoWatchNoRebaseWhileCondocLocked verifies a repo with its own
+// unpushed commits isn't rebased while a condoc holds its '.condoc' lock --
+// condoccer is committing onto the branch then (Step1SubstepEPrompt.md
+// Revision G) -- and is once the lock is gone.
+func TestRepoWatchNoRebaseWhileCondocLocked(t *testing.T) {
+	origin := initTestRepo(t, "true")
+	dir := cloneTestRepo(t, origin)
+	rw := newRepoWatch(dir, func() {})
+
+	commitChange(t, origin, "upstream\n")
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "local.txt"}, {"-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "local"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	before, err := rw.headSHA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	lock := filepath.Join(dir, ".condoc")
 	if err := os.WriteFile(lock, []byte("locked\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rw.pollAndMaybePull()
 	if got := rw.snapshot().Head; got != before {
-		t.Errorf("expected no pull while .condoc is present: HEAD moved %s -> %s", before, got)
+		t.Errorf("expected no rebase while .condoc is present: HEAD moved %s -> %s", before, got)
 	}
 
 	if err := os.Remove(lock); err != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"dungeon-keeper/pkg/types"
 )
@@ -95,6 +96,56 @@ func TestStateCarriesOutputOfCompletedSignal(t *testing.T) {
 	}
 	if got.CompletedAt == 0 {
 		t.Error("want a completion time")
+	}
+}
+
+// TestStateListsSlopspaces: a deployed slopspace is in use only while slopspace
+// work for its agent type is processing, and in-use ones sort first.
+func TestStateListsSlopspaces(t *testing.T) {
+	w := testWorker(t)
+	idle, err := w.slopspaceMgr.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployed, err := w.slopspaceMgr.Create()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.slopspaceMgr.Deploy(deployed.ID, w.config.AgentType); err != nil {
+		t.Fatal(err)
+	}
+
+	st := w.state(false)
+	if len(st.Slopspaces) != 2 {
+		t.Fatalf("want 2 slopspaces, got %d", len(st.Slopspaces))
+	}
+	first := st.Slopspaces[0]
+	if first.ID != deployed.ID || !first.Deployed || first.InUse || first.AgentType != string(w.config.AgentType) {
+		t.Errorf("want the deployed, not yet in use slopspace first, got %+v", first)
+	}
+	if second := st.Slopspaces[1]; second.ID != idle.ID || second.Deployed || second.InUse {
+		t.Errorf("want the undeployed slopspace second, got %+v", second)
+	}
+
+	path, err := w.workSignalMgr.Create(&types.WorkSignal{
+		WorkType:  types.WorkTypeSlopspace,
+		AgentType: w.config.AgentType,
+		Role:      "test",
+		Prompt:    "work",
+		CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := w.state(false); st.Slopspaces[0].InUse {
+		t.Error("a pending signal shouldn't make the slopspace in use")
+	}
+	if err := w.workSignalMgr.TakeOwnership(path, "test"); err != nil {
+		t.Fatal(err)
+	}
+	st = w.state(false)
+	if !st.Slopspaces[0].InUse || st.Slopspaces[1].InUse {
+		t.Errorf("want only the deployed slopspace in use, got %+v", st.Slopspaces)
 	}
 }
 

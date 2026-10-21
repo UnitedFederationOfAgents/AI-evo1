@@ -31,10 +31,11 @@ const (
 // the signal file; LR only needs enough to show it. maxStateBytes keeps the
 // whole push under representable's 64 KiB line limit -- see fitState.
 const (
-	maxStateCompleted = 20
-	maxStateOutput    = 32 * 1024
-	maxStatePrompt    = 4 * 1024
-	maxStateBytes     = 48 * 1024
+	maxStateCompleted  = 20
+	maxStateOutput     = 32 * 1024
+	maxStatePrompt     = 4 * 1024
+	maxStateBytes      = 48 * 1024
+	maxStateSlopspaces = 50
 )
 
 // submitRole is the role recorded on work submitted from LR's worker tab.
@@ -47,6 +48,23 @@ type WorkerStateMsg struct {
 	AgentType string             `json:"agent_type"`
 	Busy      bool               `json:"busy"`
 	Signals   []WorkerSignalInfo `json:"signals"` // ongoing first, then the most recent completed, newest first within each
+
+	// The worker tab's slopspace view: every slopspace on this host, in use
+	// first, then deployed, then newest first -- at most maxStateSlopspaces,
+	// with how many more were left out.
+	Slopspaces        []SlopspaceInfo `json:"slopspaces"`
+	SlopspacesOmitted int             `json:"slopspaces_omitted,omitempty"`
+}
+
+// SlopspaceInfo summarises one slopspace for the worker tab.
+type SlopspaceInfo struct {
+	ID        string   `json:"id"`
+	CreatedAt int64    `json:"created_at"` // unix ms
+	Iteration int      `json:"iteration"`  // deployment cycles so far
+	Deployed  bool     `json:"deployed"`
+	AgentType string   `json:"agent_type,omitempty"` // the agent type it's deployed to (or was, last)
+	InUse     bool     `json:"in_use"`               // deployed, and a local agent of that type is working a slopspace signal right now
+	Repos     []string `json:"repos,omitempty"`      // writespace repos, owner/name
 }
 
 // WorkerSignalInfo summarises one work signal for the worker tab.
@@ -228,8 +246,67 @@ func (w *Worker) state(busy bool) WorkerStateMsg {
 	complete, _ := w.workSignalMgr.ListComplete()
 	st.Signals = append(st.Signals, w.summarise(ongoing, 0)...)
 	st.Signals = append(st.Signals, w.summarise(complete, maxStateCompleted)...)
+	st.Slopspaces, st.SlopspacesOmitted = w.slopspaces(ongoing)
 	fitState(&st)
 	return st
+}
+
+// slopspaces summarises every slopspace on this host for the worker tab.
+// Whether one is in use comes from the ongoing signals: a deployed slopspace
+// is in use while an agent of the type it's deployed to is processing
+// slopspace work -- at most one slopspace is deployed per agent type, so
+// that work is running in it. That agent may be this worker or any other
+// dungeon-keeper on the host.
+func (w *Worker) slopspaces(ongoing []string) ([]SlopspaceInfo, int) {
+	all, err := w.slopspaceMgr.List()
+	if err != nil {
+		return []SlopspaceInfo{}, 0
+	}
+	working := map[types.AgentType]bool{}
+	for _, p := range ongoing {
+		signal, _, err := w.workSignalMgr.Read(p)
+		if err != nil {
+			continue
+		}
+		if signal.Status == types.WorkStatusProcessing && signal.WorkType == types.WorkTypeSlopspace {
+			working[signal.AgentType] = true
+		}
+	}
+
+	out := make([]SlopspaceInfo, 0, len(all))
+	for _, m := range all {
+		info := SlopspaceInfo{
+			ID:        m.ID,
+			CreatedAt: m.CreatedAt.UnixMilli(),
+			Iteration: m.Iteration,
+			Deployed:  m.Deployed,
+			AgentType: string(m.DeployedAgentType),
+			InUse:     m.Deployed && working[m.DeployedAgentType],
+		}
+		info.Repos, _ = w.slopspaceMgr.WritespaceRepos(m.ID)
+		out = append(out, info)
+	}
+	rank := func(s SlopspaceInfo) int {
+		switch {
+		case s.InUse:
+			return 0
+		case s.Deployed:
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if ri, rj := rank(out[i]), rank(out[j]); ri != rj {
+			return ri < rj
+		}
+		return out[i].CreatedAt > out[j].CreatedAt
+	})
+	omitted := 0
+	if len(out) > maxStateSlopspaces {
+		omitted = len(out) - maxStateSlopspaces
+		out = out[:maxStateSlopspaces]
+	}
+	return out, omitted
 }
 
 // fitState trims st until it marshals to at most maxStateBytes: representable

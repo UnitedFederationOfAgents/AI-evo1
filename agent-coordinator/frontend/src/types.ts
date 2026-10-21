@@ -319,6 +319,19 @@ export interface WorkerStateMsg {
   agent_type: string
   busy: boolean
   signals: WorkerSignalInfo[]
+  // absent from a dungeon-keeper older than the slopspace view
+  slopspaces?: SlopspaceInfo[]
+  slopspaces_omitted?: number
+}
+
+export interface SlopspaceInfo {
+  id: string
+  created_at: number
+  iteration: number
+  deployed: boolean
+  agent_type?: string
+  in_use: boolean
+  repos?: string[]
 }
 
 export interface WorkerReplyMsg {

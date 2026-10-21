@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo } from './types'
 import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -550,10 +550,49 @@ function FCCommandPanel({
   )
 }
 
-// WorkerPanel is the worker tab: a temporary prompt box that hands
-// prompt-only work to this host's dungeon-keeper, and the work signals it
-// reports, newest first -- see local-representative/worker.go.
+const WORKER_SUBTABS = ['direct', 'slopspace'] as const
+type WorkerSubTab = typeof WORKER_SUBTABS[number]
+
+// WorkerPanel is the worker tab, split in two: direct is a temporary prompt
+// box that hands prompt-only work to this host's dungeon-keeper, and the
+// work signals it reports, newest first; slopspace lists this host's
+// slopspaces and whether a local agent is using one -- see
+// local-representative/worker.go.
 function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+}) {
+  const [sub, setSub] = useState<WorkerSubTab>('direct')
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="ctl-subtabs">
+        {WORKER_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'direct' && <WorkerDirectView healthy={healthy} state={state} reply={reply} onSubmit={onSubmit} />}
+      {sub === 'slopspace' && <WorkerSlopspaceView state={state} />}
+    </div>
+  )
+}
+
+// WorkerDirectView is the worker tab's direct sub-tab: the prompt box and
+// the work signals.
+function WorkerDirectView({
   healthy,
   state,
   reply,
@@ -576,12 +615,7 @@ function WorkerPanel({
 
   const signals = state?.signals ?? []
   return (
-    <div className="worker-panel">
-      {state && (
-        <div className="worker-meta">
-          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
-        </div>
-      )}
+    <>
       <div className="worker-submit">
         <textarea
           className="worker-prompt"
@@ -611,6 +645,53 @@ function WorkerPanel({
             ))}
           </div>
         )}
+    </>
+  )
+}
+
+// WorkerSlopspaceView is the worker tab's slopspace sub-tab: this host's
+// slopspaces as dungeon-keeper last reported them, in use first. Read-only
+// for now.
+function WorkerSlopspaceView({ state }: { state: WorkerStateMsg | null }) {
+  if (!state) return <div className="service-empty">the worker hasn't reported yet</div>
+  if (!state.slopspaces) return <div className="service-empty">this worker is too old to report its slopspaces — rebuild it</div>
+  const slopspaces = state.slopspaces
+  const inUse = slopspaces.filter(s => s.in_use)
+  return (
+    <>
+      <div className="worker-meta">
+        {inUse.length > 0
+          ? `in use by a local agent: ${inUse.map(s => `${s.id.slice(0, 8)} (${s.agent_type})`).join(', ')}`
+          : 'no slopspace is in use by a local agent'}
+      </div>
+      {slopspaces.length === 0
+        ? <div className="service-empty">no slopspaces on this host</div>
+        : (
+          <div className="worker-signals">
+            {slopspaces.map(s => <WorkerSlopspaceRow key={s.id} slopspace={s} />)}
+            {!!state.slopspaces_omitted && <div className="worker-signal-detail">…and {state.slopspaces_omitted} older not shown</div>}
+          </div>
+        )}
+    </>
+  )
+}
+
+function WorkerSlopspaceRow({ slopspace: s }: { slopspace: SlopspaceInfo }) {
+  const status = s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'
+  const repos = s.repos ?? []
+  return (
+    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}`}>
+      <div className="worker-signal-head worker-slopspace-head">
+        <span className="worker-signal-status">{status}</span>
+        <span className="worker-signal-prompt" title={s.id}>
+          {s.id}
+          {repos.length > 0 && <span className="worker-slopspace-repos"> · {repos.join(', ')}</span>}
+        </span>
+        <span className="worker-signal-when">
+          {s.deployed && s.agent_type ? `${s.agent_type} · ` : ''}
+          {s.iteration} deploy{s.iteration === 1 ? '' : 's'} · created {new Date(s.created_at).toLocaleString()}
+        </span>
+      </div>
     </div>
   )
 }

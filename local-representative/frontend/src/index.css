@@ -2702,3 +2702,10 @@ body {
   overflow-y: auto;
 }
 .worker-signal-output { color: #d4d4d4; }
+
+.worker-slopspace-head { cursor: default; }
+.worker-slopspace-head:hover { background: none; }
+.worker-slopspace-in-use { border-color: #2d5a7a; }
+.worker-slopspace-in-use .worker-signal-status { color: #5bb8ff; }
+.worker-slopspace-deployed .worker-signal-status { color: #e0a83e; }
+.worker-slopspace-repos { color: #777; font-size: 12px; }

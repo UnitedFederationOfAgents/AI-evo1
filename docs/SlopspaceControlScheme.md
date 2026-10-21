@@ -98,6 +98,12 @@ Not yet built or run end to end; see the Step 1 replies.
   - `slopResolveHead` finds the missing heads. In the condoc repo, the head is the first commit after the base, which is the reply's: nothing else commits there during a turn. In the pointer repo, it is the first commit after the base to the pointer file that clears the turn. If that commit doesn't exist yet, the repo is left out. It is also left out if a pointer push rebased the base away.
   - The diff's place in the URL hash is URI-encoded, so a refresh lands back on a slopspace diff too.
 
+### Done: slopspace visibility on the worker tab (SlopspaceSlopspaceCondocs Step 1 Substep B)
+
+- The worker tab, both local-representative's and agent-coordinator's per-host copy, is split into two sub-tabs. **direct** is what was there: the prompt box and the work signals. **slopspace** lists the host's slopspaces. For now it only shows them; it has no controls yet.
+- dungeon-keeper puts the list in its `worker-state` as `slopspaces` (`repr.go`'s `slopspaces`): each slopspace's id, creation time, deploy count, writespace repos, whether it is deployed and to which agent type, and whether it is **in use**. In use means it is deployed and an ongoing slopspace signal for that agent type is `processing`. Only one slopspace is deployed per agent type, so that work is running in it. In-use slopspaces come first, then deployed ones, then the rest newest first, up to 50. `slopspaces_omitted` counts any left out.
+- The list is rebuilt on each watch-loop pass, like the signals, and sent only when it changes. Which condoc a slopspace belongs to isn't shown: that link is in condoccer's pointer specs, not in the slopspace.
+
 ## What Exists Today
 
 ### Same-repo scheme (for contrast)

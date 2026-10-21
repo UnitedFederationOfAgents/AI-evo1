@@ -1129,12 +1129,17 @@ function parseCommitRanges(content: string): Map<string, CommitRange> {
 //   - owner/name: [`base`](…/commit/<base>) → [`head`](…/commit/<head>)
 //   - owner/name: [`head`](…/commit/<head>)
 //   - owner/name: (no changes)
-// A reply's range spans every repo it changed: from is "owner/name@<base>,…"
-// and to "owner/name@<head>,…", which the backend diffs repo by repo. A
-// reply that changed no repo gets no range.
+//   - owner/name: [`base`](…/commit/<base>) → this reply
+// The last form is the condoc repo and the pointer repo, committed after the
+// reply is written. A reply's range spans every repo it changed: from is
+// "owner/name@<base>,…" and to "owner/name@<head>,…", which the backend
+// diffs repo by repo. A repo with a base and no head is the condoc or
+// pointer repo, whose head the backend finds. A reply that changed no repo
+// gets no range.
 function parseSlopCommitRanges(content: string): Map<string, CommitRange> {
   const link = String.raw`\[\x60[a-f0-9]+\x60\]\(https:\/\/github\.com\/[^)\s]+\/commit\/([a-f0-9]+)\)`
   const changedRe = new RegExp(String.raw`^- ([\w.-]+\/[\w.-]+): ${link}(?: → ${link})?\s*$`)
+  const thisReplyRe = new RegExp(String.raw`^- ([\w.-]+\/[\w.-]+): ${link} → this reply\s*$`)
   const unchangedRe = /^- [\w.-]+\/[\w.-]+: \(no changes\)\s*$/
   const replyRe = /^## Reply(?: ([A-Z]))?(?:\s|$)/
 
@@ -1149,6 +1154,11 @@ function parseSlopCommitRanges(content: string): Map<string, CommitRange> {
     while (j >= 0 && lines[j].trim() === '') j--
     for (; j >= 0; j--) {
       if (unchangedRe.test(lines[j])) continue
+      const tm = thisReplyRe.exec(lines[j])
+      if (tm) {
+        from.unshift(`${tm[1]}@${tm[2]}`)
+        continue
+      }
       const m = changedRe.exec(lines[j])
       if (!m) break
       const [, repo, first, second] = m
@@ -1159,7 +1169,7 @@ function parseSlopCommitRanges(content: string): Map<string, CommitRange> {
         to.unshift(`${repo}@${first}`)
       }
     }
-    if (to.length > 0) {
+    if (from.length > 0 || to.length > 0) {
       result.set(rm[1] ? `reply-${rm[1]}` : 'reply-initial', { from: from.join(','), to: to.join(',') })
     }
   }

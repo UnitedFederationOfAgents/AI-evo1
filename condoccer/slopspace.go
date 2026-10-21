@@ -1326,6 +1326,9 @@ func (s *Server) runTurn(stem string) error {
 					}
 					t.Bases = append(t.Bases, repo+"@"+sha)
 				}
+				if base := s.pointerBase(&spec); base != "" {
+					t.Bases = append(t.Bases, base)
+				}
 			}
 			if !meta.Deployed {
 				if err := s.slop.ss.Deploy(id, dktypes.AgentTypeWorker); err != nil {
@@ -1565,14 +1568,49 @@ func replyFromSignal(signal *dktypes.WorkSignal, events []dktypes.WorkEvent) str
 	return reply
 }
 
+// pointerBase is "owner/name@<sha>" of the pointer repo's HEAD, recorded
+// with a turn's bases so the reply's diff can include the turn's pointer
+// changes. It is "" when the pointer repo is also one of the condoc's repos
+// (their diff files would share names) or can't be read.
+func (s *Server) pointerBase(spec *PointerSpec) string {
+	cfg, path := s.acquirePointerOp()
+	defer s.endPointerOp()
+	repo := normalizeRepo(cfg.Repo)
+	if !pointerRepoPattern.MatchString(repo) {
+		return ""
+	}
+	for _, r := range spec.Repos() {
+		if strings.EqualFold(r, repo) {
+			return ""
+		}
+	}
+	out, err := pointerGit(path, "rev-parse", "HEAD")
+	if err != nil {
+		log.Printf("slopspace %s: pointer repo HEAD: %v: %s", spec.Stem(), err, strings.TrimSpace(string(out)))
+		return ""
+	}
+	return repo + "@" + strings.TrimSpace(string(out))
+}
+
 // turnPreamble links each target repo's commit for the reply, one line per
 // repo (D6): where the branch was before the turn and the commit the turn
-// made, or "(no changes)".
+// made, or "(no changes)". The other repos in bases -- the condoc repo and
+// the pointer repo -- are committed only after the reply is written, so
+// their lines link the base and end "→ this reply"; the diff viewer finds
+// their heads (see slopResolveHead).
 func turnPreamble(targets, bases []string, heads map[string]string) string {
 	baseOf := map[string]string{}
+	var others []string
+	isTarget := map[string]bool{}
+	for _, t := range targets {
+		isTarget[t] = true
+	}
 	for _, b := range bases {
 		if i := strings.LastIndex(b, "@"); i > 0 {
 			baseOf[b[:i]] = b[i+1:]
+			if !isTarget[b[:i]] {
+				others = append(others, b[:i])
+			}
 		}
 	}
 	link := func(repo, sha string) string {
@@ -1594,6 +1632,9 @@ func turnPreamble(targets, bases []string, heads map[string]string) string {
 			lines = append(lines, fmt.Sprintf("- %s: %s → %s", repo, link(repo, base), link(repo, head)))
 		}
 	}
+	for _, repo := range others {
+		lines = append(lines, fmt.Sprintf("- %s: %s → this reply", repo, link(repo, baseOf[repo])))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -1602,14 +1643,60 @@ func turnPreamble(targets, bases []string, heads map[string]string) string {
 // A slopspace reply's diff spans every repo the turn changed, so a diff
 // request carries one range per repo, read off the reply preamble's links:
 // fromCommit is "owner/name@<base>,..." and toCommit "owner/name@<head>,...".
-// A repo with a head and no base diffs the head commit alone. Files go back
-// to the UI as "owner/name/<path>", which is how get-file-diff names them.
+// A repo with a head and no base diffs the head commit alone. The condoc
+// repo and the pointer repo come with a base and no head ("→ this reply"):
+// their heads are found here (slopResolveHead), and the pointer repo is
+// listed only when the turn changed its pointer file. Files go back to the
+// UI as "owner/name/<path>", which is how get-file-diff names them.
 
 // slopDiffRange is one repo's part of a slopspace diff request.
 type slopDiffRange struct {
-	repo   string
-	gitDir string
-	spec   string // git revision range
+	repo     string
+	gitArgs  []string // points git at the repo: --git-dir <dir> or -C <path>
+	spec     string   // git revision range
+	path     string   // limits the diff to one file: the pointer repo's pointer file
+	allFiles bool     // keeps condoc files, which a target's list leaves out
+}
+
+func (r slopDiffRange) git(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, r.gitArgs...), args...)...)
+}
+
+// slopResolveHead finds where a repo committed after the reply stood for a
+// turn that started at base. In the condoc repo that is the first commit
+// after base, the reply's own: nothing else commits there while the turn
+// runs. In the pointer repo it is the first commit after base to the
+// condoc's pointer file that clears its turn; other condoccers' commits to
+// other pointer files are skipped. "" means the turn hasn't got that far,
+// or base was rebased away by a pointer push.
+func (s *Server) slopResolveHead(r slopDiffRange, base string) (string, error) {
+	if r.path == "" {
+		out, err := r.git("rev-list", "--first-parent", "--reverse", base+"..HEAD").Output()
+		if err != nil {
+			return "", fmt.Errorf("git rev-list failed in %s: %v", r.repo, err)
+		}
+		first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		return first, nil
+	}
+	s.acquirePointerOp()
+	defer s.endPointerOp()
+	if err := r.git("merge-base", "--is-ancestor", base, "HEAD").Run(); err != nil {
+		return "", nil
+	}
+	out, err := r.git("rev-list", "--reverse", "--topo-order", base+"..HEAD", "--", r.path).Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-list failed in %s: %v", r.repo, err)
+	}
+	for _, c := range strings.Fields(string(out)) {
+		b, err := r.git("show", c+":"+r.path).Output()
+		if err != nil {
+			continue
+		}
+		if spec, err := parsePointerSpec(string(b)); err == nil && spec.Turn == nil {
+			return c, nil
+		}
+	}
+	return "", nil
 }
 
 // parseRepoShas parses "owner/name@sha,..." into repo → sha, keeping order.
@@ -1632,21 +1719,27 @@ func parseRepoShas(list string) (map[string]string, []string, error) {
 	return shas, order, nil
 }
 
-// slopDiffRanges resolves a slopspace diff request to a range in each repo's
-// git dir, which stays in the slopspace's writespaces-secure whether or not
-// the slopspace is deployed.
+// slopDiffRanges resolves a slopspace diff request to a range in each repo:
+// in its git dir, which stays in the slopspace's writespaces-secure whether
+// or not the slopspace is deployed, or for the pointer repo in its checkout.
+// A repo whose head can't be found yet is left out.
 func (s *Server) slopDiffRanges(rel, fromCommit, toCommit string) ([]slopDiffRange, error) {
 	stem := strings.TrimPrefix(rel, slopPathPrefix)
 	if stem == "" || strings.ContainsAny(stem, `/\`) || strings.Contains(stem, "..") {
 		return nil, fmt.Errorf("invalid condoc path")
 	}
-	bases, _, err := parseRepoShas(fromCommit)
+	bases, baseOrder, err := parseRepoShas(fromCommit)
 	if err != nil {
 		return nil, err
 	}
 	heads, order, err := parseRepoShas(toCommit)
 	if err != nil {
 		return nil, err
+	}
+	for _, repo := range baseOrder {
+		if _, ok := heads[repo]; !ok {
+			order = append(order, repo)
+		}
 	}
 	spec, err := s.readSpec(stem)
 	if err != nil {
@@ -1663,20 +1756,41 @@ func (s *Server) slopDiffRanges(rel, fromCommit, toCommit string) ([]slopDiffRan
 	for _, r := range spec.Repos() {
 		known[r] = true
 	}
+	pointerRepo, pointerPath := "", ""
+	if cfg, path, err := s.pointerReadyPath(); err == nil {
+		pointerRepo, pointerPath = normalizeRepo(cfg.Repo), path
+	}
 	var ranges []slopDiffRange
 	for _, repo := range order {
-		if !known[repo] {
+		r := slopDiffRange{repo: repo}
+		switch {
+		case known[repo]:
+			r.gitArgs = []string{"--git-dir", filepath.Join(meta.RootPath, dkslop.WriteSpacesSecure, dkslop.ReposDir, filepath.FromSlash(repo))}
+			r.allFiles = repo == spec.CondocRepo
+		case repo == pointerRepo && pointerPath != "":
+			r.gitArgs = []string{"-C", pointerPath}
+			r.path = pointerDir + "/" + stem + ".yaml"
+			r.allFiles = true
+		default:
 			return nil, fmt.Errorf("%s isn't one of %s's repos", repo, spec.Name)
 		}
-		base := bases[repo]
-		if base == "" {
-			base = heads[repo] + "^"
+		base, head := bases[repo], heads[repo]
+		if head == "" {
+			if !r.allFiles {
+				return nil, fmt.Errorf("%s has no head commit in this diff", repo)
+			}
+			if head, err = s.slopResolveHead(r, base); err != nil {
+				return nil, err
+			}
+			if head == "" {
+				continue
+			}
 		}
-		ranges = append(ranges, slopDiffRange{
-			repo:   repo,
-			gitDir: filepath.Join(meta.RootPath, dkslop.WriteSpacesSecure, dkslop.ReposDir, filepath.FromSlash(repo)),
-			spec:   base + ".." + heads[repo],
-		})
+		if base == "" {
+			base = head + "^"
+		}
+		r.spec = base + ".." + head
+		ranges = append(ranges, r)
 	}
 	return ranges, nil
 }
@@ -1689,12 +1803,16 @@ func (s *Server) slopHandleGetDiff(c *wsClient, rel, fromCommit, toCommit string
 	}
 	files := []string{}
 	for _, r := range ranges {
-		out, err := exec.Command("git", "--git-dir", r.gitDir, "log", "--name-only", "--format=", r.spec).Output()
+		args := []string{"diff", "--name-only", r.spec}
+		if r.path != "" {
+			args = append(args, "--", r.path)
+		}
+		out, err := r.git(args...).Output()
 		if err != nil {
-			s.replyErr(c, fmt.Errorf("git log failed in %s: %v", r.repo, err))
+			s.replyErr(c, fmt.Errorf("git diff failed in %s: %v", r.repo, err))
 			return
 		}
-		for _, f := range changedFiles(out) {
+		for _, f := range listedFiles(out, !r.allFiles) {
 			files = append(files, r.repo+"/"+f)
 		}
 	}
@@ -1721,7 +1839,10 @@ func (s *Server) slopHandleGetFileDiff(c *wsClient, rel, fromCommit, toCommit, f
 		if r.repo != repo {
 			continue
 		}
-		out, err := exec.Command("git", "--git-dir", r.gitDir, "diff", r.spec, "--", path).Output()
+		if r.path != "" && path != r.path {
+			break
+		}
+		out, err := r.git("diff", r.spec, "--", path).Output()
 		if err != nil {
 			s.replyErr(c, fmt.Errorf("git diff failed in %s: %v", repo, err))
 			return

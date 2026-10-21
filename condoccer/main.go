@@ -1227,12 +1227,17 @@ func (s *Server) diffRepoRoot(condocRel string) (string, error) {
 // changedFiles is the sorted, de-duplicated project files (condoc files left
 // out) in "git log --name-only" output.
 func changedFiles(out []byte) []string {
+	return listedFiles(out, true)
+}
+
+// listedFiles is changedFiles with the condoc files kept unless skipCondoc.
+func listedFiles(out []byte, skipCondoc bool) []string {
 	fileSet := make(map[string]bool)
 	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if l == "" || logLineIsCommitHeader(l) {
 			continue
 		}
-		if !isCondocFile(l) {
+		if !skipCondoc || !isCondocFile(l) {
 			fileSet[l] = true
 		}
 	}

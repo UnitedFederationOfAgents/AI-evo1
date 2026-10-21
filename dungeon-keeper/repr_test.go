@@ -126,6 +126,12 @@ func TestStateListsSlopspaces(t *testing.T) {
 	if second := st.Slopspaces[1]; second.ID != idle.ID || second.Deployed || second.InUse {
 		t.Errorf("want the undeployed slopspace second, got %+v", second)
 	}
+	if first.Path != deployed.RootPath || first.DeployPath != w.config.DeployPath() {
+		t.Errorf("want the deployed slopspace's store and deploy paths, got %q and %q", first.Path, first.DeployPath)
+	}
+	if second := st.Slopspaces[1]; second.Path != idle.RootPath || second.DeployPath != "" {
+		t.Errorf("want only a store path for the undeployed slopspace, got %q and %q", second.Path, second.DeployPath)
+	}
 
 	path, err := w.workSignalMgr.Create(&types.WorkSignal{
 		WorkType:  types.WorkTypeSlopspace,

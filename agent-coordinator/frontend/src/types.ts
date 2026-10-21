@@ -332,6 +332,10 @@ export interface SlopspaceInfo {
   agent_type?: string
   in_use: boolean
   repos?: string[]
+  // its directory under the slopspaces dir, and where its spaces are while
+  // deployed (both absent from a dungeon-keeper older than the path field)
+  path?: string
+  deploy_path?: string
 }
 
 export interface WorkerReplyMsg {

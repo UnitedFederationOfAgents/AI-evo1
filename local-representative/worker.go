@@ -35,13 +35,15 @@ type WorkerStateMsg struct {
 // SlopspaceInfo mirrors dungeon-keeper/repr.go's type of the same name: one
 // of this host's slopspaces, shown on the worker tab's slopspace view.
 type SlopspaceInfo struct {
-	ID        string   `json:"id"`
-	CreatedAt int64    `json:"created_at"`
-	Iteration int      `json:"iteration"`
-	Deployed  bool     `json:"deployed"`
-	AgentType string   `json:"agent_type,omitempty"`
-	InUse     bool     `json:"in_use"`
-	Repos     []string `json:"repos,omitempty"`
+	ID         string   `json:"id"`
+	CreatedAt  int64    `json:"created_at"`
+	Iteration  int      `json:"iteration"`
+	Deployed   bool     `json:"deployed"`
+	AgentType  string   `json:"agent_type,omitempty"`
+	InUse      bool     `json:"in_use"`
+	Repos      []string `json:"repos,omitempty"`
+	Path       string   `json:"path"`
+	DeployPath string   `json:"deploy_path,omitempty"`
 }
 
 // WorkerSignalInfo mirrors dungeon-keeper/repr.go's type of the same name.

@@ -4408,6 +4408,10 @@ function WorkerSlopspaceControl({
   const locked = busy || !sel || sel.in_use
   const repos = sel?.repos ?? []
   const stored = !!sel && !sel.deployed
+  // Where its spaces are right now on the host: the deploy location while
+  // deployed, else its directory under the slopspaces dir (which keeps its
+  // metadata either way).
+  const path = sel ? (sel.deployed ? sel.deploy_path : sel.path) ?? '' : ''
   // A command (Revision B) queues a slopspace work signal for the host
   // worker's agent, which runs it in the deployed slopspace; it shows on the
   // direct sub-tab with the other signals.
@@ -4433,7 +4437,19 @@ function WorkerSlopspaceControl({
         </select>
         <button className="worker-submit-btn" disabled={busy} onClick={() => send({ op: 'create' })}>+ create</button>
       </div>
-      {sel?.in_use && <div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">path</span>
+        <input
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-path"
+          readOnly
+          value={path}
+          placeholder={!sel ? 'pick a slopspace' : 'rebuild dungeon-keeper to see paths'}
+          onFocus={e => e.target.select()}
+          disabled={!sel}
+        />
+      </div>
+      {sel?.deployed && sel.path && <div className="worker-meta">deployed — stored at {sel.path} when returned</div>}
+      {sel?.in_use &&<div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
       <div className="worker-slopctl-line">
         <span className="worker-slopctl-label">lifecycle</span>
         <select className="worker-slopctl-input" value={agentType} onChange={e => setAgentType(e.target.value)} disabled={locked || !stored}>

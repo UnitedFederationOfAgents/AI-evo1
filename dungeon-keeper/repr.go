@@ -62,13 +62,15 @@ type WorkerStateMsg struct {
 
 // SlopspaceInfo summarises one slopspace for the worker tab.
 type SlopspaceInfo struct {
-	ID        string   `json:"id"`
-	CreatedAt int64    `json:"created_at"` // unix ms
-	Iteration int      `json:"iteration"`  // deployment cycles so far
-	Deployed  bool     `json:"deployed"`
-	AgentType string   `json:"agent_type,omitempty"` // the agent type it's deployed to (or was, last)
-	InUse     bool     `json:"in_use"`               // deployed, and a local agent of that type is working a slopspace signal right now
-	Repos     []string `json:"repos,omitempty"`      // writespace repos, owner/name
+	ID         string   `json:"id"`
+	CreatedAt  int64    `json:"created_at"` // unix ms
+	Iteration  int      `json:"iteration"`  // deployment cycles so far
+	Deployed   bool     `json:"deployed"`
+	AgentType  string   `json:"agent_type,omitempty"`  // the agent type it's deployed to (or was, last)
+	InUse      bool     `json:"in_use"`                // deployed, and a local agent of that type is working a slopspace signal right now
+	Repos      []string `json:"repos,omitempty"`       // writespace repos, owner/name
+	Path       string   `json:"path"`                  // its directory under the slopspaces dir: metadata, plus its spaces while stored
+	DeployPath string   `json:"deploy_path,omitempty"` // while deployed, where its readspaces and writespaces are
 }
 
 // WorkerSignalInfo summarises one work signal for the worker tab.
@@ -298,6 +300,10 @@ func (w *Worker) slopspaces(ongoing []string) ([]SlopspaceInfo, int) {
 			Deployed:  m.Deployed,
 			AgentType: string(m.DeployedAgentType),
 			InUse:     m.Deployed && working[m.DeployedAgentType],
+			Path:      m.RootPath,
+		}
+		if m.Deployed {
+			info.DeployPath = m.DeployPath
 		}
 		info.Repos, _ = w.slopspaceMgr.WritespaceRepos(m.ID)
 		out = append(out, info)

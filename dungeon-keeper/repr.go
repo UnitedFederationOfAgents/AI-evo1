@@ -38,8 +38,12 @@ const (
 	maxStateSlopspaces = 50
 )
 
-// submitRole is the role recorded on work submitted from LR's worker tab.
-const submitRole = "worker-tab"
+// submitRole is the role recorded on work submitted from LR's worker tab;
+// commandRole on prompts from the slopspace manual control's command entry.
+const (
+	submitRole  = "worker-tab"
+	commandRole = "slopspace-command"
+)
 
 // WorkerStateMsg is the "worker-state" data payload pushed to
 // local-representative, which shows it on its worker tab.
@@ -180,9 +184,20 @@ func (w *Worker) submit(req SubmitRequest) (string, error) {
 		Mode:         "prompt",
 		CreatedAt:    time.Now(),
 	}
-	// Signal files are named by role and creation second, so two submits in
-	// the same second would share a name and the second would overwrite the
-	// first. Move to the next free second instead.
+	path, err := w.createSignal(signal)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[%s] submitted work from local-representative: %s", w.workerID, path)
+	w.pushState()
+	return path, nil
+}
+
+// createSignal writes signal into ongoing/ and wakes the watch loop so it
+// starts right away. Signal files are named by role and creation second, so
+// two submits in the same second would share a name and the second would
+// overwrite the first. Move to the next free second instead.
+func (w *Worker) createSignal(signal *types.WorkSignal) (string, error) {
 	for {
 		name := worksignal.GenerateFilename(signal.Role, signal.CreatedAt, false)
 		if _, err := os.Stat(filepath.Join(w.config.OngoingWorkDir(), name)); os.IsNotExist(err) {
@@ -194,12 +209,10 @@ func (w *Worker) submit(req SubmitRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[%s] submitted work from local-representative: %s", w.workerID, path)
 	select {
 	case w.wake <- struct{}{}:
 	default:
 	}
-	w.pushState()
 	return path, nil
 }
 

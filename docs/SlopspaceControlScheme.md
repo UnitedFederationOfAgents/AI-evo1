@@ -108,13 +108,15 @@ Not yet built or run end to end; see the Step 1 replies.
   - **deploy** (with an agent type) / **return** / **delete**: `Deploy` / `Return` / `Delete`. Delete asks for confirmation first.
   - **add repo**: clones or pulls `owner/name` into the shared writespace pool (`writespace.CloneRepo`), then `AddWritespaceRepo` on a new branch, which is required, as in the CLI.
   - **commit & push**: `WriteRepoChanges` for one repo, or `WriteAllRepoChanges` for every repo, with an optional message. The reply lists each repo's pushed SHA, or "no changes".
+  - **command** (Revision B): a custom prompt for the agent. It queues a `slopspace` work signal (role `slopspace-command`, mode `write`) for the agent type the slopspace is deployed to. The watch loop runs it in the deployed slopspace and, because it didn't deploy it, leaves it deployed. The signal shows with the others on the **direct** sub-tab, with the agent's output. The command entry is only enabled on a deployed slopspace, and only when it is deployed for the agent type this host's dungeon-keeper runs. A signal for any other type would never be picked up.
 - How a request travels: browser → LR `worker-slopspace` (or AC `lr-worker-slopspace` → LR `__worker:slopspace`) → dungeon-keeper `__worker:slopspace <json>` (`dungeon-keeper/slopctl.go`). dungeon-keeper runs the op off its command goroutine, answers with `slopspace-reply`, and pushes a fresh `worker-state`. LR relays the answer as `worker-slopspace-reply` to its own browsers and up to AC, which broadcasts it as `lr-worker-slopspace-reply`. LR and AC answer themselves when the request never reaches dungeon-keeper, for example when the worker isn't connected.
 - Guards, in dungeon-keeper:
   - Manual ops run one at a time.
   - Nothing can be done to an **in use** slopspace.
+  - Nothing can be done to a deployed slopspace while slopspace work for its agent type is still `pending` (Revision B), including a second command. Queued slopspace work runs in whatever is deployed when it is picked up, or in a new slopspace if nothing is. Returning it first would send a queued command somewhere else.
   - A deploy is refused while another slopspace is deployed for that agent type. This matters because `Deploy` clears the deploy path first, which would throw away the other slopspace's writespaces.
   - The UI only enables add repo and commit & push on a stored (returned) slopspace, because the Manager refuses both while it is deployed.
-- **Caveat:** these are raw Manager calls. Condoccer doesn't know about them. Deploying, returning or deleting a condoc's slopspace by hand while condoccer is driving it will confuse its turn queue. The panel can't tell which slopspaces belong to a condoc (see above).
+- **Caveat:** these are raw Manager calls. Condoccer doesn't know about them. Deploying, returning or deleting a condoc's slopspace by hand while condoccer is driving it will confuse its turn queue. The panel can't tell which slopspaces belong to a condoc (see above). The same applies to a command: one sent to a condoc's deployed slopspace runs in that condoc's writespaces, and condoccer might return the slopspace before the command is picked up.
 
 ## What Exists Today
 

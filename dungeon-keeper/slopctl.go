@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"dungeon-keeper/pkg/slopspace"
 	"dungeon-keeper/pkg/types"
@@ -17,16 +19,19 @@ import (
 // "__worker:slopspace <json>", this runs the op through the same
 // pkg/slopspace Manager condoccer and the `slopspace` CLI use, and answers
 // with "slopspace-reply". The slopspace list itself updates through the
-// next worker-state.
+// next worker-state. Revision B adds "command": a custom prompt for the
+// agent, queued as a slopspace work signal against the deployed slopspace,
+// which then shows with the other signals on the direct sub-tab.
 
 // SlopspaceControlRequest is the JSON carried by "__worker:slopspace <json>".
 type SlopspaceControlRequest struct {
-	Op        string `json:"op"`                   // create | deploy | return | delete | add-repo | write
+	Op        string `json:"op"`                   // create | deploy | return | delete | add-repo | write | command
 	ID        string `json:"id,omitempty"`         // the slopspace; every op but create
 	AgentType string `json:"agent_type,omitempty"` // deploy; defaults to this worker's
 	Repo      string `json:"repo,omitempty"`       // add-repo (required), write (empty: every repo); owner/name
 	Branch    string `json:"branch,omitempty"`     // add-repo: the new branch to create
 	Message   string `json:"message,omitempty"`    // write: the commit message
+	Prompt    string `json:"prompt,omitempty"`     // command: what to ask the agent
 }
 
 // SlopspaceControlReply is the "slopspace-reply" data payload.
@@ -98,11 +103,48 @@ func (w *Worker) slopspaceControl(req *SlopspaceControlRequest) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("no such slopspace: %w", err)
 	}
-	if meta.Deployed && w.agentWorking(meta.DeployedAgentType) {
-		return "", fmt.Errorf("slopspace %s is in use by a local %s agent; wait for its turn to finish", shortID(id), meta.DeployedAgentType)
+	if meta.Deployed {
+		working, queued := w.slopspaceWork(meta.DeployedAgentType)
+		if working {
+			return "", fmt.Errorf("slopspace %s is in use by a local %s agent; wait for its turn to finish", shortID(id), meta.DeployedAgentType)
+		}
+		// Queued slopspace work runs in whatever is deployed when an agent
+		// picks it up -- or in a fresh slopspace if nothing is -- so this
+		// one has to stay put until that work has run.
+		if queued {
+			return "", fmt.Errorf("slopspace %s has slopspace work waiting for a %s agent; wait for it to run", shortID(id), meta.DeployedAgentType)
+		}
 	}
 
 	switch req.Op {
+	case "command":
+		if !meta.Deployed {
+			return "", errors.New("deploy the slopspace first")
+		}
+		// Only this worker's own agent type: a signal for a type no local
+		// dungeon-keeper watches would wait forever and pin the slopspace.
+		if meta.DeployedAgentType != w.config.AgentType {
+			return "", fmt.Errorf("slopspace %s is deployed for %s, but this worker runs %s agents", shortID(id), meta.DeployedAgentType, w.config.AgentType)
+		}
+		prompt := strings.TrimSpace(req.Prompt)
+		if prompt == "" {
+			return "", errors.New("enter a command first")
+		}
+		// A slopspace signal, which processSlopspaceWork runs in the deployed
+		// slopspace -- and, as it didn't deploy it, leaves deployed.
+		path, err := w.createSignal(&types.WorkSignal{
+			WorkType:  types.WorkTypeSlopspace,
+			AgentType: meta.DeployedAgentType,
+			Role:      commandRole,
+			Prompt:    prompt,
+			Mode:      "write",
+			CreatedAt: time.Now(),
+		})
+		if err != nil {
+			return "", err
+		}
+		return "queued " + filepath.Base(path) + " — it shows on the direct tab", nil
+
 	case "deploy":
 		at := w.config.AgentType
 		if req.AgentType != "" {
@@ -180,20 +222,24 @@ func (w *Worker) slopspaceControl(req *SlopspaceControlRequest) (string, error) 
 	return "", fmt.Errorf("unknown slopspace op %q", req.Op)
 }
 
-// agentWorking reports whether an agent of the given type is processing
-// slopspace work right now -- the same test the list's "in use" uses.
-func (w *Worker) agentWorking(at types.AgentType) bool {
+// slopspaceWork reports whether an agent of the given type is processing
+// slopspace work right now -- the same test the list's "in use" uses -- and
+// whether slopspace work for that type is waiting to be picked up.
+func (w *Worker) slopspaceWork(at types.AgentType) (working, queued bool) {
 	ongoing, _ := w.workSignalMgr.ListOngoing()
 	for _, p := range ongoing {
 		signal, _, err := w.workSignalMgr.Read(p)
-		if err != nil {
+		if err != nil || signal.WorkType != types.WorkTypeSlopspace || signal.AgentType != at {
 			continue
 		}
-		if signal.Status == types.WorkStatusProcessing && signal.WorkType == types.WorkTypeSlopspace && signal.AgentType == at {
-			return true
+		switch signal.Status {
+		case types.WorkStatusProcessing:
+			working = true
+		case types.WorkStatusPending:
+			queued = true
 		}
 	}
-	return false
+	return working, queued
 }
 
 // describeWrites is the one-line form of printWriteResults.

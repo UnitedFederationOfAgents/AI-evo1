@@ -754,12 +754,17 @@ function WorkerSlopspaceControl({
   const [branch, setBranch] = useState('')
   const [writeRepo, setWriteRepo] = useState('')
   const [message, setMessage] = useState('')
+  const [command, setCommand] = useState('')
   const [pending, setPending] = useState<string | null>(null)
 
   // The answer ends the wait. A dungeon-keeper from before the panel never
   // answers, so give up eventually; add-repo clones and write pushes can
-  // take a while.
-  useEffect(() => { if (reply) setPending(null) }, [reply])
+  // take a while. A queued command clears the box.
+  useEffect(() => {
+    if (!reply) return
+    setPending(null)
+    if (reply.ok && reply.op === 'command') setCommand('')
+  }, [reply])
   useEffect(() => {
     if (!pending) return
     const t = setTimeout(() => setPending(null), 120_000)
@@ -775,6 +780,15 @@ function WorkerSlopspaceControl({
   const locked = busy || !sel || sel.in_use
   const repos = sel?.repos ?? []
   const stored = !!sel && !sel.deployed
+  // A command (Revision B) queues a slopspace work signal for this worker's
+  // agent, which runs it in the deployed slopspace; it shows on the direct
+  // sub-tab with the other signals.
+  const commandable = !locked && !!sel && sel.deployed && sel.agent_type === state.agent_type
+  const sendCommand = () => {
+    const text = command.trim()
+    if (!commandable || !text) return
+    send({ op: 'command', id, prompt: text })
+  }
 
   return (
     <div className="worker-slopctl">
@@ -831,6 +845,24 @@ function WorkerSlopspaceControl({
         >write</button>
       </div>
       {sel?.deployed && !sel.in_use && <div className="worker-meta">adding repos and writing need it returned first</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">command</span>
+        <textarea
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-command"
+          rows={2}
+          placeholder={commandable ? `prompt for the ${sel?.agent_type} agent, run in this slopspace… Ctrl+Enter to send` : 'deploy the slopspace to send it a command'}
+          value={command}
+          onChange={e => setCommand(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendCommand()
+          }}
+          disabled={!commandable}
+        />
+        <button className="worker-submit-btn" disabled={!commandable || !command.trim()} onClick={sendCommand}>send</button>
+      </div>
+      {sel?.deployed && !sel.in_use && sel.agent_type !== state.agent_type && (
+        <div className="worker-meta">deployed for {sel.agent_type}, but this worker runs {state.agent_type} agents — commands need it deployed for {state.agent_type}</div>
+      )}
       {pending && <div className="worker-meta">{pending}: waiting for dungeon-keeper…</div>}
       {!pending && reply && (reply.ok
         ? <div className="worker-slopctl-ok">{reply.op}{reply.id ? ` ${reply.id.slice(0, 8)}` : ''}: {reply.detail || 'done'}</div>

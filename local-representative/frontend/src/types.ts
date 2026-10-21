@@ -269,12 +269,13 @@ export interface WorkerReplyMsg {
 // The slopspace sub-tab's manual control panel -- see worker.go and
 // dungeon-keeper/slopctl.go.
 export interface WorkerSlopspaceRequest {
-  op: 'create' | 'deploy' | 'return' | 'delete' | 'add-repo' | 'write'
+  op: 'create' | 'deploy' | 'return' | 'delete' | 'add-repo' | 'write' | 'command'
   id?: string
   agent_type?: string
   repo?: string    // owner/name: add-repo; write (empty for every repo)
   branch?: string  // add-repo: the new branch
   message?: string // write: the commit message
+  prompt?: string  // command: what to ask the agent in the deployed slopspace
 }
 
 export interface WorkerSlopspaceReply {

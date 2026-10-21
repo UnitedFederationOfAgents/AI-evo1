@@ -61,6 +61,12 @@ func TestControlSlopspaceRefusesBadRequestsAndMissingWorker(t *testing.T) {
 	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "deploy"}); err == nil {
 		t.Error("an op on no slopspace should be refused")
 	}
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "command", ID: "x", Prompt: " "}); err == nil || !strings.Contains(err.Error(), "enter a command") {
+		t.Errorf("a command with no prompt should be refused, got %v", err)
+	}
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "command", ID: "x", Prompt: "hi"}); err == nil || !strings.Contains(err.Error(), "isn't connected") {
+		t.Errorf("a command is a known op; with no worker connected want refused as not connected, got %v", err)
+	}
 	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "create"}); err == nil || !strings.Contains(err.Error(), "isn't connected") {
 		t.Errorf("with no worker connected want refused as not connected, got %v", err)
 	}

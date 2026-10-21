@@ -2728,6 +2728,7 @@ body {
 }
 .worker-slopctl-input:disabled { opacity: 0.5; }
 .worker-slopctl-pick, .worker-slopctl-grow { flex: 1; }
+.worker-slopctl-command { font-family: inherit; resize: vertical; min-height: 2.5em; }
 .worker-slopctl .worker-submit-btn { padding: 4px 12px; }
 .worker-slopctl-danger { background: #4a1e1e; border-color: #8a2e2e; }
 .worker-slopctl-ok { color: #4ec94e; font-size: 13px; }

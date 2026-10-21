@@ -89,6 +89,7 @@ type WorkerSlopspaceRequest struct {
 	Repo      string `json:"repo,omitempty"`
 	Branch    string `json:"branch,omitempty"`
 	Message   string `json:"message,omitempty"`
+	Prompt    string `json:"prompt,omitempty"` // command (Revision B)
 }
 
 // WorkerSlopspaceReply mirrors dungeon-keeper's SlopspaceControlReply: how a
@@ -103,8 +104,10 @@ type WorkerSlopspaceReply struct {
 }
 
 // workerSlopspaceOps are the manual control ops dungeon-keeper runs.
+// "command" (Revision B) queues a prompt for the agent in a deployed
+// slopspace.
 var workerSlopspaceOps = map[string]bool{
-	"create": true, "deploy": true, "return": true, "delete": true, "add-repo": true, "write": true,
+	"create": true, "deploy": true, "return": true, "delete": true, "add-repo": true, "write": true, "command": true,
 }
 
 func (s *Server) getWorkerState() *WorkerStateMsg {
@@ -194,6 +197,9 @@ func (s *Server) controlSlopspace(req WorkerSlopspaceRequest) error {
 	}
 	if req.Op != "create" && strings.TrimSpace(req.ID) == "" {
 		return errors.New("pick a slopspace first")
+	}
+	if req.Op == "command" && strings.TrimSpace(req.Prompt) == "" {
+		return errors.New("enter a command first")
 	}
 	if s.reprServer == nil || !s.reprServer.IsHealthy("worker") {
 		return errors.New("the worker (dungeon-keeper) isn't connected — launch it from the system tab")

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo, useContext, createCo
 import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
-  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus,
+  LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState, AgentInfo,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
@@ -190,6 +190,28 @@ function useCoordinatorWS() {
 
   const sendLRSetAutoRebuild = useCallback((hostId: string, enabled: boolean) => {
     wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
+  }, [])
+
+  // Checks out a different branch in the host's watched dev-repo -- the
+  // "dev branch" switch control (Step1SubstepCPrompt.md Revision B).
+  const sendLRSwitchBranch = useCallback((hostId: string, branch: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-switch-branch', payload: { host_id: hostId, branch } }))
+  }, [])
+
+  // The per-host "providers" section's "connect"/"disconnect" controls
+  // (Step1SubstepEPrompt.md): hand the host's LR a credential to use -- only
+  // a GitHub PAT so far -- or have it forget one it was handed.
+  const sendLRConnectProvider = useCallback((hostId: string, provider: string, token: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-connect-provider', payload: { host_id: hostId, provider, token } }))
+  }, [])
+  const sendLRDisconnectProvider = useCallback((hostId: string, provider: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-disconnect-provider', payload: { host_id: hostId, provider } }))
+  }, [])
+
+  // The per-host "agents & models" section's "re-inspect" control
+  // (Step1SubstepEPrompt.md Revision B).
+  const sendLRInspectAgents = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-inspect-agents', payload: { host_id: hostId } }))
   }, [])
 
   // Toggles whether the given host's LR restarts itself the instant an
@@ -548,7 +570,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -557,9 +579,10 @@ function hostDotClass(status: string): string {
 }
 
 function HostSidebar({
-  hosts, selectedHostId, onSelect, onSelectGlobal,
+  hosts, hostData, selectedHostId, onSelect, onSelectGlobal,
 }: {
   hosts: Host[]
+  hostData: Record<string, HostClientState>
   selectedHostId: string | null
   onSelect: (id: string) => void
   onSelectGlobal: () => void
@@ -588,11 +611,19 @@ function HostSidebar({
           >
             <span className={`host-dot ${hostDotClass(host.status)}`} />
             <span className="host-label">{host.label}</span>
+            {hostData[host.id]?.repo?.build_failed && <BuildFailedDot />}
           </div>
         ))
       )}
     </div>
   )
+}
+
+// BuildFailedDot is the small red dot a host's sidebar row and topology card
+// carry from a failed rebuild until its next successful one -- see
+// LRRepoStateMsg.build_failed (Step1SubstepEPrompt.md Revision D).
+function BuildFailedDot() {
+  return <span className="host-build-failed" title="last rebuild failed — clears on the next successful rebuild" />
 }
 
 const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'] as const
@@ -978,12 +1009,13 @@ function procRowKey(proc: ProcInfo): string {
 }
 
 function SystemProcRow({
-  proc, nowSec, selected, onSelect, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
+  proc, nowSec, selected, onSelect, onOpen, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
 }: {
   proc: ProcInfo
   nowSec: number
   selected?: boolean
   onSelect?: () => void
+  onOpen?: () => void // double-click: go to this app's own tab (Step1SubstepCPrompt.md)
   onTerminate?: (id: string) => void
   onRestart?: () => void
   onRestartManaged?: (id: string) => void
@@ -1001,7 +1033,10 @@ function SystemProcRow({
     <div
       className={`sys-row sys-row-${proc.status}${onSelect ? ' sys-row-clickable' : ''}${selected ? ' sys-row-selected' : ''}`}
       onClick={onSelect}
-      title={onSelect ? 'click for version details' : undefined}
+      onDoubleClick={onOpen}
+      title={onSelect
+        ? (onOpen ? 'click for version details, double-click to open its tab' : 'click for version details')
+        : undefined}
     >
       <span className="sys-col sys-col-name">
         <span className="sys-col-name-main">
@@ -1237,12 +1272,18 @@ function Trough({ entries }: { entries: TroughEntry[] }) {
 // changes. It's selectable, plain, and reads "rebuild" only once HEAD has
 // moved since the last build with the repo clean; otherwise it's disabled.
 // Rendered only when that host's LR was actually launched with --dev-repo.
+//
+// onSwitchBranch, when given, adds the "dev branch" row (Step1SubstepCPrompt.md
+// Revision B) -- the per-host system tab passes it; the global view's
+// details pane deliberately doesn't, since its own "switch all" control
+// under "rebuild all" covers every host at once.
 function RepoWatchPanel({
-  repoState, onRebuild, onSetAutoRebuild,
+  repoState, onRebuild, onSetAutoRebuild, onSwitchBranch,
 }: {
   repoState: LRRepoStateMsg | undefined
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch?: (branch: string) => void
 }) {
   if (!repoState?.watched) return null
 
@@ -1290,6 +1331,92 @@ function RepoWatchPanel({
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
       )}
+      {onSwitchBranch && (
+        <BranchSwitcher
+          branch={repoState.branch || '(detached)'}
+          branches={repoState.branches ?? []}
+          current={repoState.branch}
+          disabledReason={branchSwitchBlocker([repoState])}
+          error={repoState.switch_error}
+          onSwitch={onSwitchBranch}
+        />
+      )}
+    </div>
+  )
+}
+
+// branchSwitchBlocker returns why a dev-branch switch can't happen right now
+// on any of the given watched repos, or null if it can -- the same refusals
+// local-representative's switchBranch enforces server-side (dirty, building,
+// condoc lock), surfaced up front so the switch button disables itself.
+function branchSwitchBlocker(repos: LRRepoStateMsg[]): string | null {
+  if (repos.some(r => r.dirty)) return 'uncommitted changes — commit or revert to enable switching'
+  if (repos.some(r => r.building)) return 'a rebuild is running'
+  if (repos.some(r => r.condoc_locked)) return 'a condoc is mid-transition (.condoc lock file present)'
+  return null
+}
+
+// BranchSwitcher is the "dev branch" readout plus its "switch" control
+// (Step1SubstepCPrompt.md Revision B): shows the branch being watched and,
+// once "switch" is pressed, a picker over the available branches with a
+// confirming "switch" and a "cancel". Used both per-host (inside
+// RepoWatchPanel) and in the global view under "rebuild all", where branch
+// reads "<differs>" when the hosts disagree and a switch goes to every host.
+function BranchSwitcher({
+  branch, branches, current, disabledReason, error, onSwitch,
+}: {
+  branch: string
+  branches: string[]
+  current?: string
+  disabledReason: string | null
+  error?: string
+  onSwitch: (branch: string) => void
+}) {
+  const [picking, setPicking] = useState(false)
+  const [choice, setChoice] = useState('')
+  const disabled = !!disabledReason || branches.length === 0
+
+  const open = () => {
+    setChoice(current && branches.includes(current) ? current : branches[0] ?? '')
+    setPicking(true)
+  }
+  const confirm = () => {
+    if (choice) onSwitch(choice)
+    setPicking(false)
+  }
+
+  return (
+    <div className="sys-branch">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-branch</span>
+        {picking ? (
+          <select className="sys-branch-select" value={choice} onChange={e => setChoice(e.target.value)}>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <span className="sys-branch-name" title={branch}>{branch}</span>
+        )}
+      </div>
+      <div className="sys-repo-controls">
+        {picking ? (
+          <>
+            <button className="sys-btn sys-btn-branch" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+              switch
+            </button>
+            <button className="sys-btn sys-btn-neutral" onClick={() => setPicking(false)}>cancel</button>
+          </>
+        ) : (
+          <button
+            className="sys-btn sys-btn-branch"
+            disabled={disabled}
+            onClick={open}
+            title={disabledReason ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}
+          >
+            switch
+          </button>
+        )}
+      </div>
+      {error && <div className="sys-repo-error" title={error}>last branch switch failed: {error}</div>}
     </div>
   )
 }
@@ -1609,8 +1736,385 @@ function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => vo
   )
 }
 
+// isLRTab narrows an app name (e.g. a ProcInfo.name) to one of a host
+// view's tabs -- every managed sub-application has a same-named tab.
+function isLRTab(name: string): name is LRTab {
+  return (LR_TABS as readonly string[]).includes(name)
+}
+
+/* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) ---- */
+
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub', claude: 'Claude' }
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+function connectionStatusLabel(status: string): string {
+  return status === 'ok' ? 'connected' : status === 'failed' ? 'not working' : 'checking…'
+}
+
+// connectionTitle is a provider icon's hover text: who the credentials
+// authenticate as, or why they don't.
+function connectionTitle(c: ConnectionInfo): string {
+  const label = providerLabel(c.provider)
+  if (c.status === 'ok') return `${label} — ${c.principal ?? 'connected'}`
+  if (c.status === 'failed') return `${label} — credentials not working${c.detail ? `: ${c.detail}` : ''}`
+  return `${label} — checking credentials…`
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  if (provider === 'github') {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    )
+  }
+  if (provider === 'aws') {
+    return (
+      <svg viewBox="0 0 28 16" width="24" height="14" aria-hidden="true">
+        <text x="14" y="9" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor" fontFamily="sans-serif">aws</text>
+        <path d="M5 11.5 Q14 16 23 11.5" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M20.6 10.6 L23.2 11.4 L22.3 13.8" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return <span>{providerLabel(provider)}</span>
+}
+
+// AgentIcon is an agent tile's image (Step1SubstepEPrompt.md Revision E),
+// drawn like ProviderIcon: a small inline mark per ambiguous-agent agent
+// (ambiguous-agent/main.go's availableAgents), tinted after that agent's own
+// color there, falling back to the agent's name for one it doesn't know.
+function AgentIcon({ agent }: { agent: string }) {
+  switch (agent) {
+    case 'claude':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g stroke="#d97757" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M8 1.5V14.5M1.5 8H14.5M3.4 3.4L12.6 12.6M12.6 3.4L3.4 12.6" />
+          </g>
+        </svg>
+      )
+    case 'gemini':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M8 0C8 4.4 11.6 8 16 8C11.6 8 8 11.6 8 16C8 11.6 4.4 8 0 8C4.4 8 8 4.4 8 0Z" fill="#4e8cf7" />
+        </svg>
+      )
+    case 'codex':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="#a78bfa" strokeWidth="1.3">
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" />
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" transform="rotate(60 8 8)" />
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" transform="rotate(120 8 8)" />
+          </g>
+        </svg>
+      )
+    case 'copilot':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="#4fb3e8" strokeWidth="1.3" strokeLinejoin="round">
+            <path d="M2.5 7.5C2.5 4.5 4.8 2.5 8 2.5S13.5 4.5 13.5 7.5V11C13.5 12.4 11.2 13.5 8 13.5S2.5 12.4 2.5 11Z" />
+            <rect x="4.2" y="6" width="3" height="2.6" rx="1" />
+            <rect x="8.8" y="6" width="3" height="2.6" rx="1" />
+          </g>
+        </svg>
+      )
+    case 'opencode':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <rect x="2" y="2" width="12" height="12" fill="none" stroke="#4caf50" strokeWidth="1.5" />
+          <rect x="5.5" y="5.5" width="5" height="5" fill="#4caf50" />
+        </svg>
+      )
+    case 'grok':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M11.5 4.2A5 5 0 1 0 12.6 10" />
+            <path d="M14 1.5L5 14.5" />
+          </g>
+        </svg>
+      )
+  }
+  return <span>{agent}</span>
+}
+
+// CONNECTABLE_PROVIDERS are the providers the "connect" control offers
+// (Step1SubstepEPrompt.md) -- local-representative/connectivity.go's
+// connectableProviders, with how each is connected.
+interface ConnectOption { provider: string, method: string, placeholder: string }
+
+const CONNECTABLE_PROVIDERS: ConnectOption[] = [
+  { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
+]
+
+// CONNECTABLE_AGENTS are the agents the "agents & models" section's
+// "connect" offers (Revision D) -- local-representative/agents.go's
+// agentAuthEnv. They travel as a provider named after the agent.
+const CONNECTABLE_AGENTS: ConnectOption[] = [
+  { provider: 'claude', method: 'OAuth token', placeholder: 'CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)' },
+]
+
+// DEV_AGENTS are ambiguous-agent's test agents: hidden in "agents & models"
+// unless its "show-dev" toggle is on, and never drawn as topology tiles.
+const DEV_AGENTS: ReadonlySet<string> = new Set(['clod'])
+
+// ProviderConnectForm is the "connect" control: a provider (or agent)
+// picker and a masked credential field. Whitespace is rejected here because
+// the credential travels as one word of a "__system:connect" command.
+function ProviderConnectForm({ options = CONNECTABLE_PROVIDERS, onConnect, onCancel }: {
+  options?: ConnectOption[]
+  onConnect: (provider: string, token: string) => void
+  onCancel: () => void
+}) {
+  const [provider, setProvider] = useState(options[0].provider)
+  const [token, setToken] = useState('')
+  const spec = options.find(p => p.provider === provider) ?? options[0]
+  const trimmed = token.trim()
+  const invalid = trimmed === '' || /\s/.test(trimmed)
+  const submit = () => {
+    if (invalid) return
+    onConnect(provider, trimmed)
+    setToken('')
+  }
+  return (
+    <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
+      <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
+        {options.map(p => (
+          <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
+        ))}
+      </select>
+      <input
+        className="sys-provider-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={spec.placeholder}
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        autoFocus
+      />
+      <button type="submit" className="sys-btn sys-btn-branch" disabled={invalid}
+        title={invalid && trimmed !== '' ? 'a token can\'t contain whitespace' : `use this ${spec.method} for ${providerLabel(provider)} on this host`}>
+        connect
+      </button>
+      <button type="button" className="sys-btn sys-btn-neutral" onClick={onCancel}>cancel</button>
+    </form>
+  )
+}
+
+// ProvidersPanel is the per-host system tab's "providers" section: always
+// shown, with one sub-section per provider that host holds credentials for
+// -- see local-representative/connectivity.go -- plus the "connect" control
+// (Step1SubstepEPrompt.md). A provider connected through it (source
+// "connected") takes precedence over the host's environment credentials
+// and gets a "disconnect", which falls back to them.
+function ProvidersPanel({ connections, onConnect, onDisconnect }: {
+  connections?: ConnectionInfo[] | null
+  onConnect: (provider: string, token: string) => void
+  onDisconnect: (provider: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  return (
+    <div className="sys-providers">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">providers</span>
+        {!connecting && connections != null && (
+          <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+            title="give this host credentials for a provider (GitHub PAT)">
+            connect
+          </button>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          onConnect={(provider, token) => { onConnect(provider, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {connections == null ? (
+        <div className="sys-providers-none">this host's LR doesn't report provider connections</div>
+      ) : connections.length === 0 ? (
+        <div className="sys-providers-none">no provider credentials present</div>
+      ) : connections.map(c => (
+        <div key={c.provider} className={`sys-provider sys-provider-${c.status}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
+            <span className="sys-provider-name">{providerLabel(c.provider)}</span>
+            <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+            {c.source === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(c.provider)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          <div className="sys-readout-row">
+            <span className="sys-readout-label">principal</span>
+            <span className="sys-readout-value">
+              {c.principal || <span className="sys-readout-placeholder">{c.status === 'checking' ? 'not yet verified' : 'unknown'}</span>}
+            </span>
+          </div>
+          {c.source && (
+            <div className="sys-readout-row">
+              <span className="sys-readout-label">credentials from</span>
+              <span className="sys-readout-value">{c.source}</span>
+            </div>
+          )}
+          {c.status === 'failed' && c.detail && (
+            <div className="sys-readout-row">
+              <span className="sys-readout-label">error</span>
+              <span className="sys-readout-value sys-provider-error">{c.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// AgentsPanel is the per-host system tab's "agents & models" section, below
+// "providers" (Step1SubstepEPrompt.md Revision B): the AI agents that host
+// can run and their models, as its ambiguous-agent layer reports them
+// (ambiguous-agent --inspect, run by its LR -- see
+// local-representative/agents.go). Installed agents get a card each; the
+// rest are listed on one line. Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
+//
+// Revision D adds a "connect" control for CONNECTABLE_AGENTS (Claude's
+// CLAUDE_CODE_OAUTH_TOKEN, which that host's LR passes to every app it
+// launches afterwards) and a "show-dev" toggle, off by default, that the
+// DEV_AGENTS (clod) are hidden behind.
+function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
+  agents?: AgentsState | null
+  nowSec: number
+  onInspect: () => void
+  onConnect: (agent: string, token: string) => void
+  onDisconnect: (agent: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  const [showDev, setShowDev] = useState(false)
+  const hasDev = agents?.agents.some(a => DEV_AGENTS.has(a.name)) ?? false
+  const shown = agents?.agents.filter(a => showDev || !DEV_AGENTS.has(a.name)) ?? []
+  const installed = shown.filter(a => a.installed)
+  const missing = shown.filter(a => !a.installed)
+  const checking = agents?.status === 'checking'
+  return (
+    <div className="sys-providers sys-agents">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">agents &amp; models</span>
+        {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+        {agents != null && (
+          <span className="sys-agents-controls">
+            {hasDev && (
+              <label className="sys-agents-showdev" title="also list ambiguous-agent's test agents (clod)">
+                <input type="checkbox" checked={showDev} onChange={e => setShowDev(e.target.checked)} />
+                show-dev
+              </label>
+            )}
+            {!connecting && (
+              <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+                title="give an agent on this host credentials (Claude OAuth token)">
+                connect
+              </button>
+            )}
+            <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+              title="ask this host's ambiguous-agent again which agents and models it has">
+              {checking ? 'inspecting…' : 're-inspect'}
+            </button>
+          </span>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          options={CONNECTABLE_AGENTS}
+          onConnect={(agent, token) => { onConnect(agent, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {agents?.status === 'failed' && (
+        <div className="sys-provider-row">
+          <span className="sys-provider-label">error</span>
+          <span className="sys-provider-value sys-provider-error">{agents.detail || 'inspection failed'}</span>
+        </div>
+      )}
+      {agents == null ? (
+        <div className="sys-providers-none">this host's LR doesn't report agents</div>
+      ) : installed.length === 0 && agents.status !== 'checking' ? (
+        <div className="sys-providers-none">no agents available</div>
+      ) : installed.map(a => (
+        <div key={a.name} className={`sys-provider ${a.detail ? 'sys-provider-failed' : ''}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-name">{a.name}</span>
+            {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
+            <span className="sys-provider-status sys-provider-status-ok">available</span>
+            {a.auth === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(a.name)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          {CONNECTABLE_AGENTS.some(c => c.provider === a.name) && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">auth</span>
+              <span className="sys-provider-value">
+                {a.auth === 'connected' ? 'connected — passed to apps launched from now on'
+                  : a.auth ? `${a.auth} (LR's environment)`
+                  : <span className="sys-provider-placeholder">none passed — relies on the agent's own login, if any</span>}
+              </span>
+            </div>
+          )}
+          {a.version && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">version</span>
+              <span className="sys-provider-value">{a.version}</span>
+            </div>
+          )}
+          {a.path && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">path</span>
+              <span className="sys-provider-value">{a.path}</span>
+            </div>
+          )}
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">models</span>
+            {a.models && a.models.length > 0 ? (
+              <span className="sys-agent-models">
+                {a.models.map(m => (
+                  <span key={m} className="sys-agent-model">{m}{m === a.default_model ? ' (default)' : ''}</span>
+                ))}
+              </span>
+            ) : (
+              <span className="sys-provider-value">
+                <span className="sys-provider-placeholder">
+                  {a.model_selection ? 'none listed' : 'no model selection (uses its built-in default)'}
+                </span>
+              </span>
+            )}
+          </div>
+          {a.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{a.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="sys-agents-missing">not installed: {missing.map(a => a.name).join(', ')}</div>
+      )}
+    </div>
+  )
+}
+
 function SystemPanel({
-  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetAutoUpdate,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch, onSetAutoUpdate,
+  onConnectProvider, onDisconnectProvider, onInspectAgents, onOpenTab,
 }: {
   hostId: string
   state: LRSystemStateMsg | undefined
@@ -1624,7 +2128,12 @@ function SystemPanel({
   onRestartManaged: (hostId: string, id: string) => void
   onRebuild: (hostId: string) => void
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  onSwitchBranch: (hostId: string, branch: string) => void
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  onConnectProvider: (hostId: string, provider: string, token: string) => void
+  onDisconnectProvider: (hostId: string, provider: string) => void
+  onInspectAgents: (hostId: string) => void
+  onOpenTab: (tab: LRTab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   // Which process row's drill-down is open, keyed by procRowKey -- cleared
@@ -1670,6 +2179,7 @@ function SystemPanel({
         repoState={repoState}
         onRebuild={() => onRebuild(hostId)}
         onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
+        onSwitchBranch={branch => onSwitchBranch(hostId, branch)}
       />
       {fcRunning && fcRows.map(row => (
         <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
@@ -1702,6 +2212,7 @@ function SystemPanel({
             onSelect={() => setSelectedKey(k => k === procRowKey(p) ? null : procRowKey(p))}
             onTerminate={id => onTerminate(hostId, id)}
             onRestartManaged={id => onRestartManaged(hostId, id)}
+            onOpen={isLRTab(p.name) ? () => onOpenTab(p.name as LRTab) : undefined}
           />
         ))}
         {managed.length === 0 && (
@@ -1728,6 +2239,18 @@ function SystemPanel({
           )
         })}
       </div>
+      <ProvidersPanel
+        connections={state.connections}
+        onConnect={(provider, token) => onConnectProvider(hostId, provider, token)}
+        onDisconnect={provider => onDisconnectProvider(hostId, provider)}
+      />
+      <AgentsPanel
+        agents={state.agents}
+        nowSec={nowSec}
+        onInspect={() => onInspectAgents(hostId)}
+        onConnect={(agent, token) => onConnectProvider(hostId, agent, token)}
+        onDisconnect={agent => onDisconnectProvider(hostId, agent)}
+      />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -2952,19 +3475,41 @@ function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolea
 // individual FC/CO/W box's own green border once it's connected but out of
 // date (see subAppOutOfDate) -- LR/AC never get one; the card-level halo
 // already implies it for LR.
+//
+// connections adds a bar of provider icons (AWS, GitHub) above the boxes --
+// unlike the boxes, an icon is only drawn at all when that host holds the
+// credentials, with a yellow border once they've failed verification (see
+// local-representative/connectivity.go). onOpen drives double-click
+// navigation: the card opens that host's system tab, a sub-app box that
+// sub-app's own tab (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md).
+//
+// Step1SubstepEPrompt.md Revision D adds a row of agent tiles below the
+// boxes -- one per agent installed on that host, never a DEV_AGENTS one
+// (double-click opens the system tab, where "agents & models" lists them) --
+// and buildFailed's small red dot beside the label (see BuildFailedDot).
 function TopologyNodeCard({
-  label, status, isSelf, services, managed, devMode, selected, outOfDate, onClick,
+  label, status, isSelf, services, managed, connections, agents, buildFailed, devMode, selected, outOfDate, onClick, onOpen,
 }: {
   label: string
   status?: string
   isSelf?: boolean
   services?: ServiceStatus[]
   managed?: ProcInfo[]
+  connections?: ConnectionInfo[] | null
+  agents?: AgentsState | null
+  buildFailed?: boolean
   devMode?: boolean
   selected?: boolean
   outOfDate?: boolean
   onClick?: () => void
+  onOpen?: (tab: LRTab) => void
 }) {
+  // A sub-app box's double-click handler -- stops the event reaching the
+  // card's own (which would open the system tab instead).
+  const openTab = (tab: LRTab) => onOpen
+    ? (e: React.MouseEvent) => { e.stopPropagation(); onOpen(tab) }
+    : undefined
+
   const fcHealthy = serviceHealthy(services, 'federation-command')
   const coHealthy = serviceHealthy(services, 'condoccer')
   const tcHealthy = serviceHealthy(services, 'convo')
@@ -2983,19 +3528,31 @@ function TopologyNodeCard({
   const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
   const rbOutdated = devMode && rbHealthy && subAppOutOfDate(managed, 'robot')
   const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
+  const agentTiles = agents?.agents.filter(a => a.installed && !DEV_AGENTS.has(a.name)) ?? []
 
   return (
     <div
       className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}${outOfDate ? ' topo-node-outdated' : ''}`}
       title={outOfDate ? "this host's LR is behind the dev branch it's tracking — see details & control" : undefined}
       onClick={onClick}
+      onDoubleClick={onOpen ? () => onOpen('system') : undefined}
     >
       <div className="topo-node-header">
         {status && <span className={`host-dot ${hostDotClass(status)}`} />}
         <span className="topo-node-label">{label}</span>
+        {buildFailed && <BuildFailedDot />}
         {isSelf && <span className="topo-node-self-tag">self</span>}
       </div>
       <div className="topo-node-diagram">
+        {connections && connections.length > 0 && (
+          <div className="topo-node-row topo-node-conns">
+            {connections.map(c => (
+              <span key={c.provider} className={`topo-conn-icon topo-conn-${c.status}`} title={connectionTitle(c)}>
+                <ProviderIcon provider={c.provider} />
+              </span>
+            ))}
+          </div>
+        )}
         <div className="topo-node-row topo-node-row-top">
           {isSelf && <span className="topo-node-box topo-node-box-ac">AC</span>}
           <span className="topo-node-box topo-node-box-lr">LR</span>
@@ -3004,31 +3561,55 @@ function TopologyNodeCard({
           <span
             className={subAppBoxClass(fcHealthy, fcManaged, !!fcOutdated)}
             title={fcOutdated ? "federation-command is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('federation-command')}
           >FC</span>
           <span
             className={subAppBoxClass(coHealthy, coManaged, !!coOutdated)}
             title={coOutdated ? "condoccer is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('condoccer')}
           >CO</span>
           <span
             className={subAppBoxClass(tcHealthy, tcManaged, !!tcOutdated)}
             title={tcOutdated ? "convo is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('convo')}
           >TC</span>
           <span
             className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
             title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('sessions')}
           >SM</span>
           <span
             className={subAppBoxClass(rbHealthy, rbManaged, !!rbOutdated)}
             title={rbOutdated ? "robot is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('robot')}
           >RB</span>
           <span
             className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
             title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('worker')}
           >W</span>
         </div>
+        {agentTiles.length > 0 && (
+          <div className="topo-node-row topo-node-agents">
+            {agentTiles.map(a => (
+              <span key={a.name} className={`topo-agent-tile${a.auth ? ' topo-agent-tile-auth' : ''}`} title={agentTileTitle(a)}>
+                <AgentIcon agent={a.name} />
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
+}
+
+// agentTileTitle is an agent tile's hover text: its version, and for a
+// connectable agent where its credential comes from.
+function agentTileTitle(a: AgentInfo): string {
+  const parts = [a.version ? `${a.name} — ${a.version}` : a.name]
+  if (a.auth) parts.push(`auth: ${a.auth}`)
+  else if (CONNECTABLE_AGENTS.some(c => c.provider === a.name)) parts.push('auth: none passed')
+  return parts.join('\n')
 }
 
 // GlobalTopologyPanel: main pane of host cards (left, agent-coordinator's own
@@ -3067,9 +3648,10 @@ function TopologyNodeCard({
 // selective-restart effect as "host update all" but generalized to every
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
+  onOpenHost: (hostId: string, tab: LRTab) => void
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
@@ -3077,6 +3659,7 @@ function GlobalTopologyPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
@@ -3138,6 +3721,23 @@ function GlobalTopologyPanel({
   const handleSetAutoRebuildAll = (enabled: boolean) =>
     watchedHosts.forEach(h => sendLRSetAutoRebuild(h.id, enabled))
 
+  // Network-wide "dev branch" control under "rebuild all"
+  // (Step1SubstepCPrompt.md Revision B): reads the one branch every watched
+  // host is on, or "<differs>" when they disagree; offers every branch any
+  // of them reports; and a switch is sent to every watched host at once.
+  const watchedRepos = watchedHosts.map(h => hostData[h.id]!.repo!)
+  const watchedBranches = new Set(watchedRepos.map(r => r.branch || '(detached)'))
+  const allBranchesLabel = watchedBranches.size === 0 ? '—'
+    : watchedBranches.size === 1 ? [...watchedBranches][0]
+    : '<differs>'
+  const allBranchOptions = [...new Set(watchedRepos.flatMap(r => r.branches ?? []))].sort()
+  const commonBranch = watchedBranches.size === 1 ? watchedRepos[0]?.branch : undefined
+  const switchErrors = watchedHosts
+    .filter(h => hostData[h.id]?.repo?.switch_error)
+    .map(h => `${h.label}: ${hostData[h.id]!.repo!.switch_error}`)
+  const handleSwitchBranchAll = (branch: string) =>
+    watchedHosts.forEach(h => sendLRSwitchBranch(h.id, branch))
+
   // "network update all": the same selective-restart effect as "host update
   // all" above, generalized to every connected host's LR plus AC -- each
   // host's own `update_available` (not its sub-apps') decides whether that
@@ -3178,10 +3778,14 @@ function GlobalTopologyPanel({
             isSelf
             services={hostData[selfHost.id]?.lrState?.services}
             managed={hostData[selfHost.id]?.system?.managed}
+            connections={hostData[selfHost.id]?.system?.connections}
+            agents={hostData[selfHost.id]?.system?.agents}
+            buildFailed={!!hostData[selfHost.id]?.repo?.build_failed}
             devMode={devMode}
             selected={selectedHostId === selfHost.id}
             outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
             onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
+            onOpen={tab => onOpenHost(selfHost.id, tab)}
           />
         ) : (
           <TopologyNodeCard label="agent-coordinator" isSelf />
@@ -3194,10 +3798,14 @@ function GlobalTopologyPanel({
             status={h.status}
             services={hostData[h.id]?.lrState?.services}
             managed={hostData[h.id]?.system?.managed}
+            connections={hostData[h.id]?.system?.connections}
+            agents={hostData[h.id]?.system?.agents}
+            buildFailed={!!hostData[h.id]?.repo?.build_failed}
             devMode={devMode}
             selected={selectedHostId === h.id}
             outOfDate={devMode && hostOutOfDate(hostData[h.id])}
             onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}
+            onOpen={tab => onOpenHost(h.id, tab)}
           />
         ))}
       </div>
@@ -3309,6 +3917,16 @@ function GlobalTopologyPanel({
                 </label>
               </div>
             )}
+            {devMode && watchedHosts.length > 0 && (
+              <BranchSwitcher
+                branch={allBranchesLabel}
+                branches={allBranchOptions}
+                current={commonBranch}
+                disabledReason={branchSwitchBlocker(watchedRepos)}
+                error={switchErrors.length > 0 ? switchErrors.join('; ') : undefined}
+                onSwitch={handleSwitchBranchAll}
+              />
+            )}
             <div className="topo-controls-buttons">
               <button
                 className={`sys-btn sys-btn-restart${acWillUpdate ? ' sys-btn-restart-update' : ''}`}
@@ -3384,9 +4002,10 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
+  onOpenHost: (hostId: string, tab: LRTab) => void
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
@@ -3394,6 +4013,7 @@ function GlobalSystemPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
   acUpdateAvailable: boolean
@@ -3428,6 +4048,7 @@ function GlobalSystemPanel({
           sendLRRestartApp={sendLRRestartApp}
           sendLRRebuildApp={sendLRRebuildApp}
           sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          sendLRSwitchBranch={sendLRSwitchBranch}
           sendLRSetAutoUpdate={sendLRSetAutoUpdate}
           acLoaderManaged={acLoaderManaged}
           acUpdateAvailable={acUpdateAvailable}
@@ -3435,6 +4056,7 @@ function GlobalSystemPanel({
           acStartedAt={acStartedAt}
           sendACRestartApp={sendACRestartApp}
           sendACSetAutoUpdate={sendACSetAutoUpdate}
+          onOpenHost={onOpenHost}
         />
       ) : (
         <div className="service-empty">not yet implemented</div>
@@ -3445,9 +4067,10 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, activeTab, setActiveTab,
-  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, activeTab, setActiveTab,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles, onOpenHost,
 }: {
+  onOpenHost: (hostId: string, tab: LRTab) => void
   hosts: Host[]
   hostData: Record<string, HostClientState>
   selfHostId: string | null
@@ -3455,6 +4078,7 @@ function GlobalView({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
@@ -3522,6 +4146,7 @@ function GlobalView({
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               acLoaderManaged={acLoaderManaged}
               acUpdateAvailable={acUpdateAvailable}
@@ -3529,6 +4154,7 @@ function GlobalView({
               acStartedAt={acStartedAt}
               sendACRestartApp={sendACRestartApp}
               sendACSetAutoUpdate={sendACSetAutoUpdate}
+              onOpenHost={onOpenHost}
             />
           )
         ) : (
@@ -3641,7 +4267,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -3659,9 +4285,13 @@ function LRView({
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  sendLRConnectProvider: (hostId: string, provider: string, token: string) => void
+  sendLRDisconnectProvider: (hostId: string, provider: string) => void
+  sendLRInspectAgents: (hostId: string) => void
   uploadFiles: (hostId: string, files: FileList | File[]) => void
-  importHostFiles: (hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
+  importHostFiles:(hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
   activeTab: LRTab
   setActiveTab: (tab: LRTab) => void
   hasHighlighted: boolean
@@ -3872,7 +4502,12 @@ function LRView({
                     onRestartManaged={sendLRRestartManagedApp}
                     onRebuild={sendLRRebuildApp}
                     onSetAutoRebuild={sendLRSetAutoRebuild}
+                    onSwitchBranch={sendLRSwitchBranch}
                     onSetAutoUpdate={sendLRSetAutoUpdate}
+                    onConnectProvider={sendLRConnectProvider}
+                    onDisconnectProvider={sendLRDisconnectProvider}
+                    onInspectAgents={sendLRInspectAgents}
+                    onOpenTab={setActiveTab}
                   />
                 )
               )}
@@ -4219,7 +4854,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetAutoUpdate, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -4252,6 +4887,14 @@ export default function App() {
   }
 
   const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+
+  // Double-click navigation from the global topology view
+  // (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md): a host card
+  // opens that host's system tab, a sub-app box that sub-app's tab.
+  const handleOpenHostTab = (id: string, tab: LRTab) => {
+    if (id !== selectedHostId) handleSelectHost(id)
+    setActiveTab(tab)
+  }
 
   // "At least one file store available" (Step1SubstepCPrompt.md): AC has no
   // file store of its own -- a screenshot can only ever land somewhere by
@@ -4387,6 +5030,7 @@ export default function App() {
         <div className={`sidebar-wrap${mobileNavOpen ? ' mobile-open' : ''}`}>
           <HostSidebar
             hosts={hosts}
+            hostData={hostData}
             selectedHostId={selectedHostId}
             onSelect={handleSelectHost}
             onSelectGlobal={handleSelectGlobal}
@@ -4410,7 +5054,11 @@ export default function App() {
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              sendLRConnectProvider={sendLRConnectProvider}
+              sendLRDisconnectProvider={sendLRDisconnectProvider}
+              sendLRInspectAgents={sendLRInspectAgents}
               uploadFiles={uploadFiles}
               importHostFiles={importHostFiles}
               activeTab={activeTab}
@@ -4429,6 +5077,7 @@ export default function App() {
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
@@ -4441,6 +5090,7 @@ export default function App() {
               hasHighlighted={!!firstHighlighted}
               onGoToHighlighted={goToFirstHighlighted}
               uploadFiles={uploadFiles}
+              onOpenHost={handleOpenHostTab}
             />
           )}
         </div>

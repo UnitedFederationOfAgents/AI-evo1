@@ -397,6 +397,18 @@ of sequential commits landing on the watched repo from triggering a rebuild
 per commit. Turning auto-rebuild off, the repo going dirty, or the button
 otherwise going inactive cancels the pending timer.
 
+Below that, a **dev-branch** row shows the branch the watched repo has
+checked out (the branch the poll above follows the upstream of) with a
+**switch** button that opens a picker over every local and remote-tracking
+branch and runs `git switch <branch>` (also settable remotely via
+`__system:switch-branch <branch>`). A switch is refused while the repo is
+dirty, a build is running, or `.condoc` is present, with the reason shown
+under the row. A switch moves HEAD the same way a pull does, so the rebuild
+button (and auto-rebuild's timer) treat it like any other change. The row
+appears only in per-host system tabs. The global view gets its own
+**dev-branch** control under **rebuild all**, which reads `<differs>` when
+the watched hosts are on different branches and switches every one of them.
+
 Every git/make invocation the watcher makes — the poll's own status check,
 the pull, and a rebuild, whether triggered by the operator or by
 auto-rebuild — goes through one mutex, so **the check-and-rebuild process is

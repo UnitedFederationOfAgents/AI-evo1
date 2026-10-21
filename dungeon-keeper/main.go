@@ -461,7 +461,9 @@ func runSlopspace(cfg *types.Config, args []string) {
 			message := fs.String("message", "", "Commit message")
 			fs.Parse(args[3:])
 
-			if err := mgr.WriteAllRepoChanges(slopspaceID, *message); err != nil {
+			results, err := mgr.WriteAllRepoChanges(slopspaceID, *message)
+			printWriteResults(results)
+			if err != nil {
 				log.Fatalf("Failed to write changes: %v", err)
 			}
 			fmt.Printf("Pushed changes from all writespace repos in slopspace %s\n", slopspaceID)
@@ -483,9 +485,11 @@ func runSlopspace(cfg *types.Config, args []string) {
 				log.Fatalf("Invalid owner/repo format: %s", ownerRepo)
 			}
 
-			if err := mgr.WriteRepoChanges(slopspaceID, parts[0], parts[1], *message); err != nil {
+			result, err := mgr.WriteRepoChanges(slopspaceID, parts[0], parts[1], *message)
+			if err != nil {
 				log.Fatalf("Failed to write changes: %v", err)
 			}
+			printWriteResults([]slopspace.RepoWriteResult{result})
 			fmt.Printf("Pushed changes from %s in slopspace %s\n", ownerRepo, slopspaceID)
 		} else {
 			// Assume slopspace write <id> all format with id as args[1]
@@ -499,7 +503,9 @@ func runSlopspace(cfg *types.Config, args []string) {
 			message := fs.String("message", "", "Commit message")
 			fs.Parse(args[3:])
 
-			if err := mgr.WriteAllRepoChanges(slopspaceID, *message); err != nil {
+			results, err := mgr.WriteAllRepoChanges(slopspaceID, *message)
+			printWriteResults(results)
+			if err != nil {
 				log.Fatalf("Failed to write changes: %v", err)
 			}
 			fmt.Printf("Pushed changes from all writespace repos in slopspace %s\n", slopspaceID)
@@ -513,6 +519,22 @@ func runSlopspace(cfg *types.Config, args []string) {
 	// Silence unused variable warnings
 	_ = readspaceMgr
 	_ = writespaceMgr
+}
+
+// printWriteResults reports each repo a `slopspace write` touched and the
+// commit it now sits at.
+func printWriteResults(results []slopspace.RepoWriteResult) {
+	for _, r := range results {
+		sha := r.SHA
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		status := "no changes"
+		if r.Changed {
+			status = "committed and pushed"
+		}
+		fmt.Printf("  %s: %s (%s)\n", r.Repo, sha, status)
+	}
 }
 
 func requiredSlopspaceID(args []string) (string, bool) {
@@ -823,7 +845,7 @@ func (w *Worker) processWorkSignal(signalPath string) error {
 	return nil
 }
 
-func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath string) error {
+func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath string) (retErr error) {
 	// Check if there's already a deployed slopspace for this agent type
 	deployedID, err := w.slopspaceMgr.GetDeployedID(w.config.AgentType)
 	if err != nil {
@@ -833,8 +855,12 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 	var metadata *types.SlopspaceMetadata
 
 	if deployedID != "" {
-		// Use existing deployed slopspace
-		log.Printf("[%s] Using existing deployed slopspace: %s", w.workerID, deployedID)
+		// Use the slopspace someone else deployed. Whoever deployed it owns
+		// returning it -- condoccer, for instance, deploys a condoc's
+		// slopspace, signals, waits for complete/, then returns it and
+		// commits (see docs/SlopspaceControlScheme.md, D3). Returning it
+		// here too would race that.
+		log.Printf("[%s] Using existing deployed slopspace: %s (its deployer returns it)", w.workerID, deployedID)
 		metadata, err = w.slopspaceMgr.Get(deployedID)
 		if err != nil {
 			return fmt.Errorf("failed to get deployed slopspace: %w", err)
@@ -851,6 +877,19 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 		if err := w.slopspaceMgr.Deploy(metadata.ID, w.config.AgentType); err != nil {
 			return fmt.Errorf("failed to deploy slopspace: %w", err)
 		}
+
+		// This worker deployed it, so this worker returns it -- whether or
+		// not the agent succeeds, so a failed run never strands it deployed.
+		id := metadata.ID
+		defer func() {
+			log.Printf("[%s] Returning slopspace: %s", w.workerID, id)
+			if err := w.slopspaceMgr.Return(id); err != nil {
+				log.Printf("[%s] Failed to return slopspace %s: %v", w.workerID, id, err)
+				if retErr == nil {
+					retErr = fmt.Errorf("failed to return slopspace: %w", err)
+				}
+			}
+		}()
 
 		// Update metadata after deploy
 		metadata, _ = w.slopspaceMgr.Get(metadata.ID)
@@ -869,12 +908,6 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 	}
 
 	log.Printf("[%s] Agent output:\n%s", w.workerID, string(output))
-
-	// Return the slopspace
-	log.Printf("[%s] Returning slopspace: %s", w.workerID, metadata.ID)
-	if err := w.slopspaceMgr.Return(metadata.ID); err != nil {
-		return fmt.Errorf("failed to return slopspace: %w", err)
-	}
 
 	return nil
 }

@@ -135,3 +135,14 @@ retry cycle begins again on its own. An *explicit* disconnect (`^C` while
 connected/connecting/in local control) disarms it as well as dropping the
 link; `auto-connect disable` alone only cancels a retry in progress, leaving an
 already-live connection up.
+
+## Agents and models on this host
+
+```
+ufa agent list                    # every agent: installed or not, version, path
+ufa agent model list [<agent>]    # an agent's models (default: the current agent)
+```
+
+Both ask the ambiguous-agent layer (`ambiguous-agent --inspect`, the same
+source as LR's "agents & models" section), so they show what is actually
+installed, unlike `list-agents` / `list-models`, which use FC's own tables.

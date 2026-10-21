@@ -98,6 +98,12 @@ type VersionMsg struct {
 type SystemStateMsg struct {
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
+	// Connections lists the providers this host holds credentials for --
+	// see connectivity.go. Empty (never null) when there are none.
+	Connections []ConnectionInfo `json:"connections"`
+	// Agents is the "agents & models" section: which AI agents (and models)
+	// this host can run, per ambiguous-agent -- see agents.go.
+	Agents AgentsState `json:"agents"`
 }
 
 // launchSpec describes how to start one managed application.
@@ -396,7 +402,9 @@ func (s *Server) systemState() SystemStateMsg {
 			PendingVersion:  s.selfVersion.pending(),
 			AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
 		},
-		Managed: procs,
+		Managed:     procs,
+		Connections: append([]ConnectionInfo{}, s.connectivity.connections()...),
+		Agents:      s.agents.snapshot(),
 	}
 }
 
@@ -744,6 +752,10 @@ func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
 //	__system:rebuild
 //	__system:auto-rebuild <on|off>
 //	__system:auto-update <on|off>
+//	__system:switch-branch <name>
+//	__system:connect <provider> <credential>
+//	__system:disconnect <provider>
+//	__system:inspect-agents
 func (s *Server) handleSystemCommand(raw string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
 	verb, arg, _ := strings.Cut(rest, " ")
@@ -779,10 +791,32 @@ func (s *Server) handleSystemCommand(raw string) {
 		s.requestRebuild("operator")
 	case "auto-rebuild":
 		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
+	case "switch-branch":
+		if arg == "" {
+			log.Printf("system: remote switch-branch command missing target")
+			return
+		}
+		s.switchBranch(arg)
 	case "auto-update":
 		s.setAutoUpdate(arg == "on" || arg == "true" || arg == "1")
+	case "connect":
+		provider, credential, _ := strings.Cut(arg, " ")
+		if provider == "" {
+			log.Printf("system: remote connect command missing provider")
+			return
+		}
+		s.connectProvider(provider, credential)
+	case "disconnect":
+		if arg == "" {
+			log.Printf("system: remote disconnect command missing provider")
+			return
+		}
+		s.disconnectProvider(arg)
+	case "inspect-agents":
+		s.agents.reinspect()
 	default:
-		log.Printf("system: ignoring unrecognised remote system command %q", raw)
+		// Only the verb: the rest may be a credential.
+		log.Printf("system: ignoring unrecognised remote system command %q", verb)
 	}
 }
 
@@ -1043,6 +1077,10 @@ func (s *Server) launchManaged(app string) (string, error) {
 	if spec.buildEnv != nil {
 		cmd.Env = append(cmd.Env, spec.buildEnv(s, id)...)
 	}
+	// A connected provider credential overrides LR's own environment's (exec
+	// keeps the last of duplicate keys) -- see connectivity.go.
+	cmd.Env = append(cmd.Env, s.connectivity.childEnv()...)
+	cmd.Env = append(cmd.Env, s.agents.childEnv()...) // likewise a connected agent's (agents.go)
 	// Own process group so terminate can signal the whole child tree (terminal
 	// wrapper included).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

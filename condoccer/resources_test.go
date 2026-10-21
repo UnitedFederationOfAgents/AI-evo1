@@ -254,7 +254,7 @@ func TestFetchAllHighlightedFilesOlderLR(t *testing.T) {
 func TestAddResourceRequiresConnection(t *testing.T) {
 	s := newServer(t.TempDir())
 	info := CondocInfo{Name: "X", StepFile: "condocs/xImpls/Step1Prompt.md"}
-	err := s.addResource(filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "highlighted"})
+	err := s.addResource(s.root, filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "highlighted"}, true)
 	if err == nil {
 		t.Fatal("expected an error with no local-representative connection")
 	}
@@ -265,7 +265,7 @@ func TestAddResourceRequiresConnection(t *testing.T) {
 func TestAddResourceUnknownType(t *testing.T) {
 	s := newServer(t.TempDir())
 	info := CondocInfo{Name: "X", StepFile: "condocs/xImpls/Step1Prompt.md"}
-	err := s.addResource(filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "bogus"})
+	err := s.addResource(s.root, filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "bogus"}, true)
 	if err == nil {
 		t.Fatal("expected an error for an unknown resource type")
 	}
@@ -281,11 +281,11 @@ func TestAddVoiceNoteResource(t *testing.T) {
 	s := newServer(root)
 	info := CondocInfo{Name: "X", StepFile: "condocs/xImpls/Step1Prompt.md"}
 
-	err := s.addResource(filepath.Join(s.root, mainRelPath), info, ActionRequest{
+	err := s.addResource(s.root, filepath.Join(s.root, mainRelPath), info, ActionRequest{
 		ResourceType: "voice-note",
 		ResourceName: "Meeting recap",
 		Content:      "we agreed to ship on Friday",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("addResource: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestAddVoiceNoteResource(t *testing.T) {
 func TestAddVoiceNoteResourceRequiresContent(t *testing.T) {
 	s := newServer(t.TempDir())
 	info := CondocInfo{Name: "X", StepFile: "condocs/xImpls/Step1Prompt.md"}
-	err := s.addResource(filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "voice-note", Content: "   "})
+	err := s.addResource(s.root, filepath.Join(s.root, "condocs", "X.md"), info, ActionRequest{ResourceType: "voice-note", Content: "   "}, true)
 	if err == nil {
 		t.Fatal("expected an error for an empty voice note")
 	}

@@ -165,11 +165,54 @@ export interface TCAvailabilityMsg {
   available: boolean
 }
 
+// ConnectionInfo is one provider a host holds credentials for -- see
+// local-representative/connectivity.go. Only present providers are listed;
+// status is "checking" until the first verification, then "ok" or "failed".
+export interface ConnectionInfo {
+  provider: string // "aws" | "github"
+  status: string   // "checking" | "ok" | "failed"
+  principal?: string // AWS caller ARN / GitHub login, once verified
+  source?: string    // where the credentials came from, e.g. "TF_VAR_github_pat"
+  detail?: string    // why the last check failed
+}
+
 export interface LRSystemStateMsg {
   host_id: string
   active: boolean
   self: ProcInfo
   managed: ProcInfo[]
+  connections?: ConnectionInfo[] | null // null/absent for an older LR -- see ConnectionInfo
+  agents?: AgentsState | null // null/absent for an older LR -- see AgentsState
+}
+
+// AgentInfo is one agent in the per-host "agents & models" section, as that
+// host's ambiguous-agent --inspect reports it (see
+// local-representative/agents.go).
+export interface AgentInfo {
+  name: string
+  command: string
+  installed: boolean
+  path?: string
+  version?: string
+  model_selection: boolean
+  default_model?: string
+  models?: string[]
+  detail?: string // why listing its models failed
+  // Where a connectable agent's credential comes from (Step1SubstepEPrompt.md
+  // Revision D): "connected", the env var's name when that host's LR
+  // environment sets it, or absent.
+  auth?: string
+}
+
+// AgentsState is which AI agents (and models) a host can run. status is
+// "checking" until LR's first inspection finishes, then "ok", or "failed"
+// (with detail) when its ambiguous-agent couldn't be found or run.
+export interface AgentsState {
+  status: string
+  detail?: string
+  default_agent?: string
+  agents: AgentInfo[]
+  checked_at?: number
 }
 
 // LRRepoStateMsg mirrors local-representative's dev-repo watcher (--dev-repo,
@@ -191,11 +234,21 @@ export interface LRRepoStateMsg {
   auto_rebuild_seconds?: number
   head?: string
   last_error?: string
+  // From a failed rebuild until the next successful one (unlike last_error,
+  // which a new rebuild clears as it starts) -- drives the small red dot on
+  // the host's sidebar row and topology card (Step1SubstepEPrompt.md Revision D).
+  build_failed?: boolean
   // True while condoccer's '.condoc' lock file sits at the repo root (see
   // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- forces
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
   // is never rebuilt out from under.
   condoc_locked?: boolean
+  // The "dev branch" this LR is watching ('' / absent when HEAD is
+  // detached), every branch a "switch" may pick from, and the last
+  // refused/failed switch -- Step1SubstepCPrompt.md Revision B.
+  branch?: string
+  branches?: string[]
+  switch_error?: string
 }
 
 export interface CondocInfo {

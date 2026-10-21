@@ -97,9 +97,48 @@ export interface ProcInfo {
   session?: string // federation-command only: the session it's currently on (display name if session.yaml has one, otherwise the bare id) -- empty until an instance has connected and reported
 }
 
+// ConnectionInfo is one provider this host holds credentials for -- see
+// connectivity.go. Only present providers are listed; status is "checking"
+// until the first verification, then "ok" or "failed".
+export interface ConnectionInfo {
+  provider: string // "aws" | "github"
+  status: string   // "checking" | "ok" | "failed"
+  principal?: string // AWS caller ARN / GitHub login, once verified
+  source?: string    // where the credentials came from, e.g. "TF_VAR_github_pat"
+  detail?: string    // why the last check failed
+}
+
+// AgentInfo is one agent in the "agents & models" section, as
+// ambiguous-agent --inspect reports it (see local-representative/agents.go).
+export interface AgentInfo {
+  name: string
+  command: string
+  installed: boolean
+  path?: string
+  version?: string
+  model_selection: boolean
+  default_model?: string
+  models?: string[]
+  detail?: string // why listing its models failed
+  // Where a connectable agent's credential comes from (Step1SubstepEPrompt.md
+  // Revision D): "connected", the env var's name when LR's environment sets
+  // it, or absent.
+  auth?: string
+}
+
+export interface AgentsState {
+  status: string // "checking" | "ok" | "failed"
+  detail?: string
+  default_agent?: string
+  agents: AgentInfo[]
+  checked_at?: number
+}
+
 export interface SystemStateMsg {
   self: ProcInfo
   managed: ProcInfo[]
+  connections?: ConnectionInfo[]
+  agents?: AgentsState
 }
 
 // ModeMismatchMsg discloses that a connected peer's dev-mode status differs
@@ -168,11 +207,18 @@ export interface RepoStateMsg {
   auto_rebuild_seconds?: number
   head?: string
   last_error?: string
+  build_failed?: boolean // from a failed rebuild until the next successful one
   // True while condoccer's '.condoc' lock file sits at the repo root (see
   // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md) -- forces
   // rebuild_ready false regardless of dirty/head, so a condoc mid-transition
   // is never rebuilt out from under.
   condoc_locked?: boolean
+  // The "dev branch" being watched ('' / absent when HEAD is detached),
+  // every branch a "switch" may pick from, and the last refused/failed
+  // switch -- Step1SubstepCPrompt.md Revision B.
+  branch?: string
+  branches?: string[]
+  switch_error?: string
 }
 
 // The worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md): what the

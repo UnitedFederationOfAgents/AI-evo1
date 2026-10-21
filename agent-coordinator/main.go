@@ -353,8 +353,47 @@ type ProcInfo struct {
 
 // SystemStateMsg matches the system-state payload sent from LR over representable.
 type SystemStateMsg struct {
-	Self    ProcInfo   `json:"self"`
-	Managed []ProcInfo `json:"managed"`
+	Self        ProcInfo         `json:"self"`
+	Managed     []ProcInfo       `json:"managed"`
+	Connections []ConnectionInfo `json:"connections"`
+	Agents      *AgentsState     `json:"agents"`
+}
+
+// AgentsState mirrors local-representative/agents.go's: which AI agents (and
+// models) that host can run, per its ambiguous-agent -- the per-host system
+// tab's "agents & models" section (Step1SubstepEPrompt.md Revision B).
+type AgentsState struct {
+	Status       string      `json:"status"`
+	Detail       string      `json:"detail,omitempty"`
+	DefaultAgent string      `json:"default_agent,omitempty"`
+	Agents       []AgentInfo `json:"agents"`
+	CheckedAt    int64       `json:"checked_at,omitempty"`
+}
+
+// AgentInfo mirrors local-representative/agents.go's: one agent and its models.
+type AgentInfo struct {
+	Name           string   `json:"name"`
+	Command        string   `json:"command"`
+	Installed      bool     `json:"installed"`
+	Path           string   `json:"path,omitempty"`
+	Version        string   `json:"version,omitempty"`
+	ModelSelection bool     `json:"model_selection"`
+	DefaultModel   string   `json:"default_model,omitempty"`
+	Models         []string `json:"models,omitempty"`
+	Detail         string   `json:"detail,omitempty"`
+}
+
+// ConnectionInfo mirrors local-representative/connectivity.go's: one
+// provider (AWS, GitHub) that host holds credentials for, and whether they
+// currently work. Drives the topology card's connectivity icons and the
+// per-host system tab's "providers" section (see
+// condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md).
+type ConnectionInfo struct {
+	Provider  string `json:"provider"`
+	Status    string `json:"status"`
+	Principal string `json:"principal,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Detail    string `json:"detail,omitempty"`
 }
 
 // RepoStateMsg mirrors local-representative's dev-repo watcher payload (see
@@ -373,6 +412,13 @@ type RepoStateMsg struct {
 	Head               string `json:"head,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
 	CondocLocked       bool   `json:"condoc_locked,omitempty"`
+
+	// Branch/Branches/SwitchError: the "dev branch" the LR is watching, the
+	// branches a "switch" may pick from, and the last refused/failed switch
+	// -- Step1SubstepCPrompt.md Revision B.
+	Branch      string   `json:"branch,omitempty"`
+	Branches    []string `json:"branches,omitempty"`
+	SwitchError string   `json:"switch_error,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -458,6 +504,13 @@ type LRSystemStateMsg struct {
 	Active  bool       `json:"active"`
 	Self    ProcInfo   `json:"self"`
 	Managed []ProcInfo `json:"managed"`
+	// Connections is always sent, so the per-host "providers" section can
+	// tell "no credentials present" ([]) from an older LR that doesn't
+	// report them, or Active being false (null).
+	Connections []ConnectionInfo `json:"connections"`
+	// Agents is null when that LR predates the "agents & models" section
+	// (or isn't connected).
+	Agents *AgentsState `json:"agents"`
 }
 
 // LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
@@ -465,18 +518,21 @@ type LRSystemStateMsg struct {
 // local-representative/repowatch.go). Watched is false both when that LR
 // isn't watching a repo and when it isn't connected.
 type LRRepoStateMsg struct {
-	HostID             string `json:"host_id"`
-	Watched            bool   `json:"watched"`
-	Root               string `json:"root,omitempty"`
-	Dirty              bool   `json:"dirty"`
-	RebuildReady       bool   `json:"rebuild_ready"`
-	Building           bool   `json:"building"`
-	AutoRebuild        bool   `json:"auto_rebuild"`
-	AutoRebuildPending bool   `json:"auto_rebuild_pending,omitempty"`
-	AutoRebuildSeconds int    `json:"auto_rebuild_seconds,omitempty"`
-	Head               string `json:"head,omitempty"`
-	LastError          string `json:"last_error,omitempty"`
-	CondocLocked       bool   `json:"condoc_locked,omitempty"`
+	HostID             string   `json:"host_id"`
+	Watched            bool     `json:"watched"`
+	Root               string   `json:"root,omitempty"`
+	Dirty              bool     `json:"dirty"`
+	RebuildReady       bool     `json:"rebuild_ready"`
+	Building           bool     `json:"building"`
+	AutoRebuild        bool     `json:"auto_rebuild"`
+	AutoRebuildPending bool     `json:"auto_rebuild_pending,omitempty"`
+	AutoRebuildSeconds int      `json:"auto_rebuild_seconds,omitempty"`
+	Head               string   `json:"head,omitempty"`
+	LastError          string   `json:"last_error,omitempty"`
+	CondocLocked       bool     `json:"condoc_locked,omitempty"`
+	Branch             string   `json:"branch,omitempty"`
+	Branches           []string `json:"branches,omitempty"`
+	SwitchError        string   `json:"switch_error,omitempty"`
 }
 
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
@@ -879,7 +935,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	if system != nil {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{
-			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed,
+			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections, Agents: system.Agents,
 		})
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1008,6 +1064,9 @@ func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
 		Head:               r.Head,
 		LastError:          r.LastError,
 		CondocLocked:       r.CondocLocked,
+		Branch:             r.Branch,
+		Branches:           r.Branches,
+		SwitchError:        r.SwitchError,
 	}
 }
 
@@ -1268,6 +1327,56 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					state = "on"
 				}
 				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
+			}
+		case "lr-switch-branch":
+			// The dev-branch "switch" control (Step1SubstepCPrompt.md
+			// Revision B); the global view's "switch all" just sends one of
+			// these per watched host. LR validates the name against its own
+			// branch list -- this only rejects ones that couldn't survive the
+			// "__system:<verb> <arg>" framing.
+			var payload struct {
+				HostID string `json:"host_id"`
+				Branch string `json:"branch"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Branch != "" &&
+				!strings.ContainsAny(payload.Branch, " \t\r\n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:switch-branch "+payload.Branch)
+			}
+		case "lr-connect-provider":
+			// The per-host "providers" section's "connect" control
+			// (Step1SubstepEPrompt.md): hands the host's LR a credential to
+			// use -- a GitHub PAT, which LR checks, or (from the "agents &
+			// models" section, Revision D) Claude's CLAUDE_CODE_OAUTH_TOKEN,
+			// with provider "claude". Never logged.
+			var payload struct {
+				HostID   string `json:"host_id"`
+				Provider string `json:"provider"`
+				Token    string `json:"token"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Provider != "" && payload.Token != "" &&
+				!strings.ContainsAny(payload.Provider+payload.Token, " \t\r\n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:connect "+payload.Provider+" "+payload.Token)
+			}
+		case "lr-disconnect-provider":
+			var payload struct {
+				HostID   string `json:"host_id"`
+				Provider string `json:"provider"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && payload.Provider != "" &&
+				!strings.ContainsAny(payload.Provider, " \t\r\n") && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:disconnect "+payload.Provider)
+			}
+		case "lr-inspect-agents":
+			// The "agents & models" section's "re-inspect" control
+			// (Step1SubstepEPrompt.md Revision B).
+			var payload struct {
+				HostID string `json:"host_id"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				s.reprServer.SendCommand(payload.HostID, "__system:inspect-agents")
 			}
 		case "lr-set-auto-update":
 			var payload struct {
@@ -1729,7 +1838,7 @@ func main() {
 				hs.system = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-system-state", LRSystemStateMsg{
-					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed,
+					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections, Agents: payload.Agents,
 				})
 			}
 		case "repo-state":

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg } from './types'
 import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -8,6 +8,12 @@ import { detectTextFormat } from './textformat'
 
 const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
+
+// isTab narrows an app name (e.g. a ProcInfo.name) to one of the dashboard's
+// tabs -- every managed sub-application has a same-named tab.
+function isTab(name: string): name is Tab {
+  return (TABS as readonly string[]).includes(name)
+}
 
 // Tabs whose content is another app's own UI, embedded via same-origin
 // iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
@@ -201,6 +207,36 @@ function useStatusWS() {
     }
   }, [])
 
+  // Checks out a different branch in the watched dev-repo -- the "dev
+  // branch" switch control (Step1SubstepCPrompt.md Revision B).
+  const switchBranch = useCallback((branch: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'switch-branch', payload: { branch } }))
+    }
+  }, [])
+
+  // The providers section's "connect"/"disconnect" controls
+  // (Step1SubstepEPrompt.md): hand this LR a credential to use -- only a
+  // GitHub PAT so far -- or have it forget one it was handed.
+  const connectProvider = useCallback((provider: string, token: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'connect-provider', payload: { provider, token } }))
+    }
+  }, [])
+  const disconnectProvider = useCallback((provider: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'disconnect-provider', payload: { provider } }))
+    }
+  }, [])
+
+  // The "agents & models" section's "re-inspect" control
+  // (Step1SubstepEPrompt.md Revision B).
+  const inspectAgents = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'inspect-agents' }))
+    }
+  }, [])
+
   // Toggles whether this LR restarts itself the instant an update becomes
   // available, instead of waiting for the "update and restart" button --
   // see docs/DevMode.md "Loader".
@@ -380,7 +416,7 @@ function useStatusWS() {
   return {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork,
   }
 }
 
@@ -861,12 +897,14 @@ function SystemProcRow({
   onTerminate,
   onRestart,
   onSetAutoUpdate,
+  onOpen,
 }: {
   proc: ProcInfo
   nowSec: number
   onTerminate?: (id: string) => void
   onRestart?: () => void
   onSetAutoUpdate?: (enabled: boolean) => void
+  onOpen?: () => void // double-click: go to this app's own tab (Step1SubstepCPrompt.md)
 }) {
   const detail = proc.status === 'running'
     ? formatUptime(proc.started_at, nowSec)
@@ -877,7 +915,11 @@ function SystemProcRow({
     : proc.name
 
   return (
-    <div className={`sys-row sys-row-${proc.status}`}>
+    <div
+      className={`sys-row sys-row-${proc.status}${onOpen ? ' sys-row-openable' : ''}`}
+      onDoubleClick={onOpen}
+      title={onOpen ? 'double-click to open its tab' : undefined}
+    >
       <span className="sys-col sys-col-name">
         <span className="sys-col-name-main">
           {label}
@@ -1028,10 +1070,12 @@ function RepoWatchPanel({
   repoState,
   onRebuild,
   onSetAutoRebuild,
+  onSwitchBranch,
 }: {
   repoState: RepoStateMsg
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch: (branch: string) => void
 }) {
   if (!repoState.watched) return null
 
@@ -1079,6 +1123,71 @@ function RepoWatchPanel({
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>
       )}
+      <BranchSwitcher repoState={repoState} onSwitch={onSwitchBranch} />
+    </div>
+  )
+}
+
+// BranchSwitcher is the dev-repo panel's "dev branch" readout plus its
+// "switch" control (Step1SubstepCPrompt.md Revision B): shows the branch
+// being watched and, once "switch" is pressed, a picker over the available
+// branches with a confirming "switch" and a "cancel". Disabled for the same
+// reasons LR's switchBranch refuses server-side (dirty, building, condoc
+// lock), so those surface up front.
+function BranchSwitcher({ repoState, onSwitch }: { repoState: RepoStateMsg; onSwitch: (branch: string) => void }) {
+  const [picking, setPicking] = useState(false)
+  const [choice, setChoice] = useState('')
+  const branches = repoState.branches ?? []
+  const blocker = repoState.dirty ? 'uncommitted changes — commit or revert to enable switching'
+    : repoState.building ? 'a rebuild is running'
+    : repoState.condoc_locked ? 'a condoc is mid-transition (.condoc lock file present)'
+    : null
+  const disabled = !!blocker || branches.length === 0
+
+  const open = () => {
+    const current = repoState.branch
+    setChoice(current && branches.includes(current) ? current : branches[0] ?? '')
+    setPicking(true)
+  }
+  const confirm = () => {
+    if (choice) onSwitch(choice)
+    setPicking(false)
+  }
+
+  return (
+    <div className="sys-branch">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-branch</span>
+        {picking ? (
+          <select className="sys-branch-select" value={choice} onChange={e => setChoice(e.target.value)}>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <span className="sys-branch-name" title={repoState.branch}>{repoState.branch || '(detached)'}</span>
+        )}
+      </div>
+      <div className="sys-repo-controls">
+        {picking ? (
+          <>
+            <button className="sys-btn sys-btn-branch" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+              switch
+            </button>
+            <button className="sys-btn sys-btn-neutral" onClick={() => setPicking(false)}>cancel</button>
+          </>
+        ) : (
+          <button
+            className="sys-btn sys-btn-branch"
+            disabled={disabled}
+            onClick={open}
+            title={blocker ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}
+          >
+            switch
+          </button>
+        )}
+      </div>
+      {repoState.switch_error && (
+        <div className="sys-repo-error" title={repoState.switch_error}>last branch switch failed: {repoState.switch_error}</div>
+      )}
     </div>
   )
 }
@@ -1092,7 +1201,12 @@ function SystemPanel({
   onRestart,
   onRebuild,
   onSetAutoRebuild,
+  onSwitchBranch,
   onSetAutoUpdate,
+  onConnectProvider,
+  onDisconnectProvider,
+  onInspectAgents,
+  onOpenTab,
 }: {
   state: SystemStateMsg | null
   fcInstances: FCInstanceInfo[]
@@ -1102,7 +1216,12 @@ function SystemPanel({
   onRestart: () => void
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch: (branch: string) => void
   onSetAutoUpdate: (enabled: boolean) => void
+  onConnectProvider: (provider: string, token: string) => void
+  onDisconnectProvider: (provider: string) => void
+  onInspectAgents: () => void
+  onOpenTab: (tab: Tab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const troughEntries = useTrough(repoState.last_error)
@@ -1132,7 +1251,7 @@ function SystemPanel({
 
   return (
     <div className="sys-panel">
-      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} />
+      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} onSwitchBranch={onSwitchBranch} />
       {fcRunning && fcRows.map(row => (
         <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
           {row.label} control: <strong>{fcControl(row.state)}</strong>
@@ -1149,7 +1268,13 @@ function SystemPanel({
         </div>
         <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} onSetAutoUpdate={onSetAutoUpdate} />
         {state.managed.map(p => (
-          <SystemProcRow key={p.instance_id} proc={p} nowSec={nowSec} onTerminate={onTerminate} />
+          <SystemProcRow
+            key={p.instance_id}
+            proc={p}
+            nowSec={nowSec}
+            onTerminate={onTerminate}
+            onOpen={isTab(p.name) ? () => onOpenTab(p.name as Tab) : undefined}
+          />
         ))}
         {state.managed.length === 0 && (
           <div className="sys-row sys-row-none">no managed applications</div>
@@ -1174,7 +1299,314 @@ function SystemPanel({
           )
         })}
       </div>
+      <ProvidersPanel connections={state.connections} onConnect={onConnectProvider} onDisconnect={onDisconnectProvider} />
+      <AgentsPanel
+        agents={state.agents}
+        nowSec={nowSec}
+        onInspect={onInspectAgents}
+        onConnect={onConnectProvider}
+        onDisconnect={onDisconnectProvider}
+      />
       <Trough entries={troughEntries} />
+    </div>
+  )
+}
+
+/* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) --
+   mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
+
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub', claude: 'Claude' }
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+function connectionStatusLabel(status: string): string {
+  return status === 'ok' ? 'connected' : status === 'failed' ? 'not working' : 'checking…'
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  if (provider === 'github') {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    )
+  }
+  if (provider === 'aws') {
+    return (
+      <svg viewBox="0 0 28 16" width="24" height="14" aria-hidden="true">
+        <text x="14" y="9" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor" fontFamily="sans-serif">aws</text>
+        <path d="M5 11.5 Q14 16 23 11.5" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M20.6 10.6 L23.2 11.4 L22.3 13.8" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return <span>{providerLabel(provider)}</span>
+}
+
+// CONNECTABLE_PROVIDERS are the providers the "connect" control offers
+// (Step1SubstepEPrompt.md) -- connectivity.go's connectableProviders, with
+// how each is connected.
+interface ConnectOption { provider: string, method: string, placeholder: string }
+
+const CONNECTABLE_PROVIDERS: ConnectOption[] = [
+  { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
+]
+
+// CONNECTABLE_AGENTS are the agents the "agents & models" section's
+// "connect" offers (Revision D) -- agents.go's agentAuthEnv. They travel as
+// a provider named after the agent.
+const CONNECTABLE_AGENTS: ConnectOption[] = [
+  { provider: 'claude', method: 'OAuth token', placeholder: 'CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)' },
+]
+
+// DEV_AGENTS are ambiguous-agent's test agents, hidden in "agents & models"
+// unless its "show-dev" toggle is on.
+const DEV_AGENTS: ReadonlySet<string> = new Set(['clod'])
+
+// ProviderConnectForm is the "connect" control: a provider (or agent)
+// picker and a masked credential field. Whitespace is rejected to match
+// agent-coordinator's copy, where the credential travels as one word of a
+// "__system:connect" command.
+function ProviderConnectForm({ options = CONNECTABLE_PROVIDERS, onConnect, onCancel }: {
+  options?: ConnectOption[]
+  onConnect: (provider: string, token: string) => void
+  onCancel: () => void
+}) {
+  const [provider, setProvider] = useState(options[0].provider)
+  const [token, setToken] = useState('')
+  const spec = options.find(p => p.provider === provider) ?? options[0]
+  const trimmed = token.trim()
+  const invalid = trimmed === '' || /\s/.test(trimmed)
+  const submit = () => {
+    if (invalid) return
+    onConnect(provider, trimmed)
+    setToken('')
+  }
+  return (
+    <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
+      <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
+        {options.map(p => (
+          <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
+        ))}
+      </select>
+      <input
+        className="sys-provider-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={spec.placeholder}
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        autoFocus
+      />
+      <button type="submit" className="sys-btn sys-btn-branch" disabled={invalid}
+        title={invalid && trimmed !== '' ? 'a token can\'t contain whitespace' : `use this ${spec.method} for ${providerLabel(provider)} on this host`}>
+        connect
+      </button>
+      <button type="button" className="sys-btn sys-btn-neutral" onClick={onCancel}>cancel</button>
+    </form>
+  )
+}
+
+// ProvidersPanel is the system tab's "providers" section: always shown, with
+// one sub-section per provider this host holds credentials for, plus the
+// "connect" control (Step1SubstepEPrompt.md). A provider connected through
+// it (source "connected") takes precedence over this host's environment
+// credentials and gets a "disconnect", which falls back to them.
+function ProvidersPanel({ connections, onConnect, onDisconnect }: {
+  connections?: ConnectionInfo[]
+  onConnect: (provider: string, token: string) => void
+  onDisconnect: (provider: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  return (
+    <div className="sys-providers">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">providers</span>
+        {!connecting && (
+          <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+            title="give this host credentials for a provider (GitHub PAT)">
+            connect
+          </button>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          onConnect={(provider, token) => { onConnect(provider, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {!connections || connections.length === 0 ? (
+        <div className="sys-providers-none">no provider credentials present</div>
+      ) : connections.map(c => (
+        <div key={c.provider} className={`sys-provider sys-provider-${c.status}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
+            <span className="sys-provider-name">{providerLabel(c.provider)}</span>
+            <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+            {c.source === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(c.provider)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">principal</span>
+            <span className="sys-provider-value">
+              {c.principal || <span className="sys-provider-placeholder">{c.status === 'checking' ? 'not yet verified' : 'unknown'}</span>}
+            </span>
+          </div>
+          {c.source && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">credentials from</span>
+              <span className="sys-provider-value">{c.source}</span>
+            </div>
+          )}
+          {c.status === 'failed' && c.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{c.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ---- Agents & models (condocs/slopspaceCondocsImpls/Step1SubstepEPrompt.md Revision B) --
+   mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
+
+// AgentsPanel is the system tab's "agents & models" section, below
+// "providers": the AI agents this host can run and their models, as the
+// ambiguous-agent layer reports them (ambiguous-agent --inspect, run by LR
+// -- see local-representative/agents.go). Installed agents get a card each;
+// the rest are listed on one line.
+//
+// Revision D adds a "connect" control for CONNECTABLE_AGENTS (Claude's
+// CLAUDE_CODE_OAUTH_TOKEN, which LR passes to every app it launches
+// afterwards) and a "show-dev" toggle, off by default, that the DEV_AGENTS
+// (clod) are hidden behind.
+function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
+  agents?: AgentsState
+  nowSec: number
+  onInspect: () => void
+  onConnect: (agent: string, token: string) => void
+  onDisconnect: (agent: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  const [showDev, setShowDev] = useState(false)
+  const hasDev = agents?.agents.some(a => DEV_AGENTS.has(a.name)) ?? false
+  const shown = agents?.agents.filter(a => showDev || !DEV_AGENTS.has(a.name)) ?? []
+  const installed = shown.filter(a => a.installed)
+  const missing = shown.filter(a => !a.installed)
+  const checking = !agents || agents.status === 'checking'
+  return (
+    <div className="sys-providers sys-agents">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">agents &amp; models</span>
+        {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+        <span className="sys-agents-controls">
+          {hasDev && (
+            <label className="sys-agents-showdev" title="also list ambiguous-agent's test agents (clod)">
+              <input type="checkbox" checked={showDev} onChange={e => setShowDev(e.target.checked)} />
+              show-dev
+            </label>
+          )}
+          {!connecting && (
+            <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+              title="give an agent on this host credentials (Claude OAuth token)">
+              connect
+            </button>
+          )}
+          <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+            title="ask ambiguous-agent again which agents and models this host has">
+            {checking ? 'inspecting…' : 're-inspect'}
+          </button>
+        </span>
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          options={CONNECTABLE_AGENTS}
+          onConnect={(agent, token) => { onConnect(agent, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {agents?.status === 'failed' && (
+        <div className="sys-provider-row">
+          <span className="sys-provider-label">error</span>
+          <span className="sys-provider-value sys-provider-error">{agents.detail || 'inspection failed'}</span>
+        </div>
+      )}
+      {!agents ? (
+        <div className="sys-providers-none">not reported by this host</div>
+      ) : installed.length === 0 && agents.status !== 'checking' ? (
+        <div className="sys-providers-none">no agents available</div>
+      ) : installed.map(a => (
+        <div key={a.name} className={`sys-provider ${a.detail ? 'sys-provider-failed' : ''}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-name">{a.name}</span>
+            {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
+            <span className="sys-provider-status sys-provider-status-ok">available</span>
+            {a.auth === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(a.name)}
+                title="forget the connected credential (falls back to any in LR's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          {CONNECTABLE_AGENTS.some(c => c.provider === a.name) && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">auth</span>
+              <span className="sys-provider-value">
+                {a.auth === 'connected' ? 'connected — passed to apps launched from now on'
+                  : a.auth ? `${a.auth} (LR's environment)`
+                  : <span className="sys-provider-placeholder">none passed — relies on the agent's own login, if any</span>}
+              </span>
+            </div>
+          )}
+          {a.version && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">version</span>
+              <span className="sys-provider-value">{a.version}</span>
+            </div>
+          )}
+          {a.path && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">path</span>
+              <span className="sys-provider-value">{a.path}</span>
+            </div>
+          )}
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">models</span>
+            {a.models && a.models.length > 0 ? (
+              <span className="sys-agent-models">
+                {a.models.map(m => (
+                  <span key={m} className="sys-agent-model">{m}{m === a.default_model ? ' (default)' : ''}</span>
+                ))}
+              </span>
+            ) : (
+              <span className="sys-provider-value">
+                <span className="sys-provider-placeholder">
+                  {a.model_selection ? 'none listed' : 'no model selection (uses its built-in default)'}
+                </span>
+              </span>
+            )}
+          </div>
+          {a.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{a.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="sys-agents-missing">not installed: {missing.map(a => a.name).join(', ')}</div>
+      )}
     </div>
   )
 }
@@ -2645,7 +3077,7 @@ export default function App() {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
     acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setAutoUpdate, submitWork,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -2821,7 +3253,12 @@ export default function App() {
                   onRestart={restartApp}
                   onRebuild={rebuildRepo}
                   onSetAutoRebuild={setAutoRebuild}
+                  onSwitchBranch={switchBranch}
                   onSetAutoUpdate={setAutoUpdate}
+                  onConnectProvider={connectProvider}
+                  onDisconnectProvider={disconnectProvider}
+                  onInspectAgents={inspectAgents}
+                  onOpenTab={goToTab}
                 />
               ) : activeTab === 'files' && viewerFileId ? (
                 <FileViewer

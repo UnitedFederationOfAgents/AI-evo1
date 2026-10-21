@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -130,6 +131,110 @@ func TestRepoWatchPollAndMaybePull(t *testing.T) {
 	}
 	if snap.RebuildReady {
 		t.Errorf("expected rebuild_ready=false while dirty")
+	}
+}
+
+// cloneTestRepo clones origin into a new temp dir, returning it.
+func cloneTestRepo(t *testing.T, origin string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "clone")
+	if out, err := exec.Command("git", "clone", "-q", origin, dir).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v (%s)", err, out)
+	}
+	return dir
+}
+
+// TestRepoWatchPullConflictKeepsBranch verifies a pull --rebase that
+// conflicts is aborted, leaving the dev repo on its branch rather than
+// detached partway through the rebase (Step1SubstepEPrompt.md Revision G).
+func TestRepoWatchPullConflictKeepsBranch(t *testing.T) {
+	origin := initTestRepo(t, "true")
+	dir := cloneTestRepo(t, origin)
+	rw := newRepoWatch(dir, func() {})
+
+	commitChange(t, origin, "upstream\n")
+	commitChange(t, dir, "local\n")
+	localHead, err := rw.headSHA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rw.pollAndMaybePull()
+	snap := rw.snapshot()
+	if snap.Branch == "" {
+		t.Errorf("expected the dev repo to stay on its branch after a conflicting pull, got a detached HEAD")
+	}
+	if rw.rebaseInProgress() {
+		t.Errorf("expected the failed rebase to be aborted")
+	}
+	if snap.Head != localHead {
+		t.Errorf("expected HEAD back at the local commit %s, got %s", localHead, snap.Head)
+	}
+}
+
+// TestRepoWatchFastForwardsWhileCondocLocked verifies a follower LR -- no
+// commits of its own -- keeps fast-forwarding while a '.condoc' lock is
+// present, since the tracked lock arrives by pull and would otherwise strand
+// it before the release (Step1Prompt.md Revision F).
+func TestRepoWatchFastForwardsWhileCondocLocked(t *testing.T) {
+	origin := initTestRepo(t, "true")
+	dir := cloneTestRepo(t, origin)
+	rw := newRepoWatch(dir, func() {})
+	before, err := rw.headSHA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	commitChange(t, origin, "upstream\n")
+	if err := os.WriteFile(filepath.Join(dir, ".condoc"), []byte("locked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Head; got == before {
+		t.Errorf("expected a fast-forward while .condoc is present on a follower")
+	}
+}
+
+// TestRepoWatchNoRebaseWhileCondocLocked verifies a repo with its own
+// unpushed commits isn't rebased while a condoc holds its '.condoc' lock --
+// condoccer is committing onto the branch then (Step1SubstepEPrompt.md
+// Revision G) -- and is once the lock is gone.
+func TestRepoWatchNoRebaseWhileCondocLocked(t *testing.T) {
+	origin := initTestRepo(t, "true")
+	dir := cloneTestRepo(t, origin)
+	rw := newRepoWatch(dir, func() {})
+
+	commitChange(t, origin, "upstream\n")
+	if err := os.WriteFile(filepath.Join(dir, "local.txt"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "local.txt"}, {"-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "local"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	before, err := rw.headSHA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lock := filepath.Join(dir, ".condoc")
+	if err := os.WriteFile(lock, []byte("locked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Head; got != before {
+		t.Errorf("expected no rebase while .condoc is present: HEAD moved %s -> %s", before, got)
+	}
+
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Head; got == before {
+		t.Errorf("expected the pull to go ahead once .condoc is gone")
 	}
 }
 
@@ -520,4 +625,67 @@ func TestServerRebuildControlsNoRepoWatched(t *testing.T) {
 	s.setAutoRebuild(true)
 	s.handleSystemCommand("__system:rebuild")
 	s.handleSystemCommand("__system:auto-rebuild on")
+	s.switchBranch("main")
+	s.handleSystemCommand("__system:switch-branch main")
+}
+
+// TestParseBranchRefs verifies the dev-branch picker's option list
+// (Step1SubstepCPrompt.md Revision B): local and remote-tracking branches
+// merge under their short name, remotes' symbolic HEADs are dropped, and the
+// result is sorted.
+func TestParseBranchRefs(t *testing.T) {
+	out := "refs/heads/main\nrefs/heads/feature/x\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/main\nrefs/remotes/origin/remote-only\nrefs/remotes/upstream/feature/x\n"
+	got := parseBranchRefs(out)
+	want := []string{"feature/x", "main", "remote-only"}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseBranchRefs = %v, want %v", got, want)
+	}
+}
+
+// TestRepoWatchSwitchBranch verifies switchBranch checks out a listed
+// branch, reports it via the snapshot once polled, and refuses unknown
+// branches and dirty repos.
+func TestRepoWatchSwitchBranch(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	git("branch", "-M", "main")
+	git("branch", "other")
+	rw := newRepoWatch(dir, func() {})
+
+	snap := rw.snapshot()
+	if snap.Branch != "main" {
+		t.Errorf("Branch = %q, want main", snap.Branch)
+	}
+	if !slices.Equal(snap.Branches, []string{"main", "other"}) {
+		t.Errorf("Branches = %v, want [main other]", snap.Branches)
+	}
+
+	if err := rw.switchBranch("nope"); err == nil {
+		t.Errorf("expected switching to an unknown branch to fail")
+	}
+	if err := rw.switchBranch("--orphan"); err == nil {
+		t.Errorf("expected an option-like branch name to be rejected")
+	}
+
+	if err := rw.switchBranch("other"); err != nil {
+		t.Fatalf("switchBranch(other): %v", err)
+	}
+	rw.pollAndMaybePull()
+	if got := rw.snapshot().Branch; got != "other" {
+		t.Errorf("Branch after switch = %q, want other", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := rw.switchBranch("main"); err == nil {
+		t.Errorf("expected switching a dirty repo to be refused")
+	}
 }

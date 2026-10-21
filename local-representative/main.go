@@ -260,6 +260,14 @@ type Server struct {
 	// (and selfVersion.available() reports false) otherwise.
 	selfVersion *selfVersionWatch
 
+	// connectivity detects and verifies this host's provider credentials
+	// (AWS, GitHub) for the system tab -- see connectivity.go.
+	connectivity *connectivityWatch
+
+	// agents inspects, through ambiguous-agent, which AI agents and models
+	// this host can run, for the system tab -- see agents.go.
+	agents *agentsWatch
+
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
@@ -1302,6 +1310,30 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
 				s.setAutoRebuild(payload.Enabled)
 			}
+		case "switch-branch":
+			var payload struct {
+				Branch string `json:"branch"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.switchBranch(payload.Branch)
+			}
+		case "connect-provider":
+			var payload struct {
+				Provider string `json:"provider"`
+				Token    string `json:"token"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Provider != "" {
+				s.connectProvider(payload.Provider, payload.Token)
+			}
+		case "disconnect-provider":
+			var payload struct {
+				Provider string `json:"provider"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.Provider != "" {
+				s.disconnectProvider(payload.Provider)
+			}
+		case "inspect-agents":
+			s.agents.reinspect()
 		case "set-auto-update":
 			var payload struct {
 				Enabled bool `json:"enabled"`
@@ -1761,6 +1793,12 @@ func main() {
 			go s.selfVersion.watchLoop()
 		}
 	}
+	s.connectivity = newConnectivityWatch(s.broadcastSystemState)
+	go s.connectivity.watchLoop()
+	s.agents = newAgentsWatch(s.broadcastSystemState, func() (string, error) {
+		return s.resolveAppBinary(ambiguousAgentBin, ambiguousAgentBin)
+	})
+	go s.agents.watchLoop()
 	s.devMode = cfg.devMode
 	s.dev = cfg.dev
 	if s.devMode {

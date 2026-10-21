@@ -138,6 +138,46 @@ body {
 
 .nav-up-btn:hover { color: #999; }
 
+.scheme-tabs {
+  display: flex;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+.scheme-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #777;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 7px 4px;
+  cursor: pointer;
+}
+
+.scheme-tab:hover { color: #aaa; }
+
+.scheme-tab.selected {
+  color: #cccccc;
+  border-bottom-color: #007acc;
+}
+
+.list-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #999;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.list-filter-count { color: #555; }
+
 .nav-list {
   flex: 1;
   min-height: 0; /* same shrink-to-fit fix as .detail-view, so the repr-footer below stays visible */
@@ -312,6 +352,120 @@ body {
 .working-dir-btn {
   white-space: nowrap;
 }
+
+/* ---- Pointer repo ("Set Pointer Repo") on the slopspace tab ---- */
+
+.working-dir.pointer-repo {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 360px;
+}
+
+.pointer-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pointer-field .working-dir-label { width: 84px; flex-shrink: 0; }
+
+.pointer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pointer-state { font-weight: 600; }
+.pointer-state-ready   { color: #4ec94e; }
+.pointer-state-missing { color: #d9a800; }
+.pointer-state-cloning { color: #4da6ff; }
+.pointer-state-invalid { color: #e07020; }
+
+.pointer-note { color: #666; font-size: 11px; }
+
+.pointer-message {
+  color: #e07020;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 560px;
+}
+
+/* Another condoccer's condoc: still selectable, shown read-only. */
+.nav-item.nav-item-readonly { opacity: 0.7; }
+.nav-item.nav-item-new .nav-item-name { color: #4da6ff; }
+
+/* ---- Slopspace condocs (proposal form, pointer view, condoc panel) ---- */
+
+.badge-queued      { background: #1e2a3a; color: #8ab4e0; }
+.badge-pr_proposed { background: #2e1f3d; color: #c58af0; }
+.badge-pr_open     { background: #2e1f3d; color: #c58af0; }
+.badge-merged      { background: #1a3a1a; color: #4ec94e; }
+.badge-error       { background: #4a1414; color: #ff7070; }
+
+.slop-view {
+  padding: 16px 24px;
+  overflow-y: auto;
+}
+
+.slop-view h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.slop-form { max-width: 640px; }
+.slop-field-block { align-items: flex-start; }
+.slop-textarea { resize: vertical; font-family: monospace; }
+.slop-template { width: 100%; max-width: none; }
+
+.slop-branch-check {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+}
+
+.slop-good { color: #4ec94e; }
+.slop-bad  { color: #e07020; }
+
+.slop-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 24px;
+  border-bottom: 1px solid #333;
+  background: #1b1b1f;
+}
+
+.slop-details { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.slop-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.slop-row .working-dir-label { width: 64px; flex-shrink: 0; }
+.slop-description { color: #999; white-space: pre-wrap; }
+
+.slop-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid #6a2a2a;
+  border-radius: 3px;
+  color: #ff9a9a;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slop-prs h3 { margin: 0 0 6px; font-size: 13px; }
+.slop-prs .pointer-actions { justify-content: flex-start; }
+.slop-pr-list { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
+.slop-pr-list li { display: flex; gap: 10px; }
+.slop-pr-status { font-size: 11px; }
 
 /* ---- Detail view (single pane) ---- */
 

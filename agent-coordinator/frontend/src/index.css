@@ -269,6 +269,18 @@ body {
 .host-dot-disconnected { background: #cc4444; }
 .host-dot-unknown      { background: #666; }
 
+/* Last rebuild failed, until the next successful one (Step1SubstepEPrompt.md
+   Revision D) -- on the sidebar row and the topology card. */
+.host-build-failed {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #e05252;
+  box-shadow: 0 0 3px rgba(224, 82, 82, 0.6);
+}
+
 .host-item-text {
   display: flex;
   flex-direction: column;
@@ -896,6 +908,33 @@ body {
    applies without .topo-node-box-healthy already being set. */
 .topo-node-box-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 6px 1px rgba(224, 168, 62, 0.45); }
 
+/* Connectivity icon bar above the boxes (Step1SubstepCPrompt.md): an icon is
+   only drawn when that host holds the provider's credentials at all, so
+   there's no unlit state -- just a yellow border once they've failed
+   verification (see local-representative/connectivity.go). */
+.topo-node { user-select: none; } /* double-click navigates rather than selecting text */
+.topo-conn-icon {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  color: #d4d4d4;
+}
+.topo-conn-checking { color: #777; }
+.topo-conn-failed { border-color: #d6b62e; box-shadow: 0 0 0 1px rgba(214, 182, 46, 0.35); }
+
+/* Agent tiles below the boxes (Step1SubstepEPrompt.md Revision D): one per
+   agent installed on the host (never a dev agent such as clod); a blue
+   border once a connectable agent has a credential (connected or from LR's
+   environment). */
+.topo-node-agents { flex-wrap: wrap; justify-content: center; gap: 4px; }
+.topo-agent-tile {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 9px; color: #d4d4d4;
+}
+.topo-agent-tile-auth { border-color: #245a7a; color: #6ea6c9; }
+
 .topo-details {
   width: 240px;
   flex-shrink: 0;
@@ -954,7 +993,7 @@ body {
 .sys-row-failed { background: #241717; }
 /* Process rows are clickable to open the version drill-down below the table
    (see SystemProcDetails/procRowKey) -- Step5Prompt.md Revision J. */
-.sys-row-clickable { cursor: pointer; }
+.sys-row-clickable { cursor: pointer; user-select: none; } /* double-click opens the app's tab rather than selecting text */
 .sys-row-clickable:hover { background: #262626; }
 .sys-row-selected { background: #16324a; }
 .sys-row-selected:hover { background: #1a3a56; }
@@ -1008,6 +1047,45 @@ body {
 .sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
 .sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
 
+/* "providers" section (Step1SubstepCPrompt.md): always present, one
+   sub-section per provider the host holds credentials for -- yellow border
+   when they don't work, matching the topology card's connectivity icon. */
+.sys-providers { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-providers-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-providers-none { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider { display: flex; flex-direction: column; gap: 6px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 10px; }
+.sys-provider-failed { border-color: #d6b62e; }
+.sys-provider-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #d4d4d4; }
+.sys-provider-icon { display: flex; align-items: center; color: #d4d4d4; }
+.sys-provider-status { margin-left: auto; font-size: 11px; font-weight: 400; }
+.sys-provider-status-ok { color: #4ec94e; }
+.sys-provider-status-failed { color: #d6b62e; }
+.sys-provider-status-checking { color: #888; font-style: italic; }
+.sys-provider-error { color: #d6b62e; }
+/* The "connect" control (Step1SubstepEPrompt.md). */
+.sys-providers-heading { display: flex; align-items: center; gap: 8px; }
+.sys-providers-heading .sys-btn { margin-left: auto; }
+.sys-provider-connect { display: flex; align-items: center; gap: 6px; }
+.sys-provider-connect .sys-branch-select { flex: 0 0 auto; }
+.sys-provider-token { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 6px; }
+/* "agents & models" (Step1SubstepEPrompt.md Revision B) reuses the providers styles. */
+.sys-agents-checked { font-size: 11px; color: #555; }
+.sys-agent-tag { font-size: 10px; font-weight: 400; color: #888; border: 1px solid #3c3c3c; border-radius: 3px; padding: 0 4px; }
+.sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
+.sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-provider-placeholder { color: #555; font-style: italic; }
+/* Revision D: "show-dev" toggle + "connect" beside "re-inspect". */
+.sys-agents-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Revision F: "show-dev" in the same green as .sys-btn-rebuild, brighter while on. */
+.sys-agents-showdev { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-showdev:hover { background: #2e5a2e; }
+.sys-agents-showdev:has(input:checked) { background: #2e5a2e; border-color: #4caf50; color: #9be29b; }
+.sys-agents-showdev input { accent-color: #2e7a2e; margin: 0; }
+
 /* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) -- mirrors this
    host's LR system tab, forwarded up as "lr-repo-state" ---- */
 .sys-repo-panel { display: flex; flex-direction: column; gap: 8px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
@@ -1028,6 +1106,14 @@ body {
    before building. */
 .sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
 .sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B):
+   inside the dev-repo panel per-host, and under "rebuild all" globally. */
+.sys-branch { display: flex; flex-direction: column; gap: 6px; }
+.sys-branch-name { color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+/* Same green as .sys-btn-rebuild (Step1SubstepCPrompt.md Revision C). */
+.sys-btn-branch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-branch:hover:not(:disabled) { background: #2e5a2e; }
+.sys-branch-select { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 4px; }
 
 /* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
 .sys-trough { border: 1px solid #3c3c3c; border-radius: 4px; background: #111; }

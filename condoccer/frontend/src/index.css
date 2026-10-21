@@ -270,6 +270,11 @@ body {
 .iter-retry   { background: #e07020; }
 .iter-substep { background: #9d55cc; }
 .iter-resource { background: #3bbfae; }
+/* An agent-created resource's dot is hollow (see iterDotClass). */
+.nav-iter-dot.iter-agent {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px #3bbfae;
+}
 
 /* ---- Badges ---- */
 
@@ -696,6 +701,25 @@ body {
 .iter-section-retry   .iter-section-label { color: #e07020; }
 .iter-section-substep .iter-section-label { color: #9d55cc; }
 .iter-section-resource .iter-section-label { color: #3bbfae; }
+
+/* An agent-created resource (Revision B of
+   slopspaceSlopspaceCondocsImpls/Step1Prompt.md): dashed border and an
+   "agent" tag on its label, so it reads apart from a human's. */
+.iter-section-agent { border-style: dashed; }
+.iter-section-agent.iter-section-selected { border-style: solid; }
+
+.resource-agent-tag {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid #3bbfae;
+  border-radius: 3px;
+  color: #3bbfae;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  vertical-align: 1px;
+}
 
 .iter-section-content {
   font-size: 12px;

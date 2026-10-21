@@ -1329,6 +1329,9 @@ func (s *Server) runTurn(stem string) error {
 				if base := s.pointerBase(&spec); base != "" {
 					t.Bases = append(t.Bases, base)
 				}
+				if err := resetAgentResources(slopAgentResourcesDir(meta)); err != nil {
+					return err
+				}
 			}
 			if !meta.Deployed {
 				if err := s.slop.ss.Deploy(id, dktypes.AgentTypeWorker); err != nil {
@@ -1409,6 +1412,12 @@ func (s *Server) runTurn(stem string) error {
 			if err := addIterationTemplate(active, nextLetterAfter(t.Letter)); err != nil {
 				return err
 			}
+			// The reply is in, so a failure here mustn't rerun this stage.
+			replyLabel := strings.TrimSpace("Reply " + t.Letter)
+			impls := implDir(filepath.Join(root, filepath.FromSlash(spec.CondocPath)))
+			if err := addAgentResources(active, slopAgentResourcesDir(meta), impls, replyLabel); err != nil {
+				log.Printf("slopspace %s: linking the agent's resources: %v", stem, err)
+			}
 			t.Stage = stageReplied
 			if err := s.writeSpec(&spec, ""); err != nil {
 				return err
@@ -1466,7 +1475,7 @@ func (s *Server) turnPrompt(spec *PointerSpec, meta *dktypes.SlopspaceMetadata) 
 		return "", fmt.Errorf("no active substep file")
 	}
 	repos := filepath.Join(meta.DeployPath, dkslop.WriteSpacesDir, dkslop.ReposDir)
-	return prompt + slopspaceRepoNote(repos, spec.Targets, spec.CondocRepo), nil
+	return prompt + slopspaceRepoNote(repos, spec.Targets, spec.CondocRepo) + agentResourcesNote(slopAgentResourcesDir(meta)), nil
 }
 
 // submitSignal writes the turn's work signal -- the only thing condoccer

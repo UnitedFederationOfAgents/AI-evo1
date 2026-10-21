@@ -828,6 +828,7 @@ interface StepSection {
   content: string
   substepLetter?: string
   resourceLinks?: ResourceLink[]
+  agent?: boolean // a resource the turn's agent created ("## Resource N (agent)")
 }
 
 const COMMIT_LINK_RE = /^\[`[a-f0-9]+`\]\([^)]+\)\s*$/gm
@@ -860,6 +861,7 @@ function parseStepSections(content: string): StepSection[] {
     substepTitle: string
     resourceNum: string
     resourceName: string
+    resourceAgent?: boolean
     fullMatch: string
   }
   const headings: Heading[] = []
@@ -868,8 +870,9 @@ function parseStepSections(content: string): StepSection[] {
   // "## Resource N" or "## Resource N -- <name>" (Revision B; the original
   // "## Resource (N)" parens were dropped) -- given its own heading here so
   // it gets cut out as its own section below, rather than reading as an
-  // unstyled tail of whichever Reply/Revision precedes it.
-  const reResource = /^## Resource (\d+)(?: -- (.+))?/gm
+  // unstyled tail of whichever Reply/Revision precedes it. An agent-created
+  // one reads "## Resource N (agent)[ -- <name>]" (condoccer/agentresources.go).
+  const reResource = /^## Resource (\d+)( \(agent\))?(?: -- (.+))?/gm
   reMain.lastIndex = 0
   reSubstep.lastIndex = 0
   reResource.lastIndex = 0
@@ -882,7 +885,7 @@ function parseStepSections(content: string): StepSection[] {
     headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), resourceNum: '', resourceName: '', fullMatch: m[0] })
   }
   while ((m = reResource.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: 'Resource', letter: '', from: '', substepTitle: '', resourceNum: m[1], resourceName: (m[2] ?? '').trim(), fullMatch: m[0] })
+    headings.push({ index: m.index, kind: 'Resource', letter: '', from: '', substepTitle: '', resourceNum: m[1], resourceName: (m[3] ?? '').trim(), resourceAgent: m[2] !== undefined, fullMatch: m[0] })
   }
   headings.sort((a, b) => a.index - b.index)
 
@@ -903,6 +906,7 @@ function parseStepSections(content: string): StepSection[] {
     let substepLetter: string | undefined
     let resourceLinks: ResourceLink[] | undefined
     let sectionContent = cleaned
+    const agent = h.resourceAgent || undefined
 
     if (h.kind === 'Reply') {
       id = h.letter ? `reply-${h.letter}` : 'reply-initial'
@@ -935,7 +939,7 @@ function parseStepSections(content: string): StepSection[] {
       substepLetter = h.letter
     }
 
-    sections.push({ id, label, kind, content: sectionContent, substepLetter, resourceLinks })
+    sections.push({ id, label, kind, content: sectionContent, substepLetter, resourceLinks, agent })
   }
 
   return sections
@@ -944,7 +948,26 @@ function parseStepSections(content: string): StepSection[] {
 function sectionsToIterations(sections: StepSection[]): Iteration[] {
   return sections
     .filter((s) => s.kind !== 'prompt')
-    .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
+    .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'], agent: s.agent }))
+}
+
+// ---- Agent-created resources (Revision B of
+// slopspaceSlopspaceCondocsImpls/Step1Prompt.md) ----
+//
+// A resource the turn's agent created is set slightly apart from a human's:
+// a hollow sidebar dot, a dashed section border, and an "agent" tag on its
+// label. These helpers add the modifier classes to the shared ones.
+
+function iterDotClass(iter: Iteration): string {
+  return `nav-iter-dot iter-${iter.type}${iter.agent ? ' iter-agent' : ''}`
+}
+
+function sectionClass(sec: StepSection, selected: boolean): string {
+  return `iter-section iter-section-${sec.kind}${sec.agent ? ' iter-section-agent' : ''}${selected ? ' iter-section-selected' : ''}`
+}
+
+function AgentTag({ agent }: { agent?: boolean }) {
+  return agent ? <span className="resource-agent-tag" title="Created by the agent">agent</span> : null
 }
 
 // resolveSubstepView picks which substep's content/iterations to show:
@@ -1673,8 +1696,8 @@ function Sidebar({
                 className={`nav-item nav-item-iter${selectedIterId === iter.id ? ' selected' : ''}`}
                 onClick={() => onSelectIter(iter.id)}
               >
-                <span className={`nav-iter-dot iter-${iter.type}`} />
-                <span className="nav-item-name">{iter.label}</span>
+                <span className={iterDotClass(iter)} />
+                <span className="nav-item-name">{iter.label}<AgentTag agent={iter.agent} /></span>
                 {iter.type === 'substep' && (
                   <button
                     className="nav-enter-btn"
@@ -1724,8 +1747,8 @@ function Sidebar({
                 className={`nav-item nav-item-iter${selectedSubstepIterId === iter.id ? ' selected' : ''}`}
                 onClick={() => onSelectSubstepIter(iter.id)}
               >
-                <span className={`nav-iter-dot iter-${iter.type}`} />
-                <span className="nav-item-name">{iter.label}</span>
+                <span className={iterDotClass(iter)} />
+                <span className="nav-item-name">{iter.label}<AgentTag agent={iter.agent} /></span>
                 {iter.type === 'reply' && range && (
                   <button
                     className="nav-enter-btn"
@@ -2909,10 +2932,10 @@ function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onActi
           {sections.map((sec) => (
             <div
               key={sec.id}
-              className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+              className={sectionClass(sec, selectedSubstepIterId === sec.id)}
               ref={(el) => { sectionRefs.current[sec.id] = el }}
             >
-              <div className="iter-section-label">{sec.label}</div>
+              <div className="iter-section-label">{sec.label}<AgentTag agent={sec.agent} /></div>
               {sectionBody(sec, state.info.path)}
             </div>
           ))}
@@ -2944,10 +2967,10 @@ function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onActi
         {sections.map((sec) => (
           <div
             key={sec.id}
-            className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+            className={sectionClass(sec, selectedSubstepIterId === sec.id)}
             ref={(el) => { sectionRefs.current[sec.id] = el }}
           >
-            <div className="iter-section-label">{sec.label}</div>
+            <div className="iter-section-label">{sec.label}<AgentTag agent={sec.agent} /></div>
             {sectionBody(sec, state.info.path)}
           </div>
         ))}
@@ -2995,10 +3018,10 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
             ? completedSections.map((sec) => (
                 <div
                   key={sec.id}
-                  className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
+                  className={sectionClass(sec, selectedIterId === sec.id)}
                   ref={(el) => { sectionRefs.current[sec.id] = el }}
                 >
-                  <div className="iter-section-label">{sec.label}</div>
+                  <div className="iter-section-label">{sec.label}<AgentTag agent={sec.agent} /></div>
                   {sec.kind === 'substep' ? (
                     <div className="iter-section-content">
                       <span style={{ color: '#aaa', fontSize: 12 }}>{sec.content}</span>
@@ -3052,12 +3075,12 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
         {sections.map((sec) => (
           <div
             key={sec.id}
-            className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
+            className={sectionClass(sec, selectedIterId === sec.id)}
             ref={(el) => { sectionRefs.current[sec.id] = el }}
             onDoubleClick={() => sec.kind === 'substep' && sec.substepLetter && onEnterSubstep(sec.substepLetter)}
           >
             <div className="iter-section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>{sec.label}</span>
+              <span>{sec.label}<AgentTag agent={sec.agent} /></span>
               {sec.kind === 'substep' && sec.substepLetter && (
                 <button
                   className="btn-secondary"

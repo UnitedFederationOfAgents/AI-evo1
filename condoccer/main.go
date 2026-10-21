@@ -134,6 +134,8 @@ type Iteration struct {
 	Label string `json:"label"`
 	Type  string `json:"type"` // "reply", "revision", "retry", "substep", "resource"
 	From  string `json:"from,omitempty"`
+	// Agent marks a resource the turn's agent created ("## Resource N (agent)").
+	Agent bool   `json:"agent,omitempty"`
 }
 
 var (
@@ -164,7 +166,7 @@ var (
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 	commitHashRe         = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
-	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource (\d+)(?: -- (.+))?\s*$`)
+	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource (\d+)( \(agent\))?(?: -- (.+))?\s*$`)
 	placeholderLineRe    = regexp.MustCompile(`(?m)^## <REPLACE-Revision\|Retry> [A-Z]\s*$`)
 )
 
@@ -461,11 +463,13 @@ func parseIterations(stepContent string) []Iteration {
 	// own sidebar entry (previously it had no heading of its own here, so its
 	// body just read as an unstyled tail of whichever Reply/Revision preceded
 	// it -- see parseStepSections on the frontend for the client-side mirror).
+	// An agent-created one's "(agent)" marker sets Agent rather than going
+	// into the label (Revision B of slopspaceSlopspaceCondocsImpls/Step1Prompt.md).
 	for _, idx := range resourceHeadingRe.FindAllStringSubmatchIndex(stepContent, -1) {
 		num := stepContent[idx[2]:idx[3]]
 		name := ""
-		if idx[4] >= 0 {
-			name = strings.TrimSpace(stepContent[idx[4]:idx[5]])
+		if idx[6] >= 0 {
+			name = strings.TrimSpace(stepContent[idx[6]:idx[7]])
 		}
 		label := "Resource " + num
 		if name != "" {
@@ -473,7 +477,7 @@ func parseIterations(stepContent string) []Iteration {
 		}
 		candidates = append(candidates, candidate{
 			pos:  idx[0],
-			iter: Iteration{ID: "resource-" + num, Label: label, Type: "resource"},
+			iter: Iteration{ID: "resource-" + num, Label: label, Type: "resource", Agent: idx[4] >= 0},
 		})
 	}
 

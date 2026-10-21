@@ -445,3 +445,14 @@ func slopspaceRepoNote(deployRepos string, targets []string, condocRepo string) 
 		"Do not commit or push; the handler commits and pushes every repo you changed after you finish.",
 		deployRepos, strings.Join(targets, ", "), condocRepo)
 }
+
+// agentResourcesNote tells the agent it may hand back files to be linked
+// into the condoc as a resource (see addAgentResources), appended to every
+// turn's prompt after slopspaceRepoNote.
+func agentResourcesNote(dir string) string {
+	return fmt.Sprintf("\n\nIf this interaction calls for a resource worth keeping with the condoc (a report, diagram, log, "+
+		"screenshot, data file, or a .zip of several), write it as a file into '%s'. After you finish, the handler copies "+
+		"every file there into the condoc's folder and links it under a new \"## Resource N (agent)\" heading after your "+
+		"reply. Do not link it or copy it into the condoc files yourself; you may describe what you added in your terminal "+
+		"response.", dir)
+}

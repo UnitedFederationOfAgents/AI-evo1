@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,4 +68,45 @@ func workerSubmitCommand(prompt string) (string, error) {
 		return "", fmt.Errorf("the prompt is too long to send through agent-coordinator (%d KiB, the limit is %d KiB)", len(b)>>10, maxWorkerSubmit>>10)
 	}
 	return "__worker:submit " + string(b), nil
+}
+
+// The slopspace sub-tab's manual control panel (SlopspaceSlopspaceCondocs
+// Step 1 Substep B, Revision A) goes through LR as "__worker:slopspace
+// <json>", and the outcome comes back as "worker-slopspace-reply" -- from
+// that host's dungeon-keeper once the op is done, or from LR when it never
+// got there. See local-representative/worker.go.
+
+// LRWorkerSlopspaceReplyMsg is the host-scoped "lr-worker-slopspace-reply"
+// message. Every browser gets it.
+type LRWorkerSlopspaceReplyMsg struct {
+	HostID string          `json:"host_id"`
+	Reply  json.RawMessage `json:"reply"`
+}
+
+// workerSlopspaceReplyMsg builds an lr-worker-slopspace-reply carrying an
+// error AC itself found, before the request reached the host.
+func workerSlopspaceReplyMsg(hostID, op, id string, err error) LRWorkerSlopspaceReplyMsg {
+	b, _ := json.Marshal(map[string]any{"op": op, "id": id, "ok": false, "error": err.Error()})
+	return LRWorkerSlopspaceReplyMsg{HostID: hostID, Reply: b}
+}
+
+// workerSlopspaceCommand builds the "__worker:slopspace <json>" command for
+// a browser's manual slopspace op. The request is passed on as-is; LR and
+// dungeon-keeper check the rest.
+func workerSlopspaceCommand(req json.RawMessage) (string, error) {
+	var probe struct {
+		Op string `json:"op"`
+	}
+	if err := json.Unmarshal(req, &probe); err != nil || probe.Op == "" {
+		return "", errors.New("bad slopspace request")
+	}
+	// Compact it onto one line: a command is read a line at a time.
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, req); err != nil {
+		return "", err
+	}
+	if buf.Len() > maxWorkerSubmit {
+		return "", errors.New("the slopspace request is too long to send through agent-coordinator")
+	}
+	return "__worker:slopspace " + buf.String(), nil
 }

@@ -132,6 +132,7 @@ func (w *Worker) connectLoop(host, port, name string) {
 //
 //	__worker:submit {"prompt": "...", "agent": "...", "model": "..."}
 //	__worker:refresh
+//	__worker:slopspace {"op": "...", "id": "...", ...}  (see slopctl.go)
 func (w *Worker) handleReprCommand(raw string) {
 	if !strings.HasPrefix(raw, "__worker:") {
 		return
@@ -148,6 +149,8 @@ func (w *Worker) handleReprCommand(raw string) {
 		if _, err := w.submit(req); err != nil {
 			log.Printf("[%s] repr: submit failed: %v", w.workerID, err)
 		}
+	case "slopspace":
+		w.handleSlopspaceCommand(arg)
 	case "refresh":
 		w.reprMu.Lock()
 		w.lastPushed = ""

@@ -350,6 +350,30 @@ export interface LRWorkerReplyMsg {
   reply: WorkerReplyMsg
 }
 
+// The slopspace sub-tab's manual control panel -- see worker.go and
+// dungeon-keeper/slopctl.go.
+export interface WorkerSlopspaceRequest {
+  op: 'create' | 'deploy' | 'return' | 'delete' | 'add-repo' | 'write'
+  id?: string
+  agent_type?: string
+  repo?: string    // owner/name: add-repo; write (empty for every repo)
+  branch?: string  // add-repo: the new branch
+  message?: string // write: the commit message
+}
+
+export interface WorkerSlopspaceReply {
+  op: string
+  id?: string
+  ok: boolean
+  error?: string
+  detail?: string
+}
+
+export interface LRWorkerSlopspaceReplyMsg {
+  host_id: string
+  reply: WorkerSlopspaceReply
+}
+
 export interface FileInfo {
   id: string
   name: string

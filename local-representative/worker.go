@@ -17,7 +17,9 @@ const maxWorkerPrompt = 32 << 10
 // UI of its own; the worker tab shows those signals and has a temporary
 // prompt box that submits prompt-only work for it to run in-place in /tmp.
 // worker-state is forwarded to agent-coordinator too, whose per-host worker
-// tab is the same panel, submitting through "__worker:submit".
+// tab is the same panel, submitting through "__worker:submit". The slopspace
+// sub-tab's manual control panel goes through "__worker:slopspace"
+// (SlopspaceSlopspaceCondocs Step 1 Substep B, Revision A).
 
 // WorkerStateMsg mirrors dungeon-keeper/repr.go's type of the same name.
 type WorkerStateMsg struct {
@@ -76,6 +78,35 @@ type WorkerReplyMsg struct {
 	Error string `json:"error,omitempty"`
 }
 
+// WorkerSlopspaceRequest is the slopspace sub-tab's manual control
+// ("worker-slopspace"), passed on to dungeon-keeper as
+// "__worker:slopspace <json>". It mirrors dungeon-keeper/slopctl.go's
+// SlopspaceControlRequest.
+type WorkerSlopspaceRequest struct {
+	Op        string `json:"op"`
+	ID        string `json:"id,omitempty"`
+	AgentType string `json:"agent_type,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	Branch    string `json:"branch,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// WorkerSlopspaceReply mirrors dungeon-keeper's SlopspaceControlReply: how a
+// manual op went. dungeon-keeper sends it as "slopspace-reply" once the op is
+// done; LR sends one itself when the op never reached dungeon-keeper.
+type WorkerSlopspaceReply struct {
+	Op     string `json:"op"`
+	ID     string `json:"id,omitempty"`
+	OK     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// workerSlopspaceOps are the manual control ops dungeon-keeper runs.
+var workerSlopspaceOps = map[string]bool{
+	"create": true, "deploy": true, "return": true, "delete": true, "add-repo": true, "write": true,
+}
+
 func (s *Server) getWorkerState() *WorkerStateMsg {
 	s.workerMu.RLock()
 	defer s.workerMu.RUnlock()
@@ -92,10 +123,30 @@ func (s *Server) setWorkerState(st WorkerStateMsg) {
 	}
 }
 
+// setWorkerSlopspaceReply passes a manual slopspace op's outcome to this
+// LR's worker tab and to agent-coordinator's, whichever sent it.
+func (s *Server) setWorkerSlopspaceReply(reply WorkerSlopspaceReply) {
+	s.broadcast("worker-slopspace-reply", reply)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("worker-slopspace-reply", reply)
+	}
+}
+
 // handleWorkerCommand runs agent-coordinator's per-host worker tab:
 // "__worker:submit <json>" is the same submit as this LR's own worker tab
-// makes, and the answer goes back up as "worker-reply".
+// makes, and the answer goes back up as "worker-reply";
+// "__worker:slopspace <json>" is the slopspace sub-tab's manual control,
+// answered as "worker-slopspace-reply".
 func (s *Server) handleWorkerCommand(cmd string) {
+	if rest, ok := strings.CutPrefix(cmd, "__worker:slopspace "); ok {
+		var req WorkerSlopspaceRequest
+		if err := json.Unmarshal([]byte(rest), &req); err != nil {
+			s.setWorkerSlopspaceReply(WorkerSlopspaceReply{Error: "bad slopspace request: " + err.Error()})
+		} else if err := s.controlSlopspace(req); err != nil {
+			s.setWorkerSlopspaceReply(WorkerSlopspaceReply{Op: req.Op, ID: req.ID, Error: err.Error()})
+		}
+		return
+	}
 	rest, ok := strings.CutPrefix(cmd, "__worker:submit ")
 	if !ok {
 		return
@@ -132,5 +183,28 @@ func (s *Server) submitWork(req WorkerSubmitRequest) error {
 		return err
 	}
 	s.reprServer.SendCommand("worker", "__worker:submit "+string(b))
+	return nil
+}
+
+// controlSlopspace hands a manual slopspace op to dungeon-keeper, which runs
+// it through its slopspace Manager and answers with "slopspace-reply".
+func (s *Server) controlSlopspace(req WorkerSlopspaceRequest) error {
+	if !workerSlopspaceOps[req.Op] {
+		return fmt.Errorf("unknown slopspace op %q", req.Op)
+	}
+	if req.Op != "create" && strings.TrimSpace(req.ID) == "" {
+		return errors.New("pick a slopspace first")
+	}
+	if s.reprServer == nil || !s.reprServer.IsHealthy("worker") {
+		return errors.New("the worker (dungeon-keeper) isn't connected — launch it from the system tab")
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	if len(b) > maxWorkerPrompt {
+		return errors.New("the slopspace request is too long")
+	}
+	s.reprServer.SendCommand("worker", "__worker:slopspace "+string(b))
 	return nil
 }

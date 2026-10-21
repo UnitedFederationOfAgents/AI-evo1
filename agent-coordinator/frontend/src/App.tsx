@@ -4,6 +4,7 @@ import type {
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState, AgentInfo,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo,
+  WorkerSlopspaceRequest, WorkerSlopspaceReply, LRWorkerSlopspaceReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -53,6 +54,8 @@ interface HostClientState {
   // answer to the last prompt submitted from here -- see worker.go.
   worker?: WorkerStateMsg
   workerReply?: WorkerReplyMsg
+  // ...and how the slopspace sub-tab's last manual control op went.
+  slopspaceReply?: WorkerSlopspaceReply
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
@@ -155,6 +158,21 @@ function useCoordinatorWS() {
       wsRef.current.send(JSON.stringify({ type: 'lr-worker-submit', payload: { host_id: hostId, prompt } }))
     } else {
       setReply({ ok: false, error: 'not connected' })
+    }
+  }, [])
+
+  // A host's slopspace sub-tab manual control panel -- see worker.go. Its
+  // answer comes back as lr-worker-slopspace-reply.
+  const sendLRWorkerSlopspace = useCallback((hostId: string, req: WorkerSlopspaceRequest) => {
+    const setReply = (slopspaceReply: WorkerSlopspaceReply | undefined) => setHostData(prev => ({
+      ...prev,
+      [hostId]: { ...(prev[hostId] ?? emptyHostState()), slopspaceReply },
+    }))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setReply(undefined)
+      wsRef.current.send(JSON.stringify({ type: 'lr-worker-slopspace', payload: { host_id: hostId, request: req } }))
+    } else {
+      setReply({ op: req.op, id: req.id, ok: false, error: 'not connected' })
     }
   }, [])
 
@@ -514,6 +532,14 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-worker-slopspace-reply': {
+            const p = msg.payload as LRWorkerSlopspaceReplyMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), slopspaceReply: p.reply },
+            }))
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
@@ -570,7 +596,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -4171,18 +4197,23 @@ type WorkerSubTab = typeof WORKER_SUBTABS[number]
 // WorkerPanel is a host's worker tab, split in two: direct is a temporary
 // prompt box that hands prompt-only work to that host's dungeon-keeper, and
 // the work signals it reports, newest first; slopspace lists that host's
-// slopspaces and whether a local agent is using one -- see worker.go.
-// Mirrors local-representative/frontend/src/App.tsx's own copy.
+// slopspaces, whether a local agent is using one, and a manual control
+// panel for them -- see worker.go. Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
 function WorkerPanel({
   healthy,
   state,
   reply,
   onSubmit,
+  slopspaceReply,
+  onControlSlopspace,
 }: {
   healthy: boolean
   state: WorkerStateMsg | null
   reply: WorkerReplyMsg | null
   onSubmit: (prompt: string) => void
+  slopspaceReply: WorkerSlopspaceReply | null
+  onControlSlopspace: (req: WorkerSlopspaceRequest) => void
 }) {
   const [sub, setSub] = useState<WorkerSubTab>('direct')
   return (
@@ -4200,7 +4231,9 @@ function WorkerPanel({
         ))}
       </div>
       {sub === 'direct' && <WorkerDirectView healthy={healthy} state={state} reply={reply} onSubmit={onSubmit} />}
-      {sub === 'slopspace' && <WorkerSlopspaceView state={state} />}
+      {sub === 'slopspace' && (
+        <WorkerSlopspaceView healthy={healthy} state={state} reply={slopspaceReply} onControl={onControlSlopspace} />
+      )}
     </div>
   )
 }
@@ -4265,9 +4298,24 @@ function WorkerDirectView({
 }
 
 // WorkerSlopspaceView is the worker tab's slopspace sub-tab: the host's
-// slopspaces as dungeon-keeper last reported them, in use first. Read-only
-// for now.
-function WorkerSlopspaceView({ state }: { state: WorkerStateMsg | null }) {
+// slopspaces as dungeon-keeper last reported them, in use first, and below
+// them the manual control panel. Clicking a row picks it for the panel.
+function WorkerSlopspaceView({
+  healthy,
+  state,
+  reply,
+  onControl,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  // A create picks the new slopspace.
+  useEffect(() => {
+    if (reply?.ok && reply.op === 'create' && reply.id) setSelected(reply.id)
+  }, [reply])
   if (!state) return <div className="service-empty">the worker hasn't reported yet</div>
   if (!state.slopspaces) return <div className="service-empty">this worker is too old to report its slopspaces — rebuild it</div>
   const slopspaces = state.slopspaces
@@ -4283,20 +4331,148 @@ function WorkerSlopspaceView({ state }: { state: WorkerStateMsg | null }) {
         ? <div className="service-empty">no slopspaces on this host</div>
         : (
           <div className="worker-signals">
-            {slopspaces.map(s => <WorkerSlopspaceRow key={s.id} slopspace={s} />)}
+            {slopspaces.map(s => (
+              <WorkerSlopspaceRow
+                key={s.id}
+                slopspace={s}
+                selected={s.id === selected}
+                onSelect={() => setSelected(s.id === selected ? null : s.id)}
+              />
+            ))}
             {!!state.slopspaces_omitted && <div className="worker-signal-detail">…and {state.slopspaces_omitted} older not shown</div>}
           </div>
         )}
+      <WorkerSlopspaceControl
+        healthy={healthy}
+        state={state}
+        selected={slopspaces.find(s => s.id === selected) ?? null}
+        onSelect={setSelected}
+        reply={reply}
+        onControl={onControl}
+      />
     </>
   )
 }
 
-function WorkerSlopspaceRow({ slopspace: s }: { slopspace: SlopspaceInfo }) {
+const WORKER_AGENT_TYPES = ['agent-worker', 'heuristic-request']
+
+// WorkerSlopspaceControl is the slopspace sub-tab's manual control panel
+// (SlopspaceSlopspaceCondocs Step 1 Substep B, Revision A). Each button is
+// one call on the host's dungeon-keeper slopspace Manager -- the same
+// interface condoccer and the `dungeon-keeper slopspace` CLI use -- run by
+// that host's dungeon-keeper (see dungeon-keeper/slopctl.go). It refuses
+// anything on a slopspace a local agent is working in.
+function WorkerSlopspaceControl({
+  healthy,
+  state,
+  selected: sel,
+  onSelect,
+  reply,
+  onControl,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg
+  selected: SlopspaceInfo | null
+  onSelect: (id: string | null) => void
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [agentType, setAgentType] = useState(state.agent_type || WORKER_AGENT_TYPES[0])
+  const [repo, setRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [writeRepo, setWriteRepo] = useState('')
+  const [message, setMessage] = useState('')
+  const [pending, setPending] = useState<string | null>(null)
+
+  // The answer ends the wait. A dungeon-keeper from before the panel never
+  // answers, so give up eventually; add-repo clones and write pushes can
+  // take a while.
+  useEffect(() => { if (reply) setPending(null) }, [reply])
+  useEffect(() => {
+    if (!pending) return
+    const t = setTimeout(() => setPending(null), 120_000)
+    return () => clearTimeout(t)
+  }, [pending])
+
+  const send = (req: WorkerSlopspaceRequest) => {
+    setPending(req.op)
+    onControl(req)
+  }
+  const id = sel?.id
+  const busy = !healthy || !!pending
+  const locked = busy || !sel || sel.in_use
+  const repos = sel?.repos ?? []
+  const stored = !!sel && !sel.deployed
+
+  return (
+    <div className="worker-slopctl">
+      <div className="worker-slopctl-title">manual control</div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">slopspace</span>
+        <select className="worker-slopctl-input worker-slopctl-pick" value={id ?? ''} onChange={e => onSelect(e.target.value || null)}>
+          <option value="">— pick one (or click a row) —</option>
+          {(state.slopspaces ?? []).map(s => (
+            <option key={s.id} value={s.id}>
+              {s.id.slice(0, 8)} · {s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'}{s.repos?.length ? ` · ${s.repos.join(', ')}` : ''}
+            </option>
+          ))}
+        </select>
+        <button className="worker-submit-btn" disabled={busy} onClick={() => send({ op: 'create' })}>+ create</button>
+      </div>
+      {sel?.in_use && <div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">lifecycle</span>
+        <select className="worker-slopctl-input" value={agentType} onChange={e => setAgentType(e.target.value)} disabled={locked || !stored}>
+          {WORKER_AGENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <button className="worker-submit-btn" disabled={locked || !stored} onClick={() => send({ op: 'deploy', id, agent_type: agentType })}>deploy</button>
+        <button className="worker-submit-btn" disabled={locked || stored} onClick={() => send({ op: 'return', id })}>return</button>
+        <button
+          className="worker-submit-btn worker-slopctl-danger"
+          disabled={locked}
+          onClick={() => {
+            if (window.confirm(`Delete slopspace ${id}? Anything not pushed from its writespaces is lost.`)) send({ op: 'delete', id })
+          }}
+        >delete</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">add repo</span>
+        <input className="worker-slopctl-input" placeholder="owner/name" value={repo} onChange={e => setRepo(e.target.value)} disabled={locked || !stored} />
+        <input className="worker-slopctl-input" placeholder="new branch" value={branch} onChange={e => setBranch(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || !/^[^/\s]+\/[^/\s]+$/.test(repo.trim()) || !branch.trim()}
+          onClick={() => send({ op: 'add-repo', id, repo: repo.trim(), branch: branch.trim() })}
+        >add</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">commit &amp; push</span>
+        <select className="worker-slopctl-input" value={writeRepo} onChange={e => setWriteRepo(e.target.value)} disabled={locked || !stored}>
+          <option value="">every repo</option>
+          {repos.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input className="worker-slopctl-input worker-slopctl-grow" placeholder="commit message (optional)" value={message} onChange={e => setMessage(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || repos.length === 0}
+          onClick={() => send({ op: 'write', id, repo: repos.includes(writeRepo) ? writeRepo : undefined, message: message.trim() || undefined })}
+        >write</button>
+      </div>
+      {sel?.deployed && !sel.in_use && <div className="worker-meta">adding repos and writing need it returned first</div>}
+      {pending && <div className="worker-meta">{pending}: waiting for dungeon-keeper…</div>}
+      {!pending && reply && (reply.ok
+        ? <div className="worker-slopctl-ok">{reply.op}{reply.id ? ` ${reply.id.slice(0, 8)}` : ''}: {reply.detail || 'done'}</div>
+        : <div className="worker-error">{reply.op ? `${reply.op}: ` : ''}{reply.error}</div>)}
+    </div>
+  )
+}
+
+function WorkerSlopspaceRow({ slopspace: s, selected, onSelect }: { slopspace: SlopspaceInfo; selected: boolean; onSelect: () => void }) {
   const status = s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'
   const repos = s.repos ?? []
   return (
-    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}`}>
-      <div className="worker-signal-head worker-slopspace-head">
+    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}${selected ? ' worker-slopspace-selected' : ''}`}>
+      <div className="worker-signal-head worker-slopspace-head" onClick={onSelect} title="pick for manual control">
         <span className="worker-signal-status">{status}</span>
         <span className="worker-signal-prompt" title={s.id}>
           {s.id}
@@ -4346,7 +4522,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit, sendLRWorkerSlopspace,
   sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
@@ -4361,6 +4537,7 @@ function LRView({
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
   sendLRWorkerSubmit: (hostId: string, prompt: string) => void
+  sendLRWorkerSlopspace: (hostId: string, req: WorkerSlopspaceRequest) => void
   sendLRRestartApp: (hostId: string) => void
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
@@ -4637,6 +4814,8 @@ function LRView({
                     state={data.worker ?? null}
                     reply={data.workerReply ?? null}
                     onSubmit={prompt => sendLRWorkerSubmit(host.id, prompt)}
+                    slopspaceReply={data.slopspaceReply ?? null}
+                    onControlSlopspace={req => sendLRWorkerSlopspace(host.id, req)}
                   />
                 )
               )}
@@ -4934,7 +5113,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -5130,6 +5309,7 @@ export default function App() {
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
               sendLRWorkerSubmit={sendLRWorkerSubmit}
+              sendLRWorkerSlopspace={sendLRWorkerSlopspace}
               sendLRRestartApp={sendLRRestartApp}
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}

@@ -696,6 +696,10 @@ type Worker struct {
 	repr       *representable.Client
 	lastPushed string
 	busy       bool // a signal is being processed right now
+
+	// slopCtlMu serialises the worker tab's manual slopspace ops -- see
+	// slopctl.go.
+	slopCtlMu sync.Mutex
 }
 
 // NewWorker creates a new worker.

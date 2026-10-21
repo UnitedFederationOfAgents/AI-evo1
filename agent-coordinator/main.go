@@ -1272,6 +1272,25 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.reprServer.SendCommand(payload.HostID, cmd)
 			}
+		case "lr-worker-slopspace":
+			// The host's slopspace sub-tab manual control panel -- see worker.go.
+			var payload struct {
+				HostID  string          `json:"host_id"`
+				Request json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				cmd, err := workerSlopspaceCommand(payload.Request)
+				if err != nil {
+					var req struct {
+						Op string `json:"op"`
+						ID string `json:"id"`
+					}
+					_ = json.Unmarshal(payload.Request, &req)
+					s.sendToClient(c, "lr-worker-slopspace-reply", workerSlopspaceReplyMsg(payload.HostID, req.Op, req.ID, err))
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
+			}
 		case "lr-launch-app":
 			var payload struct {
 				HostID string `json:"host_id"`
@@ -1906,6 +1925,8 @@ func main() {
 			s.broadcast("lr-worker-state", workerMsg(name, data))
 		case "worker-reply":
 			s.broadcast("lr-worker-reply", LRWorkerReplyMsg{HostID: name, Reply: data})
+		case "worker-slopspace-reply":
+			s.broadcast("lr-worker-slopspace-reply", LRWorkerSlopspaceReplyMsg{HostID: name, Reply: data})
 		case "lr-http":
 			var payload LRHTTPMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

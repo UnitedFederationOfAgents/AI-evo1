@@ -30,6 +30,24 @@ func TestWorkerSubmitCommand(t *testing.T) {
 	}
 }
 
+func TestWorkerSlopspaceCommand(t *testing.T) {
+	cmd, err := workerSlopspaceCommand(json.RawMessage("{\n  \"op\": \"write\",\n  \"id\": \"abc\",\n  \"message\": \"two\\nlines\"\n}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd != `__worker:slopspace {"op":"write","id":"abc","message":"two\nlines"}` {
+		t.Errorf("want one compact __worker:slopspace line, got %q", cmd)
+	}
+	for _, bad := range []string{``, `{not json`, `{"id":"abc"}`} {
+		if _, err := workerSlopspaceCommand(json.RawMessage(bad)); err == nil {
+			t.Errorf("want %q refused", bad)
+		}
+	}
+	if _, err := workerSlopspaceCommand(json.RawMessage(`{"op":"write","message":"` + strings.Repeat("x", maxWorkerSubmit) + `"}`)); err == nil {
+		t.Error("a request past the line limit should be refused")
+	}
+}
+
 func TestWorkerMsgIsNullWithoutState(t *testing.T) {
 	b, _ := json.Marshal(workerMsg("h1", nil))
 	if string(b) != `{"host_id":"h1","worker":null}` {

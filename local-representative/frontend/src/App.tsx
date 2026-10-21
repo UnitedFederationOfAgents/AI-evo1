@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react'
-import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo } from './types'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo, WorkerSlopspaceRequest, WorkerSlopspaceReply } from './types'
 import { noteTCStart } from './tcannounce'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -85,6 +85,8 @@ function useStatusWS() {
   // the last prompt submitted from it -- see local-representative/worker.go.
   const [workerState, setWorkerState] = useState<WorkerStateMsg | null>(null)
   const [workerReply, setWorkerReply] = useState<WorkerReplyMsg | null>(null)
+  // ...and how the slopspace sub-tab's last manual control op went.
+  const [slopspaceReply, setSlopspaceReply] = useState<WorkerSlopspaceReply | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<Record<string, string>>({})
@@ -255,6 +257,15 @@ function useStatusWS() {
     }
   }, [])
 
+  const controlSlopspace = useCallback((req: WorkerSlopspaceRequest) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setSlopspaceReply(null)
+      wsRef.current.send(JSON.stringify({ type: 'worker-slopspace', payload: req }))
+    } else {
+      setSlopspaceReply({ op: req.op, id: req.id, ok: false, error: 'not connected' })
+    }
+  }, [])
+
   // File upload is a plain HTTP POST (not a websocket command) so the browser
   // can stream the multipart body directly to /api/files.
   const uploadFiles = useCallback(async (fileList: FileList | File[]) => {
@@ -398,6 +409,9 @@ function useStatusWS() {
           case 'worker-reply':
             setWorkerReply(msg.payload as WorkerReplyMsg)
             break
+          case 'worker-slopspace-reply':
+            setSlopspaceReply(msg.payload as WorkerSlopspaceReply)
+            break
         }
       } catch {
         // ignore malformed messages
@@ -414,9 +428,9 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
   }
 }
 
@@ -556,18 +570,22 @@ type WorkerSubTab = typeof WORKER_SUBTABS[number]
 // WorkerPanel is the worker tab, split in two: direct is a temporary prompt
 // box that hands prompt-only work to this host's dungeon-keeper, and the
 // work signals it reports, newest first; slopspace lists this host's
-// slopspaces and whether a local agent is using one -- see
-// local-representative/worker.go.
+// slopspaces, whether a local agent is using one, and a manual control
+// panel for them -- see local-representative/worker.go.
 function WorkerPanel({
   healthy,
   state,
   reply,
   onSubmit,
+  slopspaceReply,
+  onControlSlopspace,
 }: {
   healthy: boolean
   state: WorkerStateMsg | null
   reply: WorkerReplyMsg | null
   onSubmit: (prompt: string) => void
+  slopspaceReply: WorkerSlopspaceReply | null
+  onControlSlopspace: (req: WorkerSlopspaceRequest) => void
 }) {
   const [sub, setSub] = useState<WorkerSubTab>('direct')
   return (
@@ -585,7 +603,9 @@ function WorkerPanel({
         ))}
       </div>
       {sub === 'direct' && <WorkerDirectView healthy={healthy} state={state} reply={reply} onSubmit={onSubmit} />}
-      {sub === 'slopspace' && <WorkerSlopspaceView state={state} />}
+      {sub === 'slopspace' && (
+        <WorkerSlopspaceView healthy={healthy} state={state} reply={slopspaceReply} onControl={onControlSlopspace} />
+      )}
     </div>
   )
 }
@@ -650,9 +670,24 @@ function WorkerDirectView({
 }
 
 // WorkerSlopspaceView is the worker tab's slopspace sub-tab: this host's
-// slopspaces as dungeon-keeper last reported them, in use first. Read-only
-// for now.
-function WorkerSlopspaceView({ state }: { state: WorkerStateMsg | null }) {
+// slopspaces as dungeon-keeper last reported them, in use first, and below
+// them the manual control panel. Clicking a row picks it for the panel.
+function WorkerSlopspaceView({
+  healthy,
+  state,
+  reply,
+  onControl,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  // A create picks the new slopspace.
+  useEffect(() => {
+    if (reply?.ok && reply.op === 'create' && reply.id) setSelected(reply.id)
+  }, [reply])
   if (!state) return <div className="service-empty">the worker hasn't reported yet</div>
   if (!state.slopspaces) return <div className="service-empty">this worker is too old to report its slopspaces — rebuild it</div>
   const slopspaces = state.slopspaces
@@ -668,20 +703,148 @@ function WorkerSlopspaceView({ state }: { state: WorkerStateMsg | null }) {
         ? <div className="service-empty">no slopspaces on this host</div>
         : (
           <div className="worker-signals">
-            {slopspaces.map(s => <WorkerSlopspaceRow key={s.id} slopspace={s} />)}
+            {slopspaces.map(s => (
+              <WorkerSlopspaceRow
+                key={s.id}
+                slopspace={s}
+                selected={s.id === selected}
+                onSelect={() => setSelected(s.id === selected ? null : s.id)}
+              />
+            ))}
             {!!state.slopspaces_omitted && <div className="worker-signal-detail">…and {state.slopspaces_omitted} older not shown</div>}
           </div>
         )}
+      <WorkerSlopspaceControl
+        healthy={healthy}
+        state={state}
+        selected={slopspaces.find(s => s.id === selected) ?? null}
+        onSelect={setSelected}
+        reply={reply}
+        onControl={onControl}
+      />
     </>
   )
 }
 
-function WorkerSlopspaceRow({ slopspace: s }: { slopspace: SlopspaceInfo }) {
+const WORKER_AGENT_TYPES = ['agent-worker', 'heuristic-request']
+
+// WorkerSlopspaceControl is the slopspace sub-tab's manual control panel
+// (SlopspaceSlopspaceCondocs Step 1 Substep B, Revision A). Each button is
+// one call on dungeon-keeper's slopspace Manager -- the same interface
+// condoccer and the `dungeon-keeper slopspace` CLI use -- run by this host's
+// dungeon-keeper (see dungeon-keeper/slopctl.go). It refuses anything on a
+// slopspace a local agent is working in.
+function WorkerSlopspaceControl({
+  healthy,
+  state,
+  selected: sel,
+  onSelect,
+  reply,
+  onControl,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg
+  selected: SlopspaceInfo | null
+  onSelect: (id: string | null) => void
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [agentType, setAgentType] = useState(state.agent_type || WORKER_AGENT_TYPES[0])
+  const [repo, setRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [writeRepo, setWriteRepo] = useState('')
+  const [message, setMessage] = useState('')
+  const [pending, setPending] = useState<string | null>(null)
+
+  // The answer ends the wait. A dungeon-keeper from before the panel never
+  // answers, so give up eventually; add-repo clones and write pushes can
+  // take a while.
+  useEffect(() => { if (reply) setPending(null) }, [reply])
+  useEffect(() => {
+    if (!pending) return
+    const t = setTimeout(() => setPending(null), 120_000)
+    return () => clearTimeout(t)
+  }, [pending])
+
+  const send = (req: WorkerSlopspaceRequest) => {
+    setPending(req.op)
+    onControl(req)
+  }
+  const id = sel?.id
+  const busy = !healthy || !!pending
+  const locked = busy || !sel || sel.in_use
+  const repos = sel?.repos ?? []
+  const stored = !!sel && !sel.deployed
+
+  return (
+    <div className="worker-slopctl">
+      <div className="worker-slopctl-title">manual control</div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">slopspace</span>
+        <select className="worker-slopctl-input worker-slopctl-pick" value={id ?? ''} onChange={e => onSelect(e.target.value || null)}>
+          <option value="">— pick one (or click a row) —</option>
+          {(state.slopspaces ?? []).map(s => (
+            <option key={s.id} value={s.id}>
+              {s.id.slice(0, 8)} · {s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'}{s.repos?.length ? ` · ${s.repos.join(', ')}` : ''}
+            </option>
+          ))}
+        </select>
+        <button className="worker-submit-btn" disabled={busy} onClick={() => send({ op: 'create' })}>+ create</button>
+      </div>
+      {sel?.in_use && <div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">lifecycle</span>
+        <select className="worker-slopctl-input" value={agentType} onChange={e => setAgentType(e.target.value)} disabled={locked || !stored}>
+          {WORKER_AGENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <button className="worker-submit-btn" disabled={locked || !stored} onClick={() => send({ op: 'deploy', id, agent_type: agentType })}>deploy</button>
+        <button className="worker-submit-btn" disabled={locked || stored} onClick={() => send({ op: 'return', id })}>return</button>
+        <button
+          className="worker-submit-btn worker-slopctl-danger"
+          disabled={locked}
+          onClick={() => {
+            if (window.confirm(`Delete slopspace ${id}? Anything not pushed from its writespaces is lost.`)) send({ op: 'delete', id })
+          }}
+        >delete</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">add repo</span>
+        <input className="worker-slopctl-input" placeholder="owner/name" value={repo} onChange={e => setRepo(e.target.value)} disabled={locked || !stored} />
+        <input className="worker-slopctl-input" placeholder="new branch" value={branch} onChange={e => setBranch(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || !/^[^/\s]+\/[^/\s]+$/.test(repo.trim()) || !branch.trim()}
+          onClick={() => send({ op: 'add-repo', id, repo: repo.trim(), branch: branch.trim() })}
+        >add</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">commit &amp; push</span>
+        <select className="worker-slopctl-input" value={writeRepo} onChange={e => setWriteRepo(e.target.value)} disabled={locked || !stored}>
+          <option value="">every repo</option>
+          {repos.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input className="worker-slopctl-input worker-slopctl-grow" placeholder="commit message (optional)" value={message} onChange={e => setMessage(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || repos.length === 0}
+          onClick={() => send({ op: 'write', id, repo: repos.includes(writeRepo) ? writeRepo : undefined, message: message.trim() || undefined })}
+        >write</button>
+      </div>
+      {sel?.deployed && !sel.in_use && <div className="worker-meta">adding repos and writing need it returned first</div>}
+      {pending && <div className="worker-meta">{pending}: waiting for dungeon-keeper…</div>}
+      {!pending && reply && (reply.ok
+        ? <div className="worker-slopctl-ok">{reply.op}{reply.id ? ` ${reply.id.slice(0, 8)}` : ''}: {reply.detail || 'done'}</div>
+        : <div className="worker-error">{reply.op ? `${reply.op}: ` : ''}{reply.error}</div>)}
+    </div>
+  )
+}
+
+function WorkerSlopspaceRow({ slopspace: s, selected, onSelect }: { slopspace: SlopspaceInfo; selected: boolean; onSelect: () => void }) {
   const status = s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'
   const repos = s.repos ?? []
   return (
-    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}`}>
-      <div className="worker-signal-head worker-slopspace-head">
+    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}${selected ? ' worker-slopspace-selected' : ''}`}>
+      <div className="worker-signal-head worker-slopspace-head" onClick={onSelect} title="pick for manual control">
         <span className="worker-signal-status">{status}</span>
         <span className="worker-signal-prompt" title={s.id}>
           {s.id}
@@ -3156,9 +3319,9 @@ export default function App() {
   }
   const {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
-    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -3383,6 +3546,8 @@ export default function App() {
                       state={workerState}
                       reply={workerReply}
                       onSubmit={submitWork}
+                      slopspaceReply={slopspaceReply}
+                      onControlSlopspace={controlSlopspace}
                     />
                   )}
                   {activeTab === 'federation-command' && (

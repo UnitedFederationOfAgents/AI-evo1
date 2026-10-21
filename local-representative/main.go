@@ -1243,6 +1243,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.sendToClient(c, "worker-reply", reply)
 			}
+		case "worker-slopspace":
+			// The slopspace sub-tab's manual control panel -- see worker.go.
+			// dungeon-keeper's answer comes back as worker-slopspace-reply.
+			var req WorkerSlopspaceRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				if err := s.controlSlopspace(req); err != nil {
+					s.sendToClient(c, "worker-slopspace-reply", WorkerSlopspaceReply{Op: req.Op, ID: req.ID, Error: err.Error()})
+				}
+			}
 		}
 		switch m.Type {
 		case "connect-ac":
@@ -2090,10 +2099,16 @@ func main() {
 			return
 		}
 		if name == "worker" {
-			if dataType == "worker-state" {
+			switch dataType {
+			case "worker-state":
 				var payload WorkerStateMsg
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.setWorkerState(payload)
+				}
+			case "slopspace-reply":
+				var payload WorkerSlopspaceReply
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.setWorkerSlopspaceReply(payload)
 				}
 			}
 			return

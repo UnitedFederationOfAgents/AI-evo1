@@ -100,9 +100,21 @@ Not yet built or run end to end; see the Step 1 replies.
 
 ### Done: slopspace visibility on the worker tab (SlopspaceSlopspaceCondocs Step 1 Substep B)
 
-- The worker tab, both local-representative's and agent-coordinator's per-host copy, is split into two sub-tabs. **direct** is what was there: the prompt box and the work signals. **slopspace** lists the host's slopspaces. For now it only shows them; it has no controls yet.
+- The worker tab, both local-representative's and agent-coordinator's per-host copy, is split into two sub-tabs. **direct** is what was there: the prompt box and the work signals. **slopspace** lists the host's slopspaces, with a manual control panel below the list (Revision A).
 - dungeon-keeper puts the list in its `worker-state` as `slopspaces` (`repr.go`'s `slopspaces`): each slopspace's id, creation time, deploy count, writespace repos, whether it is deployed and to which agent type, and whether it is **in use**. In use means it is deployed and an ongoing slopspace signal for that agent type is `processing`. Only one slopspace is deployed per agent type, so that work is running in it. In-use slopspaces come first, then deployed ones, then the rest newest first, up to 50. `slopspaces_omitted` counts any left out.
 - The list is rebuilt on each watch-loop pass, like the signals, and sent only when it changes. Which condoc a slopspace belongs to isn't shown: that link is in condoccer's pointer specs, not in the slopspace.
+- **Manual control panel** (Revision A). Pick a slopspace from the dropdown or by clicking its row. Each control is one call on `pkg/slopspace`'s Manager, the same interface condoccer and the `dungeon-keeper slopspace` CLI use:
+  - **+ create**: `Create`. The new slopspace is picked automatically.
+  - **deploy** (with an agent type) / **return** / **delete**: `Deploy` / `Return` / `Delete`. Delete asks for confirmation first.
+  - **add repo**: clones or pulls `owner/name` into the shared writespace pool (`writespace.CloneRepo`), then `AddWritespaceRepo` on a new branch, which is required, as in the CLI.
+  - **commit & push**: `WriteRepoChanges` for one repo, or `WriteAllRepoChanges` for every repo, with an optional message. The reply lists each repo's pushed SHA, or "no changes".
+- How a request travels: browser → LR `worker-slopspace` (or AC `lr-worker-slopspace` → LR `__worker:slopspace`) → dungeon-keeper `__worker:slopspace <json>` (`dungeon-keeper/slopctl.go`). dungeon-keeper runs the op off its command goroutine, answers with `slopspace-reply`, and pushes a fresh `worker-state`. LR relays the answer as `worker-slopspace-reply` to its own browsers and up to AC, which broadcasts it as `lr-worker-slopspace-reply`. LR and AC answer themselves when the request never reaches dungeon-keeper, for example when the worker isn't connected.
+- Guards, in dungeon-keeper:
+  - Manual ops run one at a time.
+  - Nothing can be done to an **in use** slopspace.
+  - A deploy is refused while another slopspace is deployed for that agent type. This matters because `Deploy` clears the deploy path first, which would throw away the other slopspace's writespaces.
+  - The UI only enables add repo and commit & push on a stored (returned) slopspace, because the Manager refuses both while it is deployed.
+- **Caveat:** these are raw Manager calls. Condoccer doesn't know about them. Deploying, returning or deleting a condoc's slopspace by hand while condoccer is driving it will confuse its turn queue. The panel can't tell which slopspaces belong to a condoc (see above).
 
 ## What Exists Today
 

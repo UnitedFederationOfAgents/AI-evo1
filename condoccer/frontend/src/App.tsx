@@ -670,7 +670,10 @@ function saveHideCompleted(hide: boolean) {
 //   #/condoc/<enc(path)>
 //   #/condoc/<enc(path)>/step/<num>[/iter/<id>]
 //   #/condoc/<enc(path)>/step/<num>/substep[/iter/<id>]
-//   #/condoc/<enc(path)>/step/<num>[/substep]/files/<from>..<to>[/file/<enc(file)>[/hunk/<idx>]]
+//   #/condoc/<enc(path)>/step/<num>[/substep]/files/<enc(from)>..<enc(to)>[/file/<enc(file)>[/hunk/<idx>]]
+//
+// from/to are commit hashes, or for a slopspace condoc per-repo lists (see
+// parseSlopCommitRanges), hence the encoding.
 
 interface NavHashState {
   navLevel: NavLevel
@@ -704,7 +707,7 @@ function hashFromNav(s: NavHashState): string {
   if (s.navLevel === 'files-changed' || s.navLevel === 'file-diff') {
     if (s.diffReturnLevel === 'substep') h += '/substep'
     if (s.diffFromCommit === null) return h
-    h += `/files/${s.diffFromCommit}..${s.diffToCommit ?? ''}`
+    h += `/files/${encodeURIComponent(s.diffFromCommit)}..${encodeURIComponent(s.diffToCommit ?? '')}`
     if (s.navLevel === 'file-diff' && s.selectedDiffFile) {
       h += `/file/${encodeURIComponent(s.selectedDiffFile)}`
       if (s.selectedDiffHunkIdx !== null) h += `/hunk/${s.selectedDiffHunkIdx}`
@@ -770,8 +773,8 @@ function navFromHash(hash: string): NavHashState {
     const range = parts[i + 1]
     const sep = range.indexOf('..')
     if (sep < 0) return result
-    result.diffFromCommit = range.slice(0, sep)
-    result.diffToCommit = range.slice(sep + 2)
+    result.diffFromCommit = decodeURIComponent(range.slice(0, sep))
+    result.diffToCommit = decodeURIComponent(range.slice(sep + 2))
     result.navLevel = 'files-changed'
     i += 2
 
@@ -1118,6 +1121,56 @@ function parseCommitRanges(content: string): Map<string, CommitRange> {
     result.set(pairs[i].reply.id, { from: pairs[i].range.to, to: nextFrom })
   }
   return result
+}
+
+// parseSlopCommitRanges is parseCommitRanges for a slopspace condoc, whose
+// reply preamble links each target repo's commit, one line per repo (see
+// turnPreamble in condoccer/slopspace.go):
+//   - owner/name: [`base`](…/commit/<base>) → [`head`](…/commit/<head>)
+//   - owner/name: [`head`](…/commit/<head>)
+//   - owner/name: (no changes)
+// A reply's range spans every repo it changed: from is "owner/name@<base>,…"
+// and to "owner/name@<head>,…", which the backend diffs repo by repo. A
+// reply that changed no repo gets no range.
+function parseSlopCommitRanges(content: string): Map<string, CommitRange> {
+  const link = String.raw`\[\x60[a-f0-9]+\x60\]\(https:\/\/github\.com\/[^)\s]+\/commit\/([a-f0-9]+)\)`
+  const changedRe = new RegExp(String.raw`^- ([\w.-]+\/[\w.-]+): ${link}(?: → ${link})?\s*$`)
+  const unchangedRe = /^- [\w.-]+\/[\w.-]+: \(no changes\)\s*$/
+  const replyRe = /^## Reply(?: ([A-Z]))?(?:\s|$)/
+
+  const result = new Map<string, CommitRange>()
+  const lines = content.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const rm = replyRe.exec(lines[i])
+    if (!rm) continue
+    const from: string[] = []
+    const to: string[] = []
+    let j = i - 1
+    while (j >= 0 && lines[j].trim() === '') j--
+    for (; j >= 0; j--) {
+      if (unchangedRe.test(lines[j])) continue
+      const m = changedRe.exec(lines[j])
+      if (!m) break
+      const [, repo, first, second] = m
+      if (second) {
+        from.unshift(`${repo}@${first}`)
+        to.unshift(`${repo}@${second}`)
+      } else {
+        to.unshift(`${repo}@${first}`)
+      }
+    }
+    if (to.length > 0) {
+      result.set(rm[1] ? `reply-${rm[1]}` : 'reply-initial', { from: from.join(','), to: to.join(',') })
+    }
+  }
+  return result
+}
+
+// diffFileRepo splits a slopspace diff file ("owner/name/<path>") into its
+// repo and path.
+function diffFileRepo(file: string): { repo: string; path: string } {
+  const parts = file.split('/')
+  return { repo: parts.slice(0, 2).join('/'), path: parts.slice(2).join('/') }
 }
 
 // ---- Representable connect/disconnect widget ----
@@ -1590,7 +1643,7 @@ function Sidebar({
     const stepContent = selectedStepNum === activeState.info.stepNum
       ? (activeState.stepContent ?? '')
       : (activeState.completedStepContents?.[selectedStepNum ?? 0] ?? '')
-    const commitRanges = parseCommitRanges(stepContent)
+    const commitRanges = activeState.slopspace ? parseSlopCommitRanges(stepContent) : parseCommitRanges(stepContent)
 
     return (
       <div className="sidebar">
@@ -1641,7 +1694,7 @@ function Sidebar({
 
   if (navLevel === 'substep' && activeState) {
     const { letter: substepLetter, content: substepContent, iterations: substepIterations } = resolveSubstepView(activeState, selectedSubstepLetter)
-    const substepCommitRanges = parseCommitRanges(substepContent)
+    const substepCommitRanges = activeState.slopspace ? parseSlopCommitRanges(substepContent) : parseCommitRanges(substepContent)
 
     return (
       <div className="sidebar">
@@ -1699,15 +1752,22 @@ function Sidebar({
           {diffFilesLoaded && diffFiles.length === 0 && (
             <div className="nav-empty">No project files changed.</div>
           )}
-          {diffFiles.map((file) => (
-            <div
-              key={file}
-              className={`nav-item${selectedDiffFile === file ? ' selected' : ''}`}
-              onClick={() => onSelectDiffFile(file)}
-            >
-              <span className="nav-item-name nav-item-file">{file.split('/').pop() ?? file}</span>
-            </div>
-          ))}
+          {diffFiles.map((file, i) => {
+            // A slopspace diff spans its repos: head each repo's files.
+            const repo = activeState?.slopspace ? diffFileRepo(file).repo : null
+            const newRepo = repo !== null && (i === 0 || diffFileRepo(diffFiles[i - 1]).repo !== repo)
+            return (
+              <div key={file}>
+                {newRepo && <div className="nav-repo-header">{repo}</div>}
+                <div
+                  className={`nav-item${selectedDiffFile === file ? ' selected' : ''}`}
+                  onClick={() => onSelectDiffFile(file)}
+                >
+                  <span className="nav-item-name nav-item-file">{file.split('/').pop() ?? file}</span>
+                </div>
+              </div>
+            )
+          })}
         </div>
         {reprFooter}
       </div>
@@ -1788,7 +1848,8 @@ interface StepCardProps {
   completedContent?: string
   onStartStep: (title: string, prompt: string) => void
   onCompleted: () => void
-  onRevert: (stepNum: number, iterLetter?: string) => void
+  // Absent for a slopspace condoc, which doesn't support revert.
+  onRevert?: (stepNum: number, iterLetter?: string) => void
   isActive: boolean
   isCompleted: boolean
 }
@@ -1858,7 +1919,7 @@ function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, 
     <div className={`step-card${isActive ? ' step-card-active' : ''}`}>
       <div className="step-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span>Step {step.num} — <span className="step-card-title">{step.title}</span></span>
-        {isCompleted && !revertOpen && (
+        {isCompleted && onRevert && !revertOpen && (
           <button
             className="btn-danger-sm"
             title={`Revert to step ${step.num}`}
@@ -1890,7 +1951,7 @@ function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, 
             <button
               className="btn-danger"
               onClick={() => {
-                onRevert(step.num, revertIter || undefined)
+                onRevert?.(step.num, revertIter || undefined)
                 setRevertOpen(false)
               }}
             >
@@ -1964,7 +2025,7 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
                   isCompleted={s.num < info.stepNum}
                   onStartStep={handleStartStep}
                   onCompleted={() => onAction({ action: 'completed', path: info.path })}
-                  onRevert={(stepNum, iterLetter) => onAction({ action: 'revert', path: info.path, revertStep: stepNum, revertIter: iterLetter })}
+                  onRevert={state.slopspace ? undefined : (stepNum, iterLetter) => onAction({ action: 'revert', path: info.path, revertStep: stepNum, revertIter: iterLetter })}
                 />
               ))}
             </div>
@@ -2384,17 +2445,22 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           <button className="btn-warning" onClick={() => setMode('revision')}>
             Revise {nextLetter}…
           </button>
-          <button className="btn-secondary" onClick={() => setMode('retry')}>
-            Retry {nextLetter}…
-          </button>
+          {/* Slopspace condocs don't support retry or revert (D8). */}
+          {!state.slopspace && (
+            <button className="btn-secondary" onClick={() => setMode('retry')}>
+              Retry {nextLetter}…
+            </button>
+          )}
           {!isSubstep && (
             <button className="btn-primary" onClick={() => setMode('substep')}>
               Substep {nextLetter}…
             </button>
           )}
-          <button className="btn-danger" onClick={() => setMode('revert')}>
-            Revert↩
-          </button>
+          {!state.slopspace && (
+            <button className="btn-danger" onClick={() => setMode('revert')}>
+              Revert↩
+            </button>
+          )}
           <button className="btn-secondary" onClick={() => setMode('add_resource')}>
             Add Resources…
           </button>

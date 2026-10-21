@@ -87,9 +87,14 @@ Not yet built or run end to end; see the Step 1 replies.
   - A proposal opens a form with **Check Branch**, **Accept** and **Withdraw**.
   - An accepted condoc opens in the same condoc/step/substep views as same-repo. Above them sits a slopspace panel with the condoc's state, **Resubmit** on error, the PR template editor (**Accept & Raise PRs** / **Save Edits** / **Regenerate**), and the PR list with **Merge**.
 - **Resources (Step 1 Revision E):** **Add Resources…** works the same as in same-repo, with all three sources (Highlighted, Upload/select from host, Voice Note). Resources always go into the condoc repo, in the condoc's Impls folder in the slopspace, and never into a target repo. The agent can copy them across itself, since both repos are in its slopspace. Adding a resource claims the condoc, the same as any other UI edit, so it's refused while a turn is in flight. No `.condoc` lock is needed, because the files aren't in the working dir. The files are committed along with the next prompt commit, as in same-repo. `/api/resource/` serves them from wherever the condoc repo currently is.
-- **Not in the first cut:**
-  - retry and revert (D8)
-  - the git diff views; the per-repo commit links in each reply stand in for them
+- **Not supported:** retry and revert (D8, settled in SlopspaceSlopspaceCondocs Step 1). The UI hides their controls for slopspace condocs and the backend refuses the actions.
+
+### Done: same-repo features carried over (SlopspaceSlopspaceCondocs Step 1)
+
+- **Diff viewer.** Each reply that changed a repo gets the same **⊞ View files changed** entry as in same-repo. The files-changed pane lists every changed repo's files, headed by repo, and each file opens in the usual hunk-by-hunk diff view.
+  - The frontend reads the ranges off the reply preamble's per-repo links (`parseSlopCommitRanges`). A reply's range is `owner/name@<base>,…` → `owner/name@<head>,…`. A repo listed with only a head diffs that one commit, and a `(no changes)` repo is left out.
+  - `get-diff`/`get-file-diff` on a `slopspace:` path go to `slopHandleGetDiff`/`slopHandleGetFileDiff`. They check each repo is one of the pointer's repos and run git in its `writespaces-secure` git dir, which stays put whether or not the slopspace is deployed. Files come back as `owner/name/<path>`.
+  - The diff's place in the URL hash is URI-encoded, so a refresh lands back on a slopspace diff too.
 
 ## What Exists Today
 
@@ -128,7 +133,7 @@ Not yet built or run end to end; see the Step 1 replies.
 - **One auth path.** Everything uses HTTPS + one PAT: pointer clone and push, dungeon-keeper writespaces, PR create and merge. The PAT is scoped to the pointer repo, the condoc repo and every target. Condoccer's pointer clone keeps the token out of `.git/config`, but dungeon-keeper's writespace clones don't yet (D11).
 - **Branch uniqueness across repos.** This needs `git ls-remote --heads` on every target repo plus the condoc repo, done at accept time. `AddWritespaceRepo` only fails when the branch exists *locally* (D5).
 - **Pointer repo contention.** Several condoccers, or several condocs in one condoccer, push to the same `main`. One pointer file per condoc keeps conflicts down to `pull --rebase` retries. For slopspace condocs, a `holder` field in the pointer replaces the `.condoc` lock (D4).
-- **Retry and revert are multi-repo.** The current retry rewrites history in one repo. Here it has to reset every target repo plus the condoc repo, and leave a take branch in each (D8).
+- **Retry and revert would be multi-repo.** The current retry rewrites history in one repo. Here it would have to reset every target repo plus the condoc repo, and leave a take branch in each. We won't support them (D8).
 - **Merging is not atomic.** N+1 PRs can't be merged as a unit, so partial failure has to be a visible state (D10).
 - **The Hide Completed filter needs updating.** Slopspace condocs pass through `completed` on the way to `pr_proposed`, `pr_open` and `merged`. Once that tab gets a filter, it should key off `merged`, not `completed` (D9).
 
@@ -206,9 +211,10 @@ Because turns are serialized, condoccer can safely own the deploy/return pair.
 - During the move itself the file briefly exists in neither place. Rec: keep showing the last rendered state and don't treat "not found" as staleness while a turn is in flight.
 - The agent edits the condoc in place during a turn, so the UI shows those edits live. This is a bonus over `same-repo`.
 
-#### D8 — Scope of iteration types in the first cut [A: D10]
-- a. **Rec:** handoff, revision, substep and resources first. Retry and revert come later, as a multi-repo version of `runCondocRetryGitSequence` with a take branch per repo.
+#### D8 — Scope of iteration types [A: D10]
+- a. ~~**Rec:** handoff, revision, substep and resources first. Retry and revert come later, as a multi-repo version of `runCondocRetryGitSequence` with a take branch per repo.~~
 - b. Everything at parity before shipping.
+- **Settled (SlopspaceSlopspaceCondocs Step 1):** handoff, revision, substep and resources only. **Retry and revert are not supported** for slopspace condocs, now or later. Their controls are hidden in the UI, and `slopPerformAction` refuses them. Other same-repo features, such as the diff viewer, are carried over.
 
 #### D9 — Phase model for slopspace condocs [A: D11]
 - Add `queued` (D2) before `agent_running`. Add `pr_proposed`, `pr_open` and `merged` after `completed`. `!COMPLETED!` on a slopspace condoc moves it to `pr_proposed` rather than ending it.
@@ -277,4 +283,5 @@ Steps 2–7 are done in a first cut (Step 1 Revisions C and D; see [Status](#sta
 5. **PR management package** (D10): decide the location, review AI-sandboxing, and implement create, mergeability and merge against the REST API.
 6. **Propose PR:** the in-place tempdir signal, the YAML editor, regenerate, and accept to raise the PRs.
 7. **PR phase and Merge:** mergeability polling, the Merge control, ordered merging, partial-failure display, and teardown (D9/D10).
-8. **Later:** multi-repo retry and revert (D8).
+8. ~~**Later:** multi-repo retry and revert (D8).~~ Dropped: retry and revert won't be supported (D8).
+9. **Same-repo features carried over** (SlopspaceSlopspaceCondocs): the diff viewer is done; see [Status](#status).

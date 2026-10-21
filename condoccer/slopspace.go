@@ -1165,7 +1165,7 @@ func (s *Server) slopPerformAction(action ActionRequest) error {
 	case "resubmit":
 		return s.slopResubmit(stem)
 	case "retry", "revert":
-		return fmt.Errorf("%s isn't available for slopspace condocs yet (D8)", action.Action)
+		return fmt.Errorf("%s isn't supported for slopspace condocs (D8)", action.Action)
 	}
 	_, root, main, release, err := s.slopBeginEdit(stem)
 	if err != nil {
@@ -1595,6 +1595,148 @@ func turnPreamble(targets, bases []string, heads map[string]string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// ---- diffs ----
+//
+// A slopspace reply's diff spans every repo the turn changed, so a diff
+// request carries one range per repo, read off the reply preamble's links:
+// fromCommit is "owner/name@<base>,..." and toCommit "owner/name@<head>,...".
+// A repo with a head and no base diffs the head commit alone. Files go back
+// to the UI as "owner/name/<path>", which is how get-file-diff names them.
+
+// slopDiffRange is one repo's part of a slopspace diff request.
+type slopDiffRange struct {
+	repo   string
+	gitDir string
+	spec   string // git revision range
+}
+
+// parseRepoShas parses "owner/name@sha,..." into repo → sha, keeping order.
+func parseRepoShas(list string) (map[string]string, []string, error) {
+	shas := map[string]string{}
+	var order []string
+	for _, part := range strings.Split(list, ",") {
+		if part = strings.TrimSpace(part); part == "" {
+			continue
+		}
+		repo, sha, ok := strings.Cut(part, "@")
+		if !ok || !commitHashRe.MatchString(sha) {
+			return nil, nil, fmt.Errorf("invalid commit range %q", part)
+		}
+		if _, dup := shas[repo]; !dup {
+			order = append(order, repo)
+		}
+		shas[repo] = sha
+	}
+	return shas, order, nil
+}
+
+// slopDiffRanges resolves a slopspace diff request to a range in each repo's
+// git dir, which stays in the slopspace's writespaces-secure whether or not
+// the slopspace is deployed.
+func (s *Server) slopDiffRanges(rel, fromCommit, toCommit string) ([]slopDiffRange, error) {
+	stem := strings.TrimPrefix(rel, slopPathPrefix)
+	if stem == "" || strings.ContainsAny(stem, `/\`) || strings.Contains(stem, "..") {
+		return nil, fmt.Errorf("invalid condoc path")
+	}
+	bases, _, err := parseRepoShas(fromCommit)
+	if err != nil {
+		return nil, err
+	}
+	heads, order, err := parseRepoShas(toCommit)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := s.readSpec(stem)
+	if err != nil {
+		return nil, err
+	}
+	if spec.SlopspaceID == "" {
+		return nil, fmt.Errorf("%s has no slopspace (phase %s)", spec.Name, spec.Phase)
+	}
+	meta, err := s.slop.ss.Get(spec.SlopspaceID)
+	if err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for _, r := range spec.Repos() {
+		known[r] = true
+	}
+	var ranges []slopDiffRange
+	for _, repo := range order {
+		if !known[repo] {
+			return nil, fmt.Errorf("%s isn't one of %s's repos", repo, spec.Name)
+		}
+		base := bases[repo]
+		if base == "" {
+			base = heads[repo] + "^"
+		}
+		ranges = append(ranges, slopDiffRange{
+			repo:   repo,
+			gitDir: filepath.Join(meta.RootPath, dkslop.WriteSpacesSecure, dkslop.ReposDir, filepath.FromSlash(repo)),
+			spec:   base + ".." + heads[repo],
+		})
+	}
+	return ranges, nil
+}
+
+func (s *Server) slopHandleGetDiff(c *wsClient, rel, fromCommit, toCommit string) {
+	ranges, err := s.slopDiffRanges(rel, fromCommit, toCommit)
+	if err != nil {
+		s.replyErr(c, err)
+		return
+	}
+	files := []string{}
+	for _, r := range ranges {
+		out, err := exec.Command("git", "--git-dir", r.gitDir, "log", "--name-only", "--format=", r.spec).Output()
+		if err != nil {
+			s.replyErr(c, fmt.Errorf("git log failed in %s: %v", r.repo, err))
+			return
+		}
+		for _, f := range changedFiles(out) {
+			files = append(files, r.repo+"/"+f)
+		}
+	}
+	s.sendToClient(c, "diff-list", map[string]interface{}{
+		"fromCommit": fromCommit,
+		"toCommit":   toCommit,
+		"files":      files,
+	})
+}
+
+func (s *Server) slopHandleGetFileDiff(c *wsClient, rel, fromCommit, toCommit, file string) {
+	parts := strings.SplitN(file, "/", 3)
+	if len(parts) != 3 || parts[2] == "" || strings.Contains(file, "..") {
+		s.replyErr(c, fmt.Errorf("invalid file path"))
+		return
+	}
+	repo, path := parts[0]+"/"+parts[1], parts[2]
+	ranges, err := s.slopDiffRanges(rel, fromCommit, toCommit)
+	if err != nil {
+		s.replyErr(c, err)
+		return
+	}
+	for _, r := range ranges {
+		if r.repo != repo {
+			continue
+		}
+		out, err := exec.Command("git", "--git-dir", r.gitDir, "diff", r.spec, "--", path).Output()
+		if err != nil {
+			s.replyErr(c, fmt.Errorf("git diff failed in %s: %v", repo, err))
+			return
+		}
+		content := string(out)
+		s.sendToClient(c, "file-diff", map[string]interface{}{
+			"fromCommit": fromCommit,
+			"toCommit":   toCommit,
+			"file":       file,
+			"content":    content,
+			"hunks":      diffHunks(content),
+		})
+		return
+	}
+	s.replyErr(c, fmt.Errorf("%s isn't in this diff", repo))
 }
 
 // ---- propose PR (D10) ----

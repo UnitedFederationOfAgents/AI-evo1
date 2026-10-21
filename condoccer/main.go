@@ -1032,7 +1032,8 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 		s.broadcastCondocUpdate(slopPathPrefix + p.Stem)
 
 	// get-diff/get-file-diff carry the condoc's path so git runs against
-	// that condoc's own repo (see condocRepoRoot), not the scan root.
+	// that condoc's own repo (see condocRepoRoot), not the scan root -- or,
+	// for a slopspace condoc, against each repo in its slopspace.
 	case "get-diff":
 		var p struct {
 			Path       string `json:"path"`
@@ -1217,16 +1218,48 @@ func logLineIsCommitHeader(line string) bool {
 // the repo to run git in. An empty path (an older frontend) falls back to the
 // scan root's repo.
 func (s *Server) diffRepoRoot(condocRel string) (string, error) {
-	if isSlopspacePath(condocRel) {
-		return "", fmt.Errorf("diffs aren't available for slopspace condocs yet -- follow the per-repo commit links in the reply")
-	}
 	if filepath.IsAbs(condocRel) || strings.Contains(condocRel, "..") {
 		return "", fmt.Errorf("invalid condoc path")
 	}
 	return s.condocRepoRoot(condocRel), nil
 }
 
+// changedFiles is the sorted, de-duplicated project files (condoc files left
+// out) in "git log --name-only" output.
+func changedFiles(out []byte) []string {
+	fileSet := make(map[string]bool)
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if l == "" || logLineIsCommitHeader(l) {
+			continue
+		}
+		if !isCondocFile(l) {
+			fileSet[l] = true
+		}
+	}
+	var files []string
+	for f := range fileSet {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return files
+}
+
+// diffHunks indexes the @@ hunk headers in a unified diff.
+func diffHunks(content string) []DiffHunk {
+	var hunks []DiffHunk
+	for i, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "@@") {
+			hunks = append(hunks, DiffHunk{Header: line, LineIdx: i})
+		}
+	}
+	return hunks
+}
+
 func (s *Server) handleGetDiff(c *wsClient, condocRel, fromCommit, toCommit string) {
+	if isSlopspacePath(condocRel) {
+		s.slopHandleGetDiff(c, condocRel, fromCommit, toCommit)
+		return
+	}
 	repoRoot, err := s.diffRepoRoot(condocRel)
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
@@ -1249,28 +1282,18 @@ func (s *Server) handleGetDiff(c *wsClient, condocRel, fromCommit, toCommit stri
 		s.sendToClient(c, "error", map[string]string{"message": "git log failed: " + err.Error()})
 		return
 	}
-	fileSet := make(map[string]bool)
-	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if l == "" || logLineIsCommitHeader(l) {
-			continue
-		}
-		if !isCondocFile(l) {
-			fileSet[l] = true
-		}
-	}
-	var files []string
-	for f := range fileSet {
-		files = append(files, f)
-	}
-	sort.Strings(files)
 	s.sendToClient(c, "diff-list", map[string]interface{}{
 		"fromCommit": fromCommit,
 		"toCommit":   toCommit,
-		"files":      files,
+		"files":      changedFiles(out),
 	})
 }
 
 func (s *Server) handleGetFileDiff(c *wsClient, condocRel, fromCommit, toCommit, file string) {
+	if isSlopspacePath(condocRel) {
+		s.slopHandleGetFileDiff(c, condocRel, fromCommit, toCommit, file)
+		return
+	}
 	repoRoot, err := s.diffRepoRoot(condocRel)
 	if err != nil {
 		s.sendToClient(c, "error", map[string]string{"message": err.Error()})
@@ -1298,19 +1321,12 @@ func (s *Server) handleGetFileDiff(c *wsClient, condocRel, fromCommit, toCommit,
 		return
 	}
 	content := string(out)
-	lines := strings.Split(content, "\n")
-	var hunks []DiffHunk
-	for i, line := range lines {
-		if strings.HasPrefix(line, "@@") {
-			hunks = append(hunks, DiffHunk{Header: line, LineIdx: i})
-		}
-	}
 	s.sendToClient(c, "file-diff", map[string]interface{}{
 		"fromCommit": fromCommit,
 		"toCommit":   toCommit,
 		"file":       file,
 		"content":    content,
-		"hunks":      hunks,
+		"hunks":      diffHunks(content),
 	})
 }
 

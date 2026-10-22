@@ -350,7 +350,11 @@ type Server struct {
 	convoState    *ConvoStateMsg
 	robotMu       sync.RWMutex
 	robotState    *RobotStateMsg
-	workerMu      sync.RWMutex
+	// Files-tab robot-sequence imports waiting on IANAR's answer, by request
+	// id -- see fileintegrations.go.
+	robotImportsMu sync.Mutex
+	robotImports   map[string]chan RobotSeqImportMsg
+	workerMu     sync.RWMutex
 	workerState   *WorkerStateMsg // kept after dungeon-keeper disconnects, so its signals stay visible
 
 	// Files tab: where uploaded files land, and where "persist" moves them to
@@ -2094,6 +2098,12 @@ func main() {
 				}
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.control.setRobotOps(payload.Ops)
+				}
+			case "robot-seq-import-result":
+				// A files-tab import/import-and-run -- see fileintegrations.go.
+				var payload RobotSeqImportMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.noteRobotSeqImport(payload)
 				}
 			}
 			return

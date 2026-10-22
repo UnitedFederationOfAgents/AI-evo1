@@ -2005,6 +2005,45 @@ body {
 .file-detail-delete:hover { background: #5a2e2e; border-color: #c44e4e; }
 .file-detail-delete:disabled { opacity: 0.5; cursor: default; }
 
+/* The integrations subsection: what another tab can do with this file
+   (FileIntegrations), set off below the standard actions. */
+.file-detail-integrations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed #2e4a5a;
+  padding-top: 8px;
+}
+
+.file-detail-integrations-label {
+  color: #777;
+  font-size: 11px;
+}
+
+.file-detail-integrate {
+  flex: 1;
+  background: #142a24;
+  border: 1px solid #2e7a5e;
+  border-radius: 3px;
+  color: #5cd6a8;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-integrate:hover { background: #1e4a3a; border-color: #4ec49a; }
+.file-detail-integrate:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-integrate-status {
+  font-size: 11px;
+  color: #5cd6a8;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-integrate-error { color: #e06a6a; }
+
 /* ---- File viewer ---- */
 
 .file-viewer {

@@ -703,6 +703,8 @@ func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
 			s.handleMarkupCancel(w, r, id)
 		case r.Method == http.MethodPost && action == "markup/copy":
 			s.handleMarkupCopy(w, r, id)
+		case r.Method == http.MethodPost && action == "import":
+			s.handleFileImport(w, r, id)
 		default:
 			http.NotFound(w, r)
 		}

@@ -2049,6 +2049,13 @@ function fileDeleteUrl(id: string): string {
   return `/api/files/${encodeURIComponent(id)}`
 }
 
+// fileImportUrl backs the file-details dialog's integrations -- "import"
+// and, with run, "import and run" (POST, no body -- see
+// local-representative/fileintegrations.go).
+function fileImportUrl(id: string, run: boolean): string {
+  return `/api/files/${encodeURIComponent(id)}/import${run ? '?run=1' : ''}`
+}
+
 // markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F) --
 // GET markupUrl fetches the in-progress composite if a session is already
 // open (404 otherwise, meaning "start from the plain original"), POST
@@ -2707,6 +2714,74 @@ function FileDetailPane({
           delete
         </button>
       </div>
+      <FileIntegrations file={file} importUrl={fileImportUrl} />
+    </div>
+  )
+}
+
+// FileIntegrations is the file-details pane's subsection, below the standard
+// actions, for what another tab can do with the file (Revision G of
+// condocs/slopspaceSlopspaceCondocsImpls/Step1Prompt.md). So far that's a
+// sequence YAML's "import" into its tab's library and "import and run",
+// which also runs its first sequence with every control at its default. It
+// renders nothing for any other file.
+function FileIntegrations({
+  file,
+  importUrl,
+}: {
+  file: FileInfo
+  importUrl: (id: string, run: boolean) => string
+}) {
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  useEffect(() => setStatus(null), [file.id])
+  if (!file.sequence || !SEQUENCE_ICON_PATH[file.sequence]) return null
+  const tab = file.sequence === 'robot' ? 'robot' : 'control'
+
+  const doImport = async (run: boolean) => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const resp = await fetch(importUrl(file.id, run), { method: 'POST' })
+      if (!resp.ok) {
+        setStatus({ ok: false, text: (await resp.text()).trim() || `failed (${resp.status})` })
+        return
+      }
+      const body = (await resp.json()) as { message?: string }
+      setStatus({ ok: true, text: body.message ?? 'imported' })
+    } catch (err) {
+      setStatus({ ok: false, text: String(err) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="file-detail-integrations">
+      <span className="file-detail-integrations-label">{tab} sequence integrations</span>
+      <div className="file-detail-actions">
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(false)}
+          disabled={busy}
+          title={`Import into the ${tab} tab's library`}
+        >
+          import
+        </button>
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(true)}
+          disabled={busy}
+          title="Import, then run its first sequence with every control at its default"
+        >
+          import and run
+        </button>
+      </div>
+      {status && (
+        <span className={`file-detail-integrate-status${status.ok ? '' : ' file-detail-integrate-error'}`}>
+          {status.text}
+        </span>
+      )}
     </div>
   )
 }

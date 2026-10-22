@@ -209,10 +209,14 @@ function useRobotWS() {
             if (p.req) setSeq2Replies((r) => ({ ...r, [p.req!]: p }))
           } else if (msg.type === 'seq2-started') {
             const p = msg.payload as Seq2StartedMsg
+            // A run this tab didn't start -- a files-tab "import and run"
+            // (lrimport.go) -- is picked up too, unless one of its own is going.
             setSeq2Run((run) =>
               run && run.sequenceId === p.sequence_id
                 ? { ...run, def: p.def, steps: p.def.steps.map(() => ({ status: 'pending' as const })) }
-                : run,
+                : run?.running
+                  ? run
+                  : { sequenceId: p.sequence_id, running: true, def: p.def, steps: p.def.steps.map(() => ({ status: 'pending' as const })) },
             )
           } else if (msg.type === 'seq2-progress') {
             const p = msg.payload as SequenceProgressMsg

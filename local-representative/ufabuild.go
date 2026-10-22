@@ -32,11 +32,14 @@ type ufabuildRequest struct {
 	Note string
 }
 
-// readUfabuildRequest finds the commit that last changed .ufabuild as of
-// HEAD and checks it names that commit's (first) parent. Callers must hold
-// opMu, like every other git invocation the watcher makes.
+// readUfabuildRequest finds the commit that last changed .ufabuild along
+// HEAD's first-parent history and checks it names that commit's immediate
+// parent: the commit must have exactly one parent (a merge's "parent" is
+// ambiguous), and the named SHA must resolve to exactly that parent -- not
+// an older ancestor, an ambiguous abbreviation or an unknown commit. Callers
+// must hold opMu, like every other git invocation the watcher makes.
 func (w *repoWatch) readUfabuildRequest() ufabuildRequest {
-	commit, err := w.runGit("log", "-1", "--format=%H", "--", ufabuildFile)
+	commit, err := w.runGit("log", "-1", "--first-parent", "--format=%H", "--", ufabuildFile)
 	if err != nil {
 		return ufabuildRequest{Note: fmt.Sprintf("git log: %v", err)}
 	}
@@ -51,11 +54,24 @@ func (w *repoWatch) readUfabuildRequest() ufabuildRequest {
 	if err != nil {
 		return ufabuildRequest{Note: fmt.Sprintf("%s in %s: %v", ufabuildFile, shortSHA(commit), err)}
 	}
-	parent, err := w.runGit("rev-parse", commit+"^")
+	parents, err := w.runGit("rev-parse", commit+"^@")
 	if err != nil {
-		return ufabuildRequest{Note: ufabuildFile + " was added in a root commit, which has no parent"}
+		return ufabuildRequest{Note: fmt.Sprintf("git rev-parse: %v", err)}
 	}
-	if !strings.HasPrefix(parent, named) {
+	fields := strings.Fields(parents)
+	switch len(fields) {
+	case 0:
+		return ufabuildRequest{Note: ufabuildFile + " was added in a root commit, which has no parent"}
+	case 1:
+	default:
+		return ufabuildRequest{Note: fmt.Sprintf("%s was changed in merge %s, which has no single immediate parent", ufabuildFile, shortSHA(commit))}
+	}
+	parent := fields[0]
+	resolved, err := w.runGit("rev-parse", "--verify", "--quiet", named+"^{commit}")
+	if err != nil || resolved == "" {
+		return ufabuildRequest{Note: fmt.Sprintf("%s in %s names %s, which isn't a single known commit (its parent is %s)", ufabuildFile, shortSHA(commit), named, shortSHA(parent))}
+	}
+	if resolved != parent {
 		return ufabuildRequest{Note: fmt.Sprintf("%s in %s names %s, not its parent %s", ufabuildFile, shortSHA(commit), named, shortSHA(parent))}
 	}
 	return ufabuildRequest{Commit: commit}

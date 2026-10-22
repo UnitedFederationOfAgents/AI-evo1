@@ -426,8 +426,10 @@ above, but HEAD moving no longer makes the rebuild button ready. Only a
 parent: 1a2b3c4   # 7-40 hex characters, abbreviated or full
 ```
 
-So to ask for a build, write the commit you're on into `.ufabuild` and commit
-that as its own change:
+So to ask for a build, run `scripts/ufabuild.sh` (add `--push` to push it
+too). It refuses unless the working tree is clean and HEAD is on a branch,
+then writes the commit you're on into `.ufabuild` and commits that as its own
+change. By hand that's:
 
 ```bash
 printf 'parent: %s\n' "$(git rev-parse --short HEAD)" > .ufabuild
@@ -435,16 +437,19 @@ git add .ufabuild && git commit -m "ufabuild" && git push
 ```
 
 Every LR following that branch with ufabuild watch on pulls it, finds the
-commit that last changed `.ufabuild` (`git log -1 -- .ufabuild`), checks that
-the file names that commit's first parent, and builds HEAD **straight
+commit that last changed `.ufabuild` along HEAD's first-parent history
+(`git log -1 --first-parent -- .ufabuild`), checks that the file names that
+commit's **immediate parent**, and builds HEAD **straight
 away**: no 90-second debounce, and whether or not auto-rebuild is on (the
 checkbox greys out meanwhile). Details:
 
 - Each request (keyed by the commit holding it) is built once. Commits
   landing after it don't rebuild it, and a request already committed when
   LR starts counts as built, the same way the starting HEAD does.
-- A `.ufabuild` naming any other commit, one that doesn't parse, or one
-  that's been deleted isn't a request. The panel's `.ufabuild:` line says
+- A `.ufabuild` naming any other commit (an older ancestor included), one
+  whose SHA is ambiguous or unknown, one changed by a merge (which has no
+  single immediate parent), one that doesn't parse, or one that's been
+  deleted isn't a request. The panel's `.ufabuild:` line says
   which (`ufabuild_note`), or names the current request's commit
   (`ufabuild_request`).
 - The usual blockers still apply: a dirty repo or a `.condoc` lock holds the

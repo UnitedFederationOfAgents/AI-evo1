@@ -206,3 +206,39 @@ func TestRepoWatchUfabuildRemoved(t *testing.T) {
 		t.Errorf("expected no request and a removed note, got %+v", snap)
 	}
 }
+
+// TestRepoWatchUfabuildOnlyImmediateParent verifies a .ufabuild naming an
+// older ancestor (here the grandparent) isn't a request, while one naming
+// the immediate parent, abbreviated or full, is.
+func TestRepoWatchUfabuildOnlyImmediateParent(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	commitChange(t, dir, "v2\n")
+	commitUfabuild(t, dir, ufabuildGit(t, dir, "rev-parse", "HEAD~1"))
+	snap := newRepoWatch(dir, func() {}).snapshot()
+	if snap.UfabuildRequest != "" || !strings.Contains(snap.UfabuildNote, "not its parent") {
+		t.Errorf("a .ufabuild naming its grandparent shouldn't be a request, got %+v", snap)
+	}
+
+	for _, args := range [][]string{{"rev-parse", "--short", "HEAD"}, {"rev-parse", "HEAD"}} {
+		commitUfabuild(t, dir, ufabuildGit(t, dir, args...))
+		snap = newRepoWatch(dir, func() {}).snapshot()
+		if snap.UfabuildRequest == "" || snap.UfabuildNote != "" {
+			t.Errorf("a .ufabuild naming its immediate parent (%v) should be a request, got %+v", args, snap)
+		}
+	}
+}
+
+// TestRepoWatchUfabuildMergeRejected verifies a .ufabuild brought in by a
+// merge isn't a request, since a merge has no single immediate parent.
+func TestRepoWatchUfabuildMergeRejected(t *testing.T) {
+	dir := initTestRepo(t, "true")
+	ufabuildGit(t, dir, "checkout", "-q", "-b", "side")
+	commitUfabuild(t, dir, ufabuildGit(t, dir, "rev-parse", "HEAD"))
+	ufabuildGit(t, dir, "checkout", "-q", "-")
+	commitChange(t, dir, "v2\n")
+	ufabuildGit(t, dir, "merge", "-q", "--no-ff", "--no-edit", "side")
+	snap := newRepoWatch(dir, func() {}).snapshot()
+	if snap.UfabuildRequest != "" || !strings.Contains(snap.UfabuildNote, "merge") {
+		t.Errorf("a .ufabuild changed by a merge shouldn't be a request, got %+v", snap)
+	}
+}

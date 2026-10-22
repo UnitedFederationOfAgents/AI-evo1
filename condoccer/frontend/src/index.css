@@ -745,6 +745,15 @@ body {
   padding: 2px 8px;
 }
 
+/* Lit once every linked file is already in the files tab (Revision F):
+   pressing it then goes there instead of copying. */
+.resource-to-files-btn.resource-to-files-btn-lit {
+  background: #2a4d2a;
+  color: #b8f0b8;
+  box-shadow: 0 0 6px rgba(110, 201, 110, 0.65);
+}
+.resource-to-files-btn.resource-to-files-btn-lit:hover:not(:disabled) { background: #336033; }
+
 .resource-to-files-status { font-size: 11px; color: #888; }
 .resource-to-files-status-done { color: #4ec94e; }
 .resource-to-files-status-error { color: #e05050; }

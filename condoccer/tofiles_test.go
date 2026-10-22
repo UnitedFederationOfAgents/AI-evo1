@@ -86,3 +86,49 @@ func TestUploadToFiles(t *testing.T) {
 		t.Error("expected an error from a failing local-representative")
 	}
 }
+
+func TestFindInFiles(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"abcdef01_seq.yaml":  "steps: []\n",
+		"abcdef02_diff.yaml": "steps: [a]\n",
+		"abcdef03_gone.txt":  "x",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// LR's files tab: seq.yaml twice (newest first), diff.yaml with the same
+	// size but other bytes, and nothing named gone.txt.
+	lrFiles := map[string]string{
+		"11111111_seq.yaml":  "steps: []\n",
+		"22222222_seq.yaml":  "steps: []\n",
+		"33333333_diff.yaml": "steps: [b]\n",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/files" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"files":[` +
+				`{"id":"11111111_seq.yaml","name":"seq.yaml","size":10},` +
+				`{"id":"22222222_seq.yaml","name":"seq.yaml","size":10},` +
+				`{"id":"33333333_diff.yaml","name":"diff.yaml","size":11}]}`))
+			return
+		}
+		content, ok := lrFiles[filepath.Base(r.URL.Path)]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(content))
+	}))
+	defer srv.Close()
+
+	present, err := findInFiles(srv.URL, dir, []string{"abcdef01_seq.yaml", "abcdef02_diff.yaml", "abcdef03_gone.txt"})
+	if err != nil {
+		t.Fatalf("findInFiles: %v", err)
+	}
+	if len(present) != 1 || present["abcdef01_seq.yaml"] != "11111111_seq.yaml" {
+		t.Errorf("present = %v, want only abcdef01_seq.yaml -> 11111111_seq.yaml", present)
+	}
+}

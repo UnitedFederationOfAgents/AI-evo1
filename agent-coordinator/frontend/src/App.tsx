@@ -4699,6 +4699,22 @@ function LRView({
     capture() // in case condoccer already restored a hash before this attached
   }
 
+  // A lit "to files" on a condoccer resource (slopspaceSlopspaceCondocsImpls/
+  // Step1Prompt.md Revision F) asks for this host's files tab with that file
+  // selected -- the id is the host LR's own, which is what this tab lists.
+  // Only this host's embedded condoccer frame is listened to.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin || e.source !== condoccerFrameRef.current?.contentWindow) return
+      if (e.data?.type !== 'condoccer-open-file' || typeof e.data.id !== 'string') return
+      setActiveTab('files')
+      setViewerFileId(null)
+      setSelectedFileId(e.data.id)
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [setActiveTab])
+
   const getServiceStatus = (name: string): string => {
     if (!active) return 'unknown'
     return lrState?.services?.find((s: ServiceStatus) => s.name === name)?.status ?? 'unknown'

@@ -1616,6 +1616,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux.HandleFunc("/api/host-files", s.handleHostFiles)
 	mux.HandleFunc("/api/host-resource", s.handleHostResource)
 	mux.HandleFunc("/api/resource-to-files", s.handleResourceToFiles)
+	mux.HandleFunc("/api/resource-in-files", s.handleResourceInFiles)
 
 	if devMode {
 		// In dev mode, don't serve static files — Vite dev server handles the frontend.

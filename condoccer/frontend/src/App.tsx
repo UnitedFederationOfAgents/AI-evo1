@@ -1105,11 +1105,41 @@ function ResourceSectionBody({ sec, condocPath }: { sec: StepSection; condocPath
 // right: it copies those files into this condoccer's local-representative's
 // files tab (condoccer/tofiles.go's POST /api/resource-to-files), as
 // uploads. A voice note links nothing, so has none.
+//
+// Revision F: once every linked file is already in the files tab
+// (condoccer/tofiles.go's GET /api/resource-in-files), the button is lit
+// and pressing it asks the page embedding condoccer -- local-representative
+// or agent-coordinator's host view -- to open its files tab with that file
+// selected, via an OPEN_FILE_MESSAGE postMessage. Only the files not yet
+// there are copied otherwise.
+
+const OPEN_FILE_MESSAGE = 'condoccer-open-file'
 
 function ToFilesButton({ sec, condocPath }: { sec: StepSection; condocPath: string }) {
   const [status, setStatus] = useState<{ kind: 'busy' | 'done' | 'error'; text: string } | null>(null)
+  // present maps each linked file already in the files tab to its id there.
+  const [present, setPresent] = useState<Record<string, string>>({})
   const filenames = (sec.resourceLinks ?? []).map((l) => l.filename)
+  const filenamesKey = filenames.join('\n')
+
+  const checkPresent = useCallback(async () => {
+    if (!filenamesKey) return
+    const params = new URLSearchParams({ condoc: condocPath })
+    for (const f of filenamesKey.split('\n')) params.append('filename', f)
+    try {
+      const resp = await fetch(`${basePath()}/api/resource-in-files?${params.toString()}`)
+      if (resp.ok) setPresent((await resp.json()).present ?? {})
+    } catch {
+      // unreachable just leaves the button unlit
+    }
+  }, [condocPath, filenamesKey])
+
+  useEffect(() => { void checkPresent() }, [checkPresent])
+
   if (filenames.length === 0) return null
+  const missing = filenames.filter((f) => !present[f])
+  const inFiles = missing.length === 0
+  const embedded = window.parent !== window
 
   const copy = async () => {
     setStatus({ kind: 'busy', text: 'copying…' })
@@ -1117,18 +1147,38 @@ function ToFilesButton({ sec, condocPath }: { sec: StepSection; condocPath: stri
       const resp = await fetch(`${basePath()}/api/resource-to-files`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ condoc: condocPath, filenames }),
+        body: JSON.stringify({ condoc: condocPath, filenames: missing }),
       })
       if (!resp.ok) {
         setStatus({ kind: 'error', text: (await resp.text()).trim() || `failed (${resp.status})` })
         return
       }
-      const n = filenames.length
+      const n = missing.length
       setStatus({ kind: 'done', text: `✓ ${n} file${n === 1 ? '' : 's'} in files` })
+      void checkPresent()
     } catch (err) {
       setStatus({ kind: 'error', text: String(err) })
     }
   }
+
+  const open = () => {
+    if (!embedded) {
+      setStatus({ kind: 'done', text: 'already in files' })
+      return
+    }
+    window.parent.postMessage({ type: OPEN_FILE_MESSAGE, id: present[filenames[0]] }, window.location.origin)
+  }
+
+  const n = filenames.length
+  const title = inFiles
+    ? embedded
+      ? `Already in files — go to the files tab with ${n === 1 ? 'it' : 'the first'} selected`
+      : `Already in local-representative's files tab`
+    : n === 1
+      ? `Copy this file to local-representative's files tab`
+      : missing.length === n
+        ? `Copy these ${n} files to local-representative's files tab`
+        : `Copy the ${missing.length} of these ${n} files not yet there to local-representative's files tab`
 
   return (
     <>
@@ -1138,10 +1188,10 @@ function ToFilesButton({ sec, condocPath }: { sec: StepSection; condocPath: stri
         </span>
       )}
       <button
-        className="btn-secondary resource-to-files-btn"
+        className={`btn-secondary resource-to-files-btn${inFiles ? ' resource-to-files-btn-lit' : ''}`}
         disabled={status?.kind === 'busy'}
-        title={`Copy ${filenames.length === 1 ? 'this file' : `these ${filenames.length} files`} to local-representative's files tab`}
-        onClick={(e) => { e.stopPropagation(); void copy() }}
+        title={title}
+        onClick={(e) => { e.stopPropagation(); if (inFiles) open(); else void copy() }}
         onDoubleClick={(e) => e.stopPropagation()}
       >
         to files

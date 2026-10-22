@@ -1,0 +1,8 @@
+# Binary
+condocv2
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/

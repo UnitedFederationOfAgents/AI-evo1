@@ -273,6 +273,7 @@ type Server struct {
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
 	condoccerPort string                  // HTTP port a managed condoccer serves on / is proxied from
 	condoccerRoot string                  // working dir a managed condoccer scans (empty: condoccer's default); follows condoccer's own reports, guarded by condoccerMu
+	condocv2Port  string                  // HTTP port a managed condocv2 serves on / is proxied from
 	sessionsPort  string                // HTTP port a managed session-manager serves on / is proxied from
 	convoPort     string                  // HTTP port a managed the-conversationalist serves on / is proxied from
 	robotPort     string                  // HTTP port a managed ianar serves on / is proxied from
@@ -518,6 +519,10 @@ func (s *Server) currentStatus() StatusMsg {
 	if s.reprServer != nil && s.reprServer.IsHealthy("condoccer") {
 		condoccerStatus = "healthy"
 	}
+	condocv2Status := "unhealthy"
+	if s.reprServer != nil && s.reprServer.IsHealthy("condocv2") {
+		condocv2Status = "healthy"
+	}
 	sessionsStatus := "unhealthy"
 	if s.reprServer != nil && s.reprServer.IsHealthy("sessions") {
 		sessionsStatus = "healthy"
@@ -538,6 +543,7 @@ func (s *Server) currentStatus() StatusMsg {
 		Services: []ServiceStatus{
 			{Name: "federation-command", Status: fcStatus},
 			{Name: "condoccer", Status: condoccerStatus},
+			{Name: "condocv2", Status: condocv2Status},
 			{Name: "convo", Status: convoStatus},
 			{Name: "sessions", Status: sessionsStatus},
 			{Name: "robot", Status: robotStatus},
@@ -1402,6 +1408,32 @@ func (s *Server) proxyToCondoccer(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// proxyToCondocv2 reverse-proxies /condocv2/* to a managed condocv2's HTTP
+// server on loopback, stripping the /condocv2 prefix -- mirrors
+// proxyToCondoccer.
+func (s *Server) proxyToCondocv2(w http.ResponseWriter, r *http.Request) {
+	port := s.condocv2Port
+	if port == "" {
+		http.Error(w, "condocv2 port unknown on this host", http.StatusBadGateway)
+		return
+	}
+	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	base := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		base(req)
+		req.URL.Path = strings.TrimPrefix(req.URL.Path, "/condocv2")
+		if req.URL.Path == "" {
+			req.URL.Path = "/"
+		}
+		req.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, "condocv2 not reachable on this host: "+err.Error(), http.StatusBadGateway)
+	}
+	proxy.ServeHTTP(w, r)
+}
+
 // proxyToSessions reverse-proxies /sessions/* to a managed session-manager's
 // HTTP server on loopback, stripping the /sessions prefix -- mirrors
 // proxyToCondoccer.
@@ -1492,6 +1524,7 @@ func (s *Server) setupRoutes(devMode bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/condoccer/", s.proxyToCondoccer)
+	mux.HandleFunc("/condocv2/", s.proxyToCondocv2)
 	mux.HandleFunc("/sessions/", s.proxyToSessions)
 	mux.HandleFunc("/convo/", s.proxyToConvo)
 	mux.HandleFunc("/robot/", s.proxyToRobot)
@@ -1555,6 +1588,7 @@ type appConfig struct {
 	terminal      string   // command prefix used to host an interactive child in a terminal
 	condoccerPort string   // HTTP port a managed condoccer serves on / is reverse-proxied from
 	condoccerRoot string   // repo root a managed condoccer scans (empty: condoccer's default)
+	condocv2Port  string   // HTTP port a managed condocv2 serves on / is reverse-proxied from
 	sessionsPort  string   // HTTP port a managed session-manager serves on / is reverse-proxied from
 	convoPort     string   // HTTP port a managed the-conversationalist serves on / is reverse-proxied from
 	robotPort     string   // HTTP port a managed ianar serves on / is reverse-proxied from
@@ -1607,6 +1641,7 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		terminal:      pick("terminal", defaults.terminal),
 		condoccerPort: pick("condoccer-port", defaults.condoccerPort),
 		condoccerRoot: pick("condoccer-root", defaults.condoccerRoot),
+		condocv2Port:  pick("condocv2-port", defaults.condocv2Port),
 		sessionsPort:  pick("sessions-port", defaults.sessionsPort),
 		convoPort:     pick("convo-port", defaults.convoPort),
 		robotPort:     pick("robot-port", defaults.robotPort),
@@ -1718,6 +1753,7 @@ func main() {
 	terminal := flag.String("terminal", "", "command prefix used to host federation-command in a terminal (e.g. \"xterm -e\" or \"tmux new-session -d -s fc\"); default: autodetect")
 	condoccerPort := flag.String("condoccer-port", "8080", "HTTP port a managed condoccer serves on; its UI is reverse-proxied at /condoccer/")
 	condoccerRoot := flag.String("condoccer-root", "", "repo root a managed condoccer scans (default: condoccer's own -root default)")
+	condocv2Port := flag.String("condocv2-port", "8088", "HTTP port a managed condocv2 serves on; its UI is reverse-proxied at /condocv2/")
 	sessionsPort := flag.String("sessions-port", "8085", "HTTP port a managed session-manager serves on; its UI is reverse-proxied at /sessions/")
 	convoPort := flag.String("convo-port", "8086", "HTTP port a managed the-conversationalist serves on; its UI is reverse-proxied at /convo/")
 	robotPort := flag.String("robot-port", "8087", "HTTP port a managed ianar serves on; its UI is reverse-proxied at /robot/")
@@ -1752,6 +1788,7 @@ func main() {
 		terminal:      *terminal,
 		condoccerPort: *condoccerPort,
 		condoccerRoot: *condoccerRoot,
+		condocv2Port:  *condocv2Port,
 		sessionsPort:  *sessionsPort,
 		convoPort:     *convoPort,
 		robotPort:     *robotPort,
@@ -1831,6 +1868,7 @@ func main() {
 	s.httpPort = cfg.httpPort
 	s.condoccerPort = cfg.condoccerPort
 	s.condoccerRoot = cfg.condoccerRoot
+	s.condocv2Port = cfg.condocv2Port
 	s.sessionsPort = cfg.sessionsPort
 	s.convoPort = cfg.convoPort
 	s.robotPort = cfg.robotPort
@@ -1894,6 +1932,12 @@ func main() {
 					ac.SendData("condoccer-state", empty)
 				}
 				s.setModeMismatch("condoccer", false, "")
+			}
+			return
+		}
+		if name == "condocv2" {
+			if state == "disconnected" {
+				s.setModeMismatch("condocv2", false, "")
 			}
 			return
 		}
@@ -2006,7 +2050,7 @@ func main() {
 				}
 				s.setManagedVersion(app, payload.Version)
 			}
-			if name == "condoccer" {
+			if name == "condoccer" || name == "condocv2" {
 				// condoccer has never received a tc-availability command
 				// before this (re)connection -- push the current aggregate
 				// now, even if it hasn't changed since before condoccer
@@ -2029,6 +2073,13 @@ func main() {
 					}
 				}
 			}
+			return
+		}
+		if name == "condocv2" {
+			// condocv2 is still a copy of condoccer and pushes the same
+			// "condoccer-state" summary, but its tab is a placeholder for now
+			// (sloppo condocs/condoccerV2Impls/Step1Prompt.md) -- nothing
+			// consumes it yet, and it must not clobber condoccerState.
 			return
 		}
 		if name == "sessions" {

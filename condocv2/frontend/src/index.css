@@ -1,0 +1,1542 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport (address/tab bar
+     included); vh is a fallback for browsers that don't support it. Without
+     this, mobile Safari/Chrome size the page taller than what's on-screen and
+     clip the bottom of scrolling content behind their chrome. */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable green
+   border around the whole app, reusing the "healthy"/"connected" green
+   palette rather than introducing a new accent color. An outline (not
+   border) so it never nudges the layout. Revision A: the original 1px/45%
+   outline was too subtle, so it became a thick, fully-opaque outline plus an
+   inner glow. Revision B: still too easy to miss, so the outline/glow now use
+   the brighter #6ec96e (already used elsewhere for "connect"/"launch" accent
+   text) instead of the darker #4ec94e, the glow is bigger and more opaque,
+   and a fixed "DEV MODE" tag is pinned to the top of the viewport so it's
+   visible even when the outline itself is scrolled out of view. Revision G:
+   now that the outline uses such a bright green, it reads clearly at half
+   the thickness, so it dropped from 4px to 2px. */
+.app-dev-mode {
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
+}
+
+.app-dev-mode::before {
+  content: 'DEV MODE';
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #6ec96e;
+  color: #0d1f0d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 10px;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
+/* .app is a row flex container (sidebar + content side by side), so the
+   banner is a fixed overlay rather than a flex child -- it would otherwise
+   land beside the sidebar instead of above everything. */
+.mode-mismatch-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---- Sidebar ---- */
+
+.sidebar {
+  width: 260px;
+  min-width: 180px;
+  background: #252526;
+  border-right: 1px solid #3c3c3c;
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* same shrink-to-fit fix as .detail-view, for the same reason */
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+.sidebar-header h1 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cccccc;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-version-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #666;
+}
+
+.sidebar-title {
+  font-size: 12px;
+  color: #aaa;
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-up-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.nav-up-btn:hover { color: #999; }
+
+.scheme-tabs {
+  display: flex;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+.scheme-tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #777;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 7px 4px;
+  cursor: pointer;
+}
+
+.scheme-tab:hover { color: #aaa; }
+
+.scheme-tab.selected {
+  color: #cccccc;
+  border-bottom-color: #007acc;
+}
+
+.list-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #999;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.list-filter-count { color: #555; }
+
+.nav-list {
+  flex: 1;
+  min-height: 0; /* same shrink-to-fit fix as .detail-view, so the repr-footer below stays visible */
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.nav-empty {
+  padding: 12px;
+  color: #555;
+  font-size: 11px;
+}
+
+.nav-repo-header {
+  padding: 10px 12px 4px;
+  color: #888;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.nav-item {
+  padding: 7px 12px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item-iter {
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+
+.nav-item:hover { background: #2a2d2e; }
+
+.nav-item.selected {
+  background: #37373d;
+  border-left-color: #007acc;
+}
+
+.nav-item-name {
+  font-size: 12px;
+  color: #cccccc;
+  font-weight: 500;
+}
+
+.nav-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-item-subtitle {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-iter-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.nav-enter-btn {
+  background: #2a2a2e;
+  border: 1px solid #555;
+  color: #c0c0c0;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 1px 5px;
+  margin-left: auto;
+  border-radius: 3px;
+  font-family: inherit;
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+.nav-enter-btn:hover { color: #fff; border-color: #9d55cc; background: #3a2a4a; }
+
+.iter-reply   { background: #4da6ff; }
+.iter-revision { background: #d9a800; }
+.iter-retry   { background: #e07020; }
+.iter-substep { background: #9d55cc; }
+.iter-resource { background: #3bbfae; }
+/* An agent-created resource's dot is hollow (see iterDotClass). */
+.nav-iter-dot.iter-agent {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px #3bbfae;
+}
+
+/* ---- Badges ---- */
+
+.badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.badge-proposed         { background: #3c3c3c; color: #999; }
+.badge-awaiting_step    { background: #3d3000; color: #d9a800; }
+.badge-agent_running    { background: #003366; color: #4da6ff; }
+.badge-awaiting_action  { background: #3d1e00; color: #e07020; }
+.badge-completed        { background: #1a3a1a; color: #4ec94e; }
+
+.step-label {
+  font-size: 10px;
+  color: #666;
+}
+
+/* ---- Main content ---- */
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-size: 14px;
+}
+
+/* ---- Working dir ("Set Working Dir") on the condoc-list view ---- */
+
+.empty-state-list {
+  flex-direction: column;
+  gap: 18px;
+}
+
+.working-dir {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 90%;
+  padding: 8px 12px;
+  background: #252526;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.working-dir-label {
+  color: #888;
+  white-space: nowrap;
+}
+
+.working-dir-path {
+  color: #cccccc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* elide the start of a long path, keeping its tail visible */
+  text-align: left;
+}
+
+.working-dir-input {
+  width: 420px;
+  max-width: 50vw;
+  padding: 4px 8px;
+  background: #1e1e1e;
+  color: #cccccc;
+  border: 1px solid #0e639c;
+  border-radius: 3px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.working-dir-btn {
+  white-space: nowrap;
+}
+
+/* ---- Pointer repo ("Set Pointer Repo") on the slopspace tab ---- */
+
+.working-dir.pointer-repo {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  min-width: 360px;
+}
+
+.pointer-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pointer-field .working-dir-label { width: 84px; flex-shrink: 0; }
+
+.pointer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pointer-state { font-weight: 600; }
+.pointer-state-ready   { color: #4ec94e; }
+.pointer-state-missing { color: #d9a800; }
+.pointer-state-cloning { color: #4da6ff; }
+.pointer-state-invalid { color: #e07020; }
+
+.pointer-note { color: #666; font-size: 11px; }
+
+.pointer-message {
+  color: #e07020;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 560px;
+}
+
+/* Another condoccer's condoc: still selectable, shown read-only. */
+.nav-item.nav-item-readonly { opacity: 0.7; }
+.nav-item.nav-item-new .nav-item-name { color: #4da6ff; }
+
+/* ---- Slopspace condocs (proposal form, pointer view, condoc panel) ---- */
+
+.badge-queued      { background: #1e2a3a; color: #8ab4e0; }
+.badge-pr_proposed { background: #2e1f3d; color: #c58af0; }
+.badge-pr_open     { background: #2e1f3d; color: #c58af0; }
+.badge-merged      { background: #1a3a1a; color: #4ec94e; }
+.badge-error       { background: #4a1414; color: #ff7070; }
+
+.slop-view {
+  padding: 16px 24px;
+  overflow-y: auto;
+}
+
+.slop-view h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.slop-form { max-width: 640px; }
+.slop-field-block { align-items: flex-start; }
+.slop-textarea { resize: vertical; font-family: monospace; }
+.slop-template { width: 100%; max-width: none; }
+
+.slop-branch-check {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+}
+
+.slop-good { color: #4ec94e; }
+.slop-bad  { color: #e07020; }
+
+.slop-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 24px;
+  border-bottom: 1px solid #333;
+  background: #1b1b1f;
+}
+
+.slop-details { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.slop-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.slop-row .working-dir-label { width: 64px; flex-shrink: 0; }
+.slop-description { color: #999; white-space: pre-wrap; }
+
+.slop-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid #6a2a2a;
+  border-radius: 3px;
+  color: #ff9a9a;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.slop-prs h3 { margin: 0 0 6px; font-size: 13px; }
+.slop-prs .pointer-actions { justify-content: flex-start; }
+.slop-pr-list { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
+.slop-pr-list li { display: flex; gap: 10px; }
+.slop-pr-status { font-size: 11px; }
+
+/* ---- Detail view (single pane) ---- */
+
+.detail-view {
+  flex: 1;
+  /* min-height: 0 overrides flexbox's default min-height: auto, which sizes a
+     column flex item to fit its content instead of letting it shrink to the
+     space actually available. Without it, this pane (and the scrollable
+     .detail-body inside it) refuses to shrink below its content height, so
+     the overflow gets clipped by the parent instead of becoming reachable
+     via scroll -- pushing .action-panel's submit widgets off-screen. */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detail-header {
+  padding: 10px 16px;
+  border-bottom: 1px solid #3c3c3c;
+  background: #252526;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.detail-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+.detail-step-title {
+  font-size: 13px;
+  color: #888;
+}
+
+.detail-body {
+  flex: 1;
+  min-height: 0; /* see .detail-view -- same shrink-to-fit fix, one level deeper */
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ---- Meta fields ---- */
+
+.meta-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+}
+
+.meta-field {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.meta-label {
+  color: #666;
+  width: 100px;
+  flex-shrink: 0;
+}
+
+.meta-value {
+  color: #aaa;
+  word-break: break-all;
+}
+
+/* ---- Detail sections ---- */
+
+.detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-section-label {
+  font-size: 10px;
+  color: #666;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.detail-text {
+  font-size: 12px;
+  color: #ccc;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Step list (in condoc view) ---- */
+
+.step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.step-card {
+  padding: 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+}
+
+.step-card-active {
+  border-color: #555;
+}
+
+.step-card-header {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 6px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.step-card-title {
+  color: #ccc;
+  text-transform: none;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.step-card-prompt {
+  font-size: 12px;
+  color: #aaa;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  padding: 8px;
+  background: #252526;
+  border-radius: 3px;
+}
+
+/* ---- Step input form ---- */
+
+.step-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step-form-label {
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.step-form-input {
+  background: #2d2d2d;
+  color: #d4d4d4;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  width: 100%;
+}
+
+.step-form-input:focus { border-color: #007acc; }
+
+.step-form-textarea {
+  background: #2d2d2d;
+  color: #d4d4d4;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  width: 100%;
+  min-height: 80px;
+}
+
+.step-form-textarea:focus { border-color: #007acc; }
+
+/* ---- Iteration sections (in step view) ---- */
+
+.iter-section {
+  padding: 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.iter-section-selected {
+  border-color: #007acc;
+}
+
+.iter-section-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.iter-section-prompt  .iter-section-label { color: #888; }
+.iter-section-reply   .iter-section-label { color: #4da6ff; }
+.iter-section-revision .iter-section-label { color: #d9a800; }
+.iter-section-retry   .iter-section-label { color: #e07020; }
+.iter-section-substep .iter-section-label { color: #9d55cc; }
+.iter-section-resource .iter-section-label { color: #3bbfae; }
+
+/* An agent-created resource (Revision B of
+   slopspaceSlopspaceCondocsImpls/Step1Prompt.md): dashed border and an
+   "agent" tag on its label, so it reads apart from a human's. */
+.iter-section-agent { border-style: dashed; }
+.iter-section-agent.iter-section-selected { border-style: solid; }
+
+.resource-agent-tag {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid #3bbfae;
+  border-radius: 3px;
+  color: #3bbfae;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  vertical-align: 1px;
+}
+
+/* A section label with buttons at its right -- a resource's "to files"
+   (Revision E of slopspaceSlopspaceCondocsImpls/Step1Prompt.md), a
+   substep's "Enter →". */
+.iter-section-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.iter-section-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+}
+
+.resource-to-files-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* Lit once every linked file is already in the files tab (Revision F):
+   pressing it then goes there instead of copying. */
+.resource-to-files-btn.resource-to-files-btn-lit {
+  background: #2a4d2a;
+  color: #b8f0b8;
+  box-shadow: 0 0 6px rgba(110, 201, 110, 0.65);
+}
+.resource-to-files-btn.resource-to-files-btn-lit:hover:not(:disabled) { background: #336033; }
+
+.resource-to-files-status { font-size: 11px; color: #888; }
+.resource-to-files-status-done { color: #4ec94e; }
+.resource-to-files-status-error { color: #e05050; }
+
+.iter-section-content {
+  font-size: 12px;
+  color: #ccc;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+/* ---- Resource sections (Revision B of Step5SubstepRPrompt.md): a
+   "## Resource N" block's description plus its linked files rendered inline
+   -- an image or text preview where the file kind allows it, a plain
+   download link otherwise -- rather than as raw markdown link text. ---- */
+
+.resource-section-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.resource-description {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.resource-image {
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 4px;
+  border: 1px solid #3c3c3c;
+  cursor: zoom-in;
+  object-fit: contain;
+}
+
+.resource-text-preview {
+  max-height: 240px;
+  overflow: auto;
+  background: #161616;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 11px;
+  font-family: monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.resource-file-link {
+  color: #4da6ff;
+  font-size: 12px;
+}
+
+.resource-file-note {
+  color: #888;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.resource-image-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  cursor: zoom-out;
+}
+
+.resource-image-overlay img {
+  max-width: 90vw;
+  max-height: 85vh;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.resource-image-overlay-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: #2a2a2e;
+  border: 1px solid #555;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 3px;
+  font-family: inherit;
+}
+.resource-image-overlay-close:hover { border-color: #9d55cc; }
+
+/* ---- Action panel ---- */
+
+.action-panel {
+  border-top: 1px solid #3c3c3c;
+  background: #252526;
+  padding: 12px 16px;
+  flex-shrink: 0;
+  /* Belt-and-braces: even with .detail-body correctly shrinking, a very
+     short viewport (e.g. landscape phone with the keyboard open) could still
+     make this panel alone taller than what's left. Let it scroll internally
+     rather than lose the submit button off-screen. */
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.action-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.action-status {
+  color: #666;
+  font-size: 12px;
+  padding: 6px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #444;
+  border-top-color: #4da6ff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---- Buttons ---- */
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border: none;
+  border-radius: 3px;
+  padding: 5px 12px;
+  transition: background 0.1s;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary   { background: #0e639c; color: white; }
+.btn-primary:hover:not(:disabled)   { background: #1177bb; }
+
+.btn-secondary { background: #3c3c3c; color: #cccccc; }
+.btn-secondary:hover:not(:disabled) { background: #4a4a4a; }
+
+.btn-success   { background: #2d6a2d; color: white; }
+.btn-success:hover:not(:disabled)   { background: #368036; }
+
+.btn-warning   { background: #7a5c00; color: white; }
+.btn-warning:hover:not(:disabled)   { background: #956e00; }
+
+.btn-danger    { background: #6e1e1e; color: white; }
+.btn-danger:hover:not(:disabled)    { background: #882525; }
+
+.btn-danger-sm {
+  background: none;
+  border: 1px solid #6e1e1e;
+  color: #c05050;
+  font-size: 10px;
+  padding: 2px 7px;
+}
+.btn-danger-sm:hover:not(:disabled) { background: #3a1010; }
+
+/* ---- Action form (revision / retry) ---- */
+
+.action-form {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.action-form-title {
+  font-size: 11px;
+  color: #999;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.action-form textarea {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 80px;
+  outline: none;
+  width: 100%;
+}
+
+.action-form textarea:focus { border-color: #007acc; }
+
+.action-form select {
+  background: #3c3c3c;
+  color: #cccccc;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.action-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.action-form-label {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+}
+
+/* ---- Add Resources: "Upload" source (Revision C) ---- */
+
+.resource-upload-btn {
+  font-size: 14px;
+  padding: 3px 9px;
+  line-height: 1;
+}
+
+.resource-upload-filenames {
+  font-size: 11px;
+  color: #aaa;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-upload-error {
+  color: #e05050;
+}
+
+/* ---- Add Resources: "Clipboard" source (Step4SubstepDPrompt.md Revision G) ---- */
+
+.resource-clip-hint {
+  font-size: 12px;
+  color: #888;
+}
+
+.clip-resource {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.clip-resource .step-form-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.clip-resource-image {
+  max-width: 100%;
+  max-height: 260px;
+  object-fit: contain;
+  align-self: center;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #262626;
+}
+
+.clip-resource-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #bbb;
+  font-size: 12px;
+  padding: 7px 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.clip-resource-size {
+  color: #888;
+  font-size: 11px;
+}
+
+/* ---- Error bar ---- */
+
+.error-bar {
+  background: #5a1a1a;
+  color: #f08080;
+  padding: 6px 16px;
+  font-size: 12px;
+  border-bottom: 1px solid #8b3333;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* ---- Connection status ---- */
+
+.conn-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+
+.conn-dot.connected    { background: #4ec94e; }
+.conn-dot.disconnected { background: #e07070; }
+.conn-dot.connecting   { background: #d9a800; }
+
+/* ---- Representable connect/disconnect widget ---- */
+
+.repr-footer {
+  flex-shrink: 0;
+  border-top: 1px solid #3c3c3c;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.repr-footer-status {
+  display: flex;
+  align-items: center;
+}
+
+.repr-footer-label {
+  font-size: 11px;
+  color: #aaa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repr-footer-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.repr-footer-input {
+  flex: 1;
+  min-width: 0;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 5px;
+  border-radius: 3px;
+}
+
+.repr-footer-input-port {
+  flex: 0 0 44px;
+}
+
+.repr-footer-addr {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repr-footer-form button {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+/* Auto-connect toggle (Step3Prompt.md Revision I): a first-class state
+   rendered alongside every ReprFooter variant. */
+.repr-footer-auto-connect {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #aaa;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ---- Diff views ---- */
+
+.diff-content {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.diff-line {
+  padding: 0 8px;
+  min-height: 1.5em;
+}
+
+.diff-add {
+  background-color: rgba(40, 167, 69, 0.18);
+  color: #4ec94e;
+}
+
+.diff-remove {
+  background-color: rgba(220, 53, 69, 0.18);
+  color: #e06c75;
+}
+
+.diff-hunk-header {
+  background-color: rgba(0, 122, 204, 0.12);
+  color: #7ec8e3;
+  font-weight: 600;
+}
+
+.diff-meta {
+  color: #555;
+}
+
+.diff-selected {
+  outline: 1px solid #007acc;
+  outline-offset: -1px;
+}
+
+.nav-item-file {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-item-hunk {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 10px;
+  color: #7ec8e3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- Mobile nav (hamburger + off-canvas drawer) ----
+ *
+ * Desktop keeps the always-visible two-pane layout above. Below the
+ * breakpoint the sidebar becomes a slide-in drawer, opened via a fixed
+ * hamburger button and closed by picking a nav item or tapping the
+ * backdrop. `.sidebar-wrap` is `display: contents` outside the media
+ * query so it has zero effect on the desktop flex layout.
+ */
+
+.sidebar-wrap {
+  display: contents;
+}
+
+.mobile-nav-toggle,
+.mobile-back-btn,
+.mobile-nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-nav-toggle,
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 10px;
+    z-index: 101;
+    width: 38px;
+    height: 38px;
+    background: #2d2d2d;
+    color: #ccc;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  /* Hamburger opens the full drawer (top-right); back steps up one level
+     directly, without needing to open the drawer first (top-left). Both are
+     mobile-only -- the desktop layout already has nav-up-btn in the sidebar. */
+  .mobile-nav-toggle {
+    right: 10px;
+  }
+
+  .mobile-back-btn {
+    left: 10px;
+    font-size: 24px;
+    font-weight: 700;
+  }
+
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+  }
+
+  .sidebar-wrap {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-wrap.mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .main-content {
+    padding-top: 48px;
+  }
+
+  /* Roomier touch targets. */
+  .nav-item {
+    padding: 10px 12px;
+  }
+
+  button {
+    min-height: 34px;
+    padding: 7px 14px;
+  }
+
+  .detail-header {
+    flex-wrap: wrap;
+  }
+}
+
+/* ---- File tree (files-changed main pane) ---- */
+
+.diff-file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+}
+
+.diff-file-tree-item {
+  font-family: 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  color: #ccc;
+  padding: 5px 12px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-file-tree-item.diff-file-selected {
+  background: rgba(158, 85, 204, 0.15);
+  border-left-color: #9d55cc;
+  color: #d4b4f0;
+}
+
+/* ---- The Conversationalist mic-capture (Step2Prompt.md) ----
+   field-with-mic wraps every dictatable input/textarea so MicButton sits
+   beside it rather than overlapping the field's own text or a textarea's
+   resize handle; the field itself keeps its existing class-driven styling
+   (.step-form-input/.step-form-textarea/.action-form textarea) since this
+   only adds a flex sibling. MicButton renders nothing (App.tsx) until TC is
+   available, so field-with-mic is present even when there's nothing to see
+   beside the field. */
+
+.field-with-mic {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+}
+
+.field-with-mic > input,
+.field-with-mic > textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.mic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  padding: 3px;
+  background: #2d2d2d;
+  color: #999;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.mic-btn svg { width: 100%; height: 100%; display: block; }
+
+.mic-btn:hover { background: #333; color: #d4d4d4; border-color: #555; }
+
+/* TCCaptureOverlay -- the floating panel hosting the-conversationalist's own
+   capture-mode iframe while a dictation is in progress (App.tsx). */
+
+.tc-capture-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.tc-capture-panel {
+  width: 420px;
+  max-width: 90vw;
+  height: 320px;
+  max-height: 80vh;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.tc-capture-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 12px;
+  color: #ccc;
+}
+
+.tc-capture-close {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.tc-capture-close:hover { color: #fff; }
+
+.tc-capture-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #141414;
+}
+
+/* "select from host" file picker (HostFilePicker.tsx, Step4Prompt.md
+   Revision F) -- the same block in LR's, AC's and condoccer's index.css. */
+.hfp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 24px;
+}
+
+.hfp-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  padding: 14px;
+  width: min(94vw, 620px);
+  max-height: 86vh;
+  color: #d4d4d4;
+  font-size: 12px;
+}
+
+.hfp-header { display: flex; align-items: center; justify-content: space-between; }
+.hfp-title { font-weight: 600; color: #ff9d5c; }
+.hfp-close {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+.hfp-close:hover { color: #fff; }
+
+.hfp-path-row { display: flex; align-items: center; gap: 6px; }
+.hfp-path-input {
+  flex: 1;
+  min-width: 0;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 5px 7px;
+}
+.hfp-path-input:focus { outline: none; border-color: #ff6a00; }
+.hfp-hidden-toggle { display: flex; align-items: center; gap: 4px; color: #999; white-space: nowrap; }
+
+.hfp-btn {
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.hfp-btn:hover:not(:disabled) { background: #2e2e2e; border-color: #555; }
+.hfp-btn:disabled { opacity: 0.45; cursor: default; }
+.hfp-btn-primary { color: #ff9d5c; }
+.hfp-btn-primary:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+.hfp-error { color: #f48771; white-space: pre-wrap; }
+
+.hfp-list {
+  flex: 1;
+  min-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  background: #1a1a1a;
+}
+.hfp-empty { padding: 10px; color: #777; }
+.hfp-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.hfp-entry:hover { background: #2a2a2a; }
+.hfp-entry-dir .hfp-entry-name { color: #9cdcfe; }
+.hfp-entry-selected { background: #4a2e14; }
+.hfp-entry-selected:hover { background: #5a3818; }
+.hfp-entry-icon { width: 16px; text-align: center; }
+.hfp-entry-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hfp-entry-size { color: #888; font-size: 11px; white-space: nowrap; }
+
+.hfp-footer { display: flex; align-items: center; gap: 8px; }
+.hfp-selection { flex: 1; min-width: 0; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

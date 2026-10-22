@@ -81,6 +81,7 @@ it back once LR is listening again).
 | `--condoccer-port` | `condoccer-port` | `8080` | HTTP port a managed `condoccer` serves on; its UI is reverse-proxied at `/condoccer/` |
 | `--condoccer-root` | `condoccer-root` | — | initial working dir a managed `condoccer` scans (default: condoccer's own `-root`). Once condoccer reports a different one (its **Set Working Dir**), that's used on every later launch, including across an LR restart |
 | `--sessions-port` | `sessions-port` | `8085` | HTTP port a managed `session-manager` serves on; its UI is reverse-proxied at `/sessions/` |
+| `--condocv2-port` | `condocv2-port` | `8088` | HTTP port a managed `condocv2` serves on; its UI is reverse-proxied at `/condocv2/` |
 | `--convo-port` | `convo-port` | `8086` | HTTP port a managed `the-conversationalist` serves on; its UI is reverse-proxied at `/convo/` |
 | `--robot-port` | `robot-port` | `8087` | HTTP port a managed `ianar` serves on; its UI is reverse-proxied at `/robot/` |
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
@@ -200,6 +201,13 @@ the web-exposure path) can drive condoccer on this box with no shell here.
 condoccer in general: its UI has its own connect/disconnect widget — with the
 same first-class auto-connect toggle described above — for the case where
 it's started by hand instead.
+
+`condocv2` is condoccer's successor, currently a straight copy of it launched
+the same way (as `condocv2`, on `--condocv2-port`, forwarded at `/condocv2/`).
+The two are **mutually exclusive**: LR refuses to launch either while the
+other is running (`launchSpec.excludes` in `procman.go`), and the system tab
+disables the corresponding launch button. Its **condocv2** tab is a blank
+placeholder for now.
 
 `federation-command` is an interactive shell and must run in a real terminal or
 its input reader dies on startup ("error creating cancelreader"). It should be

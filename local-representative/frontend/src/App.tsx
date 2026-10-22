@@ -6,7 +6,7 @@ import { HostFilePicker } from './HostFilePicker'
 import type { ControlV1Props } from './ControlV1'
 import { detectTextFormat } from './textformat'
 
-const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
+const TABS =['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
 // isTab narrows an app name (e.g. a ProcInfo.name) to one of the dashboard's
@@ -23,7 +23,7 @@ function isTab(name: string): name is Tab {
 // embedded app's own UI (including its own "DEV MODE" border, when that
 // sub-app runs in dev mode) fills the space instead of floating in a
 // padded, header-topped box.
-const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'condocv2', 'sessions', 'convo', 'robot'])
 
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
 // Step5Prompt.md Revision M): how many recently-visited tabs we keep around
@@ -32,9 +32,12 @@ const NAV_HISTORY_MAX = 20
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
-const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
+// `excludes` mirrors local-representative's launchSpec.excludes (procman.go):
+// launch is disabled while any of those apps is running.
+const LAUNCHABLE_APPS: { name: string; multi: boolean; excludes?: string[] }[] = [
   { name: 'federation-command', multi: true },
-  { name: 'condoccer', multi: false },
+  { name: 'condoccer', multi: false, excludes: ['condocv2'] },
+  { name: 'condocv2', multi: false, excludes: ['condoccer'] },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
   { name: 'robot', multi: false },
@@ -1590,18 +1593,20 @@ function SystemPanel({
 
       <div className="sys-launch">
         <span className="sys-launch-label">launch</span>
-        {LAUNCHABLE_APPS.map(({ name, multi }) => {
+        {LAUNCHABLE_APPS.map(({ name, multi, excludes }) => {
           const n = runningCount(name)
+          const blocker = excludes?.find(other => runningCount(other) > 0)
           return (
             <button
               key={name}
               className="sys-btn sys-btn-launch"
-              disabled={!multi && n > 0}
+              disabled={(!multi && n > 0) || blocker !== undefined}
+              title={blocker !== undefined ? `can't run alongside ${blocker} — terminate it first` : undefined}
               onClick={() => onLaunch(name)}
             >
               {multi
                 ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
-                : (n > 0 ? `${name} (running)` : name)}
+                : (n > 0 ? `${name} (running)` : blocker !== undefined ? `${name} (${blocker} running)` : name)}
             </button>
           )
         })}
@@ -3663,6 +3668,12 @@ export default function App() {
                 title="condoccer"
                 onLoad={handleCondoccerLoad}
               />
+            ) : activeTab === 'condocv2' ? (
+              // Deliberately blank for now: condocv2 is still a copy of
+              // condoccer (its UI is reachable at /condocv2/) and this tab
+              // gets its own content in later increments -- see sloppo
+              // condocs/condoccerV2Impls/Step1Prompt.md.
+              <div className="service-empty service-empty-embed">condocv2 is running</div>
             ) : activeTab === 'sessions' ? (
               <iframe className="embed-frame" src="/sessions/" title="sessions" />
             ) : activeTab === 'robot' ? (

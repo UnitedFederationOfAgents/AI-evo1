@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,6 +114,24 @@ type launchSpec struct {
 	terminal  bool                                       // true: an interactive TUI that must be hosted in a terminal
 	buildArgs func(s *Server, instanceID string) []string // argv after the program name; instanceID is the id about to be launched (see nextInstanceLocked)
 	buildEnv  func(s *Server, instanceID string) []string // extra KEY=VALUE entries appended to the child environment
+	excludes  []string                                    // other apps that may not run alongside this one (checked on launch, both ways)
+}
+
+// conflictingRunningLocked returns the first app that can't run alongside app
+// and currently has a running instance, or "" if none. Exclusion is declared
+// on either side (launchSpec.excludes) and honoured both ways. Callers must
+// hold procMu.
+func (s *Server) conflictingRunningLocked(app string) string {
+	for other, spec := range managedApps {
+		if other == app {
+			continue
+		}
+		conflicts := slices.Contains(spec.excludes, app) || slices.Contains(managedApps[app].excludes, other)
+		if conflicts && s.runningCountLocked(other) > 0 {
+			return other
+		}
+	}
+	return ""
 }
 
 // managedApps is the fixed set of applications local-representative knows how to
@@ -123,6 +142,9 @@ var managedApps = map[string]launchSpec{
 		binName:   "condoccer",
 		singleton: true,  // condoccer is one-per-box: it serves a single repo view
 		terminal:  false, // plain HTTP server — no TTY needed
+		// condocv2 is condoccer's successor (still a copy of it): both would
+		// drive the same condocs as the same holder, so only one may run.
+		excludes:  []string{"condocv2"},
 		buildArgs: func(s *Server, instanceID string) []string {
 			// Bring condoccer up already wired to this LR: --auto-connect makes it
 			// retry the representable heartbeat to our server in the background and
@@ -145,6 +167,35 @@ var managedApps = map[string]launchSpec{
 				// Cascade this LR's dev mode to every instance it launches — see
 				// docs/DevMode.md. A dev/ops mismatch would otherwise leave the
 				// pair unable to do more than exchange health information.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"condocv2": {
+		// A copy of condoccer for now, being grown into its replacement (see
+		// sloppo condocs/condoccerV2Impls/Step1Prompt.md); mutually exclusive
+		// with it -- see condoccer's excludes above.
+		binName:   "condocv2",
+		singleton: true,  // one per box, like condoccer
+		terminal:  false, // plain HTTP server — no TTY needed
+		excludes:  []string{"condoccer"},
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.condocv2Port,
+				"--name", "condocv2",
+			}
+			// Same working dir condoccer last reported, so switching between
+			// the two keeps scanning the same place.
+			if root := s.getCondoccerRoot(); root != "" {
+				args = append(args, "--root", root)
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
 				args = append(args, "--dev-mode")
 			}
 			return args
@@ -1041,6 +1092,10 @@ func (s *Server) launchManaged(app string) (string, error) {
 	if spec.singleton && s.runningCountLocked(app) > 0 {
 		s.procMu.Unlock()
 		return "", fmt.Errorf("%s is already running", app)
+	}
+	if other := s.conflictingRunningLocked(app); other != "" {
+		s.procMu.Unlock()
+		return "", fmt.Errorf("%s can't run while %s is running; terminate %s first", app, other, other)
 	}
 	instance, id := s.nextInstanceLocked(app)
 	s.procMu.Unlock()

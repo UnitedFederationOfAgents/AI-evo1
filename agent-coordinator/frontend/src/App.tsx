@@ -14,9 +14,12 @@ import type { ControlV1Props } from './ControlV1'
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
-const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
+// `excludes` mirrors local-representative's launchSpec.excludes (procman.go):
+// launch is disabled while any of those apps is running on that host.
+const LAUNCHABLE_APPS: { name: string; multi: boolean; excludes?: string[] }[] = [
   { name: 'federation-command', multi: true },
-  { name: 'condoccer', multi: false },
+  { name: 'condoccer', multi: false, excludes: ['condocv2'] },
+  { name: 'condocv2', multi: false, excludes: ['condoccer'] },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
   { name: 'robot', multi: false },
@@ -652,7 +655,7 @@ function BuildFailedDot() {
   return <span className="host-build-failed" title="last rebuild failed — clears on the next successful rebuild" />
 }
 
-const LR_SERVICES = ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'] as const
+const LR_SERVICES = ['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'worker'] as const
 // "system" and "files" sit to the right of the service tabs, mirroring
 // local-representative's own dashboard: they drive/view that LR's process
 // management and host-cache from the coordinator. Upload on this files tab is
@@ -672,7 +675,7 @@ type LRTab = typeof LR_TABS[number]
 // under the tab bar, so the embedded app's own UI (including its own
 // "DEV MODE" border, when that sub-app runs in dev mode) fills the space
 // instead of floating in a padded, header-topped box.
-const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
+const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condoccer', 'condocv2', 'sessions', 'convo', 'robot'])
 
 // Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
 // BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
@@ -2265,18 +2268,20 @@ function SystemPanel({
 
       <div className="sys-launch">
         <span className="sys-launch-label">launch</span>
-        {LAUNCHABLE_APPS.map(({ name, multi }) => {
+        {LAUNCHABLE_APPS.map(({ name, multi, excludes }) => {
           const n = runningCount(name)
+          const blocker = excludes?.find(other => runningCount(other) > 0)
           return (
             <button
               key={name}
               className="sys-btn sys-btn-launch"
-              disabled={!multi && n > 0}
+              disabled={(!multi && n > 0) || blocker !== undefined}
+              title={blocker !== undefined ? `can't run alongside ${blocker} — terminate it first` : undefined}
               onClick={() => onLaunch(hostId, name)}
             >
               {multi
                 ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
-                : (n > 0 ? `${name} (running)` : name)}
+                : (n > 0 ? `${name} (running)` : blocker !== undefined ? `${name} (${blocker} running)` : name)}
             </button>
           )
         })}
@@ -3609,7 +3614,7 @@ function hostOutOfDate(data: HostClientState | undefined): boolean {
 function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
   const services = data?.lrState?.services
   const managed = data?.system?.managed
-  return ['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'worker'].some(
+  return ['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'worker'].some(
     name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
   )
 }
@@ -4889,6 +4894,14 @@ function LRView({
                 condoccer is not running on this host — launch it from the system tab
               </div>
             )
+          ) : activeTab === 'condocv2' ? (
+            // Deliberately blank for now -- see local-representative's
+            // condocv2 tab and sloppo condocs/condoccerV2Impls/Step1Prompt.md.
+            <div className="service-empty service-empty-embed">
+              {getServiceStatus('condocv2') === 'healthy'
+                ? 'condocv2 is running'
+                : 'condocv2 is not running on this host — launch it from the system tab'}
+            </div>
           ) : activeTab === 'sessions' ? (
             data.sessions ? (
               <iframe className="embed-frame" src={`/host/${host.id}/sessions/`} title={`sessions on ${host.label}`} />

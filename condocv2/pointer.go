@@ -1,16 +1,17 @@
 package main
 
-// Pointer repo: the top-level setting of the slopspace control scheme -- see
-// docs/SlopspaceControlScheme.md and condocs/SlopspaceCondocs.md. It is the
-// slopspace tab's alternative to the same-repo tab's working dir: a git repo
-// condoccer keeps checked out at a workspace path and regularly pulls on a
-// target branch, holding one pointer file per condoc (pointers/*.yaml) that
-// records where that condoc's progression is and which repos it targets.
+// Pointer repo: the top-level setting of condocv2 -- see
+// docs/SlopspaceControlScheme.md. A git repo condocv2 keeps checked out at a
+// workspace path and regularly pulls on a target branch, holding one pointer
+// file per condoc (pointers/*.yaml) that records where that condoc's
+// progression is and which repos it targets. The pointers/ directory is
+// shared with condoccer (v1); each lists only its own version's pointers
+// (see isCondocV2Pointer).
 //
 // This file configures the repo/branch/path, clones it when missing, keeps it
-// pulled (continuously -- there is no manual pull, Revision C) and lists the
-// pointers it holds. Proposing, accepting and driving condocs through their
-// pointers is slopspace.go.
+// pulled (continuously -- there is no manual pull) and lists the v2 pointers
+// it holds. Proposing, beginning and driving condocs through their pointers
+// is slopspace.go.
 
 import (
 	"encoding/base64"
@@ -52,35 +53,33 @@ type PointerConfig struct {
 	Path   string `json:"path"`
 }
 
-// PointerEntry is one pointer file's summary, as listed on the slopspace tab
+// PointerEntry is one v2 pointer file's summary, as listed in the sidebar
 // (see entryFromSpec and decoratePointerEntry).
 type PointerEntry struct {
-	File        string   `json:"file"` // relative to the pointer repo root
-	Stem        string   `json:"stem"`
-	Path        string   `json:"path"` // the condoc path the UI subscribes to: "slopspace:<stem>"
-	Name        string   `json:"name"`
-	Phase       string   `json:"phase"`
-	Step        string   `json:"step,omitempty"`
-	Substep     string   `json:"substep,omitempty"`
-	Iteration   string   `json:"iteration,omitempty"`
-	Branch      string   `json:"branch,omitempty"`
-	CondocRepo  string   `json:"condocRepo,omitempty"`
-	Targets     []string `json:"targets,omitempty"`
-	CondocPath  string   `json:"condocPath,omitempty"`
-	CondocURL   string   `json:"condocUrl,omitempty"`
-	Description string   `json:"description,omitempty"`
-	Agent       string   `json:"agent,omitempty"`
-	Model       string   `json:"model,omitempty"`
-	StartTime   int64    `json:"startTime,omitempty"`
-	SlopspaceID string   `json:"slopspaceId,omitempty"`
-	Holder      string   `json:"holder,omitempty"`
-	Error       string   `json:"error,omitempty"`
-	PRTemplate  string   `json:"prTemplate,omitempty"`
-	TurnKind    string   `json:"turnKind,omitempty"`
-	TurnStage   string   `json:"turnStage,omitempty"`
-	PRs         []PRLive `json:"prs,omitempty"`
+	File         string   `json:"file"` // relative to the pointer repo root
+	Stem         string   `json:"stem"` // what the UI subscribes to
+	Name         string   `json:"name"`
+	Phase        string   `json:"phase"`
+	Interactions int      `json:"interactions"` // completed interactions
+	Branch       string   `json:"branch,omitempty"`
+	CondocRepo   string   `json:"condocRepo,omitempty"`
+	Targets      []string `json:"targets,omitempty"`
+	CondocPath   string   `json:"condocPath,omitempty"`
+	CondocURL    string   `json:"condocUrl,omitempty"`
+	Description  string   `json:"description,omitempty"`
+	Agent        string   `json:"agent,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	StartTime    int64    `json:"startTime,omitempty"`
+	SlopspaceID  string   `json:"slopspaceId,omitempty"`
+	Holder       string   `json:"holder,omitempty"`
+	Error        string   `json:"error,omitempty"`
 
-	// Known only to this condoccer.
+	// The interaction holding the lock, if any.
+	LockInteraction int    `json:"lockInteraction,omitempty"`
+	LockStage       string `json:"lockStage,omitempty"`
+	AutoSubmit      bool   `json:"autoSubmit,omitempty"`
+
+	// Known only to this condocv2.
 	HeldHere bool `json:"heldHere"`
 	QueuePos int  `json:"queuePos,omitempty"` // 1-based position in the turn queue
 	Running  bool `json:"running,omitempty"`  // its turn is the one running
@@ -105,7 +104,7 @@ type PointerStatus struct {
 	PullError      string         `json:"pullError,omitempty"`
 	PushError      string         `json:"pushError,omitempty"` // the last pointer push failed; retried after each pull
 	TokenAvailable bool           `json:"tokenAvailable"`
-	Holder         string         `json:"holder"` // this condoccer's holder ID (see slopHolder)
+	Holder         string         `json:"holder"` // this condocv2's holder ID (see slopHolder)
 	DefaultAgent   string         `json:"defaultAgent,omitempty"`
 	DefaultModel   string         `json:"defaultModel,omitempty"`
 	Pointers       []PointerEntry `json:"pointers"`
@@ -214,7 +213,7 @@ func validatePointerConfig(cfg PointerConfig) (PointerConfig, error) {
 }
 
 // resolvePointerPath makes path absolute: ~ expands to the home dir and a
-// relative path resolves against base (the git repo condoccer was started
+// relative path resolves against base (the git repo condocv2 was started
 // in, so the default ../sloppo is a sibling checkout in the same workspace).
 func resolvePointerPath(base, path string) string {
 	if strings.HasPrefix(path, "~/") || path == "~" {
@@ -229,8 +228,7 @@ func resolvePointerPath(base, path string) string {
 }
 
 // initPointer seeds the pointer config at startup. base is what a relative
-// path resolves against; it stays fixed for the life of the process so
-// changing the working dir doesn't move the pointer repo.
+// path resolves against; it stays fixed for the life of the process.
 func (s *Server) initPointer(cfg PointerConfig, base string) {
 	s.pointer.mu.Lock()
 	s.pointer.cfg = cfg
@@ -331,9 +329,9 @@ func (s *Server) pointerRepoStatus() PointerStatus {
 	return st
 }
 
-// readPointers lists and summarizes every pointers/*.yaml (or .yml) file.
-// A file the spec parser can't read (e.g. hand-written) still lists, from
-// the shallow parsePointerFile.
+// readPointers lists and summarizes the v2 pointers among pointers/*.yaml
+// (or .yml). Everything else there -- condoccer's v1 pointers, hand-written
+// files -- is filtered out: v1 and v2 condocs are incompatible.
 func readPointers(repoRoot string) []PointerEntry {
 	var files []string
 	for _, pat := range []string{"*.yaml", "*.yml"} {
@@ -347,111 +345,18 @@ func readPointers(repoRoot string) []PointerEntry {
 		if err != nil {
 			continue
 		}
-		rel, _ := filepath.Rel(repoRoot, f)
-		var e PointerEntry
-		if spec, err := parsePointerSpec(string(b)); err == nil {
-			e = entryFromSpec(spec, filepath.ToSlash(rel))
-		} else {
-			e = parsePointerFile(string(b))
-			e.File = filepath.ToSlash(rel)
-			e.Stem = strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+		spec, err := parsePointerSpec(string(b))
+		if err != nil {
+			continue
 		}
+		rel, _ := filepath.Rel(repoRoot, f)
+		e := entryFromSpec(spec, filepath.ToSlash(rel))
 		if e.Name == "" {
-			e.Name = strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
+			e.Name = e.Stem
 		}
 		entries = append(entries, e)
 	}
 	return entries
-}
-
-// parsePointerFile pulls the listing fields out of a pointer file. It only
-// understands the shallow shape the listing needs -- top-level scalars, the
-// state: map, and a targets: list of scalars or "- repo: x" items -- so it
-// avoids a YAML dependency until the full spec is read and written (see
-// D5 in docs/SlopspaceControlScheme.md).
-func parsePointerFile(content string) PointerEntry {
-	var e PointerEntry
-	section := ""
-	for _, raw := range strings.Split(content, "\n") {
-		line := strings.TrimRight(raw, " \t\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		indented := line[0] == ' ' || line[0] == '\t'
-		if !indented {
-			section = ""
-			key, val, ok := splitYAMLKey(trimmed)
-			if !ok {
-				continue
-			}
-			switch key {
-			case "name":
-				e.Name = val
-			case "branch":
-				e.Branch = val
-			case "condocRepo":
-				e.CondocRepo = val
-			case "state", "targets":
-				if val == "" {
-					section = key
-				}
-			}
-			continue
-		}
-		switch section {
-		case "state":
-			key, val, ok := splitYAMLKey(trimmed)
-			if !ok {
-				continue
-			}
-			switch key {
-			case "phase":
-				e.Phase = val
-			case "step":
-				e.Step = val
-			case "substep":
-				e.Substep = val
-			case "iteration":
-				e.Iteration = val
-			}
-		case "targets":
-			if !strings.HasPrefix(trimmed, "- ") {
-				continue
-			}
-			item := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-			if key, val, ok := splitYAMLKey(item); ok {
-				if key == "repo" {
-					e.Targets = append(e.Targets, val)
-				}
-				continue
-			}
-			e.Targets = append(e.Targets, unquoteYAML(item))
-		}
-	}
-	return e
-}
-
-// splitYAMLKey splits "key: value" (value may be empty), dropping a trailing
-// comment and surrounding quotes from the value.
-func splitYAMLKey(s string) (string, string, bool) {
-	i := strings.Index(s, ":")
-	if i <= 0 {
-		return "", "", false
-	}
-	key := strings.TrimSpace(s[:i])
-	val := strings.TrimSpace(s[i+1:])
-	if j := strings.Index(val, " #"); j >= 0 {
-		val = strings.TrimSpace(val[:j])
-	}
-	return key, unquoteYAML(val), true
-}
-
-func unquoteYAML(v string) string {
-	if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
-		return v[1 : len(v)-1]
-	}
-	return v
 }
 
 // setPointer changes the pointer repo config ("Set Pointer Repo") and, if the
@@ -604,6 +509,7 @@ func (s *Server) pointerLoop() {
 			if string(b) != last {
 				last = string(b)
 				s.broadcastPointer()
+				s.pushState() // mirror the summary up to local-representative
 			}
 		}
 	}

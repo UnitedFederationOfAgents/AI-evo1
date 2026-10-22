@@ -133,3 +133,34 @@ func TestPointerStatus(t *testing.T) {
 		t.Fatalf("wrong branch: got state %q message %q", st.State, st.Message)
 	}
 }
+
+// TestReadPointersSkipsCondocV2 verifies condocv2's pointers, which share
+// pointers/ with condoccer's, are filtered out of condoccer's listing.
+func TestReadPointersSkipsCondocV2(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, pointerDir), 0755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"V1-1.yaml": "name: V1\ncontrolScheme: slopspace\nstate:\n  phase: proposed\n",
+		"V2-2.yaml": "# condoc v2 pointer, kept by condocv2 -- condoccer (v1) ignores it\ncondocVersion: 2\nname: V2\ncontrolScheme: slopspace-v2\nstate:\n  phase: proposed\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(repo, pointerDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := readPointers(repo)
+	if len(got) != 1 || got[0].Name != "V1" {
+		t.Fatalf("readPointers = %+v, want only V1", got)
+	}
+}
+
+// TestValidateProposalRefusesCondocV2Branch verifies a v1 proposal can't
+// take a condocv2/ branch.
+func TestValidateProposalRefusesCondocV2Branch(t *testing.T) {
+	p := SlopspaceProposal{Name: "Foo", Targets: []string{"a/one"}, CondocRepo: "a/condocs", Branch: "condocv2/Foo-1/main"}
+	if err := validateProposal(p, &PointerSpec{StartTime: 1}); err == nil {
+		t.Fatal("validateProposal accepted a condocv2/ branch")
+	}
+}

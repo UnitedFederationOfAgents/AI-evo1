@@ -3669,11 +3669,9 @@ export default function App() {
                 onLoad={handleCondoccerLoad}
               />
             ) : activeTab === 'condocv2' ? (
-              // Deliberately blank for now: condocv2 is still a copy of
-              // condoccer (its UI is reachable at /condocv2/) and this tab
-              // gets its own content in later increments -- see sloppo
-              // condocs/condoccerV2Impls/Step1Prompt.md.
-              <div className="service-empty service-empty-embed">condocv2 is running</div>
+              // condocv2's own UI (its Text and Visual condoc tabs), as
+              // proxied at /condocv2/ -- see proxyToCondocv2.
+              <iframe className="embed-frame" src="/condocv2/" title="condocv2" />
             ) : activeTab === 'sessions' ? (
               <iframe className="embed-frame" src="/sessions/" title="sessions" />
             ) : activeTab === 'robot' ? (

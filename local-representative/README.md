@@ -202,12 +202,13 @@ condoccer in general: its UI has its own connect/disconnect widget — with the
 same first-class auto-connect toggle described above — for the case where
 it's started by hand instead.
 
-`condocv2` is condoccer's successor, currently a straight copy of it launched
-the same way (as `condocv2`, on `--condocv2-port`, forwarded at `/condocv2/`).
-The two are **mutually exclusive**: LR refuses to launch either while the
-other is running (`launchSpec.excludes` in `procman.go`), and the system tab
-disables the corresponding launch button. Its **condocv2** tab is a blank
-placeholder for now.
+`condocv2` is condoccer's successor, launched the same way (as `condocv2`, on
+`--condocv2-port`, forwarded at `/condocv2/`). It runs slopspace condocs only,
+and they are incompatible with condoccer's: each filters the other's pointers,
+condoc files and branches out. The two are **mutually exclusive**: LR refuses
+to launch either while the other is running (`launchSpec.excludes` in
+`procman.go`), and the system tab disables the corresponding launch button.
+Its **condocv2** tab embeds condocv2's UI.
 
 `federation-command` is an interactive shell and must run in a real terminal or
 its input reader dies on startup ("error creating cancelreader"). It should be

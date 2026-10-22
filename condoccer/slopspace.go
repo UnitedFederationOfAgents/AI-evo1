@@ -209,6 +209,9 @@ func (s *Server) readSpec(stem string) (PointerSpec, error) {
 	if err != nil {
 		return PointerSpec{}, err
 	}
+	if isCondocV2Pointer(string(b)) {
+		return PointerSpec{}, fmt.Errorf("%s is a condocv2 condoc -- condoccer can't open it", stem)
+	}
 	spec, err := parsePointerSpec(string(b))
 	if err != nil {
 		return PointerSpec{}, fmt.Errorf("%s: %v", stem, err)
@@ -571,6 +574,9 @@ func validateProposal(p SlopspaceProposal, spec *PointerSpec) error {
 	if branch == "" {
 		branch = fmt.Sprintf("condoc/%s-%d/main", name, spec.StartTime)
 	}
+	if strings.HasPrefix(branch, "condocv2/") {
+		return fmt.Errorf("branch %q: condocv2/ branches belong to condocv2, whose condocs are incompatible with condoccer's", branch)
+	}
 	if out, err := exec.Command("git", "check-ref-format", "--branch", branch).CombinedOutput(); err != nil {
 		return fmt.Errorf("branch %q: %s", branch, strings.TrimSpace(string(out)))
 	}
@@ -792,8 +798,8 @@ func (s *Server) readHeldSpecs() []pointerFileSpec {
 	var out []pointerFileSpec
 	for _, f := range files {
 		b, err := os.ReadFile(f)
-		if err != nil {
-			continue
+		if err != nil || isCondocV2Pointer(string(b)) {
+			continue // condocv2's condocs are never driven here
 		}
 		spec, err := parsePointerSpec(string(b))
 		if err != nil || spec.Holder != me || spec.ControlScheme != "slopspace" {

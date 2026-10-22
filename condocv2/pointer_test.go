@@ -46,8 +46,8 @@ func TestValidatePointerConfig(t *testing.T) {
 	}
 }
 
-func TestParsePointerFile(t *testing.T) {
-	content := `# pointer
+// v1Pointer is a condoccer (v1) pointer file, which condocv2 must ignore.
+const v1Pointer = `# condoc pointer, kept by condoccer -- see docs/SlopspaceControlScheme.md
 name: SlopspaceCondocs
 startTime: 1792092722
 controlScheme: slopspace
@@ -55,25 +55,44 @@ branch: condoc/SlopspaceCondocs-1792092722/main
 condocRepo: je-sidestuff/sloppo
 targets:
   - repo: UnitedFederationOfAgents/AI-evo1
-  - "je-sidestuff/other"
+holder: condoccer@box
 state:
-  phase: awaiting_action # comment
+  phase: awaiting_action
   step: 2
-  substep: ""
-  iteration: B
 `
-	got := parsePointerFile(content)
-	want := PointerEntry{
-		Name:       "SlopspaceCondocs",
-		Phase:      "awaiting_action",
-		Step:       "2",
-		Iteration:  "B",
-		Branch:     "condoc/SlopspaceCondocs-1792092722/main",
-		CondocRepo: "je-sidestuff/sloppo",
-		Targets:    []string{"UnitedFederationOfAgents/AI-evo1", "je-sidestuff/other"},
+
+func TestParsePointerSpecRejectsV1(t *testing.T) {
+	if isCondocV2Pointer(v1Pointer) {
+		t.Fatal("a v1 pointer reads as v2")
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("parsePointerFile:\n got %+v\nwant %+v", got, want)
+	if _, err := parsePointerSpec(v1Pointer); err == nil {
+		t.Fatal("parsePointerSpec accepted a v1 pointer")
+	}
+	// A v2 version marker with v1's control scheme is still not a v2 condoc.
+	if _, err := parsePointerSpec("condocVersion: 2\n" + v1Pointer); err == nil {
+		t.Fatal("parsePointerSpec accepted controlScheme slopspace")
+	}
+}
+
+func TestPointerSpecRoundTrip(t *testing.T) {
+	spec := PointerSpec{
+		Name: "Foo", StartTime: 7, ControlScheme: condocControlScheme,
+		Branch: "condocv2/Foo-7/main", CondocRepo: "a/condocs", CondocPath: "condocs/Foo.md",
+		Targets: []string{"a/one", "a/two"}, Agent: "claude", Description: "two\nlines",
+		SlopspaceID: "ss1", Holder: "condocv2@box", Bases: []string{"a/one@111", "a/condocs@222"},
+		Phase: PhaseLocked, Interactions: 2,
+		Lock: &InteractionLock{
+			Interaction: 3, Stage: stageMapped, AutoSubmit: true, Prompt: "do it\n## not a heading",
+			Role: "condocv2-Foo-7", SignalAt: 99, Bases: []string{"a/one@111"}, Heads: []string{"a/one@333"},
+		},
+	}
+	got, err := parsePointerSpec(spec.render())
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, spec.render())
+	}
+	got.UpdatedAt = ""
+	if !reflect.DeepEqual(got, spec) {
+		t.Errorf("round trip:\n got %+v\nwant %+v\n lock %+v", got, spec, got.Lock)
 	}
 }
 
@@ -89,7 +108,7 @@ func gitT(t *testing.T, dir string, args ...string) {
 
 func TestPointerStatus(t *testing.T) {
 	base := t.TempDir()
-	s := newServer(base)
+	s := newServer()
 	s.initPointer(PointerConfig{Repo: "je-sidestuff/sloppo", Branch: "main", Path: "sloppo"}, base)
 
 	if st := s.pointerStatus(); st.State != "missing" || st.ResolvedPath != filepath.Join(base, "sloppo") {
@@ -114,7 +133,13 @@ func TestPointerStatus(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, pointerDir), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(repo, pointerDir, "Foo-1.yaml"), []byte("name: Foo\nstate:\n  phase: proposed\n"), 0644); err != nil {
+	v2 := PointerSpec{Name: "Foo", StartTime: 1, ControlScheme: condocControlScheme, Branch: "condocv2/Foo-1/main",
+		CondocRepo: "a/b", Targets: []string{"a/c"}, Phase: PhaseProposed}
+	if err := os.WriteFile(filepath.Join(repo, pointerDir, "Foo-1.yaml"), []byte(v2.render()), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// condoccer's pointers share the directory and are filtered out.
+	if err := os.WriteFile(filepath.Join(repo, pointerDir, "SlopspaceCondocs-1792092722.yaml"), []byte(v1Pointer), 0644); err != nil {
 		t.Fatal(err)
 	}
 	gitT(t, repo, "add", ".")
@@ -124,7 +149,7 @@ func TestPointerStatus(t *testing.T) {
 	if st.State != "ready" {
 		t.Fatalf("ready: got state %q message %q", st.State, st.Message)
 	}
-	if len(st.Pointers) != 1 || st.Pointers[0].Name != "Foo" || st.Pointers[0].Phase != "proposed" || st.Pointers[0].File != "pointers/Foo-1.yaml" {
+	if len(st.Pointers) != 1 || st.Pointers[0].Name != "Foo" || st.Pointers[0].Phase != PhaseProposed || st.Pointers[0].File != "pointers/Foo-1.yaml" {
 		t.Fatalf("pointers = %+v", st.Pointers)
 	}
 

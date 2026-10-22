@@ -142,8 +142,8 @@ var managedApps = map[string]launchSpec{
 		binName:   "condoccer",
 		singleton: true,  // condoccer is one-per-box: it serves a single repo view
 		terminal:  false, // plain HTTP server — no TTY needed
-		// condocv2 is condoccer's successor (still a copy of it): both would
-		// drive the same condocs as the same holder, so only one may run.
+		// condocv2 is condoccer's successor: their condocs are incompatible,
+		// but both deploy slopspaces to the same worker, so only one may run.
 		excludes:  []string{"condocv2"},
 		buildArgs: func(s *Server, instanceID string) []string {
 			// Bring condoccer up already wired to this LR: --auto-connect makes it
@@ -173,9 +173,9 @@ var managedApps = map[string]launchSpec{
 		},
 	},
 	"condocv2": {
-		// A copy of condoccer for now, being grown into its replacement (see
-		// sloppo condocs/condoccerV2Impls/Step1Prompt.md); mutually exclusive
-		// with it -- see condoccer's excludes above.
+		// condoccer's replacement: slopspace condocs only, incompatible with
+		// condoccer's (see sloppo condocs/condoccerV2Impls/Step1Prompt.md);
+		// mutually exclusive with it -- see condoccer's excludes above.
 		binName:   "condocv2",
 		singleton: true,  // one per box, like condoccer
 		terminal:  false, // plain HTTP server — no TTY needed
@@ -188,8 +188,8 @@ var managedApps = map[string]launchSpec{
 				"--port", s.condocv2Port,
 				"--name", "condocv2",
 			}
-			// Same working dir condoccer last reported, so switching between
-			// the two keeps scanning the same place.
+			// The working dir condoccer last reported: condocv2 resolves a
+			// relative pointer-repo path against the git repo holding it.
 			if root := s.getCondoccerRoot(); root != "" {
 				args = append(args, "--root", root)
 			}

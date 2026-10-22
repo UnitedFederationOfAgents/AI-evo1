@@ -12,7 +12,7 @@ import (
 // Step2Prompt.md) being applied and readable back via getTCAvailability, and
 // that it's broadcast to every connected browser client.
 func TestHandleTCAvailabilityCommand(t *testing.T) {
-	s := newServer(t.TempDir())
+	s := newServer()
 
 	if s.getTCAvailability() {
 		t.Fatal("expected getTCAvailability=false before any command arrives")
@@ -54,12 +54,11 @@ func TestHandleTCAvailabilityCommand(t *testing.T) {
 	}
 }
 
-// TestHandleReprCommandIgnoresTCAvailabilityAsCondoccerNamespace guards
-// against the "__tc-availability:" branch added ahead of the "__condoccer:"
-// namespace check in handleReprCommand regressing back to a plain prefix
-// check that would swallow it into the condoccer-only warning log.
-func TestHandleReprCommandIgnoresTCAvailabilityAsCondoccerNamespace(t *testing.T) {
-	s := newServer(t.TempDir())
+// TestHandleReprCommandRoutesTCAvailability guards against the
+// "__tc-availability:" branch ahead of the "__condocv2:" namespace check in
+// handleReprCommand regressing into the namespace's warning log.
+func TestHandleReprCommandRoutesTCAvailability(t *testing.T) {
+	s := newServer()
 	s.handleReprCommand("__tc-availability:true") // must not panic
 	if !s.getTCAvailability() {
 		t.Fatal("expected handleReprCommand to route __tc-availability: through to handleTCAvailabilityCommand")

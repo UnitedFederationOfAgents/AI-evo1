@@ -4895,13 +4895,16 @@ function LRView({
               </div>
             )
           ) : activeTab === 'condocv2' ? (
-            // Deliberately blank for now -- see local-representative's
-            // condocv2 tab and sloppo condocs/condoccerV2Impls/Step1Prompt.md.
-            <div className="service-empty service-empty-embed">
-              {getServiceStatus('condocv2') === 'healthy'
-                ? 'condocv2 is running'
-                : 'condocv2 is not running on this host — launch it from the system tab'}
-            </div>
+            // condocv2's own UI, through this host's local-representative
+            // (/host/<id>/* is a transparent proxy to LR, which forwards
+            // /condocv2/* -- see proxyToHost).
+            getServiceStatus('condocv2') === 'healthy' ? (
+              <iframe className="embed-frame" src={`/host/${host.id}/condocv2/`} title={`condocv2 on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">
+                condocv2 is not running on this host — launch it from the system tab
+              </div>
+            )
           ) : activeTab === 'sessions' ? (
             data.sessions ? (
               <iframe className="embed-frame" src={`/host/${host.id}/sessions/`} title={`sessions on ${host.label}`} />

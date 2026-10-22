@@ -1540,3 +1540,129 @@ button:disabled {
 
 .hfp-footer { display: flex; align-items: center; gap: 8px; }
 .hfp-selection { flex: 1; min-width: 0; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- condocv2: phases ---- */
+
+.badge-v2-proposed        { background: #3c3c3c; color: #999; }
+.badge-v2-awaiting_prompt { background: #1a3a1a; color: #4ec94e; }
+.badge-v2-locked          { background: #003366; color: #4da6ff; }
+
+/* ---- condocv2: the condoc view (Text / Visual tabs) ---- */
+
+.v2-condoc {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.v2-condoc-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 24px 0;
+  border-bottom: 1px solid #333;
+  background: #1b1b1f;
+  flex-shrink: 0;
+}
+
+.v2-condoc-head h2 { margin: 0; font-size: 16px; }
+
+.v2-tabs { border-bottom: none; max-width: 280px; }
+
+.v2-condoc-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* Text: the linear Prompt / Response / Record flow. */
+
+.v2-text {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 16px 24px 24px;
+  max-width: 960px;
+}
+
+.v2-interaction { display: flex; flex-direction: column; gap: 6px; }
+.v2-interaction-pending { opacity: 0.7; }
+
+.v2-section-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding-left: 8px;
+  border-left: 3px solid #555;
+}
+.v2-section-prompt   { color: #4ec94e; border-left-color: #4ec94e; }
+.v2-section-response { color: #4da6ff; border-left-color: #4da6ff; }
+.v2-section-record   { color: #4ec94e; border-left-color: #2e6e2e; }
+
+.v2-body {
+  margin: 0;
+  padding: 8px 11px;
+  background: #202022;
+  border: 1px solid #2c2c2e;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.v2-record { margin: 0; padding-left: 26px; font-size: 12px; line-height: 1.7; }
+.v2-record a { color: #9cdcfe; text-decoration: none; }
+.v2-record a:hover { text-decoration: underline; }
+
+.v2-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #999;
+  font-size: 12px;
+}
+.v2-submit { margin-left: 8px; }
+
+.v2-prompt-box { display: flex; flex-direction: column; gap: 6px; }
+.v2-prompt-input { display: flex; align-items: flex-start; gap: 6px; }
+.v2-textarea { width: 100%; max-width: none; min-height: 96px; }
+.v2-prompt-actions { align-items: center; }
+.v2-auto-submit { border-bottom: none; padding: 0; }
+
+/* Visual: the swimlanes (see Swimlanes.tsx). */
+
+.swim { display: flex; flex-direction: column; gap: 8px; padding: 12px 24px 24px; }
+
+.swim-toolbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.swim-toggle { border-bottom: none; padding: 0; }
+.swim-legend { display: flex; gap: 14px; font-size: 11px; color: #777; }
+
+.swim-scroll { overflow: auto; }
+.swim-svg { display: block; font-family: inherit; }
+
+.swim-band { fill: #1d1d20; }
+.swim-band-odd { fill: #212126; }
+
+.swim-lane-title { fill: #cccccc; font-size: 12px; font-weight: 600; }
+.swim-lane-repo { fill: #666; font-size: 10px; }
+
+.swim-prompt-n { font-size: 11px; font-weight: 600; }
+.swim-prompt-text { fill: #999; font-size: 11px; }
+
+.swim-node { cursor: pointer; }
+.swim-node:hover circle { stroke-width: 3; }
+.swim-node-pending { cursor: default; }
+.swim-node-label { font-size: 10px; }
+
+.swim-sequence {
+  margin: 4px 0 0;
+  padding-left: 22px;
+  font-size: 11px;
+  color: #888;
+  line-height: 1.7;
+}
+.swim-sequence b { color: #bbb; font-weight: 600; }

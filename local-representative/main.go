@@ -2076,10 +2076,10 @@ func main() {
 			return
 		}
 		if name == "condocv2" {
-			// condocv2 is still a copy of condoccer and pushes the same
-			// "condoccer-state" summary, but its tab is a placeholder for now
-			// (sloppo condocs/condoccerV2Impls/Step1Prompt.md) -- nothing
-			// consumes it yet, and it must not clobber condoccerState.
+			// condocv2 pushes its own "condocv2-state" summary (its v2
+			// condocs, which are incompatible with condoccer's). Its tab
+			// embeds its UI directly, so nothing consumes the summary yet --
+			// and it must never clobber condoccerState.
 			return
 		}
 		if name == "sessions" {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net"
 	"strings"
@@ -21,14 +20,13 @@ const (
 	autoConnectDialTimeout = 3 * time.Second
 )
 
-// CondoccerStateMsg is the "condoccer-state" data payload condoccer pushes to
-// local-representative (which forwards a copy up to agent-coordinator). It lets
-// the rest of the stack show a condoc summary for this box and know which port
-// to reverse-proxy the condoccer UI from.
-type CondoccerStateMsg struct {
-	HTTPPort string       `json:"http_port"`
-	Root     string       `json:"root"`
-	Condocs  []CondocInfo `json:"condocs"`
+// Condocv2StateMsg is the "condocv2-state" data payload condocv2 pushes to
+// local-representative: its HTTP port and the v2 condocs in its pointer
+// repo. Deliberately not condoccer's "condoccer-state" -- v2 condocs are
+// incompatible with v1's, so they must never land in condoccer's summary.
+type Condocv2StateMsg struct {
+	HTTPPort string         `json:"http_port"`
+	Condocs  []PointerEntry `json:"condocs"`
 }
 
 // ReprStatusMsg is the "repr-status" WebSocket payload pushed to the frontend
@@ -237,7 +235,7 @@ func (s *Server) connectLoop(host, port string, stopCh chan struct{}) {
 		client.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
 			s.setModeMismatch(mismatched, peerMode)
 		})
-		s.pushCondoccerState()
+		s.pushState()
 		s.sendVersion()
 
 		<-client.DisconnectCh()
@@ -326,21 +324,18 @@ func (s *Server) sendReprStatus(c *wsClient) {
 	})
 }
 
-// pushCondoccerState sends the current condoc summary to local-representative.
+// pushState sends the current condoc summary to local-representative.
 // No-op when not connected.
-func (s *Server) pushCondoccerState() {
+func (s *Server) pushState() {
 	s.reprMu.Lock()
 	client := s.reprClient
 	s.reprMu.Unlock()
 	if client == nil {
 		return
 	}
-	root := s.getRoot()
-	infos, _ := findCondocs(root)
-	client.SendData("condoccer-state", CondoccerStateMsg{
+	client.SendData("condocv2-state", Condocv2StateMsg{
 		HTTPPort: s.httpPort,
-		Root:     root,
-		Condocs:  infos,
+		Condocs:  s.pointerStatus().Pointers,
 	})
 }
 
@@ -364,37 +359,23 @@ func (s *Server) sendVersion() {
 }
 
 // handleReprCommand handles commands local-representative relays down the
-// representable channel (originating from agent-coordinator). condoccer only
-// acts on the "__condoccer:" namespace, mirroring FC's "__ridealong:" and LR's
-// "__system:" conventions; the forwarded WebSocket UI carries everything else.
+// representable channel. condocv2 acts on its own "__condocv2:" namespace
+// (never condoccer's "__condoccer:") plus the shared "__tc-availability:";
+// the forwarded WebSocket UI carries everything else.
 //
-//	__condoccer:action <json ActionRequest>
-//	__condoccer:refresh
+//	__condocv2:refresh
 func (s *Server) handleReprCommand(raw string) {
 	if strings.HasPrefix(raw, "__tc-availability:") {
 		s.handleTCAvailabilityCommand(raw)
 		return
 	}
-	if !strings.HasPrefix(raw, "__condoccer:") {
+	if !strings.HasPrefix(raw, "__condocv2:") {
 		return
 	}
-	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__condoccer:"))
-	verb, arg, _ := strings.Cut(rest, " ")
+	verb := strings.TrimSpace(strings.TrimPrefix(raw, "__condocv2:"))
 	switch verb {
-	case "action":
-		var a ActionRequest
-		if err := json.Unmarshal([]byte(strings.TrimSpace(arg)), &a); err != nil {
-			log.Printf("repr: bad __condoccer:action payload: %v", err)
-			return
-		}
-		if err := s.performAction(a); err != nil {
-			log.Printf("repr: __condoccer:action %s failed: %v", a.Action, err)
-			return
-		}
-		s.broadcastCondocUpdate(a.Path)
-		s.pushCondoccerState()
 	case "refresh":
-		s.pushCondoccerState()
+		s.pushState()
 	default:
 		log.Printf("repr: ignoring unrecognised command %q", raw)
 	}

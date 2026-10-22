@@ -142,7 +142,9 @@ var (
 	// condocYamlRe matches the commented-out condoc-yaml header exactly as
 	// federation-command writes and recognises it (condocYAMLHeaderRe in
 	// federation-command/condoc.go), so a file that merely mentions
-	// "condoc-yaml" in prose isn't mistaken for a condoc.
+	// "condoc-yaml" in prose isn't mistaken for a condoc. condocv2's condocs
+	// carry a condocv2-yaml header instead, so this filters them out too --
+	// they are incompatible with condoccer's (see condocV2PointerRe).
 	condocYamlRe         = regexp.MustCompile("(?s)<!--\\s*```condoc-yaml\\n(.*?)```\\s*-->")
 	// snapshotFileRe matches example snapshot files (<file>.snpN.md, see
 	// condocs-examples/*/explanation.md). They copy a real condoc's header at

@@ -331,9 +331,20 @@ func (s *Server) pointerRepoStatus() PointerStatus {
 	return st
 }
 
-// readPointers lists and summarizes every pointers/*.yaml (or .yml) file.
-// A file the spec parser can't read (e.g. hand-written) still lists, from
-// the shallow parsePointerFile.
+// condocV2PointerRe recognizes condocv2's pointer files ("condocVersion: 2"),
+// which share pointers/ with condoccer's but are incompatible with them.
+var condocV2PointerRe = regexp.MustCompile(`(?m)^condocVersion:\s*["']?2["']?\s*(?:#.*)?$`)
+
+// isCondocV2Pointer reports whether a pointer file belongs to condocv2.
+// condoccer filters every such file out: it never lists, reads or drives a
+// v2 condoc (see sloppo condocs/condoccerV2Impls/Step1Prompt.md Revision A).
+func isCondocV2Pointer(content string) bool {
+	return condocV2PointerRe.MatchString(content)
+}
+
+// readPointers lists and summarizes every pointers/*.yaml (or .yml) file
+// except condocv2's. A file the spec parser can't read (e.g. hand-written)
+// still lists, from the shallow parsePointerFile.
 func readPointers(repoRoot string) []PointerEntry {
 	var files []string
 	for _, pat := range []string{"*.yaml", "*.yml"} {
@@ -344,7 +355,7 @@ func readPointers(repoRoot string) []PointerEntry {
 	entries := []PointerEntry{}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
-		if err != nil {
+		if err != nil || isCondocV2Pointer(string(b)) {
 			continue
 		}
 		rel, _ := filepath.Rel(repoRoot, f)

@@ -250,6 +250,11 @@ type FileInfo struct {
 	// so the markup dialog's bright-orange-border cue renders correctly when
 	// viewed through agent-coordinator's per-host files tab.
 	MarkedUp bool `json:"marked_up"`
+
+	// Sequence mirrors local-representative's FileInfo.Sequence ("control",
+	// "robot" or "" -- see local-representative/seqfiles.go), same reasoning
+	// again, so a sequence YAML keeps its own icon here too.
+	Sequence string `json:"sequence,omitempty"`
 }
 
 // FilesStateMsg matches the files-state payload sent from LR over representable.

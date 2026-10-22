@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { detectTextFormat } from './textformat'
 import { HostFilePicker } from './HostFilePicker'
 import type { ActionRequest, BranchCheck, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, PointerConfig, PointerEntry, PointerStatus, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, SlopspaceProposal, StepSummary, TCAvailabilityMsg } from './types'
@@ -1094,6 +1095,72 @@ function ResourceSectionBody({ sec, condocPath }: { sec: StepSection; condocPath
           <button className="resource-image-overlay-close" onClick={() => setViewing(null)}>× Close</button>
         </div>
       )}
+    </div>
+  )
+}
+
+// ---- "to files" (Revision E of slopspaceSlopspaceCondocsImpls/Step1Prompt.md) ----
+//
+// A resource with linked files gets a "to files" button at its label's
+// right: it copies those files into this condoccer's local-representative's
+// files tab (condoccer/tofiles.go's POST /api/resource-to-files), as
+// uploads. A voice note links nothing, so has none.
+
+function ToFilesButton({ sec, condocPath }: { sec: StepSection; condocPath: string }) {
+  const [status, setStatus] = useState<{ kind: 'busy' | 'done' | 'error'; text: string } | null>(null)
+  const filenames = (sec.resourceLinks ?? []).map((l) => l.filename)
+  if (filenames.length === 0) return null
+
+  const copy = async () => {
+    setStatus({ kind: 'busy', text: 'copying…' })
+    try {
+      const resp = await fetch(`${basePath()}/api/resource-to-files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ condoc: condocPath, filenames }),
+      })
+      if (!resp.ok) {
+        setStatus({ kind: 'error', text: (await resp.text()).trim() || `failed (${resp.status})` })
+        return
+      }
+      const n = filenames.length
+      setStatus({ kind: 'done', text: `✓ ${n} file${n === 1 ? '' : 's'} in files` })
+    } catch (err) {
+      setStatus({ kind: 'error', text: String(err) })
+    }
+  }
+
+  return (
+    <>
+      {status && (
+        <span className={`resource-to-files-status resource-to-files-status-${status.kind}`} title={status.text}>
+          {status.kind === 'error' ? 'failed' : status.text}
+        </span>
+      )}
+      <button
+        className="btn-secondary resource-to-files-btn"
+        disabled={status?.kind === 'busy'}
+        title={`Copy ${filenames.length === 1 ? 'this file' : `these ${filenames.length} files`} to local-representative's files tab`}
+        onClick={(e) => { e.stopPropagation(); void copy() }}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        to files
+      </button>
+    </>
+  )
+}
+
+// SectionLabel is a section's label row: its label and agent tag at the
+// left, and at the right whatever buttons the caller adds (children) plus a
+// resource's "to files".
+function SectionLabel({ sec, condocPath, children }: { sec: StepSection; condocPath: string; children?: ReactNode }) {
+  return (
+    <div className="iter-section-label iter-section-label-row">
+      <span>{sec.label}<AgentTag agent={sec.agent} /></span>
+      <span className="iter-section-label-actions">
+        {children}
+        {sec.kind === 'resource' && <ToFilesButton sec={sec} condocPath={condocPath} />}
+      </span>
     </div>
   )
 }
@@ -2935,7 +3002,7 @@ function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onActi
               className={sectionClass(sec, selectedSubstepIterId === sec.id)}
               ref={(el) => { sectionRefs.current[sec.id] = el }}
             >
-              <div className="iter-section-label">{sec.label}<AgentTag agent={sec.agent} /></div>
+              <SectionLabel sec={sec} condocPath={state.info.path} />
               {sectionBody(sec, state.info.path)}
             </div>
           ))}
@@ -2970,7 +3037,7 @@ function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onActi
             className={sectionClass(sec, selectedSubstepIterId === sec.id)}
             ref={(el) => { sectionRefs.current[sec.id] = el }}
           >
-            <div className="iter-section-label">{sec.label}<AgentTag agent={sec.agent} /></div>
+            <SectionLabel sec={sec} condocPath={state.info.path} />
             {sectionBody(sec, state.info.path)}
           </div>
         ))}
@@ -3021,7 +3088,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                   className={sectionClass(sec, selectedIterId === sec.id)}
                   ref={(el) => { sectionRefs.current[sec.id] = el }}
                 >
-                  <div className="iter-section-label">{sec.label}<AgentTag agent={sec.agent} /></div>
+                  <SectionLabel sec={sec} condocPath={state.info.path} />
                   {sec.kind === 'substep' ? (
                     <div className="iter-section-content">
                       <span style={{ color: '#aaa', fontSize: 12 }}>{sec.content}</span>
@@ -3079,8 +3146,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
             ref={(el) => { sectionRefs.current[sec.id] = el }}
             onDoubleClick={() => sec.kind === 'substep' && sec.substepLetter && onEnterSubstep(sec.substepLetter)}
           >
-            <div className="iter-section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>{sec.label}<AgentTag agent={sec.agent} /></span>
+            <SectionLabel sec={sec} condocPath={state.info.path}>
               {sec.kind === 'substep' && sec.substepLetter && (
                 <button
                   className="btn-secondary"
@@ -3090,7 +3156,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                   Enter →
                 </button>
               )}
-            </div>
+            </SectionLabel>
             {sectionBody(sec, state.info.path)}
           </div>
         ))}

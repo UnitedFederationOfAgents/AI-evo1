@@ -389,6 +389,7 @@ export interface FileInfo {
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
   highlighted: boolean // plain operator-set toggle, independent of state
   marked_up: boolean  // an in-progress markup-dialog session (arrow/rect/text) is open on this file
+  sequence?: string   // "control" | "robot": YAML that validates for import as that sequence (local-representative/seqfiles.go) -- its own icon
 }
 
 export interface LRFilesMsg {

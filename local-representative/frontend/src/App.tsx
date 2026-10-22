@@ -1964,6 +1964,30 @@ const FILE_ICON_PATH: Record<string, JSX.Element> = {
   ),
 }
 
+// SEQUENCE_ICON_PATH replaces FILE_ICON_PATH's for a YAML file that
+// validates for import as a sequence (FileInfo.sequence -- see seqfiles.go):
+// a robot's head for a robot (IANAR sequence-v2) sequence, a flow of three
+// linked steps for a control-tab sequence.
+const SEQUENCE_ICON_PATH: Record<string, JSX.Element> = {
+  robot: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="4" y="7" width="16" height="12" rx="2" />
+      <circle cx="9" cy="12" r="1.5" />
+      <circle cx="15" cy="12" r="1.5" />
+      <path d="M9 16h6M12 7V4M2 11v4M22 11v4" strokeLinecap="round" />
+      <circle cx="12" cy="3" r="1" />
+    </svg>
+  ),
+  control: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="2.5" width="8" height="5" rx="1" />
+      <rect x="13" y="9.5" width="8" height="5" rx="1" />
+      <rect x="3" y="16.5" width="8" height="5" rx="1" />
+      <path d="M11 5h4v4.5M13 12H7v4.5" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
 // FILE_STATE_CLASS drives the icon color the file-details dialog's
 // hold/persist actions describe: orange while short-term cached, yellow once
 // held, green once persisted to the host-store.
@@ -1973,13 +1997,20 @@ const FILE_STATE_CLASS: Record<string, string> = {
   persisted: 'file-state-persisted',
 }
 
-function FileIcon({ kind, state }: { kind: string; state?: string }) {
+function FileIcon({ kind, state, sequence }: { kind: string; state?: string; sequence?: string }) {
   const stateClass = FILE_STATE_CLASS[state ?? ''] ?? FILE_STATE_CLASS.cached
+  const seqIcon = sequence ? SEQUENCE_ICON_PATH[sequence] : undefined
   return (
-    <span className={`file-icon file-icon-${kind} ${stateClass}`}>
-      {FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
+    <span className={`file-icon file-icon-${seqIcon ? `seq-${sequence}` : kind} ${stateClass}`}>
+      {seqIcon ?? FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
     </span>
   )
+}
+
+// fileTypeLabel is the file-details "type" row: the kind, or which sequence
+// a sequence YAML imports as.
+function fileTypeLabel(file: FileInfo): string {
+  return file.sequence && SEQUENCE_ICON_PATH[file.sequence] ? `${file.sequence} sequence` : file.kind
 }
 
 // fileRawUrl/fileDownloadUrl address a host-cache file's bytes directly
@@ -2539,7 +2570,7 @@ function FilesPanel({
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
             >
-              <FileIcon kind={f.kind} state={f.state} />
+              <FileIcon kind={f.kind} state={f.state} sequence={f.sequence} />
               <span className="files-item-name">{f.name}</span>
             </button>
           ))}
@@ -2608,7 +2639,7 @@ function FileDetailPane({
         <span className="file-detail-title">file details</span>
         <button className="file-detail-close" onClick={onClose}>×</button>
       </div>
-      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} /></div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} sequence={file.sequence} /></div>
       <div className="file-detail-rows">
         <div className="file-detail-row">
           <span className="file-detail-label">name</span>
@@ -2616,7 +2647,7 @@ function FileDetailPane({
         </div>
         <div className="file-detail-row">
           <span className="file-detail-label">type</span>
-          <span className="file-detail-value">{file.kind}</span>
+          <span className="file-detail-value">{fileTypeLabel(file)}</span>
         </div>
         <div className="file-detail-row">
           <span className="file-detail-label">size</span>

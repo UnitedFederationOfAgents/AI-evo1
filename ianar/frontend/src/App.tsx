@@ -17,7 +17,7 @@ import type {
   WakeScreenResultMsg,
 } from './types'
 import { clipPreview, PreviewView, SaveToFile } from './shared'
-import type { Preview, SaveStatus, SeqRun } from './shared'
+import type { ImportedRun, Preview, SaveStatus, SeqRun } from './shared'
 import { SequenceV2Panel } from './SequenceV2'
 
 // ---- WebSocket hook ----
@@ -78,9 +78,10 @@ function useRobotWS() {
   const [seqLib, setSeqLib] = useState<SeqLibraryMsg | null>(null)
   const [seq2Replies, setSeq2Replies] = useState<Record<string, Seq2ReplyMsg>>({})
   const [seq2Run, setSeq2Run] = useState<SeqRun | null>(null)
-  // Counts files-tab "import and run"s seen (including one replayed on
-  // connecting), so App can switch to sequence-v2 to show each.
-  const [importedRuns, setImportedRuns] = useState(0)
+  // The latest files-tab "import and run" seen (including one replayed on
+  // connecting), so App can switch to sequence-v2 and its runner to that
+  // run's sequence.
+  const [importedRun, setImportedRun] = useState<ImportedRun | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reqCounter = useRef(0)
 
@@ -214,7 +215,7 @@ function useRobotWS() {
             const p = msg.payload as Seq2StartedMsg
             // A run this tab didn't start -- a files-tab "import and run"
             // (lrimport.go) -- is picked up too, unless one of its own is going.
-            if (p.imported) setImportedRuns((n) => n + 1)
+            if (p.imported) setImportedRun((r) => ({ n: (r?.n ?? 0) + 1, sequenceId: p.sequence_id }))
             setSeq2Run((run) =>
               run && run.sequenceId === p.sequence_id
                 ? { ...run, def: p.def, steps: p.def.steps.map(() => ({ status: 'pending' as const })) }
@@ -415,7 +416,7 @@ function useRobotWS() {
     seq2Request,
     seq2Run,
     runSeq2,
-    importedRuns,
+    importedRun,
   }
 }
 
@@ -662,15 +663,16 @@ export default function App() {
     seq2Request,
     seq2Run,
     runSeq2,
-    importedRuns,
+    importedRun,
   } = useRobotWS()
   const [tab, setTab] = useState<Tab>('simple')
 
   // A files-tab "import and run" lands here to be watched (Revision H of
-  // condocs/slopspaceSlopspaceCondocsImpls/Step1Prompt.md), so show it.
+  // condocs/slopspaceSlopspaceCondocsImpls/Step1Prompt.md), so show it;
+  // SequenceV2Panel then opens its runner on the run's sequence (Revision I).
   useEffect(() => {
-    if (importedRuns > 0) setTab('sequence-v2')
-  }, [importedRuns])
+    if (importedRun) setTab('sequence-v2')
+  }, [importedRun])
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
@@ -736,6 +738,7 @@ export default function App() {
             request={seq2Request}
             run={seq2Run}
             onRun={runSeq2}
+            importedRun={importedRun}
           />
         )}
       </div>

@@ -14,7 +14,7 @@ import type {
 } from './types'
 import { HostFilePicker } from './HostFilePicker'
 import { PreviewView, SaveToFile, STEP_ICONS } from './shared'
-import type { SaveStatus, SeqRun, StepStatus } from './shared'
+import type { ImportedRun, SaveStatus, SeqRun, StepStatus } from './shared'
 
 // The sequence-v2 tab (see seqv2.go): three sub-tabs over the library the
 // backend keeps --
@@ -791,6 +791,7 @@ function Runner({
   onSave,
   run,
   onRun,
+  importedRun,
 }: {
   lib: SeqLibraryMsg
   connected: boolean
@@ -799,11 +800,20 @@ function Runner({
   onSave: (id: string) => void
   run: SeqRun | null
   onRun: (id: string, controls: Record<string, string>) => void
+  importedRun: ImportedRun | null
 }) {
   const sequences = lib.sequences ?? []
   const actionById = new Map((lib.actions ?? []).map((a) => [a.id, a]))
-  const [selectedId, setSelectedId] = useState('')
+  const [selectedId, setSelectedId] = useState(importedRun?.sequenceId ?? '')
   const [values, setValues] = useState<Record<string, Record<string, string>>>({})
+  // Show a files-tab "import and run" (lrimport.go): select its sequence, or
+  // the runner stays on the first in the library and the run, being another
+  // sequence's, isn't shown. A run of this tab's own that's still going keeps
+  // its selection, as App only adopts the imported run when none is.
+  useEffect(() => {
+    if (importedRun && !(run?.running && run.sequenceId !== importedRun.sequenceId)) setSelectedId(importedRun.sequenceId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importedRun])
   const seq = sequences.find((q) => q.id === selectedId) ?? sequences[0]
   if (!seq) {
     return <div className="empty-state">No sequences yet — build one in the composer.</div>
@@ -953,11 +963,17 @@ interface SequenceV2PanelProps {
   request: Request
   run: SeqRun | null
   onRun: (id: string, controls: Record<string, string>) => void
+  importedRun: ImportedRun | null
 }
 
-export function SequenceV2Panel({ connected, reprStatus, saves, onSave, lib, replies, request, run, onRun }: SequenceV2PanelProps) {
+export function SequenceV2Panel({ connected, reprStatus, saves, onSave, lib, replies, request, run, onRun, importedRun }: SequenceV2PanelProps) {
   const [sub, setSub] = useState<SubTab>('runner')
   const restore = useRequest(request, replies)
+
+  // A files-tab "import and run" is watched in the runner.
+  useEffect(() => {
+    if (importedRun) setSub('runner')
+  }, [importedRun])
 
   return (
     <div className="robot-panel">
@@ -973,7 +989,7 @@ export function SequenceV2Panel({ connected, reprStatus, saves, onSave, lib, rep
       {lib && sub === 'definer' && <Definer lib={lib} request={request} replies={replies} connected={connected} />}
       {lib && sub === 'composer' && <Composer lib={lib} request={request} replies={replies} connected={connected} />}
       {lib && sub === 'runner' && (
-        <Runner lib={lib} connected={connected} reprStatus={reprStatus} saves={saves} onSave={onSave} run={run} onRun={onRun} />
+        <Runner lib={lib} connected={connected} reprStatus={reprStatus} saves={saves} onSave={onSave} run={run} onRun={onRun} importedRun={importedRun} />
       )}
       {lib && sub !== 'runner' && (
         <div className="seq2-footer">

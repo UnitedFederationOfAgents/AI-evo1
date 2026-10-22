@@ -182,6 +182,7 @@ export interface FileInfo {
   expires_at: number  // unix seconds; meaningless (0) once state is "persisted"
   highlighted: boolean // plain operator-set toggle, independent of state
   marked_up: boolean  // an in-progress markup-dialog session (arrow/rect/text) is open on this file
+  sequence?: string   // "control" | "robot": YAML that validates for import as that sequence (seqfiles.go) -- its own icon
 }
 
 export interface FilesStateMsg {
@@ -219,6 +220,15 @@ export interface RepoStateMsg {
   branch?: string
   branches?: string[]
   switch_error?: string
+  // "ufabuild watch" (local-representative/ufabuild.go), read-only -- set by
+  // LR's --ufabuild-watch launch flag, with no runtime toggle for now: when on,
+  // rebuild_ready means a new .ufabuild request rather than HEAD moving, and
+  // it builds without waiting on auto-rebuild. ufabuild_request is the short
+  // SHA of the commit holding the current valid request; ufabuild_note says
+  // why there isn't one.
+  ufabuild_watch?: boolean
+  ufabuild_request?: string
+  ufabuild_note?: string
 }
 
 // The worker tab (condocs/initialRobotImpls/Step5SubstepGPrompt.md): what the
@@ -246,9 +256,46 @@ export interface WorkerStateMsg {
   agent_type: string
   busy: boolean
   signals: WorkerSignalInfo[]
+  // absent from a dungeon-keeper older than the slopspace view
+  slopspaces?: SlopspaceInfo[]
+  slopspaces_omitted?: number
+}
+
+export interface SlopspaceInfo {
+  id: string
+  created_at: number
+  iteration: number
+  deployed: boolean
+  agent_type?: string
+  in_use: boolean
+  repos?: string[]
+  // its directory under the slopspaces dir, and where its spaces are while
+  // deployed (both absent from a dungeon-keeper older than the path field)
+  path?: string
+  deploy_path?: string
 }
 
 export interface WorkerReplyMsg {
   ok: boolean
   error?: string
+}
+
+// The slopspace sub-tab's manual control panel -- see worker.go and
+// dungeon-keeper/slopctl.go.
+export interface WorkerSlopspaceRequest {
+  op: 'create' | 'deploy' | 'return' | 'delete' | 'add-repo' | 'write' | 'command'
+  id?: string
+  agent_type?: string
+  repo?: string    // owner/name: add-repo; write (empty for every repo)
+  branch?: string  // add-repo: the new branch
+  message?: string // write: the commit message
+  prompt?: string  // command: what to ask the agent in the deployed slopspace
+}
+
+export interface WorkerSlopspaceReply {
+  op: string
+  id?: string
+  ok: boolean
+  error?: string
+  detail?: string
 }

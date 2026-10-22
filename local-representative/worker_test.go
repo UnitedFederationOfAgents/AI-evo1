@@ -49,6 +49,27 @@ func TestHandleWorkerCommandWithoutAC(t *testing.T) {
 	s.handleWorkerCommand(`__worker:submit {"prompt":"hello"}`)
 	s.handleWorkerCommand(`__worker:submit {not json`)
 	s.handleWorkerCommand(`__worker:unknown`)
+	s.handleWorkerCommand(`__worker:slopspace {"op":"create"}`)
+	s.handleWorkerCommand(`__worker:slopspace {not json`)
+}
+
+func TestControlSlopspaceRefusesBadRequestsAndMissingWorker(t *testing.T) {
+	s := newServer("test-lr")
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "frobnicate", ID: "x"}); err == nil {
+		t.Error("an unknown op should be refused")
+	}
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "deploy"}); err == nil {
+		t.Error("an op on no slopspace should be refused")
+	}
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "command", ID: "x", Prompt: " "}); err == nil || !strings.Contains(err.Error(), "enter a command") {
+		t.Errorf("a command with no prompt should be refused, got %v", err)
+	}
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "command", ID: "x", Prompt: "hi"}); err == nil || !strings.Contains(err.Error(), "isn't connected") {
+		t.Errorf("a command is a known op; with no worker connected want refused as not connected, got %v", err)
+	}
+	if err := s.controlSlopspace(WorkerSlopspaceRequest{Op: "create"}); err == nil || !strings.Contains(err.Error(), "isn't connected") {
+		t.Errorf("with no worker connected want refused as not connected, got %v", err)
+	}
 }
 
 func TestWorkerStateIsKept(t *testing.T) {

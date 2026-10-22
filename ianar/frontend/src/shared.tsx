@@ -61,6 +61,11 @@ export type SeqRun = {
   outputs?: SequenceOutput[]
 }
 
+// ImportedRun is the latest files-tab "import and run" this tab has seen
+// (lrimport.go): the sequence it runs, and a count that changes with each so
+// the same sequence imported and run twice still counts as a new one.
+export type ImportedRun = { n: number; sequenceId: string }
+
 // dataURLToObjectURL turns a base64 data: URL into a blob: URL. Video
 // elements seek reliably in a blob: URL, and it avoids holding a
 // multi-megabyte string in the DOM.

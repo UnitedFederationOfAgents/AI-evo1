@@ -399,48 +399,19 @@ type RepoWriteResult struct {
 // WriteRepoChanges pushes changes from a slopspace's writespace repo back to the remote.
 // The .git directory is restored from writespaces-secure, changes are committed and pushed.
 // It reports the resulting HEAD so callers can link the commit (see
-// docs/SlopspaceControlScheme.md, D6); with nothing to commit, nothing is pushed and
-// Changed is false.
+// docs/SlopspaceControlScheme.md, D6). The branch is pushed even with nothing to
+// commit, so a commit left unpushed by an earlier failed write still reaches the
+// remote; Changed is true only when this write made a commit. Commits pushed to
+// the branch from outside the slopspace are rebased under the local ones first
+// (see gitIntegrateRemote), so the push is a fast-forward.
 func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage string) (RepoWriteResult, error) {
 	result := RepoWriteResult{Repo: owner + "/" + repo}
 
-	metadata, err := m.Get(id)
+	repoPath, restore, err := m.openWritespaceRepo(id, owner, repo, "write repo changes")
 	if err != nil {
 		return result, err
 	}
-
-	if metadata.Deployed {
-		return result, fmt.Errorf("cannot write repo changes while deployed - return the slopspace first")
-	}
-
-	repoPath := filepath.Join(metadata.RootPath, WriteSpacesDir, ReposDir, owner, repo)
-	secureGitPath := filepath.Join(metadata.RootPath, WriteSpacesSecure, ReposDir, owner, repo)
-
-	// Check if the repo exists
-	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		return result, fmt.Errorf("writespace repo does not exist: %s/%s", owner, repo)
-	}
-
-	// Check if the secure git directory exists
-	if _, err := os.Stat(secureGitPath); os.IsNotExist(err) {
-		return result, fmt.Errorf("secure git directory not found for: %s/%s", owner, repo)
-	}
-
-	// Temporarily restore .git directory
-	gitDir := filepath.Join(repoPath, ".git")
-	if err := os.Rename(secureGitPath, gitDir); err != nil {
-		// Fall back to copy
-		if err := copyDirContents(secureGitPath, gitDir); err != nil {
-			return result, fmt.Errorf("failed to restore .git directory: %w", err)
-		}
-	}
-
-	// Cleanup: ensure .git goes back to secure location
-	defer func() {
-		if _, err := os.Stat(gitDir); err == nil {
-			os.Rename(gitDir, secureGitPath)
-		}
-	}()
+	defer restore()
 
 	// Add all changes
 	if err := gitAddAll(repoPath); err != nil {
@@ -453,27 +424,94 @@ func (m *Manager) WriteRepoChanges(id string, owner, repo string, commitMessage 
 		return result, fmt.Errorf("failed to check for changes: %w", err)
 	}
 
-	if !hasChanges {
-		result.SHA, _ = gitHead(repoPath)
-		return result, nil // No changes to push
+	if hasChanges {
+		if commitMessage == "" {
+			commitMessage = "Automated commit from dungeon-keeper"
+		}
+		if err := gitCommit(repoPath, commitMessage); err != nil {
+			return result, fmt.Errorf("failed to commit changes: %w", err)
+		}
+		result.Changed = true
 	}
 
-	// Commit changes
-	if commitMessage == "" {
-		commitMessage = "Automated commit from dungeon-keeper"
-	}
-	if err := gitCommit(repoPath, commitMessage); err != nil {
-		return result, fmt.Errorf("failed to commit changes: %w", err)
-	}
+	// The rebase may rewrite the local (still unpushed) commits, so HEAD is read
+	// after it.
+	syncErr := gitIntegrateRemote(repoPath)
 	result.SHA, _ = gitHead(repoPath)
+	if syncErr != nil {
+		result.Changed = false
+		return result, fmt.Errorf("failed to sync with the remote: %w", syncErr)
+	}
 
-	// Push changes
+	// Push even with nothing new to commit: an earlier write may have committed
+	// and then failed to push, and a retry would otherwise strand that commit.
+	// When the remote is already up to date this does nothing.
 	if err := gitPush(repoPath); err != nil {
+		result.Changed = false
 		return result, fmt.Errorf("failed to push changes: %w", err)
 	}
-	result.Changed = true
 
 	return result, nil
+}
+
+// SyncRepo brings commits pushed to a writespace repo's branch from outside the
+// slopspace (a .ufabuild request, a hand-made fix) into the writespace, so the
+// next agent turn starts from them and its write pushes cleanly. Uncommitted
+// changes are carried across with --autostash. It returns the HEAD afterwards.
+func (m *Manager) SyncRepo(id string, owner, repo string) (string, error) {
+	repoPath, restore, err := m.openWritespaceRepo(id, owner, repo, "sync a repo")
+	if err != nil {
+		return "", err
+	}
+	defer restore()
+
+	if err := gitIntegrateRemote(repoPath); err != nil {
+		return "", fmt.Errorf("sync %s/%s: %w", owner, repo, err)
+	}
+	return gitHead(repoPath)
+}
+
+// openWritespaceRepo moves a writespace repo's .git back from writespaces-secure
+// so git can run in its working tree. The returned restore puts it back; the
+// caller must call it. what names the operation in the "while deployed" error.
+func (m *Manager) openWritespaceRepo(id, owner, repo, what string) (repoPath string, restore func(), err error) {
+	metadata, err := m.Get(id)
+	if err != nil {
+		return "", nil, err
+	}
+
+	if metadata.Deployed {
+		return "", nil, fmt.Errorf("cannot %s while deployed - return the slopspace first", what)
+	}
+
+	repoPath = filepath.Join(metadata.RootPath, WriteSpacesDir, ReposDir, owner, repo)
+	secureGitPath := filepath.Join(metadata.RootPath, WriteSpacesSecure, ReposDir, owner, repo)
+
+	// Check if the repo exists
+	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("writespace repo does not exist: %s/%s", owner, repo)
+	}
+
+	// Check if the secure git directory exists
+	if _, err := os.Stat(secureGitPath); os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("secure git directory not found for: %s/%s", owner, repo)
+	}
+
+	// Temporarily restore .git directory
+	gitDir := filepath.Join(repoPath, ".git")
+	if err := os.Rename(secureGitPath, gitDir); err != nil {
+		// Fall back to copy
+		if err := copyDirContents(secureGitPath, gitDir); err != nil {
+			return "", nil, fmt.Errorf("failed to restore .git directory: %w", err)
+		}
+	}
+
+	// Cleanup: ensure .git goes back to secure location
+	return repoPath, func() {
+		if _, err := os.Stat(gitDir); err == nil {
+			os.Rename(gitDir, secureGitPath)
+		}
+	}, nil
 }
 
 // WritespaceRepos lists the owner/name of every writespace repo in a slopspace.
@@ -622,6 +660,43 @@ func gitPush(repoPath string) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, string(output))
+	}
+	return nil
+}
+
+// gitIntegrateRemote rebases the current branch's local commits onto whatever
+// has been pushed to origin's copy of the branch from elsewhere, so that a
+// following push is a fast-forward. Only unpushed commits are rewritten; the
+// remote's history never is. A branch not on the remote yet, or one the local
+// branch already contains, is left alone. On a conflict the rebase is aborted,
+// leaving the repo as it was, and the error says so.
+func gitIntegrateRemote(repoPath string) error {
+	out, err := newGitCommand(repoPath, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		return fmt.Errorf("HEAD isn't on a branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(out))
+
+	// --exit-code makes ls-remote exit 2 when the branch isn't there.
+	cmd := newGitCommand(repoPath, "ls-remote", "--exit-code", "--heads", "origin", "refs/heads/"+branch)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+			return nil
+		}
+		return fmt.Errorf("ls-remote: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := newGitCommand(repoPath, "fetch", "-q", "origin", "refs/heads/"+branch).CombinedOutput(); err != nil {
+		return fmt.Errorf("fetch: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	if newGitCommand(repoPath, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD").Run() == nil {
+		return nil
+	}
+	if out, err := newGitCommand(repoPath, "rebase", "--autostash", "FETCH_HEAD").CombinedOutput(); err != nil {
+		newGitCommand(repoPath, "rebase", "--abort").Run()
+		return fmt.Errorf("origin/%s has commits that conflict with the slopspace's unpushed ones; "+
+			"rebase them by hand in the slopspace's writespaces-secure git dir (see docs/SlopspaceControlScheme.md): %w: %s",
+			branch, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

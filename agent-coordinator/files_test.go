@@ -69,6 +69,32 @@ func TestFileInfoMarkedUpRoundTrips(t *testing.T) {
 	}
 }
 
+// TestFileInfoSequenceRoundTrips does the same for FileInfo.Sequence, which
+// gives a robot or control sequence YAML its own icon.
+func TestFileInfoSequenceRoundTrips(t *testing.T) {
+	raw := []byte(`{"id":"a1_s.yaml","name":"s.yaml","kind":"text","state":"cached","sequence":"robot"}`)
+
+	var fi FileInfo
+	if err := json.Unmarshal(raw, &fi); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if fi.Sequence != "robot" {
+		t.Fatalf("expected Sequence=robot, got %q", fi.Sequence)
+	}
+
+	out, err := json.Marshal(fi)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTripped map[string]any
+	if err := json.Unmarshal(out, &roundTripped); err != nil {
+		t.Fatalf("unmarshal round-tripped output: %v", err)
+	}
+	if v := roundTripped["sequence"]; v != "robot" {
+		t.Fatalf("re-encoded FileInfo missing sequence: %v", roundTripped)
+	}
+}
+
 // newTestServerWithHost creates an agent-coordinator Server with one
 // connected host, "lr-a", whose local-representative HTTP dashboard is
 // resolved to backend's address -- as if backend's port had been reported

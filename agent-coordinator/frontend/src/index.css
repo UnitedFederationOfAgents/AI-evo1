@@ -1106,6 +1106,8 @@ body {
    before building. */
 .sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
 .sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The .ufabuild request readout, shown while ufabuild watch is on. */
+.sys-repo-ufabuild { font-size: 11px; color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B):
    inside the dev-repo panel per-host, and under "rebuild all" globally. */
 .sys-branch { display: flex; flex-direction: column; gap: 6px; }
@@ -1241,6 +1243,21 @@ body {
 }
 .file-detail-delete:hover { background: #5a2e2e; border-color: #c44e4e; }
 .file-detail-delete:disabled { opacity: 0.5; cursor: default; }
+
+/* The integrations subsection -- see local-representative's index.css. */
+.file-detail-integrations {
+  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px dashed #2e4a5a; padding-top: 8px;
+}
+.file-detail-integrations-label { color: #777; font-size: 11px; }
+.file-detail-integrate {
+  flex: 1; background: #142a24; border: 1px solid #2e7a5e; border-radius: 3px; color: #5cd6a8;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-integrate:hover { background: #1e4a3a; border-color: #4ec49a; }
+.file-detail-integrate:disabled { opacity: 0.5; cursor: default; }
+.file-detail-integrate-status { font-size: 11px; color: #5cd6a8; overflow-wrap: anywhere; }
+.file-detail-integrate-error { color: #e06a6a; }
 
 /* ---- File viewer ---- */
 
@@ -1712,3 +1729,34 @@ body {
   overflow-y: auto;
 }
 .worker-signal-output { color: #d4d4d4; }
+
+.worker-slopspace-in-use { border-color: #2d5a7a; }
+.worker-slopspace-in-use .worker-signal-status { color: #5bb8ff; }
+.worker-slopspace-deployed .worker-signal-status { color: #e0a83e; }
+.worker-slopspace-repos { color: #777; font-size: 12px; }
+.worker-slopspace-head { cursor: pointer; }
+.worker-slopspace-head:hover { background: #1e1e1e; }
+.worker-slopspace-selected { border-color: #5c8a2e; }
+
+/* The slopspace sub-tab's manual control panel -- see dungeon-keeper/slopctl.go */
+.worker-slopctl { display: flex; flex-direction: column; gap: 8px; padding: 10px; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; }
+.worker-slopctl-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.worker-slopctl-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.worker-slopctl-label { width: 110px; flex-shrink: 0; font-size: 12px; color: #888; }
+.worker-slopctl-input {
+  min-width: 0;
+  background: #1a1a1a;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 4px 8px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+}
+.worker-slopctl-input:disabled { opacity: 0.5; }
+.worker-slopctl-pick, .worker-slopctl-grow { flex: 1; }
+.worker-slopctl-command { font-family: inherit; resize: vertical; min-height: 2.5em; }
+.worker-slopctl-path { font-family: monospace; }
+.worker-slopctl .worker-submit-btn { padding: 4px 12px; }
+.worker-slopctl-danger { background: #4a1e1e; border-color: #8a2e2e; }
+.worker-slopctl-ok { color: #4ec94e; font-size: 13px; }

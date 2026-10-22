@@ -250,6 +250,11 @@ type FileInfo struct {
 	// so the markup dialog's bright-orange-border cue renders correctly when
 	// viewed through agent-coordinator's per-host files tab.
 	MarkedUp bool `json:"marked_up"`
+
+	// Sequence mirrors local-representative's FileInfo.Sequence ("control",
+	// "robot" or "" -- see local-representative/seqfiles.go), same reasoning
+	// again, so a sequence YAML keeps its own icon here too.
+	Sequence string `json:"sequence,omitempty"`
 }
 
 // FilesStateMsg matches the files-state payload sent from LR over representable.
@@ -419,6 +424,14 @@ type RepoStateMsg struct {
 	Branch      string   `json:"branch,omitempty"`
 	Branches    []string `json:"branches,omitempty"`
 	SwitchError string   `json:"switch_error,omitempty"`
+
+	// UfabuildWatch/UfabuildRequest/UfabuildNote: "ufabuild watch" (set by
+	// LR's --ufabuild-watch; display-only here, AC can't toggle it for now)
+	// and the .ufabuild request it builds from -- see
+	// local-representative/ufabuild.go.
+	UfabuildWatch   bool   `json:"ufabuild_watch"`
+	UfabuildRequest string `json:"ufabuild_request,omitempty"`
+	UfabuildNote    string `json:"ufabuild_note,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -533,6 +546,9 @@ type LRRepoStateMsg struct {
 	Branch             string   `json:"branch,omitempty"`
 	Branches           []string `json:"branches,omitempty"`
 	SwitchError        string   `json:"switch_error,omitempty"`
+	UfabuildWatch      bool     `json:"ufabuild_watch"`
+	UfabuildRequest    string   `json:"ufabuild_request,omitempty"`
+	UfabuildNote       string   `json:"ufabuild_note,omitempty"`
 }
 
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
@@ -1067,6 +1083,9 @@ func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
 		Branch:             r.Branch,
 		Branches:           r.Branches,
 		SwitchError:        r.SwitchError,
+		UfabuildWatch:      r.UfabuildWatch,
+		UfabuildRequest:    r.UfabuildRequest,
+		UfabuildNote:       r.UfabuildNote,
 	}
 }
 
@@ -1268,6 +1287,25 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				cmd, err := workerSubmitCommand(payload.Prompt)
 				if err != nil {
 					s.sendToClient(c, "lr-worker-reply", workerReplyMsg(payload.HostID, err))
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
+			}
+		case "lr-worker-slopspace":
+			// The host's slopspace sub-tab manual control panel -- see worker.go.
+			var payload struct {
+				HostID  string          `json:"host_id"`
+				Request json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				cmd, err := workerSlopspaceCommand(payload.Request)
+				if err != nil {
+					var req struct {
+						Op string `json:"op"`
+						ID string `json:"id"`
+					}
+					_ = json.Unmarshal(payload.Request, &req)
+					s.sendToClient(c, "lr-worker-slopspace-reply", workerSlopspaceReplyMsg(payload.HostID, req.Op, req.ID, err))
 					break
 				}
 				s.reprServer.SendCommand(payload.HostID, cmd)
@@ -1906,6 +1944,8 @@ func main() {
 			s.broadcast("lr-worker-state", workerMsg(name, data))
 		case "worker-reply":
 			s.broadcast("lr-worker-reply", LRWorkerReplyMsg{HostID: name, Reply: data})
+		case "worker-slopspace-reply":
+			s.broadcast("lr-worker-slopspace-reply", LRWorkerSlopspaceReplyMsg{HostID: name, Reply: data})
 		case "lr-http":
 			var payload LRHTTPMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

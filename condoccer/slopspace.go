@@ -1165,7 +1165,7 @@ func (s *Server) slopPerformAction(action ActionRequest) error {
 	case "resubmit":
 		return s.slopResubmit(stem)
 	case "retry", "revert":
-		return fmt.Errorf("%s isn't available for slopspace condocs yet (D8)", action.Action)
+		return fmt.Errorf("%s isn't supported for slopspace condocs (D8)", action.Action)
 	}
 	_, root, main, release, err := s.slopBeginEdit(stem)
 	if err != nil {
@@ -1318,6 +1318,20 @@ func (s *Server) runTurn(stem string) error {
 				return errTurnWait
 			}
 			if len(t.Bases) == 0 {
+				// Bring in anything pushed to a target's branch from outside
+				// (a .ufabuild request, a hand-made fix) before the base is
+				// taken, so the agent sees it and the reply's push doesn't
+				// get rejected. The condoc repo isn't synced here: the UI
+				// edits it in place and its uncommitted prompt could
+				// conflict; WriteRepoChanges still rebases it before pushing.
+				if !meta.Deployed {
+					for _, repo := range spec.Targets {
+						owner, name, _ := strings.Cut(repo, "/")
+						if _, err := s.slop.ss.SyncRepo(id, owner, name); err != nil {
+							return err
+						}
+					}
+				}
 				for _, repo := range spec.Repos() {
 					owner, name, _ := strings.Cut(repo, "/")
 					sha, err := s.slop.ss.RepoHead(id, owner, name)
@@ -1325,6 +1339,12 @@ func (s *Server) runTurn(stem string) error {
 						return fmt.Errorf("%s: %v", repo, err)
 					}
 					t.Bases = append(t.Bases, repo+"@"+sha)
+				}
+				if base := s.pointerBase(&spec); base != "" {
+					t.Bases = append(t.Bases, base)
+				}
+				if err := resetAgentResources(slopAgentResourcesDir(meta)); err != nil {
+					return err
 				}
 			}
 			if !meta.Deployed {
@@ -1406,6 +1426,12 @@ func (s *Server) runTurn(stem string) error {
 			if err := addIterationTemplate(active, nextLetterAfter(t.Letter)); err != nil {
 				return err
 			}
+			// The reply is in, so a failure here mustn't rerun this stage.
+			replyLabel := strings.TrimSpace("Reply " + t.Letter)
+			impls := implDir(filepath.Join(root, filepath.FromSlash(spec.CondocPath)))
+			if err := addAgentResources(active, slopAgentResourcesDir(meta), impls, replyLabel); err != nil {
+				log.Printf("slopspace %s: linking the agent's resources: %v", stem, err)
+			}
 			t.Stage = stageReplied
 			if err := s.writeSpec(&spec, ""); err != nil {
 				return err
@@ -1463,7 +1489,7 @@ func (s *Server) turnPrompt(spec *PointerSpec, meta *dktypes.SlopspaceMetadata) 
 		return "", fmt.Errorf("no active substep file")
 	}
 	repos := filepath.Join(meta.DeployPath, dkslop.WriteSpacesDir, dkslop.ReposDir)
-	return prompt + slopspaceRepoNote(repos, spec.Targets, spec.CondocRepo), nil
+	return prompt + slopspaceRepoNote(repos, spec.Targets, spec.CondocRepo) + agentResourcesNote(slopAgentResourcesDir(meta)), nil
 }
 
 // submitSignal writes the turn's work signal -- the only thing condoccer
@@ -1565,14 +1591,49 @@ func replyFromSignal(signal *dktypes.WorkSignal, events []dktypes.WorkEvent) str
 	return reply
 }
 
+// pointerBase is "owner/name@<sha>" of the pointer repo's HEAD, recorded
+// with a turn's bases so the reply's diff can include the turn's pointer
+// changes. It is "" when the pointer repo is also one of the condoc's repos
+// (their diff files would share names) or can't be read.
+func (s *Server) pointerBase(spec *PointerSpec) string {
+	cfg, path := s.acquirePointerOp()
+	defer s.endPointerOp()
+	repo := normalizeRepo(cfg.Repo)
+	if !pointerRepoPattern.MatchString(repo) {
+		return ""
+	}
+	for _, r := range spec.Repos() {
+		if strings.EqualFold(r, repo) {
+			return ""
+		}
+	}
+	out, err := pointerGit(path, "rev-parse", "HEAD")
+	if err != nil {
+		log.Printf("slopspace %s: pointer repo HEAD: %v: %s", spec.Stem(), err, strings.TrimSpace(string(out)))
+		return ""
+	}
+	return repo + "@" + strings.TrimSpace(string(out))
+}
+
 // turnPreamble links each target repo's commit for the reply, one line per
 // repo (D6): where the branch was before the turn and the commit the turn
-// made, or "(no changes)".
+// made, or "(no changes)". The other repos in bases -- the condoc repo and
+// the pointer repo -- are committed only after the reply is written, so
+// their lines link the base and end "→ this reply"; the diff viewer finds
+// their heads (see slopResolveHead).
 func turnPreamble(targets, bases []string, heads map[string]string) string {
 	baseOf := map[string]string{}
+	var others []string
+	isTarget := map[string]bool{}
+	for _, t := range targets {
+		isTarget[t] = true
+	}
 	for _, b := range bases {
 		if i := strings.LastIndex(b, "@"); i > 0 {
 			baseOf[b[:i]] = b[i+1:]
+			if !isTarget[b[:i]] {
+				others = append(others, b[:i])
+			}
 		}
 	}
 	link := func(repo, sha string) string {
@@ -1594,7 +1655,232 @@ func turnPreamble(targets, bases []string, heads map[string]string) string {
 			lines = append(lines, fmt.Sprintf("- %s: %s → %s", repo, link(repo, base), link(repo, head)))
 		}
 	}
+	for _, repo := range others {
+		lines = append(lines, fmt.Sprintf("- %s: %s → this reply", repo, link(repo, baseOf[repo])))
+	}
 	return strings.Join(lines, "\n")
+}
+
+// ---- diffs ----
+//
+// A slopspace reply's diff spans every repo the turn changed, so a diff
+// request carries one range per repo, read off the reply preamble's links:
+// fromCommit is "owner/name@<base>,..." and toCommit "owner/name@<head>,...".
+// A repo with a head and no base diffs the head commit alone. The condoc
+// repo and the pointer repo come with a base and no head ("→ this reply"):
+// their heads are found here (slopResolveHead), and the pointer repo is
+// listed only when the turn changed its pointer file. Files go back to the
+// UI as "owner/name/<path>", which is how get-file-diff names them.
+
+// slopDiffRange is one repo's part of a slopspace diff request.
+type slopDiffRange struct {
+	repo     string
+	gitArgs  []string // points git at the repo: --git-dir <dir> or -C <path>
+	spec     string   // git revision range
+	path     string   // limits the diff to one file: the pointer repo's pointer file
+	allFiles bool     // keeps condoc files, which a target's list leaves out
+}
+
+func (r slopDiffRange) git(args ...string) *exec.Cmd {
+	return exec.Command("git", append(append([]string{}, r.gitArgs...), args...)...)
+}
+
+// slopResolveHead finds where a repo committed after the reply stood for a
+// turn that started at base. In the condoc repo that is the first commit
+// after base, the reply's own: nothing else commits there while the turn
+// runs. In the pointer repo it is the first commit after base to the
+// condoc's pointer file that clears its turn; other condoccers' commits to
+// other pointer files are skipped. "" means the turn hasn't got that far,
+// or base was rebased away by a pointer push.
+func (s *Server) slopResolveHead(r slopDiffRange, base string) (string, error) {
+	if r.path == "" {
+		out, err := r.git("rev-list", "--first-parent", "--reverse", base+"..HEAD").Output()
+		if err != nil {
+			return "", fmt.Errorf("git rev-list failed in %s: %v", r.repo, err)
+		}
+		first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		return first, nil
+	}
+	s.acquirePointerOp()
+	defer s.endPointerOp()
+	if err := r.git("merge-base", "--is-ancestor", base, "HEAD").Run(); err != nil {
+		return "", nil
+	}
+	out, err := r.git("rev-list", "--reverse", "--topo-order", base+"..HEAD", "--", r.path).Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-list failed in %s: %v", r.repo, err)
+	}
+	for _, c := range strings.Fields(string(out)) {
+		b, err := r.git("show", c+":"+r.path).Output()
+		if err != nil {
+			continue
+		}
+		if spec, err := parsePointerSpec(string(b)); err == nil && spec.Turn == nil {
+			return c, nil
+		}
+	}
+	return "", nil
+}
+
+// parseRepoShas parses "owner/name@sha,..." into repo → sha, keeping order.
+func parseRepoShas(list string) (map[string]string, []string, error) {
+	shas := map[string]string{}
+	var order []string
+	for _, part := range strings.Split(list, ",") {
+		if part = strings.TrimSpace(part); part == "" {
+			continue
+		}
+		repo, sha, ok := strings.Cut(part, "@")
+		if !ok || !commitHashRe.MatchString(sha) {
+			return nil, nil, fmt.Errorf("invalid commit range %q", part)
+		}
+		if _, dup := shas[repo]; !dup {
+			order = append(order, repo)
+		}
+		shas[repo] = sha
+	}
+	return shas, order, nil
+}
+
+// slopDiffRanges resolves a slopspace diff request to a range in each repo:
+// in its git dir, which stays in the slopspace's writespaces-secure whether
+// or not the slopspace is deployed, or for the pointer repo in its checkout.
+// A repo whose head can't be found yet is left out.
+func (s *Server) slopDiffRanges(rel, fromCommit, toCommit string) ([]slopDiffRange, error) {
+	stem := strings.TrimPrefix(rel, slopPathPrefix)
+	if stem == "" || strings.ContainsAny(stem, `/\`) || strings.Contains(stem, "..") {
+		return nil, fmt.Errorf("invalid condoc path")
+	}
+	bases, baseOrder, err := parseRepoShas(fromCommit)
+	if err != nil {
+		return nil, err
+	}
+	heads, order, err := parseRepoShas(toCommit)
+	if err != nil {
+		return nil, err
+	}
+	for _, repo := range baseOrder {
+		if _, ok := heads[repo]; !ok {
+			order = append(order, repo)
+		}
+	}
+	spec, err := s.readSpec(stem)
+	if err != nil {
+		return nil, err
+	}
+	if spec.SlopspaceID == "" {
+		return nil, fmt.Errorf("%s has no slopspace (phase %s)", spec.Name, spec.Phase)
+	}
+	meta, err := s.slop.ss.Get(spec.SlopspaceID)
+	if err != nil {
+		return nil, err
+	}
+	known := map[string]bool{}
+	for _, r := range spec.Repos() {
+		known[r] = true
+	}
+	pointerRepo, pointerPath := "", ""
+	if cfg, path, err := s.pointerReadyPath(); err == nil {
+		pointerRepo, pointerPath = normalizeRepo(cfg.Repo), path
+	}
+	var ranges []slopDiffRange
+	for _, repo := range order {
+		r := slopDiffRange{repo: repo}
+		switch {
+		case known[repo]:
+			r.gitArgs = []string{"--git-dir", filepath.Join(meta.RootPath, dkslop.WriteSpacesSecure, dkslop.ReposDir, filepath.FromSlash(repo))}
+			r.allFiles = repo == spec.CondocRepo
+		case repo == pointerRepo && pointerPath != "":
+			r.gitArgs = []string{"-C", pointerPath}
+			r.path = pointerDir + "/" + stem + ".yaml"
+			r.allFiles = true
+		default:
+			return nil, fmt.Errorf("%s isn't one of %s's repos", repo, spec.Name)
+		}
+		base, head := bases[repo], heads[repo]
+		if head == "" {
+			if !r.allFiles {
+				return nil, fmt.Errorf("%s has no head commit in this diff", repo)
+			}
+			if head, err = s.slopResolveHead(r, base); err != nil {
+				return nil, err
+			}
+			if head == "" {
+				continue
+			}
+		}
+		if base == "" {
+			base = head + "^"
+		}
+		r.spec = base + ".." + head
+		ranges = append(ranges, r)
+	}
+	return ranges, nil
+}
+
+func (s *Server) slopHandleGetDiff(c *wsClient, rel, fromCommit, toCommit string) {
+	ranges, err := s.slopDiffRanges(rel, fromCommit, toCommit)
+	if err != nil {
+		s.replyErr(c, err)
+		return
+	}
+	files := []string{}
+	for _, r := range ranges {
+		args := []string{"diff", "--name-only", r.spec}
+		if r.path != "" {
+			args = append(args, "--", r.path)
+		}
+		out, err := r.git(args...).Output()
+		if err != nil {
+			s.replyErr(c, fmt.Errorf("git diff failed in %s: %v", r.repo, err))
+			return
+		}
+		for _, f := range listedFiles(out, !r.allFiles) {
+			files = append(files, r.repo+"/"+f)
+		}
+	}
+	s.sendToClient(c, "diff-list", map[string]interface{}{
+		"fromCommit": fromCommit,
+		"toCommit":   toCommit,
+		"files":      files,
+	})
+}
+
+func (s *Server) slopHandleGetFileDiff(c *wsClient, rel, fromCommit, toCommit, file string) {
+	parts := strings.SplitN(file, "/", 3)
+	if len(parts) != 3 || parts[2] == "" || strings.Contains(file, "..") {
+		s.replyErr(c, fmt.Errorf("invalid file path"))
+		return
+	}
+	repo, path := parts[0]+"/"+parts[1], parts[2]
+	ranges, err := s.slopDiffRanges(rel, fromCommit, toCommit)
+	if err != nil {
+		s.replyErr(c, err)
+		return
+	}
+	for _, r := range ranges {
+		if r.repo != repo {
+			continue
+		}
+		if r.path != "" && path != r.path {
+			break
+		}
+		out, err := r.git("diff", r.spec, "--", path).Output()
+		if err != nil {
+			s.replyErr(c, fmt.Errorf("git diff failed in %s: %v", repo, err))
+			return
+		}
+		content := string(out)
+		s.sendToClient(c, "file-diff", map[string]interface{}{
+			"fromCommit": fromCommit,
+			"toCommit":   toCommit,
+			"file":       file,
+			"content":    content,
+			"hunks":      diffHunks(content),
+		})
+		return
+	}
+	s.replyErr(c, fmt.Errorf("%s isn't in this diff", repo))
 }
 
 // ---- propose PR (D10) ----

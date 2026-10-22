@@ -92,6 +92,19 @@ type RepoStateMsg struct {
 	Branch      string   `json:"branch,omitempty"`
 	Branches    []string `json:"branches,omitempty"`
 	SwitchError string   `json:"switch_error,omitempty"`
+
+	// UfabuildWatch is "ufabuild watch", set at launch by --ufabuild-watch
+	// (see ufabuild.go and docs/DevMode.md; reported read-only, there's no
+	// runtime toggle for now): off, rebuilds follow HEAD moving (the legacy
+	// behavior above); on, the watcher still pulls but only builds when a
+	// newly committed .ufabuild names its own commit's parent, and does so
+	// straight away rather than via auto-rebuild's debounce. UfabuildRequest
+	// is the short SHA of the commit holding the current valid request, if
+	// any; UfabuildNote says why there isn't one. Per
+	// je-sidestuff/sloppo's condocs/SlopspaceSlopspaceCondocs.md Step 2.
+	UfabuildWatch   bool   `json:"ufabuild_watch"`
+	UfabuildRequest string `json:"ufabuild_request,omitempty"`
+	UfabuildNote    string `json:"ufabuild_note,omitempty"`
 }
 
 // repoWatch is local-representative's dev-repo watcher for a single git
@@ -122,6 +135,18 @@ type repoWatch struct {
 	branch      string   // see RepoStateMsg.Branch
 	branches    []string // see RepoStateMsg.Branches
 	switchErr   string   // see RepoStateMsg.SwitchError
+
+	// ufabuildWatch is "ufabuild watch" (RepoStateMsg.UfabuildWatch).
+	// ufabuild is the .ufabuild request as of ufabuildReadAt (the HEAD it was
+	// read at, see refreshUfabuild). ufabuildBuilt is the request commit the
+	// last successful rebuild covered (the watcher's starting request before
+	// the first one, like builtHead); ufabuildFailed is one whose rebuild
+	// failed, which ufabuild watch won't retry on its own.
+	ufabuildWatch  bool
+	ufabuild       ufabuildRequest
+	ufabuildReadAt string
+	ufabuildBuilt  string
+	ufabuildFailed string
 
 	// autoRebuildDeadline/autoRebuildArmedHead track the 90s debounce timer
 	// (autoRebuildDebounce): zero deadline means no auto-rebuild is pending.
@@ -154,6 +179,10 @@ func newRepoWatch(root string, notify func()) *repoWatch {
 	}
 	w.branch, _ = w.currentBranch()
 	w.branches, _ = w.listBranches()
+	// Likewise treat whatever .ufabuild request is already committed as
+	// built, so turning ufabuild watch on only builds for a new one.
+	w.refreshUfabuild()
+	w.ufabuildBuilt = w.ufabuild.Commit
 	// Seed building from the '.building' lock file itself (Revision I), so a
 	// build already running when LR (re)starts -- e.g. one that outlived an
 	// auto-update restart, or one kicked off by hand -- is reflected right
@@ -171,12 +200,17 @@ func newRepoWatch(root string, notify func()) *repoWatch {
 // (see condocLockPresent), regardless of dirty/head -- per
 // condocs/initialDistributedDevelopmentImpls/Step5Prompt.md, the point of
 // that file is to prevent excessive rebuilds while a condoc is
-// mid-transition. Callers must hold mu (read or write).
+// mid-transition. With ufabuild watch on, HEAD moving isn't enough: there
+// has to be a valid .ufabuild request the last successful rebuild didn't
+// already cover (see ufabuild.go). Callers must hold mu (read or write).
 func (w *repoWatch) rebuildReadyLocked() bool {
-	if w.condocLockPresent() {
+	if w.condocLockPresent() || w.dirty {
 		return false
 	}
-	return !w.dirty && w.head != w.builtHead
+	if w.ufabuildWatch {
+		return w.ufabuild.Commit != "" && w.ufabuild.Commit != w.ufabuildBuilt
+	}
+	return w.head != w.builtHead
 }
 
 // condocLockPresent reports whether condoccer's '.condoc' lock file (see
@@ -218,6 +252,10 @@ func (w *repoWatch) snapshot() RepoStateMsg {
 		Branch:       w.branch,
 		Branches:     slices.Clone(w.branches),
 		SwitchError:  w.switchErr,
+
+		UfabuildWatch:   w.ufabuildWatch,
+		UfabuildRequest: shortSHA(w.ufabuild.Commit),
+		UfabuildNote:    w.ufabuild.Note,
 	}
 	if !w.autoRebuildDeadline.IsZero() {
 		msg.AutoRebuildPending = true
@@ -417,6 +455,11 @@ func (w *repoWatch) pollAndMaybePull() bool {
 	changed := oldDirty != dirty || oldHead != head || oldReady != w.rebuildReadyLocked() ||
 		oldBranch != w.branch || !slices.Equal(oldBranches, w.branches)
 	w.mu.Unlock()
+	// The .ufabuild request (and with it, under ufabuild watch, rebuild
+	// readiness) can only change when HEAD does.
+	if w.refreshUfabuild() {
+		changed = true
+	}
 	return changed
 }
 
@@ -427,6 +470,9 @@ func (w *repoWatch) pollAndMaybePull() bool {
 // buildCompletionGrace settling period that follows it (Revision I).
 func (w *repoWatch) rebuild() {
 	w.mu.Lock()
+	// The .ufabuild request this build covers -- nothing moves HEAD while
+	// the build holds opMu, so it's the one current now.
+	req := w.ufabuild.Commit
 	w.building = true
 	w.lastErr = ""
 	w.buildDoneDeadline = time.Time{} // a fresh build supersedes any prior grace countdown
@@ -447,10 +493,13 @@ func (w *repoWatch) rebuild() {
 	if buildErr != nil {
 		w.lastErr = fmt.Sprintf("%v: %s", buildErr, strings.TrimSpace(string(out)))
 		w.buildFailed = true
+		w.ufabuildFailed = req
 		log.Printf("dev-repo: rebuild failed: %s", w.lastErr)
 	} else {
 		log.Printf("dev-repo: rebuild succeeded")
 		w.buildFailed = false
+		w.ufabuildBuilt = req
+		w.ufabuildFailed = ""
 		if headErr == nil {
 			w.builtHead = head
 		}
@@ -521,6 +570,24 @@ func (w *repoWatch) maybeFinishBuild() bool {
 // changed, so the watch loop should notify.
 func (w *repoWatch) maybeAutoRebuild() bool {
 	w.mu.Lock()
+	if w.ufabuildWatch {
+		// A .ufabuild request is already a deliberate "build now", so ufabuild
+		// watch builds it straight away -- whether or not auto-rebuild is on,
+		// and without the debounce. A request whose build failed isn't
+		// retried until a new one lands (or the operator presses rebuild).
+		wasPending := !w.autoRebuildDeadline.IsZero()
+		w.autoRebuildDeadline = time.Time{}
+		w.autoRebuildArmedHead = ""
+		req := w.ufabuild.Commit
+		due := !w.building && w.rebuildReadyLocked() && req != w.ufabuildFailed
+		w.mu.Unlock()
+		if due {
+			log.Printf("dev-repo: ufabuild watch: building for the .ufabuild request in %s", shortSHA(req))
+			w.rebuild() // rebuild() notifies on its own
+			return false
+		}
+		return wasPending
+	}
 	if !w.autoRebuild || w.building || !w.rebuildReadyLocked() {
 		// Nothing to debounce right now -- e.g. auto-rebuild is off, a
 		// rebuild is already running, or there's nothing to rebuild (clean

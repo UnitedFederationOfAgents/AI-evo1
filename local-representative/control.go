@@ -289,6 +289,7 @@ func (e *controlEngine) setRobotOps(ops []ControlOpSpec) {
 	e.mu.Unlock()
 	e.broadcastLibrary()
 	e.broadcast() // steps' descriptions can now use the robot ops' wording
+	e.s.broadcastFiles() // robot sequences in the files tab are now checked against them (seqfiles.go)
 }
 
 // library returns the "control-library" snapshot.

@@ -660,6 +660,13 @@ func nextResourceNum(content string) int {
 // replaceIterationPlaceholder), with blank-line spacing matching the rest of
 // a step/substep file's sections.
 func insertResourceBlock(path, name, description string, links []resourceLink) error {
+	return insertResourceBlockAs(path, name, description, links, false)
+}
+
+// insertResourceBlockAs is insertResourceBlock, with agent marking the block
+// as one the turn's agent created: "## Resource N (agent)[ -- <name>]" (see
+// addAgentResources).
+func insertResourceBlockAs(path, name, description string, links []resourceLink, agent bool) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -673,6 +680,9 @@ func insertResourceBlock(path, name, description string, links []resourceLink) e
 
 	n := nextResourceNum(content)
 	heading := fmt.Sprintf("## Resource %d", n)
+	if agent {
+		heading += agentResourceMarker
+	}
 	if nm := strings.TrimSpace(name); nm != "" {
 		heading += " -- " + nm
 	}

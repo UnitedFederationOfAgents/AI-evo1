@@ -350,7 +350,11 @@ type Server struct {
 	convoState    *ConvoStateMsg
 	robotMu       sync.RWMutex
 	robotState    *RobotStateMsg
-	workerMu      sync.RWMutex
+	// Files-tab robot-sequence imports waiting on IANAR's answer, by request
+	// id -- see fileintegrations.go.
+	robotImportsMu sync.Mutex
+	robotImports   map[string]chan RobotSeqImportMsg
+	workerMu     sync.RWMutex
 	workerState   *WorkerStateMsg // kept after dungeon-keeper disconnects, so its signals stay visible
 
 	// Files tab: where uploaded files land, and where "persist" moves them to
@@ -1243,6 +1247,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.sendToClient(c, "worker-reply", reply)
 			}
+		case "worker-slopspace":
+			// The slopspace sub-tab's manual control panel -- see worker.go.
+			// dungeon-keeper's answer comes back as worker-slopspace-reply.
+			var req WorkerSlopspaceRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				if err := s.controlSlopspace(req); err != nil {
+					s.sendToClient(c, "worker-slopspace-reply", WorkerSlopspaceReply{Op: req.Op, ID: req.ID, Error: err.Error()})
+				}
+			}
 		}
 		switch m.Type {
 		case "connect-ac":
@@ -1532,8 +1545,9 @@ type appConfig struct {
 	dev           bool
 	devMode       bool // --dev-mode: this instance (and everything it launches) runs from an in-progress branch — see docs/DevMode.md. Distinct from dev, which just skips serving the embedded frontend.
 	devRepo       bool // --dev-repo: implies devMode and watches the launch working directory's git repo for rebuild-worthy changes — see docs/DevMode.md and repowatch.go.
+	ufabuildWatch bool // --ufabuild-watch: the --dev-repo watcher builds only for committed .ufabuild requests — see ufabuild.go and docs/DevMode.md. Launch-time only; no runtime toggle for now.
 	autoConnect   bool
-	acHost        string
+	acHost       string
 	acPort        string
 	acHTTPPort    string   // agent-coordinator's HTTP port -- see Server.acHTTPPort
 	autoLaunch    []string // child applications to launch on startup ("app" or "app:N" tokens)
@@ -1614,6 +1628,9 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 	if out.devRepo, err = pickBool("dev-repo", defaults.devRepo); err != nil {
 		return out, err
 	}
+	if out.ufabuildWatch, err = pickBool("ufabuild-watch", defaults.ufabuildWatch); err != nil {
+		return out, err
+	}
 	if out.autoConnect, err = pickBool("auto-connect", defaults.autoConnect); err != nil {
 		return out, err
 	}
@@ -1691,6 +1708,7 @@ func main() {
 	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
 	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): launched from an in-progress branch. Cascades to every federation-command/condoccer instance this LR launches. Unrelated to --dev.")
 	devRepo := flag.Bool("dev-repo", false, "dev mode plus watch the current working directory's git repo for changes to rebuild from (see docs/DevMode.md); implies --dev-mode; requires running inside a git repository")
+	ufabuildWatch := flag.Bool("ufabuild-watch", false, "with --dev-repo, rebuild only when a newly committed .ufabuild names its own commit's parent, instead of whenever HEAD moves (see docs/DevMode.md and scripts/ufabuild.sh); ignored without --dev-repo")
 	autoConnect := flag.Bool("auto-connect", false, "dial agent-coordinator in the background on startup, retrying every 10s for up to 10m")
 	acHost := flag.String("ac-host", defaultACHost, "agent-coordinator host/IP to auto-connect to")
 	acPort := flag.String("ac-port", defaultACPort, "agent-coordinator port to auto-connect to")
@@ -1724,6 +1742,7 @@ func main() {
 		dev:           *dev,
 		devMode:       *devMode,
 		devRepo:       *devRepo,
+		ufabuildWatch: *ufabuildWatch,
 		autoConnect:   *autoConnect,
 		acHost:        *acHost,
 		acPort:        *acPort,
@@ -1840,6 +1859,12 @@ func main() {
 		log.Printf("dev-repo: watching %s for changes to rebuild from (see docs/DevMode.md)", root)
 		if havePrevState && prevState.AutoRebuild {
 			s.repoWatch.setAutoRebuild(true)
+		}
+		if cfg.ufabuildWatch {
+			// Launch-time only for now: there's no runtime toggle, so a
+			// restart (relaunched with the same config) keeps it as-is.
+			s.repoWatch.setUfabuildWatch(true)
+			log.Printf("dev-repo: ufabuild watch on (--ufabuild-watch): only a newly committed %s request triggers a rebuild", ufabuildFile)
 		}
 		go s.repoWatch.watchLoop()
 	}
@@ -2086,14 +2111,26 @@ func main() {
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.control.setRobotOps(payload.Ops)
 				}
+			case "robot-seq-import-result":
+				// A files-tab import/import-and-run -- see fileintegrations.go.
+				var payload RobotSeqImportMsg
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.noteRobotSeqImport(payload)
+				}
 			}
 			return
 		}
 		if name == "worker" {
-			if dataType == "worker-state" {
+			switch dataType {
+			case "worker-state":
 				var payload WorkerStateMsg
 				if err := json.Unmarshal(data, &payload); err == nil {
 					s.setWorkerState(payload)
+				}
+			case "slopspace-reply":
+				var payload WorkerSlopspaceReply
+				if err := json.Unmarshal(data, &payload); err == nil {
+					s.setWorkerSlopspaceReply(payload)
 				}
 			}
 			return

@@ -147,6 +147,11 @@ type FileInfo struct {
 	// files tab renders it as a bright orange border, independent of
 	// Highlighted's yellow ring.
 	MarkedUp bool `json:"marked_up"`
+
+	// Sequence is "control" or "robot" when the file is YAML that validates
+	// for import as that kind of sequence (see seqfiles.go), "" otherwise.
+	// The files tab gives each its own icon; Kind stays "text" either way.
+	Sequence string `json:"sequence,omitempty"`
 }
 
 // FilesStateMsg is the payload of "files-state" messages: the current
@@ -324,6 +329,7 @@ func (s *Server) scanCacheDir() []FileInfo {
 			UploadedAt: info.ModTime().Unix(),
 			ExpiresAt:  info.ModTime().Add(fileCacheTTL).Unix(),
 			MarkedUp:   isMarkedUp(s.fileCacheDir, id),
+			Sequence:   classifySequenceFile(s.fileCacheDir, id, s.fileRobotOps()),
 		}
 		if m, ok := readManifest(s.fileCacheDir, id); ok {
 			fi.Highlighted = m.Highlighted
@@ -365,6 +371,7 @@ func (s *Server) scanStoreDir() []FileInfo {
 			State:      "persisted",
 			UploadedAt: info.ModTime().Unix(),
 			MarkedUp:   isMarkedUp(s.hostStoreDir, id),
+			Sequence:   classifySequenceFile(s.hostStoreDir, id, s.fileRobotOps()),
 		}
 		if m, ok := readManifest(s.hostStoreDir, id); ok {
 			fi.Highlighted = m.Highlighted
@@ -593,9 +600,20 @@ func (s *Server) saveFileFrom(filename string, src io.Reader) (FileInfo, error) 
 		State:      "cached",
 		UploadedAt: now.Unix(),
 		ExpiresAt:  now.Add(fileCacheTTL).Unix(),
+		Sequence:   classifySequenceFile(s.fileCacheDir, id, s.fileRobotOps()),
 	}
 	s.writeManifest(s.fileCacheDir, info, s.lrName)
 	return info, nil
+}
+
+// fileRobotOps are IANAR's ops, for classifySequenceFile's robot-sequence
+// check: nil while IANAR hasn't reported them (or there's no control engine,
+// as in some tests).
+func (s *Server) fileRobotOps() []ControlOpSpec {
+	if s.control == nil {
+		return nil
+	}
+	return s.control.getRobotOps()
 }
 
 // writeManifest writes the hidden ".manifest_<id>.yaml" sidecar for a
@@ -685,6 +703,8 @@ func (s *Server) handleFileItem(w http.ResponseWriter, r *http.Request) {
 			s.handleMarkupCancel(w, r, id)
 		case r.Method == http.MethodPost && action == "markup/copy":
 			s.handleMarkupCopy(w, r, id)
+		case r.Method == http.MethodPost && action == "import":
+			s.handleFileImport(w, r, id)
 		default:
 			http.NotFound(w, r)
 		}

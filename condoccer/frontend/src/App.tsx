@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { detectTextFormat } from './textformat'
 import { HostFilePicker } from './HostFilePicker'
 import type { ActionRequest, BranchCheck, CondocInfo, CondocMeta, CondocState, Iteration, ModeMismatchMsg, Phase, PointerConfig, PointerEntry, PointerStatus, ReprStatus, ReprStatusMsg, RootMsg, SelfInfoMsg, SlopspaceProposal, StepSummary, TCAvailabilityMsg } from './types'
@@ -670,7 +671,10 @@ function saveHideCompleted(hide: boolean) {
 //   #/condoc/<enc(path)>
 //   #/condoc/<enc(path)>/step/<num>[/iter/<id>]
 //   #/condoc/<enc(path)>/step/<num>/substep[/iter/<id>]
-//   #/condoc/<enc(path)>/step/<num>[/substep]/files/<from>..<to>[/file/<enc(file)>[/hunk/<idx>]]
+//   #/condoc/<enc(path)>/step/<num>[/substep]/files/<enc(from)>..<enc(to)>[/file/<enc(file)>[/hunk/<idx>]]
+//
+// from/to are commit hashes, or for a slopspace condoc per-repo lists (see
+// parseSlopCommitRanges), hence the encoding.
 
 interface NavHashState {
   navLevel: NavLevel
@@ -704,7 +708,7 @@ function hashFromNav(s: NavHashState): string {
   if (s.navLevel === 'files-changed' || s.navLevel === 'file-diff') {
     if (s.diffReturnLevel === 'substep') h += '/substep'
     if (s.diffFromCommit === null) return h
-    h += `/files/${s.diffFromCommit}..${s.diffToCommit ?? ''}`
+    h += `/files/${encodeURIComponent(s.diffFromCommit)}..${encodeURIComponent(s.diffToCommit ?? '')}`
     if (s.navLevel === 'file-diff' && s.selectedDiffFile) {
       h += `/file/${encodeURIComponent(s.selectedDiffFile)}`
       if (s.selectedDiffHunkIdx !== null) h += `/hunk/${s.selectedDiffHunkIdx}`
@@ -770,8 +774,8 @@ function navFromHash(hash: string): NavHashState {
     const range = parts[i + 1]
     const sep = range.indexOf('..')
     if (sep < 0) return result
-    result.diffFromCommit = range.slice(0, sep)
-    result.diffToCommit = range.slice(sep + 2)
+    result.diffFromCommit = decodeURIComponent(range.slice(0, sep))
+    result.diffToCommit = decodeURIComponent(range.slice(sep + 2))
     result.navLevel = 'files-changed'
     i += 2
 
@@ -825,6 +829,7 @@ interface StepSection {
   content: string
   substepLetter?: string
   resourceLinks?: ResourceLink[]
+  agent?: boolean // a resource the turn's agent created ("## Resource N (agent)")
 }
 
 const COMMIT_LINK_RE = /^\[`[a-f0-9]+`\]\([^)]+\)\s*$/gm
@@ -857,6 +862,7 @@ function parseStepSections(content: string): StepSection[] {
     substepTitle: string
     resourceNum: string
     resourceName: string
+    resourceAgent?: boolean
     fullMatch: string
   }
   const headings: Heading[] = []
@@ -865,8 +871,9 @@ function parseStepSections(content: string): StepSection[] {
   // "## Resource N" or "## Resource N -- <name>" (Revision B; the original
   // "## Resource (N)" parens were dropped) -- given its own heading here so
   // it gets cut out as its own section below, rather than reading as an
-  // unstyled tail of whichever Reply/Revision precedes it.
-  const reResource = /^## Resource (\d+)(?: -- (.+))?/gm
+  // unstyled tail of whichever Reply/Revision precedes it. An agent-created
+  // one reads "## Resource N (agent)[ -- <name>]" (condoccer/agentresources.go).
+  const reResource = /^## Resource (\d+)( \(agent\))?(?: -- (.+))?/gm
   reMain.lastIndex = 0
   reSubstep.lastIndex = 0
   reResource.lastIndex = 0
@@ -879,7 +886,7 @@ function parseStepSections(content: string): StepSection[] {
     headings.push({ index: m.index, kind: 'Substep', letter: m[1], from: '', substepTitle: m[2].trim(), resourceNum: '', resourceName: '', fullMatch: m[0] })
   }
   while ((m = reResource.exec(content)) !== null) {
-    headings.push({ index: m.index, kind: 'Resource', letter: '', from: '', substepTitle: '', resourceNum: m[1], resourceName: (m[2] ?? '').trim(), fullMatch: m[0] })
+    headings.push({ index: m.index, kind: 'Resource', letter: '', from: '', substepTitle: '', resourceNum: m[1], resourceName: (m[3] ?? '').trim(), resourceAgent: m[2] !== undefined, fullMatch: m[0] })
   }
   headings.sort((a, b) => a.index - b.index)
 
@@ -900,6 +907,7 @@ function parseStepSections(content: string): StepSection[] {
     let substepLetter: string | undefined
     let resourceLinks: ResourceLink[] | undefined
     let sectionContent = cleaned
+    const agent = h.resourceAgent || undefined
 
     if (h.kind === 'Reply') {
       id = h.letter ? `reply-${h.letter}` : 'reply-initial'
@@ -932,7 +940,7 @@ function parseStepSections(content: string): StepSection[] {
       substepLetter = h.letter
     }
 
-    sections.push({ id, label, kind, content: sectionContent, substepLetter, resourceLinks })
+    sections.push({ id, label, kind, content: sectionContent, substepLetter, resourceLinks, agent })
   }
 
   return sections
@@ -941,7 +949,26 @@ function parseStepSections(content: string): StepSection[] {
 function sectionsToIterations(sections: StepSection[]): Iteration[] {
   return sections
     .filter((s) => s.kind !== 'prompt')
-    .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'] }))
+    .map((s) => ({ id: s.id, label: s.label, type: s.kind as Iteration['type'], agent: s.agent }))
+}
+
+// ---- Agent-created resources (Revision B of
+// slopspaceSlopspaceCondocsImpls/Step1Prompt.md) ----
+//
+// A resource the turn's agent created is set slightly apart from a human's:
+// a hollow sidebar dot, a dashed section border, and an "agent" tag on its
+// label. These helpers add the modifier classes to the shared ones.
+
+function iterDotClass(iter: Iteration): string {
+  return `nav-iter-dot iter-${iter.type}${iter.agent ? ' iter-agent' : ''}`
+}
+
+function sectionClass(sec: StepSection, selected: boolean): string {
+  return `iter-section iter-section-${sec.kind}${sec.agent ? ' iter-section-agent' : ''}${selected ? ' iter-section-selected' : ''}`
+}
+
+function AgentTag({ agent }: { agent?: boolean }) {
+  return agent ? <span className="resource-agent-tag" title="Created by the agent">agent</span> : null
 }
 
 // resolveSubstepView picks which substep's content/iterations to show:
@@ -1072,6 +1099,122 @@ function ResourceSectionBody({ sec, condocPath }: { sec: StepSection; condocPath
   )
 }
 
+// ---- "to files" (Revision E of slopspaceSlopspaceCondocsImpls/Step1Prompt.md) ----
+//
+// A resource with linked files gets a "to files" button at its label's
+// right: it copies those files into this condoccer's local-representative's
+// files tab (condoccer/tofiles.go's POST /api/resource-to-files), as
+// uploads. A voice note links nothing, so has none.
+//
+// Revision F: once every linked file is already in the files tab
+// (condoccer/tofiles.go's GET /api/resource-in-files), the button is lit
+// and pressing it asks the page embedding condoccer -- local-representative
+// or agent-coordinator's host view -- to open its files tab with that file
+// selected, via an OPEN_FILE_MESSAGE postMessage. Only the files not yet
+// there are copied otherwise.
+
+const OPEN_FILE_MESSAGE = 'condoccer-open-file'
+
+function ToFilesButton({ sec, condocPath }: { sec: StepSection; condocPath: string }) {
+  const [status, setStatus] = useState<{ kind: 'busy' | 'done' | 'error'; text: string } | null>(null)
+  // present maps each linked file already in the files tab to its id there.
+  const [present, setPresent] = useState<Record<string, string>>({})
+  const filenames = (sec.resourceLinks ?? []).map((l) => l.filename)
+  const filenamesKey = filenames.join('\n')
+
+  const checkPresent = useCallback(async () => {
+    if (!filenamesKey) return
+    const params = new URLSearchParams({ condoc: condocPath })
+    for (const f of filenamesKey.split('\n')) params.append('filename', f)
+    try {
+      const resp = await fetch(`${basePath()}/api/resource-in-files?${params.toString()}`)
+      if (resp.ok) setPresent((await resp.json()).present ?? {})
+    } catch {
+      // unreachable just leaves the button unlit
+    }
+  }, [condocPath, filenamesKey])
+
+  useEffect(() => { void checkPresent() }, [checkPresent])
+
+  if (filenames.length === 0) return null
+  const missing = filenames.filter((f) => !present[f])
+  const inFiles = missing.length === 0
+  const embedded = window.parent !== window
+
+  const copy = async () => {
+    setStatus({ kind: 'busy', text: 'copying…' })
+    try {
+      const resp = await fetch(`${basePath()}/api/resource-to-files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ condoc: condocPath, filenames: missing }),
+      })
+      if (!resp.ok) {
+        setStatus({ kind: 'error', text: (await resp.text()).trim() || `failed (${resp.status})` })
+        return
+      }
+      const n = missing.length
+      setStatus({ kind: 'done', text: `✓ ${n} file${n === 1 ? '' : 's'} in files` })
+      void checkPresent()
+    } catch (err) {
+      setStatus({ kind: 'error', text: String(err) })
+    }
+  }
+
+  const open = () => {
+    if (!embedded) {
+      setStatus({ kind: 'done', text: 'already in files' })
+      return
+    }
+    window.parent.postMessage({ type: OPEN_FILE_MESSAGE, id: present[filenames[0]] }, window.location.origin)
+  }
+
+  const n = filenames.length
+  const title = inFiles
+    ? embedded
+      ? `Already in files — go to the files tab with ${n === 1 ? 'it' : 'the first'} selected`
+      : `Already in local-representative's files tab`
+    : n === 1
+      ? `Copy this file to local-representative's files tab`
+      : missing.length === n
+        ? `Copy these ${n} files to local-representative's files tab`
+        : `Copy the ${missing.length} of these ${n} files not yet there to local-representative's files tab`
+
+  return (
+    <>
+      {status && (
+        <span className={`resource-to-files-status resource-to-files-status-${status.kind}`} title={status.text}>
+          {status.kind === 'error' ? 'failed' : status.text}
+        </span>
+      )}
+      <button
+        className={`btn-secondary resource-to-files-btn${inFiles ? ' resource-to-files-btn-lit' : ''}`}
+        disabled={status?.kind === 'busy'}
+        title={title}
+        onClick={(e) => { e.stopPropagation(); if (inFiles) open(); else void copy() }}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
+        to files
+      </button>
+    </>
+  )
+}
+
+// SectionLabel is a section's label row: its label and agent tag at the
+// left, and at the right whatever buttons the caller adds (children) plus a
+// resource's "to files".
+function SectionLabel({ sec, condocPath, children }: { sec: StepSection; condocPath: string; children?: ReactNode }) {
+  return (
+    <div className="iter-section-label iter-section-label-row">
+      <span>{sec.label}<AgentTag agent={sec.agent} /></span>
+      <span className="iter-section-label-actions">
+        {children}
+        {sec.kind === 'resource' && <ToFilesButton sec={sec} condocPath={condocPath} />}
+      </span>
+    </div>
+  )
+}
+
 // sectionBody renders a parsed section's content: the raw-text default for
 // every kind but 'resource', which gets ResourceSectionBody's inline
 // image/text rendering instead (see Revision B of Step5SubstepRPrompt.md).
@@ -1118,6 +1261,66 @@ function parseCommitRanges(content: string): Map<string, CommitRange> {
     result.set(pairs[i].reply.id, { from: pairs[i].range.to, to: nextFrom })
   }
   return result
+}
+
+// parseSlopCommitRanges is parseCommitRanges for a slopspace condoc, whose
+// reply preamble links each target repo's commit, one line per repo (see
+// turnPreamble in condoccer/slopspace.go):
+//   - owner/name: [`base`](…/commit/<base>) → [`head`](…/commit/<head>)
+//   - owner/name: [`head`](…/commit/<head>)
+//   - owner/name: (no changes)
+//   - owner/name: [`base`](…/commit/<base>) → this reply
+// The last form is the condoc repo and the pointer repo, committed after the
+// reply is written. A reply's range spans every repo it changed: from is
+// "owner/name@<base>,…" and to "owner/name@<head>,…", which the backend
+// diffs repo by repo. A repo with a base and no head is the condoc or
+// pointer repo, whose head the backend finds. A reply that changed no repo
+// gets no range.
+function parseSlopCommitRanges(content: string): Map<string, CommitRange> {
+  const link = String.raw`\[\x60[a-f0-9]+\x60\]\(https:\/\/github\.com\/[^)\s]+\/commit\/([a-f0-9]+)\)`
+  const changedRe = new RegExp(String.raw`^- ([\w.-]+\/[\w.-]+): ${link}(?: → ${link})?\s*$`)
+  const thisReplyRe = new RegExp(String.raw`^- ([\w.-]+\/[\w.-]+): ${link} → this reply\s*$`)
+  const unchangedRe = /^- [\w.-]+\/[\w.-]+: \(no changes\)\s*$/
+  const replyRe = /^## Reply(?: ([A-Z]))?(?:\s|$)/
+
+  const result = new Map<string, CommitRange>()
+  const lines = content.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const rm = replyRe.exec(lines[i])
+    if (!rm) continue
+    const from: string[] = []
+    const to: string[] = []
+    let j = i - 1
+    while (j >= 0 && lines[j].trim() === '') j--
+    for (; j >= 0; j--) {
+      if (unchangedRe.test(lines[j])) continue
+      const tm = thisReplyRe.exec(lines[j])
+      if (tm) {
+        from.unshift(`${tm[1]}@${tm[2]}`)
+        continue
+      }
+      const m = changedRe.exec(lines[j])
+      if (!m) break
+      const [, repo, first, second] = m
+      if (second) {
+        from.unshift(`${repo}@${first}`)
+        to.unshift(`${repo}@${second}`)
+      } else {
+        to.unshift(`${repo}@${first}`)
+      }
+    }
+    if (from.length > 0 || to.length > 0) {
+      result.set(rm[1] ? `reply-${rm[1]}` : 'reply-initial', { from: from.join(','), to: to.join(',') })
+    }
+  }
+  return result
+}
+
+// diffFileRepo splits a slopspace diff file ("owner/name/<path>") into its
+// repo and path.
+function diffFileRepo(file: string): { repo: string; path: string } {
+  const parts = file.split('/')
+  return { repo: parts.slice(0, 2).join('/'), path: parts.slice(2).join('/') }
 }
 
 // ---- Representable connect/disconnect widget ----
@@ -1590,7 +1793,7 @@ function Sidebar({
     const stepContent = selectedStepNum === activeState.info.stepNum
       ? (activeState.stepContent ?? '')
       : (activeState.completedStepContents?.[selectedStepNum ?? 0] ?? '')
-    const commitRanges = parseCommitRanges(stepContent)
+    const commitRanges = activeState.slopspace ? parseSlopCommitRanges(stepContent) : parseCommitRanges(stepContent)
 
     return (
       <div className="sidebar">
@@ -1610,8 +1813,8 @@ function Sidebar({
                 className={`nav-item nav-item-iter${selectedIterId === iter.id ? ' selected' : ''}`}
                 onClick={() => onSelectIter(iter.id)}
               >
-                <span className={`nav-iter-dot iter-${iter.type}`} />
-                <span className="nav-item-name">{iter.label}</span>
+                <span className={iterDotClass(iter)} />
+                <span className="nav-item-name">{iter.label}<AgentTag agent={iter.agent} /></span>
                 {iter.type === 'substep' && (
                   <button
                     className="nav-enter-btn"
@@ -1641,7 +1844,7 @@ function Sidebar({
 
   if (navLevel === 'substep' && activeState) {
     const { letter: substepLetter, content: substepContent, iterations: substepIterations } = resolveSubstepView(activeState, selectedSubstepLetter)
-    const substepCommitRanges = parseCommitRanges(substepContent)
+    const substepCommitRanges = activeState.slopspace ? parseSlopCommitRanges(substepContent) : parseCommitRanges(substepContent)
 
     return (
       <div className="sidebar">
@@ -1661,8 +1864,8 @@ function Sidebar({
                 className={`nav-item nav-item-iter${selectedSubstepIterId === iter.id ? ' selected' : ''}`}
                 onClick={() => onSelectSubstepIter(iter.id)}
               >
-                <span className={`nav-iter-dot iter-${iter.type}`} />
-                <span className="nav-item-name">{iter.label}</span>
+                <span className={iterDotClass(iter)} />
+                <span className="nav-item-name">{iter.label}<AgentTag agent={iter.agent} /></span>
                 {iter.type === 'reply' && range && (
                   <button
                     className="nav-enter-btn"
@@ -1699,15 +1902,22 @@ function Sidebar({
           {diffFilesLoaded && diffFiles.length === 0 && (
             <div className="nav-empty">No project files changed.</div>
           )}
-          {diffFiles.map((file) => (
-            <div
-              key={file}
-              className={`nav-item${selectedDiffFile === file ? ' selected' : ''}`}
-              onClick={() => onSelectDiffFile(file)}
-            >
-              <span className="nav-item-name nav-item-file">{file.split('/').pop() ?? file}</span>
-            </div>
-          ))}
+          {diffFiles.map((file, i) => {
+            // A slopspace diff spans its repos: head each repo's files.
+            const repo = activeState?.slopspace ? diffFileRepo(file).repo : null
+            const newRepo = repo !== null && (i === 0 || diffFileRepo(diffFiles[i - 1]).repo !== repo)
+            return (
+              <div key={file}>
+                {newRepo && <div className="nav-repo-header">{repo}</div>}
+                <div
+                  className={`nav-item${selectedDiffFile === file ? ' selected' : ''}`}
+                  onClick={() => onSelectDiffFile(file)}
+                >
+                  <span className="nav-item-name nav-item-file">{file.split('/').pop() ?? file}</span>
+                </div>
+              </div>
+            )
+          })}
         </div>
         {reprFooter}
       </div>
@@ -1788,7 +1998,8 @@ interface StepCardProps {
   completedContent?: string
   onStartStep: (title: string, prompt: string) => void
   onCompleted: () => void
-  onRevert: (stepNum: number, iterLetter?: string) => void
+  // Absent for a slopspace condoc, which doesn't support revert.
+  onRevert?: (stepNum: number, iterLetter?: string) => void
   isActive: boolean
   isCompleted: boolean
 }
@@ -1858,7 +2069,7 @@ function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, 
     <div className={`step-card${isActive ? ' step-card-active' : ''}`}>
       <div className="step-card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span>Step {step.num} — <span className="step-card-title">{step.title}</span></span>
-        {isCompleted && !revertOpen && (
+        {isCompleted && onRevert && !revertOpen && (
           <button
             className="btn-danger-sm"
             title={`Revert to step ${step.num}`}
@@ -1890,7 +2101,7 @@ function StepCard({ step, completedContent, onStartStep, onCompleted, onRevert, 
             <button
               className="btn-danger"
               onClick={() => {
-                onRevert(step.num, revertIter || undefined)
+                onRevert?.(step.num, revertIter || undefined)
                 setRevertOpen(false)
               }}
             >
@@ -1964,7 +2175,7 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
                   isCompleted={s.num < info.stepNum}
                   onStartStep={handleStartStep}
                   onCompleted={() => onAction({ action: 'completed', path: info.path })}
-                  onRevert={(stepNum, iterLetter) => onAction({ action: 'revert', path: info.path, revertStep: stepNum, revertIter: iterLetter })}
+                  onRevert={state.slopspace ? undefined : (stepNum, iterLetter) => onAction({ action: 'revert', path: info.path, revertStep: stepNum, revertIter: iterLetter })}
                 />
               ))}
             </div>
@@ -2384,17 +2595,22 @@ function ActionPanel({ state, onAction, isSubstep = false }: ActionPanelProps) {
           <button className="btn-warning" onClick={() => setMode('revision')}>
             Revise {nextLetter}…
           </button>
-          <button className="btn-secondary" onClick={() => setMode('retry')}>
-            Retry {nextLetter}…
-          </button>
+          {/* Slopspace condocs don't support retry or revert (D8). */}
+          {!state.slopspace && (
+            <button className="btn-secondary" onClick={() => setMode('retry')}>
+              Retry {nextLetter}…
+            </button>
+          )}
           {!isSubstep && (
             <button className="btn-primary" onClick={() => setMode('substep')}>
               Substep {nextLetter}…
             </button>
           )}
-          <button className="btn-danger" onClick={() => setMode('revert')}>
-            Revert↩
-          </button>
+          {!state.slopspace && (
+            <button className="btn-danger" onClick={() => setMode('revert')}>
+              Revert↩
+            </button>
+          )}
           <button className="btn-secondary" onClick={() => setMode('add_resource')}>
             Add Resources…
           </button>
@@ -2833,10 +3049,10 @@ function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onActi
           {sections.map((sec) => (
             <div
               key={sec.id}
-              className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+              className={sectionClass(sec, selectedSubstepIterId === sec.id)}
               ref={(el) => { sectionRefs.current[sec.id] = el }}
             >
-              <div className="iter-section-label">{sec.label}</div>
+              <SectionLabel sec={sec} condocPath={state.info.path} />
               {sectionBody(sec, state.info.path)}
             </div>
           ))}
@@ -2868,10 +3084,10 @@ function SubstepDetailView({ state, substepLetter, selectedSubstepIterId, onActi
         {sections.map((sec) => (
           <div
             key={sec.id}
-            className={`iter-section iter-section-${sec.kind}${selectedSubstepIterId === sec.id ? ' iter-section-selected' : ''}`}
+            className={sectionClass(sec, selectedSubstepIterId === sec.id)}
             ref={(el) => { sectionRefs.current[sec.id] = el }}
           >
-            <div className="iter-section-label">{sec.label}</div>
+            <SectionLabel sec={sec} condocPath={state.info.path} />
             {sectionBody(sec, state.info.path)}
           </div>
         ))}
@@ -2919,10 +3135,10 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
             ? completedSections.map((sec) => (
                 <div
                   key={sec.id}
-                  className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
+                  className={sectionClass(sec, selectedIterId === sec.id)}
                   ref={(el) => { sectionRefs.current[sec.id] = el }}
                 >
-                  <div className="iter-section-label">{sec.label}</div>
+                  <SectionLabel sec={sec} condocPath={state.info.path} />
                   {sec.kind === 'substep' ? (
                     <div className="iter-section-content">
                       <span style={{ color: '#aaa', fontSize: 12 }}>{sec.content}</span>
@@ -2976,12 +3192,11 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
         {sections.map((sec) => (
           <div
             key={sec.id}
-            className={`iter-section iter-section-${sec.kind}${selectedIterId === sec.id ? ' iter-section-selected' : ''}`}
+            className={sectionClass(sec, selectedIterId === sec.id)}
             ref={(el) => { sectionRefs.current[sec.id] = el }}
             onDoubleClick={() => sec.kind === 'substep' && sec.substepLetter && onEnterSubstep(sec.substepLetter)}
           >
-            <div className="iter-section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>{sec.label}</span>
+            <SectionLabel sec={sec} condocPath={state.info.path}>
               {sec.kind === 'substep' && sec.substepLetter && (
                 <button
                   className="btn-secondary"
@@ -2991,7 +3206,7 @@ function StepDetailView({ state, stepNum, selectedIterId, onAction, onEnterSubst
                   Enter →
                 </button>
               )}
-            </div>
+            </SectionLabel>
             {sectionBody(sec, state.info.path)}
           </div>
         ))}

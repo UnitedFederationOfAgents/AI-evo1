@@ -40,6 +40,7 @@ export interface Iteration {
   label: string
   type: 'reply' | 'revision' | 'retry' | 'substep' | 'resource'
   from?: string
+  agent?: boolean // a resource the turn's agent created ("## Resource N (agent)")
 }
 
 export interface CondocState {

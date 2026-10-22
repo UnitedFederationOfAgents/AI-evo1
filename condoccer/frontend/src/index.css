@@ -191,6 +191,13 @@ body {
   font-size: 11px;
 }
 
+.nav-repo-header {
+  padding: 10px 12px 4px;
+  color: #888;
+  font-size: 10px;
+  font-weight: 600;
+}
+
 .nav-item {
   padding: 7px 12px;
   cursor: pointer;
@@ -263,6 +270,11 @@ body {
 .iter-retry   { background: #e07020; }
 .iter-substep { background: #9d55cc; }
 .iter-resource { background: #3bbfae; }
+/* An agent-created resource's dot is hollow (see iterDotClass). */
+.nav-iter-dot.iter-agent {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px #3bbfae;
+}
 
 /* ---- Badges ---- */
 
@@ -689,6 +701,62 @@ body {
 .iter-section-retry   .iter-section-label { color: #e07020; }
 .iter-section-substep .iter-section-label { color: #9d55cc; }
 .iter-section-resource .iter-section-label { color: #3bbfae; }
+
+/* An agent-created resource (Revision B of
+   slopspaceSlopspaceCondocsImpls/Step1Prompt.md): dashed border and an
+   "agent" tag on its label, so it reads apart from a human's. */
+.iter-section-agent { border-style: dashed; }
+.iter-section-agent.iter-section-selected { border-style: solid; }
+
+.resource-agent-tag {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid #3bbfae;
+  border-radius: 3px;
+  color: #3bbfae;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  vertical-align: 1px;
+}
+
+/* A section label with buttons at its right -- a resource's "to files"
+   (Revision E of slopspaceSlopspaceCondocsImpls/Step1Prompt.md), a
+   substep's "Enter →". */
+.iter-section-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.iter-section-label-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+}
+
+.resource-to-files-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+/* Lit once every linked file is already in the files tab (Revision F):
+   pressing it then goes there instead of copying. */
+.resource-to-files-btn.resource-to-files-btn-lit {
+  background: #2a4d2a;
+  color: #b8f0b8;
+  box-shadow: 0 0 6px rgba(110, 201, 110, 0.65);
+}
+.resource-to-files-btn.resource-to-files-btn-lit:hover:not(:disabled) { background: #336033; }
+
+.resource-to-files-status { font-size: 11px; color: #888; }
+.resource-to-files-status-done { color: #4ec94e; }
+.resource-to-files-status-error { color: #e05050; }
 
 .iter-section-content {
   font-size: 12px;

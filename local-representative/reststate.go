@@ -67,7 +67,8 @@ type lrState struct {
 func (s *Server) currentState() lrState {
 	var st lrState
 	if s.repoWatch != nil {
-		st.AutoRebuild = s.repoWatch.snapshot().AutoRebuild
+		rs := s.repoWatch.snapshot()
+		st.AutoRebuild = rs.AutoRebuild
 	}
 	st.AutoUpdate = s.selfVersion.autoUpdateEnabled()
 	ac := s.getACState()

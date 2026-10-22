@@ -3,7 +3,8 @@ import type {
   Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState, AgentInfo,
-  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg,
+  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo,
+  WorkerSlopspaceRequest, WorkerSlopspaceReply, LRWorkerSlopspaceReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
@@ -53,6 +54,8 @@ interface HostClientState {
   // answer to the last prompt submitted from here -- see worker.go.
   worker?: WorkerStateMsg
   workerReply?: WorkerReplyMsg
+  // ...and how the slopspace sub-tab's last manual control op went.
+  slopspaceReply?: WorkerSlopspaceReply
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
@@ -155,6 +158,21 @@ function useCoordinatorWS() {
       wsRef.current.send(JSON.stringify({ type: 'lr-worker-submit', payload: { host_id: hostId, prompt } }))
     } else {
       setReply({ ok: false, error: 'not connected' })
+    }
+  }, [])
+
+  // A host's slopspace sub-tab manual control panel -- see worker.go. Its
+  // answer comes back as lr-worker-slopspace-reply.
+  const sendLRWorkerSlopspace = useCallback((hostId: string, req: WorkerSlopspaceRequest) => {
+    const setReply = (slopspaceReply: WorkerSlopspaceReply | undefined) => setHostData(prev => ({
+      ...prev,
+      [hostId]: { ...(prev[hostId] ?? emptyHostState()), slopspaceReply },
+    }))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setReply(undefined)
+      wsRef.current.send(JSON.stringify({ type: 'lr-worker-slopspace', payload: { host_id: hostId, request: req } }))
+    } else {
+      setReply({ op: req.op, id: req.id, ok: false, error: 'not connected' })
     }
   }, [])
 
@@ -514,6 +532,14 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-worker-slopspace-reply': {
+            const p = msg.payload as LRWorkerSlopspaceReplyMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), slopspaceReply: p.reply },
+            }))
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
@@ -570,7 +596,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -1289,6 +1315,7 @@ function RepoWatchPanel({
 
   const locked = repoState.condoc_locked && !repoState.dirty
   const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : locked ? 'condoc' : 'rebuild'
+  const ufabuild = !!repoState.ufabuild_watch
 
   return (
     <div className="sys-repo-panel">
@@ -1308,15 +1335,25 @@ function RepoWatchPanel({
               : locked
               ? 'a condoc is mid-transition (.condoc lock file present) — rebuilding is held off until it settles'
               : repoState.rebuild_ready
-              ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              ? ufabuild
+                ? `a new .ufabuild request (${repoState.ufabuild_request}) — runs make deploy-dev-binaries at the repo root`
+                : 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              : ufabuild
+              ? 'no new .ufabuild request since the last successful build'
               : 'nothing to rebuild since the last successful build'
           }
         >
           {label}
         </button>
-        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst">
+        <label
+          className="sys-auto-rebuild"
+          title={ufabuild
+            ? 'not used while ufabuild watch is on (LR launched with --ufabuild-watch) -- a .ufabuild request builds straight away'
+            : 'rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst'}
+        >
           <input
             type="checkbox"
+            disabled={ufabuild}
             checked={repoState.auto_rebuild}
             onChange={e => onSetAutoRebuild(e.target.checked)}
           />
@@ -1330,6 +1367,11 @@ function RepoWatchPanel({
       </div>
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
+      )}
+      {ufabuild && (
+        <div className="sys-repo-ufabuild" title="ufabuild watch is on (LR launched with --ufabuild-watch): the dev branch is still pulled, but only a newly committed .ufabuild naming its own commit's parent builds">
+          .ufabuild:{repoState.ufabuild_request ? `request in ${repoState.ufabuild_request}` : repoState.ufabuild_note || 'no request'}
+        </div>
       )}
       {onSwitchBranch && (
         <BranchSwitcher
@@ -2318,6 +2360,31 @@ const FILE_ICON_PATH: Record<string, JSX.Element> = {
   ),
 }
 
+// SEQUENCE_ICON_PATH replaces FILE_ICON_PATH's for a YAML file that
+// validates for import as a sequence (FileInfo.sequence -- see
+// local-representative/seqfiles.go): a robot's head for a robot (IANAR
+// sequence-v2) sequence, a flow of three linked steps for a control-tab
+// sequence. Mirrors local-representative's own copy.
+const SEQUENCE_ICON_PATH: Record<string, JSX.Element> = {
+  robot: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="4" y="7" width="16" height="12" rx="2" />
+      <circle cx="9" cy="12" r="1.5" />
+      <circle cx="15" cy="12" r="1.5" />
+      <path d="M9 16h6M12 7V4M2 11v4M22 11v4" strokeLinecap="round" />
+      <circle cx="12" cy="3" r="1" />
+    </svg>
+  ),
+  control: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="2.5" width="8" height="5" rx="1" />
+      <rect x="13" y="9.5" width="8" height="5" rx="1" />
+      <rect x="3" y="16.5" width="8" height="5" rx="1" />
+      <path d="M11 5h4v4.5M13 12H7v4.5" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
 // FILE_STATE_CLASS drives the icon color the file-details dialog's
 // hold/persist actions describe: orange while short-term cached, yellow once
 // held, green once persisted to the host-store.
@@ -2327,13 +2394,20 @@ const FILE_STATE_CLASS: Record<string, string> = {
   persisted: 'file-state-persisted',
 }
 
-function FileIcon({ kind, state }: { kind: string; state?: string }) {
+function FileIcon({ kind, state, sequence }: { kind: string; state?: string; sequence?: string }) {
   const stateClass = FILE_STATE_CLASS[state ?? ''] ?? FILE_STATE_CLASS.cached
+  const seqIcon = sequence ? SEQUENCE_ICON_PATH[sequence] : undefined
   return (
-    <span className={`file-icon file-icon-${kind} ${stateClass}`}>
-      {FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
+    <span className={`file-icon file-icon-${seqIcon ? `seq-${sequence}` : kind} ${stateClass}`}>
+      {seqIcon ?? FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
     </span>
   )
+}
+
+// fileTypeLabel is the file-details "type" row: the kind, or which sequence
+// a sequence YAML imports as.
+function fileTypeLabel(file: FileInfo): string {
+  return file.sequence && SEQUENCE_ICON_PATH[file.sequence] ? `${file.sequence} sequence` : file.kind
 }
 
 // fileRawUrl/fileDownloadUrl address a file's bytes through AC's existing
@@ -2372,6 +2446,13 @@ function fileHighlightUrl(hostId: string, id: string): string {
 
 function fileDeleteUrl(hostId: string, id: string): string {
   return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
+}
+
+// fileImportUrl backs the file-details dialog's integrations ("import" and,
+// with run, "import and run"), through the same transparent proxy as
+// hold/persist/delete above -- see local-representative/fileintegrations.go.
+function fileImportUrl(hostId: string, id: string, run: boolean): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/import${run ? '?run=1' : ''}`
 }
 
 // markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F),
@@ -2882,7 +2963,7 @@ function FilesPanel({
               onDoubleClick={() => onEnter(f.id)}
               title={f.name}
             >
-              <FileIcon kind={f.kind} state={f.state} />
+              <FileIcon kind={f.kind} state={f.state} sequence={f.sequence} />
               <span className="files-item-name">{f.name}</span>
             </button>
           ))}
@@ -2893,13 +2974,14 @@ function FilesPanel({
 }
 
 function FileDetailPane({
-  file, hostId, onClose, onEnter, onMarkup,
+  file, hostId, onClose, onEnter, onMarkup, onOpenTab,
 }: {
   file: FileInfo
   hostId: string
   onClose: () => void
   onEnter: (id: string) => void
   onMarkup: (id: string) => void
+  onOpenTab: (tab: LRTab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [busy, setBusy] = useState(false)
@@ -2949,7 +3031,7 @@ function FileDetailPane({
         <span className="file-detail-title">file details</span>
         <button className="file-detail-close" onClick={onClose}>×</button>
       </div>
-      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} /></div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} sequence={file.sequence} /></div>
       <div className="file-detail-rows">
         <div className="file-detail-row">
           <span className="file-detail-label">name</span>
@@ -2957,7 +3039,7 @@ function FileDetailPane({
         </div>
         <div className="file-detail-row">
           <span className="file-detail-label">type</span>
-          <span className="file-detail-value">{file.kind}</span>
+          <span className="file-detail-value">{fileTypeLabel(file)}</span>
         </div>
         <div className="file-detail-row">
           <span className="file-detail-label">size</span>
@@ -3013,6 +3095,77 @@ function FileDetailPane({
           delete
         </button>
       </div>
+      <FileIntegrations file={file} importUrl={(id, run) => fileImportUrl(hostId, id, run)} onRunStarted={onOpenTab} />
+    </div>
+  )
+}
+
+// FileIntegrations mirrors local-representative's file-details subsection of
+// the same name: a sequence YAML's "import" into its tab's library on that
+// host, and "import and run", which also runs its first sequence with every
+// control at its default. It renders nothing for any other file. A plain
+// import stays here; a started run hands over to onRunStarted with the
+// host's tab it shows in.
+function FileIntegrations({
+  file,
+  importUrl,
+  onRunStarted,
+}: {
+  file: FileInfo
+  importUrl: (id: string, run: boolean) => string
+  onRunStarted: (tab: 'robot' | 'control') => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  useEffect(() => setStatus(null), [file.id])
+  if (!file.sequence || !SEQUENCE_ICON_PATH[file.sequence]) return null
+  const tab = file.sequence === 'robot' ? 'robot' : 'control'
+
+  const doImport = async (run: boolean) => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const resp = await fetch(importUrl(file.id, run), { method: 'POST' })
+      if (!resp.ok) {
+        setStatus({ ok: false, text: (await resp.text()).trim() || `failed (${resp.status})` })
+        return
+      }
+      const body = (await resp.json()) as { message?: string }
+      setStatus({ ok: true, text: body.message ?? 'imported' })
+      if (run) onRunStarted(tab)
+    } catch (err) {
+      setStatus({ ok: false, text: String(err) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="file-detail-integrations">
+      <span className="file-detail-integrations-label">{tab} sequence integrations</span>
+      <div className="file-detail-actions">
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(false)}
+          disabled={busy}
+          title={`Import into the ${tab} tab's library on this host`}
+        >
+          import
+        </button>
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(true)}
+          disabled={busy}
+          title="Import, then run its first sequence with every control at its default"
+        >
+          import and run
+        </button>
+      </div>
+      {status && (
+        <span className={`file-detail-integrate-status${status.ok ? '' : ' file-detail-integrate-error'}`}>
+          {status.text}
+        </span>
+      )}
     </div>
   )
 }
@@ -3648,7 +3801,7 @@ function agentTileTitle(a: AgentInfo): string {
 // selective-restart effect as "host update all" but generalized to every
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -4002,7 +4155,7 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -4067,7 +4220,7 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, activeTab, setActiveTab,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, activeTab, setActiveTab,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -4165,11 +4318,56 @@ function GlobalView({
   )
 }
 
-// WorkerPanel is a host's worker tab: a temporary prompt box that hands
-// prompt-only work to that host's dungeon-keeper, and the work signals it
-// reports, newest first -- see worker.go. Mirrors
+const WORKER_SUBTABS = ['direct', 'slopspace'] as const
+type WorkerSubTab = typeof WORKER_SUBTABS[number]
+
+// WorkerPanel is a host's worker tab, split in two: direct is a temporary
+// prompt box that hands prompt-only work to that host's dungeon-keeper, and
+// the work signals it reports, newest first; slopspace lists that host's
+// slopspaces, whether a local agent is using one, and a manual control
+// panel for them -- see worker.go. Mirrors
 // local-representative/frontend/src/App.tsx's own copy.
 function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+  slopspaceReply,
+  onControlSlopspace,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+  slopspaceReply: WorkerSlopspaceReply | null
+  onControlSlopspace: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [sub, setSub] = useState<WorkerSubTab>('direct')
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="ctl-subtabs">
+        {WORKER_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'direct' && <WorkerDirectView healthy={healthy} state={state} reply={reply} onSubmit={onSubmit} />}
+      {sub === 'slopspace' && (
+        <WorkerSlopspaceView healthy={healthy} state={state} reply={slopspaceReply} onControl={onControlSlopspace} />
+      )}
+    </div>
+  )
+}
+
+// WorkerDirectView is the worker tab's direct sub-tab: the prompt box and
+// the work signals.
+function WorkerDirectView({
   healthy,
   state,
   reply,
@@ -4192,12 +4390,7 @@ function WorkerPanel({
 
   const signals = state?.signals ?? []
   return (
-    <div className="worker-panel">
-      {state && (
-        <div className="worker-meta">
-          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
-        </div>
-      )}
+    <>
       <div className="worker-submit">
         <textarea
           className="worker-prompt"
@@ -4227,6 +4420,244 @@ function WorkerPanel({
             ))}
           </div>
         )}
+    </>
+  )
+}
+
+// WorkerSlopspaceView is the worker tab's slopspace sub-tab: the host's
+// slopspaces as dungeon-keeper last reported them, in use first, and below
+// them the manual control panel. Clicking a row picks it for the panel.
+function WorkerSlopspaceView({
+  healthy,
+  state,
+  reply,
+  onControl,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  // A create picks the new slopspace.
+  useEffect(() => {
+    if (reply?.ok && reply.op === 'create' && reply.id) setSelected(reply.id)
+  }, [reply])
+  if (!state) return <div className="service-empty">the worker hasn't reported yet</div>
+  if (!state.slopspaces) return <div className="service-empty">this worker is too old to report its slopspaces — rebuild it</div>
+  const slopspaces = state.slopspaces
+  const inUse = slopspaces.filter(s => s.in_use)
+  return (
+    <>
+      <div className="worker-meta">
+        {inUse.length > 0
+          ? `in use by a local agent: ${inUse.map(s => `${s.id.slice(0, 8)} (${s.agent_type})`).join(', ')}`
+          : 'no slopspace is in use by a local agent'}
+      </div>
+      {slopspaces.length === 0
+        ? <div className="service-empty">no slopspaces on this host</div>
+        : (
+          <div className="worker-signals">
+            {slopspaces.map(s => (
+              <WorkerSlopspaceRow
+                key={s.id}
+                slopspace={s}
+                selected={s.id === selected}
+                onSelect={() => setSelected(s.id === selected ? null : s.id)}
+              />
+            ))}
+            {!!state.slopspaces_omitted && <div className="worker-signal-detail">…and {state.slopspaces_omitted} older not shown</div>}
+          </div>
+        )}
+      <WorkerSlopspaceControl
+        healthy={healthy}
+        state={state}
+        selected={slopspaces.find(s => s.id === selected) ?? null}
+        onSelect={setSelected}
+        reply={reply}
+        onControl={onControl}
+      />
+    </>
+  )
+}
+
+const WORKER_AGENT_TYPES = ['agent-worker', 'heuristic-request']
+
+// WorkerSlopspaceControl is the slopspace sub-tab's manual control panel
+// (SlopspaceSlopspaceCondocs Step 1 Substep B, Revision A). Each button is
+// one call on the host's dungeon-keeper slopspace Manager -- the same
+// interface condoccer and the `dungeon-keeper slopspace` CLI use -- run by
+// that host's dungeon-keeper (see dungeon-keeper/slopctl.go). It refuses
+// anything on a slopspace a local agent is working in.
+function WorkerSlopspaceControl({
+  healthy,
+  state,
+  selected: sel,
+  onSelect,
+  reply,
+  onControl,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg
+  selected: SlopspaceInfo | null
+  onSelect: (id: string | null) => void
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+}) {
+  const [agentType, setAgentType] = useState(state.agent_type || WORKER_AGENT_TYPES[0])
+  const [repo, setRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [writeRepo, setWriteRepo] = useState('')
+  const [message, setMessage] = useState('')
+  const [command, setCommand] = useState('')
+  const [pending, setPending] = useState<string | null>(null)
+
+  // The answer ends the wait. A dungeon-keeper from before the panel never
+  // answers, so give up eventually; add-repo clones and write pushes can
+  // take a while. A queued command clears the box.
+  useEffect(() => {
+    if (!reply) return
+    setPending(null)
+    if (reply.ok && reply.op === 'command') setCommand('')
+  }, [reply])
+  useEffect(() => {
+    if (!pending) return
+    const t = setTimeout(() => setPending(null), 120_000)
+    return () => clearTimeout(t)
+  }, [pending])
+
+  const send = (req: WorkerSlopspaceRequest) => {
+    setPending(req.op)
+    onControl(req)
+  }
+  const id = sel?.id
+  const busy = !healthy || !!pending
+  const locked = busy || !sel || sel.in_use
+  const repos = sel?.repos ?? []
+  const stored = !!sel && !sel.deployed
+  // Where its spaces are right now on the host: the deploy location while
+  // deployed, else its directory under the slopspaces dir (which keeps its
+  // metadata either way).
+  const path = sel ? (sel.deployed ? sel.deploy_path : sel.path) ?? '' : ''
+  // A command (Revision B) queues a slopspace work signal for the host
+  // worker's agent, which runs it in the deployed slopspace; it shows on the
+  // direct sub-tab with the other signals.
+  const commandable = !locked && !!sel && sel.deployed && sel.agent_type === state.agent_type
+  const sendCommand = () => {
+    const text = command.trim()
+    if (!commandable || !text) return
+    send({ op: 'command', id, prompt: text })
+  }
+
+  return (
+    <div className="worker-slopctl">
+      <div className="worker-slopctl-title">manual control</div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">slopspace</span>
+        <select className="worker-slopctl-input worker-slopctl-pick" value={id ?? ''} onChange={e => onSelect(e.target.value || null)}>
+          <option value="">— pick one (or click a row) —</option>
+          {(state.slopspaces ?? []).map(s => (
+            <option key={s.id} value={s.id}>
+              {s.id.slice(0, 8)} · {s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'}{s.repos?.length ? ` · ${s.repos.join(', ')}` : ''}
+            </option>
+          ))}
+        </select>
+        <button className="worker-submit-btn" disabled={busy} onClick={() => send({ op: 'create' })}>+ create</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">path</span>
+        <input
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-path"
+          readOnly
+          value={path}
+          placeholder={!sel ? 'pick a slopspace' : 'rebuild dungeon-keeper to see paths'}
+          onFocus={e => e.target.select()}
+          disabled={!sel}
+        />
+      </div>
+      {sel?.deployed && sel.path && <div className="worker-meta">deployed — stored at {sel.path} when returned</div>}
+      {sel?.in_use &&<div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">lifecycle</span>
+        <select className="worker-slopctl-input" value={agentType} onChange={e => setAgentType(e.target.value)} disabled={locked || !stored}>
+          {WORKER_AGENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <button className="worker-submit-btn" disabled={locked || !stored} onClick={() => send({ op: 'deploy', id, agent_type: agentType })}>deploy</button>
+        <button className="worker-submit-btn" disabled={locked || stored} onClick={() => send({ op: 'return', id })}>return</button>
+        <button
+          className="worker-submit-btn worker-slopctl-danger"
+          disabled={locked}
+          onClick={() => {
+            if (window.confirm(`Delete slopspace ${id}? Anything not pushed from its writespaces is lost.`)) send({ op: 'delete', id })
+          }}
+        >delete</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">add repo</span>
+        <input className="worker-slopctl-input" placeholder="owner/name" value={repo} onChange={e => setRepo(e.target.value)} disabled={locked || !stored} />
+        <input className="worker-slopctl-input" placeholder="new branch" value={branch} onChange={e => setBranch(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || !/^[^/\s]+\/[^/\s]+$/.test(repo.trim()) || !branch.trim()}
+          onClick={() => send({ op: 'add-repo', id, repo: repo.trim(), branch: branch.trim() })}
+        >add</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">commit &amp; push</span>
+        <select className="worker-slopctl-input" value={writeRepo} onChange={e => setWriteRepo(e.target.value)} disabled={locked || !stored}>
+          <option value="">every repo</option>
+          {repos.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input className="worker-slopctl-input worker-slopctl-grow" placeholder="commit message (optional)" value={message} onChange={e => setMessage(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || repos.length === 0}
+          onClick={() => send({ op: 'write', id, repo: repos.includes(writeRepo) ? writeRepo : undefined, message: message.trim() || undefined })}
+        >write</button>
+      </div>
+      {sel?.deployed && !sel.in_use && <div className="worker-meta">adding repos and writing need it returned first</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">command</span>
+        <textarea
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-command"
+          rows={2}
+          placeholder={commandable ? `prompt for the ${sel?.agent_type} agent, run in this slopspace… Ctrl+Enter to send` : 'deploy the slopspace to send it a command'}
+          value={command}
+          onChange={e => setCommand(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendCommand()
+          }}
+          disabled={!commandable}
+        />
+        <button className="worker-submit-btn" disabled={!commandable || !command.trim()} onClick={sendCommand}>send</button>
+      </div>
+      {sel?.deployed && !sel.in_use && sel.agent_type !== state.agent_type && (
+        <div className="worker-meta">deployed for {sel.agent_type}, but this worker runs {state.agent_type} agents — commands need it deployed for {state.agent_type}</div>
+      )}
+      {pending && <div className="worker-meta">{pending}: waiting for dungeon-keeper…</div>}
+      {!pending && reply && (reply.ok
+        ? <div className="worker-slopctl-ok">{reply.op}{reply.id ? ` ${reply.id.slice(0, 8)}` : ''}: {reply.detail || 'done'}</div>
+        : <div className="worker-error">{reply.op ? `${reply.op}: ` : ''}{reply.error}</div>)}
+    </div>
+  )
+}
+
+function WorkerSlopspaceRow({ slopspace: s, selected, onSelect }: { slopspace: SlopspaceInfo; selected: boolean; onSelect: () => void }) {
+  const status = s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'
+  const repos = s.repos ?? []
+  return (
+    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}${selected ? ' worker-slopspace-selected' : ''}`}>
+      <div className="worker-signal-head worker-slopspace-head" onClick={onSelect} title="pick for manual control">
+        <span className="worker-signal-status">{status}</span>
+        <span className="worker-signal-prompt" title={s.id}>
+          {s.id}
+          {repos.length > 0 && <span className="worker-slopspace-repos"> · {repos.join(', ')}</span>}
+        </span>
+        <span className="worker-signal-when">
+          {s.deployed && s.agent_type ? `${s.agent_type} · ` : ''}
+          {s.iteration} deploy{s.iteration === 1 ? '' : 's'} · created {new Date(s.created_at).toLocaleString()}
+        </span>
+      </div>
     </div>
   )
 }
@@ -4266,8 +4697,8 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 }
 
 function LRView({
-  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit, sendLRWorkerSlopspace,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -4281,6 +4712,7 @@ function LRView({
   sendLRLaunchApp: (hostId: string, name: string) => void
   sendLRTerminateApp: (hostId: string, id: string) => void
   sendLRWorkerSubmit: (hostId: string, prompt: string) => void
+  sendLRWorkerSlopspace: (hostId: string, req: WorkerSlopspaceRequest) => void
   sendLRRestartApp: (hostId: string) => void
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
@@ -4361,6 +4793,22 @@ function LRView({
     win.addEventListener('hashchange', capture)
     capture() // in case condoccer already restored a hash before this attached
   }
+
+  // A lit "to files" on a condoccer resource (slopspaceSlopspaceCondocsImpls/
+  // Step1Prompt.md Revision F) asks for this host's files tab with that file
+  // selected -- the id is the host LR's own, which is what this tab lists.
+  // Only this host's embedded condoccer frame is listened to.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin || e.source !== condoccerFrameRef.current?.contentWindow) return
+      if (e.data?.type !== 'condoccer-open-file' || typeof e.data.id !== 'string') return
+      setActiveTab('files')
+      setViewerFileId(null)
+      setSelectedFileId(e.data.id)
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [setActiveTab])
 
   const getServiceStatus = (name: string): string => {
     if (!active) return 'unknown'
@@ -4557,6 +5005,8 @@ function LRView({
                     state={data.worker ?? null}
                     reply={data.workerReply ?? null}
                     onSubmit={prompt => sendLRWorkerSubmit(host.id, prompt)}
+                    slopspaceReply={data.slopspaceReply ?? null}
+                    onControlSlopspace={req => sendLRWorkerSlopspace(host.id, req)}
                   />
                 )
               )}
@@ -4618,6 +5068,7 @@ function LRView({
                 onClose={() => setSelectedFileId(null)}
                 onEnter={setViewerFileId}
                 onMarkup={id => setMarkupFile(files.find(f => f.id === id) ?? null)}
+                onOpenTab={tab => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
               />
             )}
           </div>
@@ -4854,7 +5305,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -5050,6 +5501,7 @@ export default function App() {
               sendLRLaunchApp={sendLRLaunchApp}
               sendLRTerminateApp={sendLRTerminateApp}
               sendLRWorkerSubmit={sendLRWorkerSubmit}
+              sendLRWorkerSlopspace={sendLRWorkerSlopspace}
               sendLRRestartApp={sendLRRestartApp}
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}

@@ -751,7 +751,6 @@ func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
 //	__system:restart-managed <instance-id-or-app>
 //	__system:rebuild
 //	__system:auto-rebuild <on|off>
-//	__system:ufabuild-watch <on|off>
 //	__system:auto-update <on|off>
 //	__system:switch-branch <name>
 //	__system:connect <provider> <credential>
@@ -792,8 +791,6 @@ func (s *Server) handleSystemCommand(raw string) {
 		s.requestRebuild("operator")
 	case "auto-rebuild":
 		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
-	case "ufabuild-watch":
-		s.setUfabuildWatch(arg == "on" || arg == "true" || arg == "1")
 	case "switch-branch":
 		if arg == "" {
 			log.Printf("system: remote switch-branch command missing target")

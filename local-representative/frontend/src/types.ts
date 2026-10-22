@@ -220,7 +220,8 @@ export interface RepoStateMsg {
   branch?: string
   branches?: string[]
   switch_error?: string
-  // The "ufabuild watch" toggle (local-representative/ufabuild.go): when on,
+  // "ufabuild watch" (local-representative/ufabuild.go), read-only -- set by
+  // LR's --ufabuild-watch launch flag, with no runtime toggle for now: when on,
   // rebuild_ready means a new .ufabuild request rather than HEAD moving, and
   // it builds without waiting on auto-rebuild. ufabuild_request is the short
   // SHA of the commit holding the current valid request; ufabuild_note says

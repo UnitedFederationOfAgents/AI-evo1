@@ -409,13 +409,15 @@ appears only in per-host system tabs. The global view gets its own
 **dev-branch** control under **rebuild all**, which reads `<differs>` when
 the watched hosts are on different branches and switches every one of them.
 
-A **ufabuild watch** toggle next to **auto-rebuild** (also settable remotely
-via `__system:ufabuild-watch <on|off>`, which `agent-coordinator`'s per-host
-system tab and global Details & Control pane send as `lr-set-ufabuild-watch`)
-swaps HEAD-moved rebuilds for explicit, committed build requests, per
+**ufabuild watch** swaps HEAD-moved rebuilds for explicit, committed build
+requests, per
 [`SlopspaceSlopspaceCondocs`](https://github.com/je-sidestuff/sloppo/blob/main/condocs/SlopspaceSlopspaceCondocs.md)
-Step 2. It's off by default, and off means everything above is unchanged
-(the "legacy" watch).
+Step 2. For now it can only be turned on at launch, by passing
+`--ufabuild-watch` alongside `--dev-repo` (or `ufabuild-watch: true` in
+`local-representative.yaml`). There's no runtime toggle in LR's or
+`agent-coordinator`'s system tabs; that comes back with the move to condocs
+v2 (Step 2 Revision F). It's off by default, and off means everything above
+is unchanged (the "legacy" watch).
 
 With it on, the watcher keeps polling and pulling the dev branch exactly as
 above, but HEAD moving no longer makes the rebuild button ready. Only a
@@ -426,10 +428,10 @@ above, but HEAD moving no longer makes the rebuild button ready. Only a
 parent: 1a2b3c4   # 7-40 hex characters, abbreviated or full
 ```
 
-So to ask for a build, run `scripts/ufabuild.sh` (add `--push` to push it
-too). It refuses unless the working tree is clean and HEAD is on a branch,
-then writes the commit you're on into `.ufabuild` and commits that as its own
-change. By hand that's:
+So to ask for a build, run `scripts/ufabuild.sh`. It refuses unless the
+working tree is clean and HEAD is on a branch, then writes the commit you're
+on into `.ufabuild`, commits that as its own change and pushes it (pass
+`nopush` to commit without pushing). By hand that's:
 
 ```bash
 printf 'parent: %s\n' "$(git rev-parse --short HEAD)" > .ufabuild
@@ -457,9 +459,10 @@ checkbox greys out meanwhile). Details:
 - A request whose build fails isn't retried on every poll. Press
   **rebuild** to retry it, or commit a new request.
 - Any successful rebuild, in either mode, marks the current request built and
-  the current HEAD built, so toggling between modes never fires a stale
-  build.
-- The toggle rides restarts in `lrState.UfabuildWatch`, like auto-rebuild.
+  the current HEAD built, so switching modes never fires a stale build.
+- A restart relaunches LR with the same flags, so ufabuild watch stays as
+  it was launched. The panels show it read-only: the auto-rebuild checkbox
+  greys out and a `.ufabuild:` line appears while it's on.
 
 Every git/make invocation the watcher makes — the poll's own status check,
 the pull, and a rebuild, whether triggered by the operator or by

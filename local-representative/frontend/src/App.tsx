@@ -209,14 +209,6 @@ function useStatusWS() {
     }
   }, [])
 
-  // Toggles "ufabuild watch" (local-representative/ufabuild.go): build only
-  // for a newly committed .ufabuild naming its commit's parent.
-  const setUfabuildWatch = useCallback((enabled: boolean) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'set-ufabuild-watch', payload: { enabled } }))
-    }
-  }, [])
-
   // Checks out a different branch in the watched dev-repo -- the "dev
   // branch" switch control (Step1SubstepCPrompt.md Revision B).
   const switchBranch = useCallback((branch: string) => {
@@ -438,7 +430,7 @@ function useStatusWS() {
   return {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, setUfabuildWatch, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
   }
 }
 
@@ -1369,13 +1361,11 @@ function RepoWatchPanel({
   repoState,
   onRebuild,
   onSetAutoRebuild,
-  onSetUfabuildWatch,
   onSwitchBranch,
 }: {
   repoState: RepoStateMsg
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
-  onSetUfabuildWatch: (enabled: boolean) => void
   onSwitchBranch: (branch: string) => void
 }) {
   if (!repoState.watched) return null
@@ -1415,7 +1405,7 @@ function RepoWatchPanel({
         <label
           className="sys-auto-rebuild"
           title={ufabuild
-            ? 'not used while ufabuild watch is on -- a .ufabuild request builds straight away'
+            ? 'not used while ufabuild watch is on (--ufabuild-watch) -- a .ufabuild request builds straight away'
             : 'rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst'}
         >
           <input
@@ -1425,17 +1415,6 @@ function RepoWatchPanel({
             onChange={e => onSetAutoRebuild(e.target.checked)}
           />
           auto-rebuild
-        </label>
-        <label
-          className="sys-auto-rebuild"
-          title="keep pulling the dev branch, but build only when a newly committed .ufabuild names its own commit's parent (parent: <sha>) -- off follows HEAD moving instead"
-        >
-          <input
-            type="checkbox"
-            checked={ufabuild}
-            onChange={e => onSetUfabuildWatch(e.target.checked)}
-          />
-          ufabuild watch
         </label>
         {repoState.auto_rebuild_pending && (
           <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time HEAD moves again">
@@ -1447,7 +1426,7 @@ function RepoWatchPanel({
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>
       )}
       {ufabuild && (
-        <div className="sys-repo-ufabuild">
+        <div className="sys-repo-ufabuild" title="ufabuild watch is on (launched with --ufabuild-watch): the dev branch is still pulled, but only a newly committed .ufabuild naming its own commit's parent builds">
           .ufabuild: {repoState.ufabuild_request ? `request in ${repoState.ufabuild_request}` : repoState.ufabuild_note || 'no request'}
         </div>
       )}
@@ -1529,7 +1508,6 @@ function SystemPanel({
   onRestart,
   onRebuild,
   onSetAutoRebuild,
-  onSetUfabuildWatch,
   onSwitchBranch,
   onSetAutoUpdate,
   onConnectProvider,
@@ -1545,7 +1523,6 @@ function SystemPanel({
   onRestart: () => void
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
-  onSetUfabuildWatch: (enabled: boolean) => void
   onSwitchBranch: (branch: string) => void
   onSetAutoUpdate: (enabled: boolean) => void
   onConnectProvider: (provider: string, token: string) => void
@@ -1581,7 +1558,7 @@ function SystemPanel({
 
   return (
     <div className="sys-panel">
-      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} onSetUfabuildWatch={onSetUfabuildWatch} onSwitchBranch={onSwitchBranch} />
+      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} onSwitchBranch={onSwitchBranch} />
       {fcRunning && fcRows.map(row => (
         <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
           {row.label} control: <strong>{fcControl(row.state)}</strong>
@@ -3536,7 +3513,7 @@ export default function App() {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
     acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, setUfabuildWatch, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -3712,7 +3689,6 @@ export default function App() {
                   onRestart={restartApp}
                   onRebuild={rebuildRepo}
                   onSetAutoRebuild={setAutoRebuild}
-                  onSetUfabuildWatch={setUfabuildWatch}
                   onSwitchBranch={switchBranch}
                   onSetAutoUpdate={setAutoUpdate}
                   onConnectProvider={connectProvider}

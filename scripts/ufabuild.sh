@@ -4,25 +4,26 @@ set -euo pipefail
 # Commits a .ufabuild build request: a commit whose sole change is the
 # repo-root .ufabuild naming the commit you're on as its parent. Every dev-mode
 # LR following this branch with "ufabuild watch" on builds once it pulls the
-# commit (see docs/DevMode.md).
+# commit (see docs/DevMode.md). The commit is pushed to the branch's upstream
+# unless told otherwise.
 #
-# Usage: scripts/ufabuild.sh [--push]
+# Usage: scripts/ufabuild.sh [nopush]
 #
-#   --push  also push the commit to the branch's upstream.
+#   nopush  commit the request locally but don't push it.
 #
 # Refuses to run unless the working tree is clean (no staged, unstaged or
 # untracked changes) and HEAD is on a branch, so the request names exactly
 # the commit that's checked out and nothing else rides along with it.
 
 usage() {
-    echo "usage: $0 [--push]" >&2
+    echo "usage: $0 [nopush]" >&2
     exit 2
 }
 
-push=false
+push=true
 for arg in "$@"; do
     case "$arg" in
-        --push) push=true ;;
+        nopush|--nopush|--no-push) push=false ;;
         -h|--help) usage ;;
         *) echo "unknown argument: $arg" >&2; usage ;;
     esac
@@ -57,4 +58,6 @@ echo "committed .ufabuild request $(git rev-parse --short HEAD) on $branch (pare
 
 if $push; then
     git push
+else
+    echo "not pushed (nopush); run 'git push' when you want the watcher to see it"
 fi

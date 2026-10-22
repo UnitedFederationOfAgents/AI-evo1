@@ -93,8 +93,9 @@ type RepoStateMsg struct {
 	Branches    []string `json:"branches,omitempty"`
 	SwitchError string   `json:"switch_error,omitempty"`
 
-	// UfabuildWatch is the "ufabuild watch" toggle (see ufabuild.go and
-	// docs/DevMode.md): off, rebuilds follow HEAD moving (the legacy
+	// UfabuildWatch is "ufabuild watch", set at launch by --ufabuild-watch
+	// (see ufabuild.go and docs/DevMode.md; reported read-only, there's no
+	// runtime toggle for now): off, rebuilds follow HEAD moving (the legacy
 	// behavior above); on, the watcher still pulls but only builds when a
 	// newly committed .ufabuild names its own commit's parent, and does so
 	// straight away rather than via auto-rebuild's debounce. UfabuildRequest
@@ -135,7 +136,7 @@ type repoWatch struct {
 	branches    []string // see RepoStateMsg.Branches
 	switchErr   string   // see RepoStateMsg.SwitchError
 
-	// ufabuildWatch is the "ufabuild watch" toggle (RepoStateMsg.UfabuildWatch).
+	// ufabuildWatch is "ufabuild watch" (RepoStateMsg.UfabuildWatch).
 	// ufabuild is the .ufabuild request as of ufabuildReadAt (the HEAD it was
 	// read at, see refreshUfabuild). ufabuildBuilt is the request commit the
 	// last successful rebuild covered (the watcher's starting request before

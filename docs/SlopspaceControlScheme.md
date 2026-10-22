@@ -129,6 +129,13 @@ Not yet built or run end to end; see the Step 1 replies.
   - The UI only enables add repo and commit & push on a stored (returned) slopspace, because the Manager refuses both while it is deployed.
 - **Caveat:** these are raw Manager calls. Condoccer doesn't know about them. Deploying, returning or deleting a condoc's slopspace by hand while condoccer is driving it will confuse its turn queue. The panel can't tell which slopspaces belong to a condoc (see above). The same applies to a command: one sent to a condoc's deployed slopspace runs in that condoc's writespaces, and condoccer might return the slopspace before the command is picked up.
 
+### Done: outside pushes to a condoc branch (SlopspaceSlopspaceCondocs Step 2 Revision G)
+
+- **The problem.** The slopspace's copy of a branch used to be the only writer, so condoccer never fetched. Anything else pushed to the branch, such as `scripts/ufabuild.sh` from a dev checkout or a hand-made fix, made the next reply's push fail with `! [rejected] … (fetch first)`, and the turn stuck at `returned`.
+- **Before pushing.** `WriteRepoChanges` now calls `gitIntegrateRemote` after committing. It fetches the branch, and if the remote has commits the slopspace doesn't, it rebases the slopspace's unpushed commits onto them (`rebase --autostash`). Only unpushed commits are rewritten, so no pushed SHA in an earlier reply changes. A branch not on the remote yet is left alone.
+- **At turn start.** Before taking a turn's bases, condoccer calls the new `SyncRepo` on each target, so the agent sees outside commits and they stay out of the reply's base → head range. The condoc repo isn't synced then, because the UI's uncommitted prompt edits sit in its working tree. It's still rebased before its push.
+- **Conflicts.** If an outside commit conflicts with an unpushed one, the rebase is aborted, the repo is left as it was, and the turn fails with an error saying so. To fix it by hand, with condoccer stopped or the condoc idle on that error, use `g() { git --git-dir="$SS/writespaces-secure/repos/<owner>/<repo>" --work-tree="$SS/writespaces/repos/<owner>/<repo>" "$@"; }`, with `$SS` the slopspace's directory. Run `g pull --rebase origin <branch>`, resolve the conflicts, `g add` the files, `g rebase --continue` and `g push origin HEAD`, then press **Resubmit**.
+
 ## What Exists Today
 
 ### Same-repo scheme (for contrast)

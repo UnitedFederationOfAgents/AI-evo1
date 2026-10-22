@@ -130,19 +130,13 @@ func (w *repoWatch) refreshUfabuild() bool {
 	return changed
 }
 
+// setUfabuildWatch turns ufabuild watch on or off. For now it's only set
+// once at startup, from --ufabuild-watch (see main.go): the runtime toggle
+// LR's and AC's system tabs had is gone until condocs v2 brings it back
+// (SlopspaceSlopspaceCondocs.md Step 2 Revision F).
 func (w *repoWatch) setUfabuildWatch(v bool) {
 	w.mu.Lock()
 	w.ufabuildWatch = v
 	w.mu.Unlock()
 	w.notify()
-}
-
-// setUfabuildWatch toggles the dev-repo watcher's ufabuild watch -- the
-// system tab's "ufabuild watch" toggle or agent-coordinator's
-// "__system:ufabuild-watch <on|off>". A no-op when no repo is being watched.
-func (s *Server) setUfabuildWatch(v bool) {
-	if s.repoWatch == nil {
-		return
-	}
-	s.repoWatch.setUfabuildWatch(v)
 }

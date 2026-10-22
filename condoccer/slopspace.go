@@ -1318,6 +1318,20 @@ func (s *Server) runTurn(stem string) error {
 				return errTurnWait
 			}
 			if len(t.Bases) == 0 {
+				// Bring in anything pushed to a target's branch from outside
+				// (a .ufabuild request, a hand-made fix) before the base is
+				// taken, so the agent sees it and the reply's push doesn't
+				// get rejected. The condoc repo isn't synced here: the UI
+				// edits it in place and its uncommitted prompt could
+				// conflict; WriteRepoChanges still rebases it before pushing.
+				if !meta.Deployed {
+					for _, repo := range spec.Targets {
+						owner, name, _ := strings.Cut(repo, "/")
+						if _, err := s.slop.ss.SyncRepo(id, owner, name); err != nil {
+							return err
+						}
+					}
+				}
 				for _, repo := range spec.Repos() {
 					owner, name, _ := strings.Cut(repo, "/")
 					sha, err := s.slop.ss.RepoHead(id, owner, name)

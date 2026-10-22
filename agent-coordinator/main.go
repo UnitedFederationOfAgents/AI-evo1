@@ -425,8 +425,9 @@ type RepoStateMsg struct {
 	Branches    []string `json:"branches,omitempty"`
 	SwitchError string   `json:"switch_error,omitempty"`
 
-	// UfabuildWatch/UfabuildRequest/UfabuildNote: the "ufabuild watch"
-	// toggle and the .ufabuild request it builds from -- see
+	// UfabuildWatch/UfabuildRequest/UfabuildNote: "ufabuild watch" (set by
+	// LR's --ufabuild-watch; display-only here, AC can't toggle it for now)
+	// and the .ufabuild request it builds from -- see
 	// local-representative/ufabuild.go.
 	UfabuildWatch   bool   `json:"ufabuild_watch"`
 	UfabuildRequest string `json:"ufabuild_request,omitempty"`
@@ -1364,19 +1365,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					state = "on"
 				}
 				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
-			}
-		case "lr-set-ufabuild-watch":
-			var payload struct {
-				HostID  string `json:"host_id"`
-				Enabled bool   `json:"enabled"`
-			}
-			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
-				payload.HostID != "" && s.reprServer != nil {
-				state := "off"
-				if payload.Enabled {
-					state = "on"
-				}
-				s.reprServer.SendCommand(payload.HostID, "__system:ufabuild-watch "+state)
 			}
 		case "lr-switch-branch":
 			// The dev-branch "switch" control (Step1SubstepCPrompt.md

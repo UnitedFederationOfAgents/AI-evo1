@@ -2592,11 +2592,13 @@ function FileDetailPane({
   onClose,
   onEnter,
   onMarkup,
+  onOpenTab,
 }: {
   file: FileInfo
   onClose: () => void
   onEnter: (id: string) => void
   onMarkup: (id: string) => void
+  onOpenTab: (tab: Tab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [busy, setBusy] = useState(false)
@@ -2714,7 +2716,7 @@ function FileDetailPane({
           delete
         </button>
       </div>
-      <FileIntegrations file={file} importUrl={fileImportUrl} />
+      <FileIntegrations file={file} importUrl={fileImportUrl} onRunStarted={onOpenTab} />
     </div>
   )
 }
@@ -2724,13 +2726,17 @@ function FileDetailPane({
 // condocs/slopspaceSlopspaceCondocsImpls/Step1Prompt.md). So far that's a
 // sequence YAML's "import" into its tab's library and "import and run",
 // which also runs its first sequence with every control at its default. It
-// renders nothing for any other file.
+// renders nothing for any other file. A plain import stays here, so several
+// files can be imported in a row; a started run hands over to onRunStarted
+// with the tab it shows in, to watch it (Revision H).
 function FileIntegrations({
   file,
   importUrl,
+  onRunStarted,
 }: {
   file: FileInfo
   importUrl: (id: string, run: boolean) => string
+  onRunStarted: (tab: 'robot' | 'control') => void
 }) {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
@@ -2749,6 +2755,7 @@ function FileIntegrations({
       }
       const body = (await resp.json()) as { message?: string }
       setStatus({ ok: true, text: body.message ?? 'imported' })
+      if (run) onRunStarted(tab)
     } catch (err) {
       setStatus({ ok: false, text: String(err) })
     } finally {
@@ -3752,6 +3759,7 @@ export default function App() {
                 onClose={() => setSelectedFileId(null)}
                 onEnter={setViewerFileId}
                 onMarkup={id => setMarkupFile(filesState?.files.find(f => f.id === id) ?? null)}
+                onOpenTab={goToTab}
               />
             )}
           </div>

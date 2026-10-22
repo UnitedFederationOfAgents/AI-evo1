@@ -69,6 +69,10 @@ type Server struct {
 	// finished, by its run id; closing one cancels it (see lrrun.go).
 	lrRunsMu sync.Mutex
 	lrRuns   map[string]chan struct{}
+
+	// imported is the latest files-tab "import and run", kept to replay to
+	// a robot tab opened while it runs or soon after (see lrimport.go).
+	imported importedRun
 }
 
 func newServer() *Server {
@@ -120,6 +124,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.sendToClient(c, "self-info", SelfInfoMsg{DevMode: s.devMode, Version: ufaversion.Version})
 	go s.sendModeMismatch(c)
 	go s.sendToClient(c, "seq2-library", s.seqLib.snapshot())
+	s.replayImported(c)
 
 	// Write pump.
 	go func() {

@@ -78,6 +78,9 @@ function useRobotWS() {
   const [seqLib, setSeqLib] = useState<SeqLibraryMsg | null>(null)
   const [seq2Replies, setSeq2Replies] = useState<Record<string, Seq2ReplyMsg>>({})
   const [seq2Run, setSeq2Run] = useState<SeqRun | null>(null)
+  // Counts files-tab "import and run"s seen (including one replayed on
+  // connecting), so App can switch to sequence-v2 to show each.
+  const [importedRuns, setImportedRuns] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
   const reqCounter = useRef(0)
 
@@ -211,6 +214,7 @@ function useRobotWS() {
             const p = msg.payload as Seq2StartedMsg
             // A run this tab didn't start -- a files-tab "import and run"
             // (lrimport.go) -- is picked up too, unless one of its own is going.
+            if (p.imported) setImportedRuns((n) => n + 1)
             setSeq2Run((run) =>
               run && run.sequenceId === p.sequence_id
                 ? { ...run, def: p.def, steps: p.def.steps.map(() => ({ status: 'pending' as const })) }
@@ -411,6 +415,7 @@ function useRobotWS() {
     seq2Request,
     seq2Run,
     runSeq2,
+    importedRuns,
   }
 }
 
@@ -657,8 +662,15 @@ export default function App() {
     seq2Request,
     seq2Run,
     runSeq2,
+    importedRuns,
   } = useRobotWS()
   const [tab, setTab] = useState<Tab>('simple')
+
+  // A files-tab "import and run" lands here to be watched (Revision H of
+  // condocs/slopspaceSlopspaceCondocsImpls/Step1Prompt.md), so show it.
+  useEffect(() => {
+    if (importedRuns > 0) setTab('sequence-v2')
+  }, [importedRuns])
 
   return (
     <div className={`app${devMode ? ' app-dev-mode' : ''}`}>

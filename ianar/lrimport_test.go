@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -48,5 +50,60 @@ func TestImportForLRErrors(t *testing.T) {
 	}
 	if _, ok := s.seqLib.actionMap()["lr-import-print"]; ok {
 		t.Error("a failed import changed the library")
+	}
+}
+
+// TestReplayImported checks a tab that connects after an imported run began
+// gets its started message, each step's latest progress in step order, and
+// the result -- until importedReplayFor after it finished.
+func TestReplayImported(t *testing.T) {
+	now := time.Now()
+	origClock := clock
+	clock = func() time.Time { return now }
+	t.Cleanup(func() { clock = origClock })
+
+	s := &Server{clients: map[*wsClient]bool{}}
+	// replayTypes lists what a newly connected tab is replayed, progress
+	// messages as "seq2-progress:<step>".
+	replayTypes := func() []string {
+		c := &wsClient{send: make(chan []byte, 64)}
+		s.replayImported(c)
+		close(c.send)
+		var types []string
+		for b := range c.send {
+			var m wsMsg
+			if err := json.Unmarshal(b, &m); err != nil {
+				t.Fatal(err)
+			}
+			if m.Type == "seq2-progress" {
+				var p SequenceProgressMsg
+				_ = json.Unmarshal(m.Payload, &p)
+				m.Type = fmt.Sprintf("%s:%d", m.Type, p.Step)
+			}
+			types = append(types, m.Type)
+		}
+		return types
+	}
+	if got := replayTypes(); len(got) != 0 {
+		t.Fatalf("nothing run yet, replayed %v", got)
+	}
+
+	def := SequenceDef{ID: "q", Steps: []SequenceStepDef{{}, {}}}
+	s.broadcastImported("seq2-started", -1, Seq2StartedMsg{SequenceID: "q", Def: def, Imported: true})
+	s.broadcastImported("seq2-progress", 1, SequenceProgressMsg{SequenceID: "q", Step: 1, Status: "running"})
+	s.broadcastImported("seq2-progress", 0, SequenceProgressMsg{SequenceID: "q", Step: 0, Status: "success"})
+	s.broadcastImported("seq2-progress", 1, SequenceProgressMsg{SequenceID: "q", Step: 1, Status: "success"})
+	if got, want := strings.Join(replayTypes(), " "), "seq2-started seq2-progress:0 seq2-progress:1"; got != want {
+		t.Errorf("mid-run replay = %q, want %q", got, want)
+	}
+
+	s.broadcastImported("seq2-result", -1, SequenceResultMsg{SequenceID: "q", FailedStep: -1})
+	if got, want := strings.Join(replayTypes(), " "), "seq2-started seq2-progress:0 seq2-progress:1 seq2-result"; got != want {
+		t.Errorf("finished replay = %q, want %q", got, want)
+	}
+
+	now = now.Add(importedReplayFor + time.Second)
+	if got := replayTypes(); len(got) != 0 {
+		t.Errorf("long-finished run replayed %v", got)
 	}
 }

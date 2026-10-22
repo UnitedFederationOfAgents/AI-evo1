@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 )
 
 // This file backs the files tab's "import" and "import and run" buttons on a
@@ -88,11 +90,83 @@ func (s *Server) importForLR(req RobotSeqImportRequest) RobotSeqImportMsg {
 // streams it to every robot tab rather than the one that asked.
 func (s *Server) runImported(id string, q sequence) {
 	log.Printf("robot: running imported sequence %q for local-representative", id)
-	s.broadcast("seq2-started", Seq2StartedMsg{SequenceID: id, Def: q.def()})
-	res := runSequence(q, func(p SequenceProgressMsg) { s.broadcast("seq2-progress", p) })
+	s.broadcastImported("seq2-started", -1, Seq2StartedMsg{SequenceID: id, Def: q.def(), Imported: true})
+	res := runSequence(q, func(p SequenceProgressMsg) { s.broadcastImported("seq2-progress", p.Step, p) })
 	res.Warnings = s.seqLib.staleFor(id)
 	if res.Recording != nil {
 		res.ArtifactID = s.artifacts.keep(sequenceArtifact(q.def(), res))
 	}
-	s.broadcast("seq2-result", res)
+	s.broadcastImported("seq2-result", -1, res)
+}
+
+// importedReplayFor is how long after an imported run finishes a newly
+// opened robot tab is still shown it. "Import and run" sends the files tab
+// to the robot tab (Revision H), whose page only connects once it's shown --
+// usually after the run has started, often after a short one has finished.
+const importedReplayFor = 2 * time.Minute
+
+// importedRun is the latest imported run's messages, in the order a robot
+// tab needs them: seq2-started, each step's latest seq2-progress, then
+// seq2-result once it's done.
+type importedRun struct {
+	mu       sync.Mutex
+	started  []byte
+	progress map[int][]byte
+	steps    int
+	result   []byte
+	doneAt   time.Time
+}
+
+// broadcastImported broadcasts one of an imported run's messages and keeps
+// it for replayImported. step is the progress message's step, else -1.
+// Holding imported.mu across the broadcast keeps a tab that's being replayed
+// to from getting a newer message ahead of the replay.
+func (s *Server) broadcastImported(typ string, step int, payload interface{}) {
+	msg := s.marshalMsg(typ, payload)
+	r := &s.imported
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch typ {
+	case "seq2-started":
+		r.started, r.progress, r.result = msg, map[int][]byte{}, nil
+		r.steps = len(payload.(Seq2StartedMsg).Def.Steps)
+	case "seq2-progress":
+		r.progress[step] = msg
+	case "seq2-result":
+		r.result, r.doneAt = msg, clock()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for c := range s.clients {
+		select {
+		case c.send <- msg:
+		default:
+		}
+	}
+}
+
+// replayImported sends a newly connected tab the imported run, if one is
+// going or finished within importedReplayFor.
+func (s *Server) replayImported(c *wsClient) {
+	r := &s.imported
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started == nil || (r.result != nil && clock().Sub(r.doneAt) > importedReplayFor) {
+		return
+	}
+	msgs := [][]byte{r.started}
+	for i := 0; i < r.steps; i++ {
+		if m, ok := r.progress[i]; ok {
+			msgs = append(msgs, m)
+		}
+	}
+	if r.result != nil {
+		msgs = append(msgs, r.result)
+	}
+	for _, m := range msgs {
+		select {
+		case c.send <- m:
+		default:
+		}
+	}
 }

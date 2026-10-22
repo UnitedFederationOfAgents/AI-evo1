@@ -2958,13 +2958,14 @@ function FilesPanel({
 }
 
 function FileDetailPane({
-  file, hostId, onClose, onEnter, onMarkup,
+  file, hostId, onClose, onEnter, onMarkup, onOpenTab,
 }: {
   file: FileInfo
   hostId: string
   onClose: () => void
   onEnter: (id: string) => void
   onMarkup: (id: string) => void
+  onOpenTab: (tab: LRTab) => void
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const [busy, setBusy] = useState(false)
@@ -3078,7 +3079,7 @@ function FileDetailPane({
           delete
         </button>
       </div>
-      <FileIntegrations file={file} importUrl={(id, run) => fileImportUrl(hostId, id, run)} />
+      <FileIntegrations file={file} importUrl={(id, run) => fileImportUrl(hostId, id, run)} onRunStarted={onOpenTab} />
     </div>
   )
 }
@@ -3086,13 +3087,17 @@ function FileDetailPane({
 // FileIntegrations mirrors local-representative's file-details subsection of
 // the same name: a sequence YAML's "import" into its tab's library on that
 // host, and "import and run", which also runs its first sequence with every
-// control at its default. It renders nothing for any other file.
+// control at its default. It renders nothing for any other file. A plain
+// import stays here; a started run hands over to onRunStarted with the
+// host's tab it shows in.
 function FileIntegrations({
   file,
   importUrl,
+  onRunStarted,
 }: {
   file: FileInfo
   importUrl: (id: string, run: boolean) => string
+  onRunStarted: (tab: 'robot' | 'control') => void
 }) {
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
@@ -3111,6 +3116,7 @@ function FileIntegrations({
       }
       const body = (await resp.json()) as { message?: string }
       setStatus({ ok: true, text: body.message ?? 'imported' })
+      if (run) onRunStarted(tab)
     } catch (err) {
       setStatus({ ok: false, text: String(err) })
     } finally {
@@ -5046,6 +5052,7 @@ function LRView({
                 onClose={() => setSelectedFileId(null)}
                 onEnter={setViewerFileId}
                 onMarkup={id => setMarkupFile(files.find(f => f.id === id) ?? null)}
+                onOpenTab={tab => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
               />
             )}
           </div>

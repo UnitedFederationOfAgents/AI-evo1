@@ -210,6 +210,8 @@ export interface Seq2ReplyMsg {
 export interface Seq2StartedMsg {
   sequence_id: string
   def: SequenceDef
+  // A files-tab "import and run" (lrimport.go), shown in sequence-v2.
+  imported?: boolean
 }
 
 // OCRLine is a line of text read off the screen, boxed in capture pixels

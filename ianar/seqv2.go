@@ -1391,6 +1391,10 @@ type Seq2ReplyMsg struct {
 type Seq2StartedMsg struct {
 	SequenceID string      `json:"sequence_id"`
 	Def        SequenceDef `json:"def"`
+
+	// Imported marks a files-tab "import and run" (lrimport.go), which the
+	// robot tab switches to its sequence-v2 view to show.
+	Imported bool `json:"imported,omitempty"`
 }
 
 // broadcast sends a message to every connected client.

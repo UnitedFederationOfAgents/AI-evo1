@@ -1323,6 +1323,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(m.Payload, &payload); err == nil {
 				s.setAutoRebuild(payload.Enabled)
 			}
+		case "set-ufabuild-watch":
+			var payload struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil {
+				s.setUfabuildWatch(payload.Enabled)
+			}
 		case "switch-branch":
 			var payload struct {
 				Branch string `json:"branch"`
@@ -1775,8 +1782,8 @@ func main() {
 	// auto-rebuild and auto-update halves.
 	prevState, havePrevState := loadPreviousState()
 	if havePrevState {
-		log.Printf("restart state: restoring auto-rebuild=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v condoccer-root=%q from before the restart",
-			prevState.AutoRebuild, prevState.AutoUpdate, prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps, prevState.CondoccerRoot)
+		log.Printf("restart state: restoring auto-rebuild=%v ufabuild-watch=%v auto-update=%v auto-connect=%v (ac=%s:%s) managed-apps=%v condoccer-root=%q from before the restart",
+			prevState.AutoRebuild, prevState.UfabuildWatch, prevState.AutoUpdate,prevState.AutoConnect, prevState.ACHost, prevState.ACPort, prevState.ManagedApps, prevState.CondoccerRoot)
 		prevState.applyToConfig(&cfg)
 	}
 
@@ -1853,6 +1860,9 @@ func main() {
 		log.Printf("dev-repo: watching %s for changes to rebuild from (see docs/DevMode.md)", root)
 		if havePrevState && prevState.AutoRebuild {
 			s.repoWatch.setAutoRebuild(true)
+		}
+		if havePrevState && prevState.UfabuildWatch {
+			s.repoWatch.setUfabuildWatch(true)
 		}
 		go s.repoWatch.watchLoop()
 	}

@@ -409,6 +409,53 @@ appears only in per-host system tabs. The global view gets its own
 **dev-branch** control under **rebuild all**, which reads `<differs>` when
 the watched hosts are on different branches and switches every one of them.
 
+A **ufabuild watch** toggle next to **auto-rebuild** (also settable remotely
+via `__system:ufabuild-watch <on|off>`, which `agent-coordinator`'s per-host
+system tab and global Details & Control pane send as `lr-set-ufabuild-watch`)
+swaps HEAD-moved rebuilds for explicit, committed build requests, per
+[`SlopspaceSlopspaceCondocs`](https://github.com/je-sidestuff/sloppo/blob/main/condocs/SlopspaceSlopspaceCondocs.md)
+Step 2. It's off by default, and off means everything above is unchanged
+(the "legacy" watch).
+
+With it on, the watcher keeps polling and pulling the dev branch exactly as
+above, but HEAD moving no longer makes the rebuild button ready. Only a
+**`.ufabuild` request** does: a YAML file at the repo root that names the
+*parent* of the commit that last changed it:
+
+```yaml
+parent: 1a2b3c4   # 7-40 hex characters, abbreviated or full
+```
+
+So to ask for a build, write the commit you're on into `.ufabuild` and commit
+that as its own change:
+
+```bash
+printf 'parent: %s\n' "$(git rev-parse --short HEAD)" > .ufabuild
+git add .ufabuild && git commit -m "ufabuild" && git push
+```
+
+Every LR following that branch with ufabuild watch on pulls it, finds the
+commit that last changed `.ufabuild` (`git log -1 -- .ufabuild`), checks that
+the file names that commit's first parent, and builds HEAD **straight
+away**: no 90-second debounce, and whether or not auto-rebuild is on (the
+checkbox greys out meanwhile). Details:
+
+- Each request (keyed by the commit holding it) is built once. Commits
+  landing after it don't rebuild it, and a request already committed when
+  LR starts counts as built, the same way the starting HEAD does.
+- A `.ufabuild` naming any other commit, one that doesn't parse, or one
+  that's been deleted isn't a request. The panel's `.ufabuild:` line says
+  which (`ufabuild_note`), or names the current request's commit
+  (`ufabuild_request`).
+- The usual blockers still apply: a dirty repo or a `.condoc` lock holds the
+  build off until it clears.
+- A request whose build fails isn't retried on every poll. Press
+  **rebuild** to retry it, or commit a new request.
+- Any successful rebuild, in either mode, marks the current request built and
+  the current HEAD built, so toggling between modes never fires a stale
+  build.
+- The toggle rides restarts in `lrState.UfabuildWatch`, like auto-rebuild.
+
 Every git/make invocation the watcher makes — the poll's own status check,
 the pull, and a rebuild, whether triggered by the operator or by
 auto-rebuild — goes through one mutex, so **the check-and-rebuild process is

@@ -249,6 +249,14 @@ export interface LRRepoStateMsg {
   branch?: string
   branches?: string[]
   switch_error?: string
+  // The "ufabuild watch" toggle (local-representative/ufabuild.go): when on,
+  // rebuild_ready means a new .ufabuild request rather than HEAD moving, and
+  // it builds without waiting on auto-rebuild. ufabuild_request is the short
+  // SHA of the commit holding the current valid request; ufabuild_note says
+  // why there isn't one.
+  ufabuild_watch?: boolean
+  ufabuild_request?: string
+  ufabuild_note?: string
 }
 
 export interface CondocInfo {

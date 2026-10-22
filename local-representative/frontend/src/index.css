@@ -1468,6 +1468,15 @@ body {
   white-space: nowrap;
 }
 
+/* The .ufabuild request readout, shown while ufabuild watch is on. */
+.sys-repo-ufabuild {
+  font-size: 11px;
+  color: #9c9c9c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B). */
 .sys-branch {
   display: flex;

@@ -1106,6 +1106,8 @@ body {
    before building. */
 .sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
 .sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The .ufabuild request readout, shown while ufabuild watch is on. */
+.sys-repo-ufabuild { font-size: 11px; color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B):
    inside the dev-repo panel per-host, and under "rebuild all" globally. */
 .sys-branch { display: flex; flex-direction: column; gap: 6px; }

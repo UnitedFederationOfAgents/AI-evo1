@@ -27,6 +27,21 @@ func TestCurrentStateCapturesAutoRebuild(t *testing.T) {
 	}
 }
 
+// TestCurrentStateCapturesUfabuildWatch is the same for the "ufabuild watch"
+// toggle (ufabuild.go).
+func TestCurrentStateCapturesUfabuildWatch(t *testing.T) {
+	s := newServer("test-lr")
+	dir := initTestRepo(t, "true")
+	s.repoWatch = newRepoWatch(dir, func() {})
+	if got := s.currentState(); got.UfabuildWatch {
+		t.Fatalf("expected UfabuildWatch=false by default, got %+v", got)
+	}
+	s.setUfabuildWatch(true)
+	if got := s.currentState(); !got.UfabuildWatch {
+		t.Fatalf("expected UfabuildWatch=true after toggling on, got %+v", got)
+	}
+}
+
 // TestCurrentStateCapturesAutoUpdate verifies currentState reflects
 // selfVersion's live auto-update toggle, and reports false when this LR
 // isn't loader-managed (selfVersion nil) at all -- see Step5Prompt.md

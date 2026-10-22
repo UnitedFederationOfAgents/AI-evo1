@@ -210,6 +210,11 @@ function useCoordinatorWS() {
     wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
   }, [])
 
+  // Toggles the host LR's "ufabuild watch" (local-representative/ufabuild.go).
+  const sendLRSetUfabuildWatch = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-ufabuild-watch', payload: { host_id: hostId, enabled } }))
+  }, [])
+
   // Checks out a different branch in the host's watched dev-repo -- the
   // "dev branch" switch control (Step1SubstepCPrompt.md Revision B).
   const sendLRSwitchBranch = useCallback((hostId: string, branch: string) => {
@@ -596,7 +601,7 @@ function useCoordinatorWS() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetUfabuildWatch, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   }
 }
 
@@ -1304,17 +1309,19 @@ function Trough({ entries }: { entries: TroughEntry[] }) {
 // details pane deliberately doesn't, since its own "switch all" control
 // under "rebuild all" covers every host at once.
 function RepoWatchPanel({
-  repoState, onRebuild, onSetAutoRebuild, onSwitchBranch,
+  repoState, onRebuild, onSetAutoRebuild, onSetUfabuildWatch, onSwitchBranch,
 }: {
   repoState: LRRepoStateMsg | undefined
   onRebuild: () => void
   onSetAutoRebuild: (enabled: boolean) => void
+  onSetUfabuildWatch: (enabled: boolean) => void
   onSwitchBranch?: (branch: string) => void
 }) {
   if (!repoState?.watched) return null
 
   const locked = repoState.condoc_locked && !repoState.dirty
   const label = repoState.building ? 'building…' : repoState.dirty ? 'dirty' : locked ? 'condoc' : 'rebuild'
+  const ufabuild = !!repoState.ufabuild_watch
 
   return (
     <div className="sys-repo-panel">
@@ -1334,19 +1341,40 @@ function RepoWatchPanel({
               : locked
               ? 'a condoc is mid-transition (.condoc lock file present) — rebuilding is held off until it settles'
               : repoState.rebuild_ready
-              ? 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              ? ufabuild
+                ? `a new .ufabuild request (${repoState.ufabuild_request}) — runs make deploy-dev-binaries at the repo root`
+                : 'HEAD has moved since the last rebuild — runs make deploy-dev-binaries at the repo root'
+              : ufabuild
+              ? 'no new .ufabuild request since the last successful build'
               : 'nothing to rebuild since the last successful build'
           }
         >
           {label}
         </button>
-        <label className="sys-auto-rebuild" title="rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst">
+        <label
+          className="sys-auto-rebuild"
+          title={ufabuild
+            ? 'not used while ufabuild watch is on -- a .ufabuild request builds straight away'
+            : 'rebuild automatically whenever it becomes possible -- waits 90s after the last change to avoid rebuilding on every commit in a burst'}
+        >
           <input
             type="checkbox"
+            disabled={ufabuild}
             checked={repoState.auto_rebuild}
             onChange={e => onSetAutoRebuild(e.target.checked)}
           />
           auto-rebuild
+        </label>
+        <label
+          className="sys-auto-rebuild"
+          title="keep pulling the dev branch, but build only when a newly committed .ufabuild names its own commit's parent (parent: <sha>) -- off follows HEAD moving instead"
+        >
+          <input
+            type="checkbox"
+            checked={ufabuild}
+            onChange={e => onSetUfabuildWatch(e.target.checked)}
+          />
+          ufabuild watch
         </label>
         {repoState.auto_rebuild_pending && (
           <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time HEAD moves again">
@@ -1356,6 +1384,11 @@ function RepoWatchPanel({
       </div>
       {repoState.last_error && (
         <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
+      )}
+      {ufabuild && (
+        <div className="sys-repo-ufabuild">
+          .ufabuild: {repoState.ufabuild_request ? `request in ${repoState.ufabuild_request}` : repoState.ufabuild_note || 'no request'}
+        </div>
       )}
       {onSwitchBranch && (
         <BranchSwitcher
@@ -2139,7 +2172,7 @@ function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
 }
 
 function SystemPanel({
-  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch, onSetAutoUpdate,
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSetUfabuildWatch, onSwitchBranch, onSetAutoUpdate,
   onConnectProvider, onDisconnectProvider, onInspectAgents, onOpenTab,
 }: {
   hostId: string
@@ -2154,6 +2187,7 @@ function SystemPanel({
   onRestartManaged: (hostId: string, id: string) => void
   onRebuild: (hostId: string) => void
   onSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  onSetUfabuildWatch: (hostId: string, enabled: boolean) => void
   onSwitchBranch: (hostId: string, branch: string) => void
   onSetAutoUpdate: (hostId: string, enabled: boolean) => void
   onConnectProvider: (hostId: string, provider: string, token: string) => void
@@ -2205,6 +2239,7 @@ function SystemPanel({
         repoState={repoState}
         onRebuild={() => onRebuild(hostId)}
         onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
+        onSetUfabuildWatch={enabled => onSetUfabuildWatch(hostId, enabled)}
         onSwitchBranch={branch => onSwitchBranch(hostId, branch)}
       />
       {fcRunning && fcRows.map(row => (
@@ -3785,7 +3820,7 @@ function agentTileTitle(a: AgentInfo): string {
 // selective-restart effect as "host update all" but generalized to every
 // connected host's LR plus AC, rather than just the AC host.
 function GlobalTopologyPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetUfabuildWatch, sendLRSwitchBranch, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -3796,6 +3831,7 @@ function GlobalTopologyPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetUfabuildWatch: (hostId: string, enabled: boolean) => void
   sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
@@ -3979,6 +4015,7 @@ function GlobalTopologyPanel({
               repoState={selectedData?.repo}
               onRebuild={() => selectedHostId && sendLRRebuildApp(selectedHostId)}
               onSetAutoRebuild={enabled => selectedHostId && sendLRSetAutoRebuild(selectedHostId, enabled)}
+              onSetUfabuildWatch={enabled => selectedHostId && sendLRSetUfabuildWatch(selectedHostId, enabled)}
             />
           )}
           <div className="topo-controls-buttons">
@@ -4139,7 +4176,7 @@ function GlobalTopologyPanel({
 }
 
 function GlobalSystemPanel({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetUfabuildWatch, sendLRSwitchBranch, sendLRSetAutoUpdate,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -4150,6 +4187,7 @@ function GlobalSystemPanel({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetUfabuildWatch: (hostId: string, enabled: boolean) => void
   sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   acLoaderManaged: boolean
@@ -4185,6 +4223,7 @@ function GlobalSystemPanel({
           sendLRRestartApp={sendLRRestartApp}
           sendLRRebuildApp={sendLRRebuildApp}
           sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          sendLRSetUfabuildWatch={sendLRSetUfabuildWatch}
           sendLRSwitchBranch={sendLRSwitchBranch}
           sendLRSetAutoUpdate={sendLRSetAutoUpdate}
           acLoaderManaged={acLoaderManaged}
@@ -4204,7 +4243,7 @@ function GlobalSystemPanel({
 }
 
 function GlobalView({
-  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, activeTab, setActiveTab,
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetUfabuildWatch, sendLRSwitchBranch, sendLRSetAutoUpdate, activeTab, setActiveTab,
   acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles, onOpenHost,
 }: {
   onOpenHost: (hostId: string, tab: LRTab) => void
@@ -4215,6 +4254,7 @@ function GlobalView({
   sendLRRestartApp: (hostId: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetUfabuildWatch: (hostId: string, enabled: boolean) => void
   sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   activeTab: LRTab
@@ -4283,6 +4323,7 @@ function GlobalView({
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetUfabuildWatch={sendLRSetUfabuildWatch}
               sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               acLoaderManaged={acLoaderManaged}
@@ -4682,7 +4723,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit, sendLRWorkerSlopspace,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetUfabuildWatch, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -4701,6 +4742,7 @@ function LRView({
   sendLRRestartManagedApp: (hostId: string, id: string) => void
   sendLRRebuildApp: (hostId: string) => void
   sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSetUfabuildWatch: (hostId: string, enabled: boolean) => void
   sendLRSwitchBranch: (hostId: string, branch: string) => void
   sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
   sendLRConnectProvider: (hostId: string, provider: string, token: string) => void
@@ -4934,6 +4976,7 @@ function LRView({
                     onRestartManaged={sendLRRestartManagedApp}
                     onRebuild={sendLRRebuildApp}
                     onSetAutoRebuild={sendLRSetAutoRebuild}
+                    onSetUfabuildWatch={sendLRSetUfabuildWatch}
                     onSwitchBranch={sendLRSwitchBranch}
                     onSetAutoUpdate={sendLRSetAutoUpdate}
                     onConnectProvider={sendLRConnectProvider}
@@ -5289,7 +5332,7 @@ export default function App() {
     connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
-    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild, sendLRSetUfabuildWatch, sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -5490,6 +5533,7 @@ export default function App() {
               sendLRRestartManagedApp={sendLRRestartManagedApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetUfabuildWatch={sendLRSetUfabuildWatch}
               sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               sendLRConnectProvider={sendLRConnectProvider}
@@ -5513,6 +5557,7 @@ export default function App() {
               sendLRRestartApp={sendLRRestartApp}
               sendLRRebuildApp={sendLRRebuildApp}
               sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSetUfabuildWatch={sendLRSetUfabuildWatch}
               sendLRSwitchBranch={sendLRSwitchBranch}
               sendLRSetAutoUpdate={sendLRSetAutoUpdate}
               activeTab={activeTab}

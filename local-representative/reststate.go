@@ -22,6 +22,12 @@ type lrState struct {
 	// watching a repo at all.
 	AutoRebuild bool `json:"auto_rebuild,omitempty"`
 
+	// UfabuildWatch mirrors the dev-repo watcher's "ufabuild watch" toggle
+	// (see ufabuild.go) the same way -- a ufabuild-triggered rebuild is
+	// usually followed by an update-and-restart, which mustn't drop LR back
+	// to the legacy watch.
+	UfabuildWatch bool `json:"ufabuild_watch,omitempty"`
+
 	// AutoUpdate mirrors selfVersion's auto-update toggle (see
 	// selfversion.go and condocs/initialDistributedDevelopmentImpls/Step5Prompt.md
 	// Revision E) -- like AutoRebuild, this has to survive the very restart
@@ -67,7 +73,9 @@ type lrState struct {
 func (s *Server) currentState() lrState {
 	var st lrState
 	if s.repoWatch != nil {
-		st.AutoRebuild = s.repoWatch.snapshot().AutoRebuild
+		rs := s.repoWatch.snapshot()
+		st.AutoRebuild = rs.AutoRebuild
+		st.UfabuildWatch = rs.UfabuildWatch
 	}
 	st.AutoUpdate = s.selfVersion.autoUpdateEnabled()
 	ac := s.getACState()

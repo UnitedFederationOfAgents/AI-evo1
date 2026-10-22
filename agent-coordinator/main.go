@@ -424,6 +424,13 @@ type RepoStateMsg struct {
 	Branch      string   `json:"branch,omitempty"`
 	Branches    []string `json:"branches,omitempty"`
 	SwitchError string   `json:"switch_error,omitempty"`
+
+	// UfabuildWatch/UfabuildRequest/UfabuildNote: the "ufabuild watch"
+	// toggle and the .ufabuild request it builds from -- see
+	// local-representative/ufabuild.go.
+	UfabuildWatch   bool   `json:"ufabuild_watch"`
+	UfabuildRequest string `json:"ufabuild_request,omitempty"`
+	UfabuildNote    string `json:"ufabuild_note,omitempty"`
 }
 
 // Host-scoped WS message types sent to browser clients.
@@ -538,6 +545,9 @@ type LRRepoStateMsg struct {
 	Branch             string   `json:"branch,omitempty"`
 	Branches           []string `json:"branches,omitempty"`
 	SwitchError        string   `json:"switch_error,omitempty"`
+	UfabuildWatch      bool     `json:"ufabuild_watch"`
+	UfabuildRequest    string   `json:"ufabuild_request,omitempty"`
+	UfabuildNote       string   `json:"ufabuild_note,omitempty"`
 }
 
 // LRFilesMsg is the host-scoped "lr-files-state" message sent to browser
@@ -1072,6 +1082,9 @@ func repoStateMsg(hostID string, r *RepoStateMsg) LRRepoStateMsg {
 		Branch:             r.Branch,
 		Branches:           r.Branches,
 		SwitchError:        r.SwitchError,
+		UfabuildWatch:      r.UfabuildWatch,
+		UfabuildRequest:    r.UfabuildRequest,
+		UfabuildNote:       r.UfabuildNote,
 	}
 }
 
@@ -1351,6 +1364,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					state = "on"
 				}
 				s.reprServer.SendCommand(payload.HostID, "__system:auto-rebuild "+state)
+			}
+		case "lr-set-ufabuild-watch":
+			var payload struct {
+				HostID  string `json:"host_id"`
+				Enabled bool   `json:"enabled"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil &&
+				payload.HostID != "" && s.reprServer != nil {
+				state := "off"
+				if payload.Enabled {
+					state = "on"
+				}
+				s.reprServer.SendCommand(payload.HostID, "__system:ufabuild-watch "+state)
 			}
 		case "lr-switch-branch":
 			// The dev-branch "switch" control (Step1SubstepCPrompt.md

@@ -6,6 +6,7 @@ import { HostFilePicker } from './HostFilePicker'
 import type { ControlV1Props } from './ControlV1'
 import { detectTextFormat } from './textformat'
 import { WorkerVisual } from './WorkerVisual'
+import { AgentOps } from './AgentOps'
 
 const TABS =['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -1538,6 +1539,8 @@ function SystemPanel({
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const troughEntries = useTrough(repoState.last_error)
+  // Drilled into "agent operations"' full-page view (its "↑ system" leaves).
+  const [opsPage, setOpsPage] = useState(false)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -1546,6 +1549,9 @@ function SystemPanel({
 
   if (!state) {
     return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+  if (opsPage) {
+    return <div className="sys-panel"><AgentOps ops={state.agent_ops} nowSec={nowSec} onUp={() => setOpsPage(false)} /></div>
   }
 
   const runningCount = (name: string) =>
@@ -1622,6 +1628,7 @@ function SystemPanel({
         onConnect={onConnectProvider}
         onDisconnect={onDisconnectProvider}
       />
+      <AgentOps ops={state.agent_ops} nowSec={nowSec} onOpen={() => setOpsPage(true)} />
       <Trough entries={troughEntries} />
     </div>
   )

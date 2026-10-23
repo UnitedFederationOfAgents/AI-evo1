@@ -139,6 +139,21 @@ export interface SystemStateMsg {
   managed: ProcInfo[]
   connections?: ConnectionInfo[]
   agents?: AgentsState
+  agent_ops?: AgentOp[]
+}
+
+// AgentOp is one agent call in the "agent operations" section, from its
+// agent-records writing file (see local-representative/agentops.go).
+// ended_at is absent while it runs; it's dropped 5 minutes after.
+export interface AgentOp {
+  id: string
+  session: string
+  session_name?: string
+  agent: string // "" from an older clauditable
+  model?: string
+  command: string
+  started_at: number
+  ended_at?: number
 }
 
 // ModeMismatchMsg discloses that a connected peer's dev-mode status differs

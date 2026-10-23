@@ -105,6 +105,9 @@ type SystemStateMsg struct {
 	// Agents is the "agents & models" section: which AI agents (and models)
 	// this host can run, per ambiguous-agent -- see agents.go.
 	Agents AgentsState `json:"agents"`
+	// AgentOps is the "agent operations" section: agent calls running here,
+	// plus those finished in the last 5 minutes -- see agentops.go.
+	AgentOps []AgentOp `json:"agent_ops"`
 }
 
 // launchSpec describes how to start one managed application.
@@ -456,6 +459,7 @@ func (s *Server) systemState() SystemStateMsg {
 		Managed:     procs,
 		Connections: append([]ConnectionInfo{}, s.connectivity.connections()...),
 		Agents:      s.agents.snapshot(),
+		AgentOps:    s.agentOps.snapshot(),
 	}
 }
 

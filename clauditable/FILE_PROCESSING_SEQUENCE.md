@@ -9,7 +9,7 @@ for the exact on-disk formats.
 
 | File | Lifetime | Written by | Purpose |
 |------|----------|------------|---------|
-| `{ts}-writing.txt` / `{ts}-s-writing.txt` | Transient — exists only while the command runs | The invocation that dispatched the command | Marks "a writer is active at this timestamp" so concurrent invocations can detect a collision |
+| `{ts}-writing.txt` / `{ts}-s-writing.txt` | Transient — exists only while the command runs | The invocation that dispatched the command | Marks "a writer is active at this timestamp" so concurrent invocations can detect a collision. Holds `<ts> <agent> <model>` (`-` when unset), then the command; local-representative lists it as a running agent call (`agentops.go`) |
 | `{ts}-raw.txt` / `{ts}-s-raw.txt` | Permanent | The same invocation, at completion | The complete, untruncated command + response. Never edited after creation, except a `-s-raw.txt` being renamed to `-raw.txt` (see below) |
 | `{ts}-processed.txt` / `{ts}-s-processed.txt` | Permanent | The **producer of the raw/s-raw file above**, immediately after writing it | The raw content run through auto-maintenance (secret redaction, loading-bar stripping, long-response truncation), with a JSON header per processing step applied. A primary writes straight to `-processed.txt`; a secondary keeps the `-s-` infix until consolidation folds and promotes it (see below) |
 | `session.jsonl` | Permanent, append-only | The primary, once its own command completes | The consolidated, human-scannable log: one JSON-metadata-plus-preview entry per invocation, in timestamp order |

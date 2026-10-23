@@ -362,6 +362,8 @@ type SystemStateMsg struct {
 	Managed     []ProcInfo       `json:"managed"`
 	Connections []ConnectionInfo `json:"connections"`
 	Agents      *AgentsState     `json:"agents"`
+	// AgentOps is passed through untouched -- local-representative/agentops.go.
+	AgentOps json.RawMessage `json:"agent_ops"`
 }
 
 // AgentsState mirrors local-representative/agents.go's: which AI agents (and
@@ -524,6 +526,9 @@ type LRSystemStateMsg struct {
 	// Agents is null when that LR predates the "agents & models" section
 	// (or isn't connected).
 	Agents *AgentsState `json:"agents"`
+	// AgentOps is the "agent operations" section, as that LR sent it; null
+	// when it predates the section (or isn't connected).
+	AgentOps json.RawMessage `json:"agent_ops"`
 }
 
 // LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
@@ -951,7 +956,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	if system != nil {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{
-			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections, Agents: system.Agents,
+			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections, Agents: system.Agents, AgentOps: system.AgentOps,
 		})
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -1876,7 +1881,7 @@ func main() {
 				hs.system = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-system-state", LRSystemStateMsg{
-					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections, Agents: payload.Agents,
+					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections, Agents: payload.Agents, AgentOps: payload.AgentOps,
 				})
 			}
 		case "repo-state":

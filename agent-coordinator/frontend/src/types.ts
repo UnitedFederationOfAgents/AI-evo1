@@ -183,6 +183,20 @@ export interface LRSystemStateMsg {
   managed: ProcInfo[]
   connections?: ConnectionInfo[] | null // null/absent for an older LR -- see ConnectionInfo
   agents?: AgentsState | null // null/absent for an older LR -- see AgentsState
+  agent_ops?: AgentOp[] | null // null/absent for an older LR
+}
+
+// AgentOp mirrors local-representative/frontend/src/types.ts's: one agent
+// call on that host (see local-representative/agentops.go).
+export interface AgentOp {
+  id: string
+  session: string
+  session_name?: string
+  agent: string
+  model?: string
+  command: string
+  started_at: number
+  ended_at?: number
 }
 
 // AgentInfo is one agent in the per-host "agents & models" section, as that

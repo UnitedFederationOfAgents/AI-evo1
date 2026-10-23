@@ -1074,6 +1074,17 @@ body {
 .sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
 .sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
 .sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
+/* "agent operations" (AgentOps.tsx) also reuses them. */
+.agent-ops-count { font-size: 11px; color: #555; }
+.sys-providers-heading .agent-ops-up { margin-left: 0; }
+.agent-op { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; color: #d4d4d4; }
+.agent-op-done { color: #777; }
+.agent-op-dot { width: 7px; height: 7px; border-radius: 50%; background: #4a9eff; align-self: center; }
+.agent-op-done .agent-op-dot { background: #555; }
+.agent-op-agent { font-weight: 600; }
+.agent-op-session { color: #888; }
+.agent-op-time { margin-left: auto; font-size: 11px; color: #888; }
+.agent-op-cmd { flex-basis: 100%; font-family: monospace; font-size: 11px; color: #888; overflow-wrap: anywhere; padding-left: 17px; }
 .sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
 .sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
 .sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }

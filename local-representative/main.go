@@ -268,6 +268,10 @@ type Server struct {
 	// this host can run, for the system tab -- see agents.go.
 	agents *agentsWatch
 
+	// agentOps lists this host's running (and just-finished) agent calls,
+	// from agent-records' writing files, for the system tab -- see agentops.go.
+	agentOps *agentOpsWatch
+
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
@@ -1877,6 +1881,8 @@ func main() {
 	s.hostStoreDir = cfg.hostStoreDir
 	s.acHTTPPort = cfg.acHTTPPort
 	s.recordsPath = resolveRecordsPath()
+	s.agentOps = newAgentOpsWatch(s.recordsPath, s.broadcastSystemState)
+	go s.agentOps.watchLoop()
 	if cfg.fcBin != "" {
 		s.binOverrides["federation-command"] = cfg.fcBin
 	}

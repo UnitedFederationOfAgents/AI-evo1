@@ -10,6 +10,7 @@ import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
 import { detectTextFormat } from './textformat'
 import { WorkerVisual } from './WorkerVisual'
+import { AgentOps } from './AgentOps'
 import { noteTCStart } from './tcannounce'
 import type { ControlV1Props } from './ControlV1'
 
@@ -2187,6 +2188,8 @@ function SystemPanel({
   // rather than left pointing at a stale selection.
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const troughEntries = useTrough(repoState?.last_error)
+  // Drilled into "agent operations"' full-page view (its "↑ system" leaves).
+  const [opsPage, setOpsPage] = useState(false)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -2198,6 +2201,9 @@ function SystemPanel({
   }
   if (!state) {
     return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+  if (opsPage) {
+    return <div className="sys-panel"><AgentOps ops={state.agent_ops} nowSec={nowSec} onUp={() => setOpsPage(false)} /></div>
   }
 
   const managed = state.managed ?? []
@@ -2299,6 +2305,7 @@ function SystemPanel({
         onConnect={(agent, token) => onConnectProvider(hostId, agent, token)}
         onDisconnect={agent => onDisconnectProvider(hostId, agent)}
       />
+      <AgentOps ops={state.agent_ops} nowSec={nowSec} onOpen={() => setOpsPage(true)} />
       <Trough entries={troughEntries} />
     </div>
   )

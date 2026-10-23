@@ -44,6 +44,12 @@ const (
 	PhaseProposed       = "proposed"        // a proposal: no slopspace yet
 	PhaseAwaitingPrompt = "awaiting_prompt" // begun and unlocked: ready for the next prompt
 	PhaseLocked         = "locked"          // an interaction holds the lock (see InteractionLock)
+
+	// Completion and re-integration (see complete.go).
+	PhasePRDrafting = "pr_drafting" // completed: the agent is drafting the PRs
+	PhasePRProposed = "pr_proposed" // the drafts are ready to edit and raise
+	PhasePROpen     = "pr_open"     // the PRs are raised: Merge when all are mergeable
+	PhaseMerged     = "merged"      // merged, branches and slopspace removed
 )
 
 // Interaction stages, in order. An interaction is the one linear step of a v2
@@ -105,8 +111,26 @@ type PointerSpec struct {
 	Interactions int // completed interactions
 	Lock         *InteractionLock
 
+	// Completion: the guidance the PR drafts were asked for with, the draft
+	// turn's work signal (role + signalAt) and tempdir while it runs, the
+	// drafts (prs.yaml), then the raised PRs.
+	PRGuidance string
+	PRRole     string
+	PRSignalAt int64
+	PRWorkdir  string
+	PRTemplate string
+	PRs        []PointerPR
+
 	Error     string
 	UpdatedAt string
+}
+
+// PointerPR is a raised pull request.
+type PointerPR struct {
+	Repo   string `json:"repo"`
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	State  string `json:"state"` // "open" or "merged", as last recorded
 }
 
 // Stem is the pointer file's name without extension.
@@ -162,6 +186,22 @@ func (p *PointerSpec) render() string {
 		writeList(&w, 2, "bases", l.Bases)
 		writeList(&w, 2, "heads", l.Heads)
 	}
+	w.field(0, "prGuidance", p.PRGuidance, false)
+	w.field(0, "prRole", p.PRRole, false)
+	if p.PRSignalAt != 0 {
+		w.field(0, "prSignalAt", strconv.FormatInt(p.PRSignalAt, 10), true)
+	}
+	w.field(0, "prWorkdir", p.PRWorkdir, false)
+	w.field(0, "prTemplate", p.PRTemplate, false)
+	if len(p.PRs) > 0 {
+		w.line(0, "prs:")
+		for _, pr := range p.PRs {
+			w.line(2, "- repo: "+yamlScalar(pr.Repo))
+			w.field(4, "number", strconv.Itoa(pr.Number), true)
+			w.field(4, "url", pr.URL, false)
+			w.field(4, "state", pr.State, false)
+		}
+	}
 	w.field(0, "error", p.Error, false)
 	w.field(0, "updatedAt", p.UpdatedAt, false)
 	return w.String()
@@ -210,6 +250,10 @@ func parsePointerSpec(content string) (PointerSpec, error) {
 		SlopspaceID:   yamlString(m, "slopspaceId"),
 		Holder:        yamlString(m, "holder"),
 		Bases:         readList(m, "bases"),
+		PRGuidance:    yamlString(m, "prGuidance"),
+		PRRole:        yamlString(m, "prRole"),
+		PRWorkdir:     yamlString(m, "prWorkdir"),
+		PRTemplate:    yamlString(m, "prTemplate"),
 		Error:         yamlString(m, "error"),
 		UpdatedAt:     yamlString(m, "updatedAt"),
 	}
@@ -217,6 +261,14 @@ func parsePointerSpec(content string) (PointerSpec, error) {
 		return PointerSpec{}, fmt.Errorf("control scheme %q, expected %s", p.ControlScheme, condocControlScheme)
 	}
 	p.StartTime, _ = strconv.ParseInt(yamlString(m, "startTime"), 10, 64)
+	p.PRSignalAt, _ = strconv.ParseInt(yamlString(m, "prSignalAt"), 10, 64)
+	for _, it := range yamlList(m, "prs") {
+		if pm, ok := it.(map[string]any); ok {
+			pr := PointerPR{Repo: yamlString(pm, "repo"), URL: yamlString(pm, "url"), State: yamlString(pm, "state")}
+			pr.Number, _ = strconv.Atoi(yamlString(pm, "number"))
+			p.PRs = append(p.PRs, pr)
+		}
+	}
 	for _, t := range yamlList(m, "targets") {
 		switch v := t.(type) {
 		case string:

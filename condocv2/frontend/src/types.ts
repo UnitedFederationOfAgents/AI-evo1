@@ -1,5 +1,5 @@
 // Pointer phases -- see condocv2/spec.go.
-export type Phase = 'proposed' | 'awaiting_prompt' | 'locked'
+export type Phase = 'proposed' | 'awaiting_prompt' | 'locked' | 'pr_drafting' | 'pr_proposed' | 'pr_open' | 'merged'
 
 // Interaction stages, in order -- see condocv2/spec.go.
 export type LockStage =
@@ -86,6 +86,21 @@ export interface CondocState {
   interactions: Interaction[]
   pendingPrompt?: string
   timeline: Timeline
+  // Completion -- see condocv2/complete.go.
+  defaultPrGuidance: string
+  prGuidance?: string
+  prTemplate?: string
+  prs?: PRLive[]
+}
+
+// PRLive is a raised PR as last seen on GitHub.
+export interface PRLive {
+  repo: string
+  number: number
+  url: string
+  state: string // "open" or "merged"
+  status: string // mergeability, in words
+  ready: boolean
 }
 
 export type ReprStatus = 'disconnected' | 'connecting' | 'connected'

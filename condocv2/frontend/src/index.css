@@ -1546,6 +1546,10 @@ button:disabled {
 .badge-v2-proposed        { background: #3c3c3c; color: #999; }
 .badge-v2-awaiting_prompt { background: #1a3a1a; color: #4ec94e; }
 .badge-v2-locked          { background: #003366; color: #4da6ff; }
+.badge-v2-pr_drafting,
+.badge-v2-pr_proposed,
+.badge-v2-pr_open         { background: #3a2a00; color: #e0b040; }
+.badge-v2-merged          { background: #2a1a3a; color: #b48ce0; }
 
 /* ---- condocv2: the condoc view (Text / Visual tabs) ---- */
 

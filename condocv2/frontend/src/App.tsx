@@ -14,7 +14,12 @@ import type {
 
 // ---- WebSocket hook ----
 
-type StemAction = 'withdraw' | 'accept' | 'resubmit' | 'prompt' | 'submit'
+type StemAction =
+  | 'withdraw' | 'accept' | 'resubmit' | 'prompt' | 'submit'
+  | 'complete' | 'redraft' | 'raise-prs' | 'merge'
+
+type ActionExtra = { text?: string; autoSubmit?: boolean; template?: string }
+type OnAction = (type: StemAction, stem: string, extra?: ActionExtra) => void
 
 function useCondocWS() {
   const [connected, setConnected] = useState(false)
@@ -49,7 +54,7 @@ function useCondocWS() {
   )
 
   const stemAction = useCallback(
-    (type: StemAction, stem: string, extra?: { text?: string; autoSubmit?: boolean }) => {
+    (type: StemAction, stem: string, extra?: ActionExtra) => {
       send(type, { stem, ...extra })
     },
     [send],
@@ -430,6 +435,10 @@ const PHASE_LABELS: Record<Phase, string> = {
   proposed: 'Proposed',
   awaiting_prompt: 'Ready',
   locked: 'Locked',
+  pr_drafting: 'Drafting PRs',
+  pr_proposed: 'PRs drafted',
+  pr_open: 'PRs open',
+  merged: 'Merged',
 }
 
 function PhaseBadge({ phase }: { phase: Phase }) {
@@ -713,7 +722,116 @@ function PromptBox({ entry, onPrompt }: { entry: PointerEntry; onPrompt: (text: 
   )
 }
 
-function TextFlow({ state, onAction }: { state: CondocState; onAction: (type: StemAction, stem: string, extra?: { text?: string; autoSubmit?: boolean }) => void }) {
+// Completion, after the interactions: Complete (with the PR guidance, which
+// defaults to extremely concise) -> the agent drafts the PRs -> edit and
+// Raise PRs (or Redraft) -> Merge once every PR is mergeable.
+function Completion({ state, onAction }: { state: CondocState; onAction: OnAction }) {
+  const e = state.entry
+  const [open, setOpen] = useState(false)
+  const [guidance, setGuidance] = useState(state.prGuidance || state.defaultPrGuidance)
+  const [template, setTemplate] = useState(state.prTemplate ?? '')
+  useEffect(() => { setTemplate(state.prTemplate ?? '') }, [state.prTemplate])
+  useEffect(() => { setGuidance(state.prGuidance || state.defaultPrGuidance) }, [state.prGuidance, state.defaultPrGuidance])
+  const prs = state.prs ?? []
+  const held = e.heldHere
+
+  const guidanceBox = (
+    <label className="pointer-field slop-field-block">
+      <span className="working-dir-label">PR guidance</span>
+      <textarea className="working-dir-input slop-textarea" rows={3} value={guidance} onChange={(ev) => setGuidance(ev.target.value)} />
+    </label>
+  )
+  const prList = (
+    <ul className="v2-record">
+      {prs.map((pr) => (
+        <li key={pr.repo}>
+          {pr.repo}: <a href={pr.url} target="_blank" rel="noreferrer">#{pr.number}</a> — {pr.state === 'merged' ? 'merged' : pr.status}
+        </li>
+      ))}
+    </ul>
+  )
+
+  switch (e.phase) {
+    case 'awaiting_prompt':
+      if (!held || e.error || e.interactions === 0) return null
+      return open ? (
+        <div className="v2-interaction">
+          <div className="v2-section-head v2-section-record">Complete</div>
+          {guidanceBox}
+          <div className="pointer-actions">
+            <button className="btn-primary working-dir-btn" onClick={() => onAction('complete', e.stem, { text: guidance })}>Complete &amp; Draft PRs</button>
+            <button className="btn-secondary working-dir-btn" onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="pointer-actions">
+          <button className="btn-secondary working-dir-btn" onClick={() => setOpen(true)}>Complete the condoc…</button>
+        </div>
+      )
+    case 'pr_drafting':
+      return (
+        <div className="v2-interaction">
+          <div className="v2-section-head v2-section-record">Pull Requests</div>
+          <div className="v2-status">
+            {e.running && <span className="spinner" />} {e.running ? 'agent drafting the PRs' : e.queuePos ? `queued to draft the PRs (#${e.queuePos})` : 'drafting the PRs'}
+          </div>
+        </div>
+      )
+    case 'pr_proposed':
+      return (
+        <div className="v2-interaction">
+          <div className="v2-section-head v2-section-record">Pull Requests (drafts)</div>
+          <textarea
+            className="working-dir-input slop-textarea v2-textarea"
+            rows={12}
+            spellCheck={false}
+            value={template}
+            readOnly={!held}
+            onChange={(ev) => setTemplate(ev.target.value)}
+          />
+          {held && (
+            <>
+              {guidanceBox}
+              <div className="pointer-actions">
+                <button className="btn-primary working-dir-btn" onClick={() => onAction('raise-prs', e.stem, { template })}>Raise PRs</button>
+                <button className="btn-secondary working-dir-btn" onClick={() => onAction('redraft', e.stem, { text: guidance, template })}>Redraft</button>
+              </div>
+            </>
+          )}
+        </div>
+      )
+    case 'pr_open':
+      return (
+        <div className="v2-interaction">
+          <div className="v2-section-head v2-section-record">Pull Requests</div>
+          {prList}
+          {held && (
+            <div className="pointer-actions">
+              <button
+                className="btn-primary working-dir-btn"
+                disabled={!prs.every((pr) => pr.ready || pr.state === 'merged')}
+                title="merges the targets first and the condoc repo last, then removes the branches and the slopspace"
+                onClick={() => onAction('merge', e.stem)}
+              >
+                Merge
+              </button>
+            </div>
+          )}
+        </div>
+      )
+    case 'merged':
+      return (
+        <div className="v2-interaction">
+          <div className="v2-section-head v2-section-record">Merged</div>
+          {prList}
+          {e.condocUrl && <div className="pointer-note">The condoc: <a href={e.condocUrl} target="_blank" rel="noreferrer">{e.condocRepo}/{e.condocPath}</a></div>}
+        </div>
+      )
+  }
+  return null
+}
+
+function TextFlow({ state, onAction }: { state: CondocState; onAction: OnAction }) {
   const e = state.entry
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const count = state.interactions.length
@@ -725,7 +843,7 @@ function TextFlow({ state, onAction }: { state: CondocState; onAction: (type: St
   const inFlight = !!e.lockInteraction
   return (
     <div className="v2-text">
-      {state.interactions.length === 0 && !state.pendingPrompt && (
+      {state.interactions.length === 0 && !state.pendingPrompt && e.phase !== 'merged' && (
         <div className="nav-empty">No interactions yet{e.heldHere ? ' — enter the first prompt below.' : '.'}</div>
       )}
       {state.interactions.map((it) => (
@@ -766,6 +884,7 @@ function TextFlow({ state, onAction }: { state: CondocState; onAction: (type: St
       {e.heldHere && e.phase === 'awaiting_prompt' && !e.error && (
         <PromptBox entry={e} onPrompt={(text, autoSubmit) => onAction('prompt', e.stem, { text, autoSubmit })} />
       )}
+      <Completion state={state} onAction={onAction} />
       <div ref={bottomRef} />
     </div>
   )
@@ -777,7 +896,7 @@ function CondocView({ state, tab, onTab, onAction }: {
   state: CondocState
   tab: CondocTab
   onTab: (t: CondocTab) => void
-  onAction: (type: StemAction, stem: string, extra?: { text?: string; autoSubmit?: boolean }) => void
+  onAction: OnAction
 }) {
   const e = state.entry
   return (
@@ -877,7 +996,7 @@ export default function App() {
     window.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: window.location.href }))
   }, [selectedStem, tab])
 
-  const handleAction = (type: StemAction, stem: string, extra?: { text?: string; autoSubmit?: boolean }) => {
+  const handleAction: OnAction = (type, stem, extra) => {
     setError(null)
     if (type === 'withdraw') setSelectedStem(null)
     ws.stemAction(type, stem, extra)

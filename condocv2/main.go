@@ -293,11 +293,12 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	// Everything else is keyed on the condoc's pointer stem; a failure is
 	// reported back to the client that asked.
-	case "withdraw", "accept", "resubmit", "prompt", "submit":
+	case "withdraw", "accept", "resubmit", "prompt", "submit", "complete", "redraft", "raise-prs", "merge":
 		var p struct {
 			Stem       string `json:"stem"`
 			Text       string `json:"text"`
 			AutoSubmit bool   `json:"autoSubmit"`
+			Template   string `json:"template"`
 		}
 		json.Unmarshal(m.Payload, &p)
 		var err error
@@ -312,6 +313,14 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 			err = s.slopPrompt(p.Stem, p.Text, p.AutoSubmit)
 		case "submit":
 			err = s.slopSubmit(p.Stem)
+		case "complete":
+			err = s.slopComplete(p.Stem, p.Text)
+		case "redraft":
+			err = s.slopRedraft(p.Stem, p.Text, p.Template)
+		case "raise-prs":
+			err = s.slopRaisePRs(p.Stem, p.Template)
+		case "merge":
+			err = s.slopMerge(p.Stem)
 		}
 		s.replyErr(c, err)
 		if m.Type != "withdraw" {

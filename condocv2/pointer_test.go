@@ -85,6 +85,9 @@ func TestPointerSpecRoundTrip(t *testing.T) {
 			Interaction: 3, Stage: stageMapped, AutoSubmit: true, Prompt: "do it\n## not a heading",
 			Role: "condocv2-Foo-7", SignalAt: 99, Bases: []string{"a/one@111"}, Heads: []string{"a/one@333"},
 		},
+		PRGuidance: defaultPRGuidance, PRRole: "condocv2-Foo-7", PRSignalAt: 100, PRWorkdir: "/ss1/pr-draft-1",
+		PRTemplate: "prs:\n  - repo: a/one\n    title: T\n",
+		PRs:        []PointerPR{{Repo: "a/one", Number: 4, URL: "https://github.com/a/one/pull/4", State: "open"}},
 	}
 	got, err := parsePointerSpec(spec.render())
 	if err != nil {

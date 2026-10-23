@@ -36,6 +36,26 @@ Every commit's subject is `condocv2: <Name> <kind>[ <N>]`. The lock records
 which stage the interaction reached, so an error (fixed with *Resubmit*) or a
 restart resumes it where it stopped.
 
+## Completion and merge
+
+Between interactions, **Complete** ends the condoc and re-integrates its
+branches (`complete.go`):
+
+1. **complete** — `## Completed` is added to the main file (condoc commit)
+   and the pointer moves to `pr_drafting` (pointer commit)
+2. **drafted** — an in-place agent turn writes `prs.yaml`: one PR per repo
+   with changes (targets with nothing to merge are skipped), following the
+   *PR guidance*, which defaults to *extremely concise*
+3. **prs** — after editing (or *Redraft* with new guidance), *Raise PRs*
+   opens them, targets first and the condoc repo last, and lists them under
+   `## Pull Requests` in the main file
+4. **merged** — *Merge*, once GitHub reports every PR mergeable, merges them
+   in that order with merge commits, deletes the branches and the slopspace
+
+A failure leaves the error on the pointer; *Resubmit* (drafting) or the same
+button again (raising, merging) resumes. The Visual tab doesn't draw these
+commits yet.
+
 ## The UI
 
 A condoc opens with two tabs:

@@ -62,6 +62,7 @@ type slopState struct {
 	running string   // stem whose turn is running
 	busy    map[string]bool
 	wake    chan struct{}
+	prLive  map[string]prLiveCache // stem -> the raised PRs as last seen on GitHub (see complete.go)
 }
 
 // dungeonKeeperConfig reads the same environment dungeon-keeper does, so
@@ -93,6 +94,7 @@ func (s *Server) initSlopspace() {
 	s.slop.signals = worksignal.NewManager(cfg)
 	s.slop.agent = "claude"
 	s.slop.busy = map[string]bool{}
+	s.slop.prLive = map[string]prLiveCache{}
 	s.slop.wake = make(chan struct{}, 1)
 }
 
@@ -799,6 +801,10 @@ func (s *Server) readHeldSpecs() []pointerFileSpec {
 func (s *Server) slopTick() {
 	for _, ps := range s.readHeldSpecs() {
 		stem, spec := ps.stem, ps.spec
+		if spec.Phase == PhasePRDrafting && spec.Error == "" {
+			s.enqueueTurn(stem) // the PR draft turn (see complete.go)
+			continue
+		}
 		if spec.Lock == nil || spec.Error != "" {
 			continue // idle, or waiting for Resubmit
 		}
@@ -852,6 +858,11 @@ func (s *Server) slopResubmit(stem string) error {
 		return nil
 	}
 	spec.Error = ""
+	if spec.Phase == PhasePRDrafting && spec.PRWorkdir != "" {
+		// A failed draft turn starts over with a fresh work signal.
+		os.RemoveAll(spec.PRWorkdir)
+		spec.PRRole, spec.PRSignalAt, spec.PRWorkdir = "", 0, ""
+	}
 	return s.writeSpec(&spec, commitMsg(&spec, "resubmit", 0))
 }
 
@@ -941,6 +952,9 @@ func (s *Server) runTurn(stem string) error {
 	if err != nil {
 		return err
 	}
+	if spec.Phase == PhasePRDrafting && spec.Error == "" {
+		return s.runDraftTurn(&spec)
+	}
 	l := spec.Lock
 	if l == nil || spec.Error != "" || stageOrder[l.Stage] < stageOrder[stageQueued] {
 		return nil
@@ -996,13 +1010,15 @@ func (s *Server) runTurn(stem string) error {
 			deployRepos := filepath.Join(meta.DeployPath, dkslop.WriteSpacesDir, dkslop.ReposDir)
 			prompt := buildInteractionPrompt(slopStepFile(meta, &spec), n) +
 				slopspaceRepoNote(deployRepos, spec.Targets, spec.CondocRepo)
-			if err := s.submitSignal(&spec, prompt); err != nil {
+			role, at, err := s.submitSignal(&spec, dktypes.WorkTypeSlopspace, "", prompt)
+			if err != nil {
 				return err
 			}
+			l.Role, l.SignalAt = role, at
 			l.Stage = stageSignalled
 
 		case stageSignalled:
-			reply, err := s.awaitSignal(l)
+			reply, err := s.awaitSignal(l.Role, l.SignalAt)
 			if err != nil {
 				return err
 			}
@@ -1074,11 +1090,11 @@ func (s *Server) runTurn(stem string) error {
 	}
 }
 
-// submitSignal writes the turn's work signal -- the only thing condocv2
-// hands the worker. Signal files are named by role and creation second, so a
-// clash moves to the next free second.
-func (s *Server) submitSignal(spec *PointerSpec, prompt string) error {
-	l := spec.Lock
+// submitSignal writes a turn's work signal -- the only thing condocv2 hands
+// the worker -- and returns its role and creation second, which name its
+// files: a clash moves to the next free second. workdir is the in-place
+// work's location ("" for slopspace work).
+func (s *Server) submitSignal(spec *PointerSpec, workType dktypes.WorkType, workdir, prompt string) (string, int64, error) {
 	role := "condocv2-" + spec.Stem()
 	created := time.Now()
 	for {
@@ -1098,20 +1114,19 @@ func (s *Server) submitSignal(spec *PointerSpec, prompt string) error {
 		model = s.slop.model
 	}
 	if _, err := s.slop.signals.Create(&dktypes.WorkSignal{
-		WorkType:  dktypes.WorkTypeSlopspace,
-		AgentType: dktypes.AgentTypeWorker,
-		Role:      role,
-		Prompt:    prompt,
-		Agent:     agent,
-		Model:     model,
-		Mode:      "write",
-		CreatedAt: created,
+		WorkType:     workType,
+		WorkLocation: workdir,
+		AgentType:    dktypes.AgentTypeWorker,
+		Role:         role,
+		Prompt:       prompt,
+		Agent:        agent,
+		Model:        model,
+		Mode:         "write",
+		CreatedAt:    created,
 	}); err != nil {
-		return err
+		return "", 0, err
 	}
-	l.Role = role
-	l.SignalAt = created.Unix()
-	return nil
+	return role, created.Unix(), nil
 }
 
 func fileExists(path string) bool {
@@ -1121,10 +1136,10 @@ func fileExists(path string) bool {
 
 // awaitSignal waits for the worker to move the turn's signal to complete/
 // and returns the agent's reply from it.
-func (s *Server) awaitSignal(l *InteractionLock) (string, error) {
-	created := time.Unix(l.SignalAt, 0)
-	ongoing := filepath.Join(s.slop.dk.OngoingWorkDir(), worksignal.GenerateFilename(l.Role, created, false))
-	complete := filepath.Join(s.slop.dk.CompleteWorkDir(), worksignal.GenerateFilename(l.Role, created, true))
+func (s *Server) awaitSignal(role string, signalAt int64) (string, error) {
+	created := time.Unix(signalAt, 0)
+	ongoing := filepath.Join(s.slop.dk.OngoingWorkDir(), worksignal.GenerateFilename(role, created, false))
+	complete := filepath.Join(s.slop.dk.CompleteWorkDir(), worksignal.GenerateFilename(role, created, true))
 	for !fileExists(complete) {
 		if !fileExists(ongoing) {
 			time.Sleep(slopTurnPollInterval) // the worker writes complete/ before removing ongoing/
@@ -1184,6 +1199,12 @@ type CondocState struct {
 	// PendingPrompt is a locked prompt not yet in the step file.
 	PendingPrompt string   `json:"pendingPrompt,omitempty"`
 	Timeline      Timeline `json:"timeline"`
+
+	// Completion (see complete.go).
+	DefaultPRGuidance string   `json:"defaultPrGuidance"`
+	PRGuidance        string   `json:"prGuidance,omitempty"`
+	PRTemplate        string   `json:"prTemplate,omitempty"`
+	PRs               []PRLive `json:"prs,omitempty"`
 }
 
 // condocState reads a condoc's state from wherever its files are right now.
@@ -1197,11 +1218,18 @@ func (s *Server) condocState(stem string) (CondocState, error) {
 	st := CondocState{
 		Entry:        s.decoratePointerEntry(entryFromSpec(spec, pointerDir+"/"+stem+".yaml")),
 		Interactions: []Interaction{},
+
+		DefaultPRGuidance: defaultPRGuidance,
+		PRGuidance:        spec.PRGuidance,
+		PRTemplate:        spec.PRTemplate,
+		PRs:               s.prLiveFor(&spec),
 	}
 	if spec.Lock != nil && spec.Lock.Stage == stageLocked {
 		st.PendingPrompt = spec.Lock.Prompt
 	}
-	if spec.SlopspaceID != "" {
+	// A merged condoc's slopspace is gone; its files live on in the merged
+	// condoc repo (CondocURL points there).
+	if spec.SlopspaceID != "" && spec.Phase != PhaseMerged {
 		var meta *dktypes.SlopspaceMetadata
 		for attempt := 0; ; attempt++ {
 			if meta, err = s.slop.ss.Get(spec.SlopspaceID); err != nil {

@@ -74,8 +74,8 @@ func slopspaceInitialMainFile(name string, startTime int64, branch, pointerRepo,
 }
 
 // removeHumanPromptSection strips the "## Human-Prompt" section and all
-// content after it until EOF, and bare !HANDOFF!/!COMPLETED! lines
-// throughout.
+// content after it until EOF, and bare !HANDOFF!/!COMPLETED!/!FORCE-COMPLETED!
+// lines throughout.
 func removeHumanPromptSection(content string) string {
 	var out []string
 	inSection := false
@@ -85,7 +85,7 @@ func removeHumanPromptSection(content string) string {
 			inSection = true
 			continue
 		}
-		if inSection || t == "!HANDOFF!" || t == "!COMPLETED!" {
+		if inSection || t == "!HANDOFF!" || t == "!COMPLETED!" || t == "!FORCE-COMPLETED!" {
 			continue
 		}
 		out = append(out, line)
@@ -253,6 +253,25 @@ func finalizeMainFile(mainPath string) error {
 	content += fmt.Sprintf("\n\n## Condoc Completed\n\nThis condoc was completed at %d (%s).\n",
 		now.Unix(), now.UTC().Format(cfTimestampFormat))
 	return writeFileString(mainPath, content)
+}
+
+// forceFinalizeFiles closes whatever is open -- the active substep, the
+// active step, then the main file -- so the condoc reads as completed from
+// any state. A substep file the agent never got to create is skipped.
+func forceFinalizeFiles(root, mainPath string, info CondocInfo) error {
+	if info.SubstepFile != "" {
+		if p := filepath.Join(root, info.SubstepFile); fileExists(p) {
+			if err := finalizeIterFile(p, "Substep Completed", "substep"); err != nil {
+				return err
+			}
+		}
+	}
+	if info.StepFile != "" {
+		if err := finalizeIterFile(filepath.Join(root, info.StepFile), "Step Completed", "step"); err != nil {
+			return err
+		}
+	}
+	return finalizeMainFile(mainPath)
 }
 
 // appendReply writes the agent's reply under "## Reply" / "## Reply X" at

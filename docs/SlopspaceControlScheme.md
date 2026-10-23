@@ -72,6 +72,7 @@ Not yet built or run end to end; see the Step 1 replies.
 - **Handler** (`condoccer/slopspace.go`), with condoccer as the handler (S1):
   - **Propose, edit, withdraw and accept.** Accept checks the branch on every repo's remote, clones the writespaces, creates the slopspace with each repo on the branch, writes the condoc with step 1 templated, and publishes the branch everywhere.
   - **Driver.** Every 2 seconds it reads each held condoc from its expected location (D7) and reacts to the same `!HANDOFF!`/`!COMPLETED!` directives the same-repo UI writes. That covers start step, revision, substep, complete substep/step/condoc. The condoc-file edits are ported from federation-command into `condoccer/condocfiles.go`.
+  - **Force Complete.** The UI's **Force Complete** skips the directive here, since condoccer is the handler. It closes any open substep and step, completes the condoc, and commits, which leads into propose-PR. A turn that failed is dropped along with its error. A turn still running must land first. (A same-repo condoc gets `!FORCE-COMPLETED!` on its main file instead. federation-command acts on it whenever it's idle or stuck on a git error.)
   - **Turn queue (D2).** One FIFO, rebuilt from the pointers on startup. A turn moves through `queued → deployed → signalled → returned → replied`, and its stage is saved after each. Condoccer deploys, writes the work signal, waits for the worker's `complete/` file, and returns the slopspace (D3, D13). It then commits and pushes each changed target and writes the reply with one commit line per repo, and the condoc repo is committed last (D6).
   - **Propose PR.** It runs an in-place turn in a tempdir inside the slopspace, holding the condoc, each repo's diff and log, and the pointer. The agent writes `prs.yaml` there. If that file is unusable, a default template is filled in and the reason is shown.
   - **Raise PRs.** The template can be edited, regenerated with an instruction, or accepted. Accepting raises one PR per repo, links the sibling PRs, and records them in the condoc.
@@ -142,7 +143,7 @@ Not yet built or run end to end; see the Step 1 replies.
 ### Same-repo scheme (for contrast)
 
 - **The handler is federation-command, not condoccer.** `federation-command/condoc.go` holds one `CondocSession` per TUI. It creates the branch, runs the agent in `repoRoot` through `buildAgentPromptCmd`, writes `## Reply` sections, and commits and pushes.
-- **Condoccer only writes directives.** It appends `!HANDOFF!`, `!COMPLETED!`, `!REVERT-…!` and filled templates to files (`performAction` in `condoccer/main.go`), then watches the files for changes.
+- **Condoccer only writes directives.** It appends `!HANDOFF!`, `!COMPLETED!`, `!FORCE-COMPLETED!`, `!REVERT-…!` and filled templates to files (`performAction` in `condoccer/main.go`), then watches the files for changes.
 - **Progress lives in the file tree.** It is detected from file content (`detectPhase`). A committed `.condoc` lock file shows who holds the condoc.
 - **Retry is single-repo.** It pushes a take branch and then force-pushes a reset of the condoc branch (`runCondocRetryGitSequence`).
 

@@ -1151,6 +1151,66 @@ func (s *Server) slopCompleteCondoc(spec *PointerSpec, meta *dktypes.SlopspaceMe
 	return s.resync(spec, meta)
 }
 
+// slopForceComplete completes the condoc from whatever state it's in, which
+// leads into propose-PR like an ordinary completion. condoccer is the
+// handler here, so it finalizes the files itself rather than leaving a
+// directive. A turn that failed is dropped along with its error; one still
+// running has to land first.
+func (s *Server) slopForceComplete(stem string) error {
+	if !s.claim(stem) {
+		return errBusy(stem)
+	}
+	defer s.release(stem)
+	spec, err := s.readHeldSpec(stem)
+	if err != nil {
+		return err
+	}
+	if spec.SlopspaceID == "" {
+		return fmt.Errorf("%s hasn't been accepted yet", spec.Name)
+	}
+	if spec.Turn != nil && spec.Error == "" {
+		return fmt.Errorf("%s has a turn in flight -- force complete it once the turn lands", spec.Name)
+	}
+	meta, err := s.slop.ss.Get(spec.SlopspaceID)
+	if err != nil {
+		return err
+	}
+	if meta.Deployed {
+		return fmt.Errorf("%s's slopspace is deployed", spec.Name)
+	}
+	root := slopCondocRoot(meta, spec.CondocRepo)
+	main := filepath.Join(root, filepath.FromSlash(spec.CondocPath))
+	info, err := detectPhase(root, main)
+	if err != nil {
+		return err
+	}
+	// Files already reading as completed are a retry after the commit
+	// failed; the commit and resync are just run again.
+	if info.Phase != PhaseCompleted {
+		if err := checkForceCompletable(info); err != nil {
+			return err
+		}
+		if err := forceFinalizeFiles(root, main, info); err != nil {
+			return err
+		}
+	}
+	if spec.Turn != nil {
+		spec.Turn = nil
+		s.dequeue(stem)
+	}
+	spec.Error = ""
+	if err := s.commitCondocRepo(&spec, "condoc: force completed"); err != nil {
+		// Recorded with the dropped turn, so Resubmit picks up from the
+		// completed files rather than re-running that turn.
+		spec.Error = err.Error()
+		if werr := s.writeSpec(&spec, fmt.Sprintf("condoc: %s error", spec.Name)); werr != nil {
+			log.Printf("slopspace %s: %v", stem, werr)
+		}
+		return err
+	}
+	return s.resync(&spec, meta)
+}
+
 // resync re-reads the condoc's files after an edit and mirrors them into
 // the pointer.
 func (s *Server) resync(spec *PointerSpec, meta *dktypes.SlopspaceMetadata) error {
@@ -1170,6 +1230,8 @@ func (s *Server) slopPerformAction(action ActionRequest) error {
 	switch action.Action {
 	case "resubmit":
 		return s.slopResubmit(stem)
+	case "force_complete":
+		return s.slopForceComplete(stem)
 	case "retry", "revert":
 		return fmt.Errorf("%s isn't supported for slopspace condocs (D8)", action.Action)
 	}

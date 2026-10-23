@@ -99,7 +99,7 @@ type wsMsg struct {
 
 // ActionRequest is sent by the client when the user clicks an action button.
 type ActionRequest struct {
-	Action        string `json:"action"`        // handoff, completed, revision, retry, substep, start_step, revert, resubmit, add_resource
+	Action        string `json:"action"`        // handoff, completed, force_complete, revision, retry, substep, start_step, revert, resubmit, add_resource
 	Path          string `json:"path"`          // condoc path (relative to repo root)
 	Content       string `json:"content,omitempty"`
 	Letter        string `json:"letter,omitempty"`
@@ -167,10 +167,14 @@ var (
 	substepActiveRe      = regexp.MustCompile(`Substep ([A-Z]) is now active\. Interact with the substep file \(([^)]+)\)`)
 	handoffDirectiveRe   = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 	completedDirectiveRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
-	commitHashRe         = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
+	commitHashRe       = regexp.MustCompile(`^[a-f0-9]{4,40}$`)
 	resourceHeadingRe    = regexp.MustCompile(`(?m)^## Resource (\d+)( \(agent\))?(?: -- (.+))?\s*$`)
 	placeholderLineRe    = regexp.MustCompile(`(?m)^## <REPLACE-Revision\|Retry> [A-Z]\s*$`)
 )
+
+// forceCompletedDirectiveRe is the force-complete directive, which goes on
+// the main file whatever the condoc's state (see the force_complete action).
+var forceCompletedDirectiveRe = regexp.MustCompile(`(?m)^!FORCE-COMPLETED!\s*$`)
 
 // DiffHunk represents a single @@ hunk in a unified diff.
 type DiffHunk struct {
@@ -217,7 +221,22 @@ func parseMaxStepNum(content string) int {
 }
 
 // detectPhase determines the current phase of a condoc by inspecting its files.
+// A pending !FORCE-COMPLETED! on the main file reads as agent_running -- the
+// handler is about to act on it, as with a directive in a step file.
 func detectPhase(root, absPath string) (CondocInfo, error) {
+	info, err := detectFilePhase(root, absPath)
+	if err != nil || info.Phase == PhaseCompleted {
+		return info, err
+	}
+	if b, err := os.ReadFile(absPath); err == nil && forceCompletedDirectiveRe.Match(b) {
+		info.Phase = PhaseAgentRunning
+		info.JustResumedFromSubstep = false
+	}
+	return info, nil
+}
+
+// detectFilePhase is detectPhase without the force-complete override.
+func detectFilePhase(root, absPath string) (CondocInfo, error) {
 	relPath, _ := filepath.Rel(root, absPath)
 	name := strings.TrimSuffix(filepath.Base(absPath), ".md")
 
@@ -1106,6 +1125,21 @@ func (s *Server) applyAction(root, absPath string, info CondocInfo, action Actio
 	case "completed":
 		return appendToFile(activeFile, "\n!COMPLETED!\n")
 
+	case "force_complete":
+		// Always the main file: federation-command looks for it there in
+		// whatever phase it's idling (or stuck) in, finalizes any open
+		// substep and step, and completes the condoc.
+		if !sameRepo {
+			return fmt.Errorf("force complete a slopspace condoc through its pointer")
+		}
+		if err := checkForceCompletable(info); err != nil {
+			return err
+		}
+		if b, err := os.ReadFile(absPath); err == nil && forceCompletedDirectiveRe.Match(b) {
+			return nil // already pending
+		}
+		return appendToFile(absPath, "\n!FORCE-COMPLETED!\n")
+
 	case "start_step":
 		// Write edited main file content (with filled template), then trigger HANDOFF.
 		if err := os.WriteFile(absPath, []byte(action.Content), 0644); err != nil {
@@ -1196,6 +1230,18 @@ func (s *Server) applyAction(root, absPath string, info CondocInfo, action Actio
 	default:
 		return fmt.Errorf("unknown action: %s", action.Action)
 	}
+}
+
+// checkForceCompletable refuses a force complete on a condoc that is already
+// complete, or that never started a step -- a proposal has no branch to PR.
+func checkForceCompletable(info CondocInfo) error {
+	switch {
+	case info.Phase == PhaseCompleted:
+		return fmt.Errorf("%s is already completed", info.Name)
+	case info.StepNum == 0:
+		return fmt.Errorf("%s hasn't been accepted yet -- there's nothing to complete", info.Name)
+	}
+	return nil
 }
 
 // isCondocFile reports whether a repo-relative file path is a condoc file

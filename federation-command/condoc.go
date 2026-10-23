@@ -213,6 +213,10 @@ var condocCompletedRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 var condocYAMLHeaderRe = regexp.MustCompile("(?s)<!--\\s*```condoc-yaml\\n(.*?)```\\s*-->")
 var condocCompletedMarkerRe = regexp.MustCompile(`(?m)^## Condoc Completed$`)
 
+// condocForceCompletedRe is condoccer's Force Complete, always written to the
+// main file -- see condocForceComplete.
+var condocForceCompletedRe = regexp.MustCompile(`(?m)^!FORCE-COMPLETED!\s*$`)
+
 // parseCondocYAML extracts startTime, branch, and callerPath from a condoc-yaml block.
 // Returns ok=false if the block is absent or branch cannot be parsed.
 func parseCondocYAML(content string) (startTime int64, branch, callerPath string, ok bool) {
@@ -336,6 +340,11 @@ func condocFileHasHandoff(path string) bool {
 func condocFileHasCompleted(path string) bool {
 	b, err := os.ReadFile(path)
 	return err == nil && condocCompletedRe.Match(b)
+}
+
+func condocFileHasForceCompleted(path string) bool {
+	b, err := os.ReadFile(path)
+	return err == nil && condocForceCompletedRe.Match(b)
 }
 
 // ===== GIT HELPERS =====
@@ -481,7 +490,7 @@ func writeProposalFile(cs *CondocSession) error {
 }
 
 // removeHumanPromptSection strips the "## Human-Prompt" section and all content after it
-// until EOF. Also removes bare !HANDOFF!/!COMPLETED! lines throughout.
+// until EOF. Also removes bare !HANDOFF!/!COMPLETED!/!FORCE-COMPLETED! lines throughout.
 func removeHumanPromptSection(content string) string {
 	lines := strings.Split(content, "\n")
 	var out []string
@@ -495,7 +504,7 @@ func removeHumanPromptSection(content string) string {
 		if inSection {
 			continue
 		}
-		if t == "!HANDOFF!" || t == "!COMPLETED!" {
+		if t == "!HANDOFF!" || t == "!COMPLETED!" || t == "!FORCE-COMPLETED!" {
 			continue
 		}
 		out = append(out, line)
@@ -1594,6 +1603,15 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 		}
 	}
 
+	// Force complete is honored in any phase with nothing in flight, ahead of
+	// every other directive; mid-run it waits for the run to land.
+	switch cs.phase {
+	case condocPhaseAwaitingStep, condocPhaseAwaitingAction, condocPhaseGitFailed:
+		if cs.stepNum > 0 && condocFileHasForceCompleted(cs.mainFilePath) {
+			return m.condocForceComplete()
+		}
+	}
+
 	switch cs.phase {
 	case condocPhaseGitFailed:
 		if condocFileHasHandoff(cs.activeFile()) {
@@ -2673,6 +2691,32 @@ func (m appModel) condocCompleteStep() (appModel, tea.Cmd) {
 
 // condocCompleteCondoc handles !COMPLETED! on the main file.
 func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
+	return m.condocFinish("condoc: completed")
+}
+
+// condocForceComplete handles condoccer's !FORCE-COMPLETED! on the main file:
+// it closes the open substep and step (whatever was pending in them) and
+// completes the condoc, so it can be PR'd and merged from any state.
+func (m appModel) condocForceComplete() (appModel, tea.Cmd) {
+	cs := m.condoc
+	if cs.substepFile != "" {
+		if _, err := os.Stat(cs.substepFile); err == nil {
+			if err := finalizeSubstepFile(cs.substepFile); err != nil {
+				return m.condocError("finalize substep file: " + err.Error())
+			}
+		}
+	}
+	if cs.stepFile != "" {
+		if err := finalizeStepFile(cs.stepFile); err != nil {
+			return m.condocError("finalize step file: " + err.Error())
+		}
+	}
+	return m.condocFinish("condoc: force completed")
+}
+
+// condocFinish finalizes the main file, commits it as commitMsg and exits
+// condoc mode.
+func (m appModel) condocFinish(commitMsg string) (appModel, tea.Cmd) {
 	cs := m.condoc
 	if err := finalizeMainFile(cs.mainFilePath); err != nil {
 		return m.condocError("finalize main file: " + err.Error())
@@ -2686,7 +2730,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 
 	gitCmds := [][]string{
 		{"add", "."},
-		{"commit", "-m", "condoc: completed"},
+		{"commit", "-m", commitMsg},
 		{"push", "origin", cs.branch},
 	}
 	m.condocDynapane.Deactivate()
@@ -2697,7 +2741,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 	m.prevInputLen = 0
 
 	return m, tea.Batch(
-		tea.Println(successStyle.Render("condoc: completed — "+filepath.Base(cs.mainFilePath))),
+		tea.Println(successStyle.Render(commitMsg+" — "+filepath.Base(cs.mainFilePath))),
 		cs.runGit(gitCmds),
 		m.blinker.ResetTick(),
 	)

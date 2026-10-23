@@ -12,7 +12,9 @@ import type { SlopspaceInfo, WorkerSignalInfo, WorkerStateMsg } from './types'
 // lines merge into a red box spanning the deployment, from deploy to return.
 // The box sits just below the blue track, so work done while it was deployed
 // but not in it runs ABOVE it; work that ran in it is WITHIN it -- the box
-// rises around the part of the submission that ran. Clicking a submission, a
+// rises around the part of the submission that ran. Only the deployed
+// slopspace's lines touch its box; any other slopspace's lines it reaches past
+// stop short of it, with a gap (Revision I). Clicking a submission, a
 // slopspace or a deployment shows it in the details panel on the right, and
 // clicking the blue track itself shows its agent type (Revision G).
 //
@@ -40,6 +42,7 @@ const SLOP_GAP = 12    // between slopspaces
 const LANE_PAD = 14    // below a lane's last track
 const BOX_PAD = 6      // a red box's margin around what it encloses
 const DEPLOY_GAP = 4   // between the blue track's boxes and a deployment box below them
+const LINE_GAP = 5     // between another slopspace's deployment box and the lines it cuts
 const MIN_BOX_W = 8
 const MAX_ZOOM = 2000
 
@@ -125,6 +128,37 @@ function deployBoxes(l: Lane, tr: SlopTrack, ran: Map<string, string>, now: numb
     box.work.push({ from: Math.max(from, box.from), to: Math.min(to, box.to) })
   }
   return boxes
+}
+
+// boxShape places a deployment box in pixels: its body runs from just below
+// the blue track to past its slopspace's last line, and each run in it raises
+// a part around the submission.
+function boxShape(l: Lane, tr: SlopTrack, b: DeployBox, x: (t: number) => number) {
+  const x0 = x(b.from)
+  const x1 = Math.max(x0 + MIN_BOX_W, x(b.to))
+  const top = l.blueY + BOX_H / 2 + DEPLOY_GAP
+  const bottom = tr.y + (tr.lines - 1) * REPO_GAP + BOX_PAD
+  const rises = b.work.map(w => {
+    const wx0 = Math.max(x0, x(w.from) - BOX_PAD)
+    const wx1 = Math.min(x1, Math.max(x(w.from) + MIN_BOX_W, x(w.to)) + BOX_PAD)
+    return { x: wx0, w: Math.max(0, wx1 - wx0), y: l.blueY - BOX_H / 2 - BOX_PAD, h: top + BOX_PAD - (l.blueY - BOX_H / 2 - BOX_PAD) }
+  })
+  const parts = [{ x: x0, w: x1 - x0, y: top, h: bottom - top }, ...rises.filter(r => r.w > 0)]
+  return { ...b, x0, x1, top, bottom, parts }
+}
+
+// cutGaps splits the span a..b around the gaps, leaving what's outside them.
+function cutGaps(a: number, b: number, gaps: [number, number][]) {
+  const segs: [number, number][] = []
+  let at = a
+  for (const [g0, g1] of [...gaps].sort((p, q) => p[0] - q[0])) {
+    if (g1 <= at) continue
+    if (g0 >= b) break
+    if (g0 > at) segs.push([at, g0])
+    at = g1
+  }
+  if (at < b) segs.push([at, b])
+  return segs
 }
 
 // layoutLanes stacks the lanes: the base agent types always, then any other
@@ -314,7 +348,9 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
             ))}
             <line x1={x(now)} x2={x(now)} y1={AXIS_H} y2={height} className="wv-now"><title>now</title></line>
 
-            {lanes.map(l => (
+            {lanes.map(l => {
+              const shapes = l.tracks.map(tr => deployBoxes(l, tr, ran, now).map(b => boxShape(l, tr, b, x)))
+              return (
               <g key={l.type}>
                 {/* the blue track's hit area, under everything else in the
                     lane: clicking the track selects its agent type */}
@@ -329,27 +365,34 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
                   </rect>
                 )}
 
-                {/* slopspace lines */}
-                {l.tracks.map(tr => {
+                {/* slopspace lines. Only a slopspace's own deployment box
+                    touches its lines; another's box, reaching down past
+                    them, cuts them with a gap either side. */}
+                {l.tracks.map((tr, i) => {
                   const used = l.signals.filter(s => ran.get(signalKey(s)) === tr.id)
                   const from = tr.info ? tr.info.created_at : Math.min(...used.map(signalStart))
                   const to = tr.info ? now : Math.max(...used.map(s => signalEnd(s, now)))
+                  const last = tr.y + (tr.lines - 1) * REPO_GAP
+                  const gaps = shapes.flatMap((bs, j) => j === i ? [] : bs
+                    .filter(s => s.top <= last && tr.y <= s.bottom)
+                    .map((s): [number, number] => [s.x0 - LINE_GAP, s.x1 + LINE_GAP]))
+                  const segs = cutGaps(x(from), x(to), gaps)
                   const picked = selSlopspaceId === tr.id
                   return (
                     <g key={tr.id} className="wv-click" onClick={() => toggle({ kind: 'slopspace', id: tr.id })}>
                       <title>{`slopspace ${tr.id}${tr.info?.repos?.length ? `\n${tr.info.repos.join('\n')}` : ''}${tr.info ? '' : '\n(deleted)'}`}</title>
                       <rect x={x(from)} y={tr.y - 5} width={Math.max(2, x(to) - x(from))} height={(tr.lines - 1) * REPO_GAP + 10} fill="transparent" />
-                      {Array.from({ length: tr.lines }, (_, k) => (
+                      {Array.from({ length: tr.lines }, (_, k) => segs.map(([a, b]) => (
                         <line
-                          key={k}
-                          x1={x(from)} x2={x(to)}
+                          key={`${k}-${a}`}
+                          x1={a} x2={b}
                           y1={tr.y + k * REPO_GAP} y2={tr.y + k * REPO_GAP}
                           stroke={picked ? '#fff' : RED}
                           strokeWidth={picked ? 1.5 : 1}
                           strokeDasharray={tr.info ? undefined : '4 3'}
                           opacity={tr.info?.in_use || tr.info?.deployed || picked ? 1 : 0.7}
                         />
-                      ))}
+                      )))}
                     </g>
                   )
                 })}
@@ -358,17 +401,8 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
                     rising around the work that ran in it. Each is drawn as
                     its outlines, then its fills over them, so the body and
                     its raised parts read as one shape. */}
-                {l.tracks.map(tr => deployBoxes(l, tr, ran, now).map(b => {
-                  const x0 = x(b.from)
-                  const x1 = Math.max(x0 + MIN_BOX_W, x(b.to))
-                  const top = l.blueY + BOX_H / 2 + DEPLOY_GAP
-                  const bottom = tr.y + (tr.lines - 1) * REPO_GAP + BOX_PAD
-                  const rises = b.work.map(w => {
-                    const wx0 = Math.max(x0, x(w.from) - BOX_PAD)
-                    const wx1 = Math.min(x1, Math.max(x(w.from) + MIN_BOX_W, x(w.to)) + BOX_PAD)
-                    return { x: wx0, w: Math.max(0, wx1 - wx0), y: l.blueY - BOX_H / 2 - BOX_PAD, h: top + BOX_PAD - (l.blueY - BOX_H / 2 - BOX_PAD) }
-                  })
-                  const parts = [{ x: x0, w: x1 - x0, y: top, h: bottom - top }, ...rises.filter(r => r.w > 0)]
+                {l.tracks.map((tr, i) => shapes[i].map(b => {
+                  const parts = b.parts
                   const picked = selSlopspaceId === tr.id
                   const stroke = picked ? '#fff' : RED
                   const sw = picked ? 2 : 1.25
@@ -413,7 +447,8 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
                   )
                 })}
               </g>
-            ))}
+              )
+            })}
           </svg>
         </div>
         <div className="wv-details">

@@ -4,9 +4,11 @@ import type {
   LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
   LRRidealongMsg, LRCondocMsg, LRSystemStateMsg, LRRepoStateMsg, LRCondoccerMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState, AgentInfo,
   SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo,
-  WorkerSlopspaceRequest, WorkerSlopspaceReply, LRWorkerSlopspaceReplyMsg,
+  WorkerSlopspaceRequest, WorkerSlopspaceReply, LRWorkerSlopspaceReplyMsg, LRToolsMsg, LRToolsReplyMsg,
 } from './types'
 import { ControlV1 } from './ControlV1'
+import { ToolsPanel } from './Tools'
+import type { ToolsStateMsg, ToolsReply, ToolsRequest } from './Tools'
 import { HostFilePicker } from './HostFilePicker'
 import { detectTextFormat } from './textformat'
 import { WorkerVisual } from './WorkerVisual'
@@ -61,6 +63,10 @@ interface HostClientState {
   workerReply?: WorkerReplyMsg
   // ...and how the slopspace sub-tab's last manual control op went.
   slopspaceReply?: WorkerSlopspaceReply
+  // The host's tools tab, and its replies to requests sent from here (by
+  // request id) -- see tools.go.
+  tools?: ToolsStateMsg
+  toolsReplies?: Record<string, ToolsReply>
   files?: LRFilesMsg
   debugLog?: LRDebugLogMsg
   chainCall?: LRChainCallMsg
@@ -179,6 +185,24 @@ function useCoordinatorWS() {
     } else {
       setReply({ op: req.op, id: req.id, ok: false, error: 'not connected' })
     }
+  }, [])
+
+  // A host's tools tab -- see tools.go. Returns the id its lr-tools-reply
+  // will carry; replies go to every browser, so ids carry this page's own
+  // prefix.
+  const toolsReqSeq = useRef(0)
+  const requestLRTools = useCallback((hostId: string, r: ToolsRequest): string => {
+    const req = `${controlReqPrefix.current}-t${++toolsReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'lr-tools-request', payload: { host_id: hostId, request: { ...r, req } } }))
+    } else {
+      const reply: ToolsReply = { req, op: r.op, ok: false, error: 'not connected' }
+      setHostData(prev => {
+        const hs = prev[hostId] ?? emptyHostState()
+        return { ...prev, [hostId]: { ...hs, toolsReplies: { ...(hs.toolsReplies ?? {}), [req]: reply } } }
+      })
+    }
+    return req
   }, [])
 
   const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
@@ -545,6 +569,23 @@ function useCoordinatorWS() {
             }))
             break
           }
+          case 'lr-tools-state': {
+            const p = msg.payload as LRToolsMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), tools: p.tools ?? undefined },
+            }))
+            break
+          }
+          case 'lr-tools-reply': {
+            const p = msg.payload as LRToolsReplyMsg
+            const key = p.reply.req || p.reply.op
+            setHostData(prev => {
+              const hs = prev[p.host_id] ?? emptyHostState()
+              return { ...prev, [p.host_id]: { ...hs, toolsReplies: { ...(hs.toolsReplies ?? {}), [key]: p.reply } } }
+            })
+            break
+          }
           case 'lr-files-state': {
             const p = msg.payload as LRFilesMsg
             setHostData(prev => ({
@@ -602,6 +643,7 @@ function useCoordinatorWS() {
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
     sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    requestLRTools,
   }
 }
 
@@ -664,8 +706,9 @@ const LR_SERVICES = ['federation-command', 'condoccer', 'condocv2', 'convo', 'se
 // relayed through AC's dedicated upload-relay route rather than AC keeping
 // its own copy of the file (see docs/DistributedExchange.md, Path 1).
 // "control" sequences actions across a host's sub-apps (see
-// local-representative/control.go); it sits between the services and system.
-const LR_TABS = [...LR_SERVICES, 'control', 'system', 'files'] as const
+// local-representative/control.go); it sits between the services and system,
+// with "tools" (the host's T3s, run through dtt -- see tools.go) beside it.
+const LR_TABS = [...LR_SERVICES, 'control', 'tools', 'system', 'files'] as const
 type LRTab = typeof LR_TABS[number]
 
 // Tabs whose content is another app's own UI, embedded via same-origin
@@ -4713,7 +4756,7 @@ function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo;
 
 function LRView({
   host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit, sendLRWorkerSlopspace,
-  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, requestLRTools, uploadFiles, importHostFiles, activeTab, setActiveTab,
   hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget,
 }: {
   host: Host
@@ -4737,6 +4780,7 @@ function LRView({
   sendLRConnectProvider: (hostId: string, provider: string, token: string) => void
   sendLRDisconnectProvider: (hostId: string, provider: string) => void
   sendLRInspectAgents: (hostId: string) => void
+  requestLRTools: (hostId: string, req: ToolsRequest) => string
   uploadFiles: (hostId: string, files: FileList | File[]) => void
   importHostFiles:(hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
   activeTab: LRTab
@@ -5019,6 +5063,21 @@ function LRView({
                     onRun={(seq, controls, recordOverride) => sendLRControlRun(host.id, seq, controls, recordOverride)}
                     onCancel={() => sendLRControlCancel(host.id)}
                     onContinue={run => sendLRControlContinue(host.id, run)}
+                  />
+                )
+              )}
+              {activeTab === 'tools' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <ToolsPanel
+                    connected={active}
+                    state={data.tools ?? null}
+                    replies={data.toolsReplies ?? {}}
+                    request={req => requestLRTools(host.id, req)}
+                    fileUrl={id => fileRawUrl(host.id, id)}
+                    hostApi={`/host/${encodeURIComponent(host.id)}`}
+                    node="this host"
                   />
                 )
               )}
@@ -5332,6 +5391,7 @@ export default function App() {
     acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
     sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
     sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendACRestartApp, sendACSetAutoUpdate,
+    requestLRTools,
   } = useCoordinatorWS()
   const mismatches = Object.values(modeMismatches)
   // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
@@ -5537,6 +5597,7 @@ export default function App() {
               sendLRConnectProvider={sendLRConnectProvider}
               sendLRDisconnectProvider={sendLRDisconnectProvider}
               sendLRInspectAgents={sendLRInspectAgents}
+              requestLRTools={requestLRTools}
               uploadFiles={uploadFiles}
               importHostFiles={importHostFiles}
               activeTab={activeTab}

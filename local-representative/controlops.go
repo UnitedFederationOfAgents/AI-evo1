@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,10 +17,38 @@ import (
 // IANAR's sequence-v2 ops (ianar/seqv2_ops.go), which LR hands to the robot
 // ("__robot:run", see control.go's robotRun). IANAR reports its ops when it
 // connects ("robot-ops"), so the definer can offer them with their
-// arguments.
+// arguments. And tool.<name>, any T3 dtt lists (tools.go): LR runs those
+// itself, through dtt, so unlike robot ops they carry a run.
 
 // robotOpPrefix marks an instruction as one of IANAR's ops.
 const robotOpPrefix = "robot."
+
+// toolOpPrefix marks an instruction as a T3, run through dtt (tools.go).
+const toolOpPrefix = "tool."
+
+// The tool.<name> ops, made from dtt's latest listing (toolsWatch.check).
+// They're kept here rather than passed around like robotOps because a tool
+// op runs as LR's own ops do -- findControlOp(op, nil) finds it -- and
+// there's one local-representative per process. toolOpsKnown is false
+// until dtt has listed its tools: tool.* instructions are then checked
+// only for naming a tool.
+var (
+	toolOpsMu    sync.RWMutex
+	toolOpsList  []ControlOpSpec
+	toolOpsKnown bool
+)
+
+func setToolControlOps(ops []ControlOpSpec, known bool) {
+	toolOpsMu.Lock()
+	toolOpsList, toolOpsKnown = ops, known
+	toolOpsMu.Unlock()
+}
+
+func toolControlOps() ([]ControlOpSpec, bool) {
+	toolOpsMu.RLock()
+	defer toolOpsMu.RUnlock()
+	return toolOpsList, toolOpsKnown
+}
 
 // ControlOpArg documents one argument of an op.
 type ControlOpArg struct {
@@ -82,12 +111,15 @@ func (a opArgs) flag(name string) (bool, error) {
 	return false, fmt.Errorf("%s should be true or false, not %q", name, a[name])
 }
 
-// findControlOp finds op among LR's own ops and, for robot.<op>, robotOps
-// (already prefixed).
+// findControlOp finds op among LR's own ops, for robot.<op> robotOps
+// (already prefixed), and for tool.<name> the tool ops.
 func findControlOp(op string, robotOps []ControlOpSpec) (ControlOpSpec, bool) {
 	list := controlOps
-	if strings.HasPrefix(op, robotOpPrefix) {
+	switch {
+	case strings.HasPrefix(op, robotOpPrefix):
 		list = robotOps
+	case strings.HasPrefix(op, toolOpPrefix):
+		list, _ = toolControlOps()
 	}
 	for _, s := range list {
 		if s.Op == op {

@@ -7,12 +7,19 @@ import type { ControlV1Props } from './ControlV1'
 import { detectTextFormat } from './textformat'
 import { WorkerVisual } from './WorkerVisual'
 import { AgentOps } from './AgentOps'
+import { ToolsPanel } from './Tools'
+import type { ToolsStateMsg, ToolsReply, ToolsRequest } from './Tools'
 
-const TABS =['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
+// Every managed sub-application has a same-named tab. control, tools,
+// system and files are LR's own: they belong to no managed app, so they're
+// not in EMBED_TABS or LAUNCHABLE_APPS.
+const TABS =['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'control', 'tools', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
-// isTab narrows an app name (e.g. a ProcInfo.name) to one of the dashboard's
-// tabs -- every managed sub-application has a same-named tab.
+// isTab narrows a name to one of the dashboard's tabs. Given an app name
+// (e.g. a ProcInfo.name) it says whether that app has a tab to open: every
+// managed sub-application does, and none is named after one of LR's own
+// tabs (control, tools, system, files).
 function isTab(name: string): name is Tab {
   return (TABS as readonly string[]).includes(name)
 }
@@ -92,6 +99,11 @@ function useStatusWS() {
   const [workerReply, setWorkerReply] = useState<WorkerReplyMsg | null>(null)
   // ...and how the slopspace sub-tab's last manual control op went.
   const [slopspaceReply, setSlopspaceReply] = useState<WorkerSlopspaceReply | null>(null)
+  // The tools tab: the catalog and recent runs, and the replies to its
+  // requests by request id -- see local-representative/tools.go.
+  const [toolsState, setToolsState] = useState<ToolsStateMsg | null>(null)
+  const [toolsReplies, setToolsReplies] = useState<Record<string, ToolsReply>>({})
+  const toolsReqSeq = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<Record<string, string>>({})
@@ -262,6 +274,18 @@ function useStatusWS() {
     }
   }, [])
 
+  // requestTools sends a tools tab request and returns the id its
+  // "tools-reply" will carry. Unsent (not connected), it fails at once.
+  const requestTools = useCallback((r: ToolsRequest): string => {
+    const req = `t${++toolsReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'tools-request', payload: { ...r, req } }))
+    } else {
+      setToolsReplies(prev => ({ ...prev, [req]: { req, op: r.op, ok: false, error: 'not connected' } }))
+    }
+    return req
+  }, [])
+
   const controlSlopspace = useCallback((req: WorkerSlopspaceRequest) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setSlopspaceReply(null)
@@ -417,6 +441,14 @@ function useStatusWS() {
           case 'worker-slopspace-reply':
             setSlopspaceReply(msg.payload as WorkerSlopspaceReply)
             break
+          case 'tools-state':
+            setToolsState(msg.payload as ToolsStateMsg)
+            break
+          case 'tools-reply': {
+            const p = msg.payload as ToolsReply
+            setToolsReplies(prev => ({ ...prev, [p.req || p.op]: p }))
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -433,9 +465,9 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply, toolsState, toolsReplies,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace, requestTools,
   }
 }
 
@@ -3526,9 +3558,9 @@ export default function App() {
 
   const {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
-    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply, toolsState, toolsReplies,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace, requestTools,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -3741,6 +3773,16 @@ export default function App() {
                   onRun={runControl}
                   onCancel={cancelControl}
                   onContinue={continueControl}
+                />
+              ) : activeTab === 'tools' ? (
+                <ToolsPanel
+                  connected={connected}
+                  state={toolsState}
+                  replies={toolsReplies}
+                  request={requestTools}
+                  fileUrl={fileRawUrl}
+                  hostApi=""
+                  node="this node"
                 />
               ) : (
                 <>

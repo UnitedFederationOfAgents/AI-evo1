@@ -87,6 +87,7 @@ it back once LR is listening again).
 | `--file-cache-dir` | `file-cache-dir` | `/host-agent-files/exchange/host-cache` | directory the `files` tab uploads into; entries older than 1 hour are swept (72 hours once held) |
 | `--host-store-dir` | `host-store-dir` | `/host-agent-files/exchange/host-store` | directory the file details dialog's **persist** button moves a file into; never swept |
 | `--control-library` | — (command line only) | `~/.config/local-representative/control-v1.yaml` | YAML file the **control** tab's actions and sequences are kept in; empty keeps them in memory only |
+| `--tools-allow` | `tools-allow` | `*` | tools (T3s, run through `dtt`) that control runs' `tool.<name>` ops and agent-coordinator's tools tab may run: `*` for any, or comma/space-separated tool names or globs (see "Tools tab" below) |
 
 ## Configuration files
 
@@ -412,6 +413,104 @@ it:
 
 A robot step's run is given 2 minutes plus the `timeout`s and waits its
 instructions set, so `robot.wait-for-text` with `timeout: 10m` isn't cut off.
+
+## Tools tab
+
+The **tools** tab belongs to LR itself, like control, system and files. It
+isn't a managed app, and nothing runs alongside LR for it. It works with
+**T3s**: declarative tools, each described by a `tool.yaml` (format
+`dtt-v1`) and run by [`dtt`](../dtt/README.md). `dtt` is a short-lived CLI
+that LR calls when it needs it, the same way it calls
+`ambiguous-agent --inspect` for the system tab's agents. LR finds the binary
+the same way it finds the managed apps: next to LR, then
+`$AI_EVO1_DEV_BIN` (`/AI-evo1-dev/bin`), then `$PATH`.
+
+- **The catalog** comes from `dtt list --json`. LR runs it at startup,
+  every 10 minutes after that, and when you press **re-inspect**. If `dtt`
+  is missing, the tab shows the error. The catalog also goes into the
+  system-state snapshot as `tools`.
+- **Runs** use `dtt run <tool> --input - --workdir <dir> --json`. The
+  inputs are passed as JSON, and the working directory is under
+  `$TMPDIR/local-representative-tools/`. dtt enforces the tool's own
+  timeout, and LR allows 30 seconds more for dtt and uv to start. The last 20
+  runs are kept in memory, and a run's working directory is removed when the
+  run drops out of that list.
+
+The tab has three sub-tabs:
+
+- **catalog** lists each tool with its origin (built-in, `~/.ufa/tools` or a
+  `tools-dirs` entry) and whether `tools-allow` allows it. Click a tool to see
+  its inputs, outputs, runtime and path, and its `tool.yaml` (**show
+  tool.yaml**). It also shows where dtt looked, and lists any tools it
+  skipped or that are hidden by another tool of the same name.
+- **runner** builds a form from a tool's inputs. `text` inputs get a text
+  area, and `bool` inputs and inputs with `choices` get a select. Empty
+  fields take their defaults. **run** starts the tool. Each recent run shows
+  its inputs, output values, output files and the end of its log. **save
+  results to files** puts a `.zip` into the files tab containing
+  `report.txt`, `result.json`, `log.txt` and the output files, and the run
+  then links to it.
+- **author** has three parts:
+  - checks a pasted `tool.yaml` against the schema
+    (`dtt validate - --schema-only`);
+  - validates or installs a tool you choose with **select from host…**: pick
+    its `tool.yaml`, then use `dtt validate <dir>` or
+    `dtt install <dir> [--force]`;
+  - scaffolds a new tool into the tools directory
+    (`dtt create <name> --install`), as a uv Python script or a shell
+    script.
+
+### `tool.<name>` control ops
+
+Every listed tool is also a control op, `tool.<name>`, offered in the control
+tab's definer under **tools**. The op's arguments are the tool's inputs, with
+the same names, help text, required flags and defaults. Two more arguments
+are added:
+
+- `save_prefix` is put in front of each saved value's name.
+- `hint` works as it does on LR's own ops.
+
+When a control run reaches the op, it:
+
+1. runs the tool through dtt;
+2. saves each output value as `{{<save_prefix><name>}}`;
+3. copies each output file into the files tab, linked under the steps, as
+   `node-fetch-file` does.
+
+The run's working directory is then removed. If the tool fails, the step
+fails with the tool's error. This lets a control sequence, such as a
+TimeToMAAS pack-up or set-to-work sequence, call a deterministic tool
+without adding a new LR op for it.
+
+Validation is lenient for `tool.*` names dtt doesn't list, as it is for
+`robot.*`: tools come and go, and a saved library shouldn't stop loading
+because of that. Running a missing tool fails with a message that says so.
+
+### `tools-allow`
+
+`tools-allow` is modelled on `control-fetch-allow`. It lists the tools that
+control runs, and anything sent from agent-coordinator, may run. Entries are
+tool names or globs, and `tool.<name>` is accepted too. The default, `*`,
+allows every tool:
+
+```yaml
+# ~/.ufa/config/local-representative.yaml
+tools-allow: materialize-tree, lint-*
+```
+
+When a control run calls a tool that isn't allowed, the step fails with a
+message naming the setting and where it was set. agent-coordinator's
+`__tools:run` is refused the same way. This node's own runner isn't limited,
+because it's driven from this node's own dashboard. The catalog shows each
+tool's allowed state, and LR logs the setting in force at startup.
+
+### From agent-coordinator
+
+agent-coordinator has the same tab for each host. LR sends `tools-state` up
+to it, trimmed to fit one representable line: run logs are cut to 1 KiB and
+the oldest runs are left out. Requests come down as `__tools:<op> <json>`,
+where `<op>` is one of `run`, `reinspect`, `save`, `describe`, `validate`,
+`install` or `create`, and LR answers with `tools-reply`.
 
 ## Worker tab
 

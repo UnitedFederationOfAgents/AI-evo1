@@ -108,6 +108,9 @@ type SystemStateMsg struct {
 	// AgentOps is the "agent operations" section: agent calls running here,
 	// plus those finished in the last 5 minutes -- see agentops.go.
 	AgentOps []AgentOp `json:"agent_ops"`
+	// Tools is the tools tab's catalog: the T3s dtt lists here, and which
+	// tools-allow lets control runs use -- see tools.go.
+	Tools ToolsState `json:"tools"`
 }
 
 // launchSpec describes how to start one managed application.
@@ -460,6 +463,7 @@ func (s *Server) systemState() SystemStateMsg {
 		Connections: append([]ConnectionInfo{}, s.connectivity.connections()...),
 		Agents:      s.agents.snapshot(),
 		AgentOps:    s.agentOps.snapshot(),
+		Tools:       s.tools.snapshot(),
 	}
 }
 

@@ -1,4 +1,5 @@
 import type { ControlStateMsg, ControlLibraryMsg, ControlLibReply } from './controlTypes'
+import type { ToolsStateMsg, ToolsReply } from './Tools'
 
 export interface Host {
   id: string
@@ -414,6 +415,19 @@ export interface WorkerSlopspaceReply {
 export interface LRWorkerSlopspaceReplyMsg {
   host_id: string
   reply: WorkerSlopspaceReply
+}
+
+// A host's tools tab -- see tools.go and Tools.tsx (which holds the types
+// shared with local-representative). tools is null until that host
+// reports, and after it disconnects.
+export interface LRToolsMsg {
+  host_id: string
+  tools: ToolsStateMsg | null
+}
+
+export interface LRToolsReplyMsg {
+  host_id: string
+  reply: ToolsReply
 }
 
 export interface FileInfo {

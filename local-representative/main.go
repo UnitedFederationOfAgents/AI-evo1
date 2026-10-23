@@ -272,6 +272,10 @@ type Server struct {
 	// from agent-records' writing files, for the system tab -- see agentops.go.
 	agentOps *agentOpsWatch
 
+	// tools is the tools tab: the T3s dtt lists, and their recent runs --
+	// see tools.go.
+	tools *toolsWatch
+
 	// System tab: LR's own process plus any child applications it launches.
 	heartbeatPort string                  // representable port, passed to launched children
 	httpPort      string                  // LR's own dashboard HTTP port (reported to agent-coordinator)
@@ -445,6 +449,10 @@ func newServer(lrName string) *Server {
 		fcInst:                 make(map[string]*fcInstance),
 	}
 	s.control = newControlEngine(s)
+	s.tools = newToolsWatch(s.broadcastToolsState, s.toolsCatalogChanged, func() (string, error) {
+		return s.resolveAppBinary(dttBin, dttBin)
+	})
+	s.tools.saveFile = s.saveToolFile
 	return s
 }
 
@@ -676,6 +684,7 @@ func (s *Server) pushStateToAC() {
 	if wk := s.getWorkerState(); wk != nil {
 		ac.SendData("worker-state", *wk)
 	}
+	ac.SendData("tools-state", s.tools.tabStateForAC())
 }
 
 // notifyCloseConn wraps a net.Conn so closing it -- as net/http does once the
@@ -886,9 +895,10 @@ func (s *Server) connectAC(host, port string) {
 
 	// Commands from AC: "__system:" commands drive this LR's own system tab
 	// (launch/terminate managed apps), "__control:" its control tab (see
-	// control.go), "__worker:" its worker tab (see worker.go), and
-	// "__fc:<instance> <cmd>" goes to one FC instance (see fcinstances.go);
-	// everything else is forwarded to the default FC instance.
+	// control.go), "__worker:" its worker tab (see worker.go), "__tools:"
+	// its tools tab (see tools.go), and "__fc:<instance> <cmd>" goes to one
+	// FC instance (see fcinstances.go); everything else is forwarded to the
+	// default FC instance.
 	client.SetCommandHandler(func(cmd string) {
 		if strings.HasPrefix(cmd, "__system:") {
 			s.handleSystemCommand(cmd)
@@ -896,6 +906,10 @@ func (s *Server) connectAC(host, port string) {
 		}
 		if strings.HasPrefix(cmd, "__worker:") {
 			s.handleWorkerCommand(cmd)
+			return
+		}
+		if strings.HasPrefix(cmd, "__tools:") {
+			s.handleToolsCommand(cmd)
 			return
 		}
 		if strings.HasPrefix(cmd, "__tc-availability:") {
@@ -1156,6 +1170,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		if wk := s.getWorkerState(); wk != nil {
 			s.sendToClient(c, "worker-state", *wk)
 		}
+		s.sendToClient(c, "tools-state", s.tools.tabState())
 		s.sendToClient(c, "tc-availability", TCAvailabilityMsg{Available: s.getTCAvailability()})
 		for _, mm := range s.currentModeMismatches() {
 			s.sendToClient(c, "mode-mismatch", mm)
@@ -1265,6 +1280,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				if err := s.controlSlopspace(req); err != nil {
 					s.sendToClient(c, "worker-slopspace-reply", WorkerSlopspaceReply{Op: req.Op, ID: req.ID, Error: err.Error()})
 				}
+			}
+		case "tools-request":
+			// The tools tab -- see tools.go. Some ops call dtt, so the
+			// answer comes back in the background.
+			var req ToolsRequest
+			if err := json.Unmarshal(m.Payload, &req); err == nil {
+				go func() { s.sendToClient(c, "tools-reply", s.tools.handle(req, false, s.lrName)) }()
 			}
 		}
 		switch m.Type {
@@ -1600,6 +1622,8 @@ type appConfig struct {
 	hostStoreDir  string   // directory a "persist" press moves a file into
 	fetchAllow    []string // paths/globs this node hands over to control runs' node-fetch-file; "*" (the default): any file (see controlnodes.go)
 	fetchAllowSrc string   // where fetchAllow came from: a config file, "the command line" or "(default)"
+	toolsAllow    []string // tools (names/globs) control runs and agent-coordinator may run; "*" (the default): any (see tools.go)
+	toolsAllowSrc string   // where toolsAllow came from, as fetchAllowSrc
 }
 
 // splitList parses a comma/whitespace-separated list, dropping empty entries.
@@ -1653,9 +1677,14 @@ func resolveConfig(conf *ufaconfig.Config, setOnCLI map[string]bool, defaults ap
 		hostStoreDir:  pick("host-store-dir", defaults.hostStoreDir),
 		fetchAllow:    splitList(pick("control-fetch-allow", strings.Join(defaults.fetchAllow, ","))),
 		fetchAllowSrc: conf.Source("control-fetch-allow"),
+		toolsAllow:    splitList(pick("tools-allow", strings.Join(defaults.toolsAllow, ","))),
+		toolsAllowSrc: conf.Source("tools-allow"),
 	}
 	if setOnCLI["control-fetch-allow"] {
 		out.fetchAllowSrc = "the command line"
+	}
+	if setOnCLI["tools-allow"] {
+		out.toolsAllowSrc = "the command line"
 	}
 	var err error
 	if out.dev, err = pickBool("dev", defaults.dev); err != nil {
@@ -1765,6 +1794,7 @@ func main() {
 	hostStoreDir := flag.String("host-store-dir", defaultHostStoreDir, "directory the file-details dialog's \"persist\" button moves a file into; never swept")
 	controlLibPath := flag.String("control-library", defaultControlLibraryPath(), "YAML file the control tab's actions and sequences are kept in (see controllib.go); empty keeps them in memory only")
 	fetchAllow := flag.String("control-fetch-allow", fetchAllowAll, "files this node hands over to control runs' node-fetch-file, whichever node's run asks: \"*\" (or empty) for any file, or comma/space-separated absolute paths or globs (~ for home; a trailing / allows a whole directory) (see controlnodes.go)")
+	toolsAllow := flag.String("tools-allow", toolsAllowAll, "tools (T3s run through dtt) control runs' tool.<name> ops, and agent-coordinator's tools tab, may run: \"*\" (or empty) for any, or comma/space-separated tool names or globs (see tools.go)")
 	flag.Parse()
 
 	// Layer ~/.ufa/config/{global,local-representative}.yaml beneath the flags:
@@ -1799,6 +1829,7 @@ func main() {
 		fileCacheDir:  *fileCacheDir,
 		hostStoreDir:  *hostStoreDir,
 		fetchAllow:    splitList(*fetchAllow),
+		toolsAllow:    splitList(*toolsAllow),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -1859,6 +1890,15 @@ func main() {
 		return s.resolveAppBinary(ambiguousAgentBin, ambiguousAgentBin)
 	})
 	go s.agents.watchLoop()
+	if err := s.tools.setAllow(cfg.toolsAllow, cfg.toolsAllowSrc); err != nil {
+		log.Fatal(err)
+	}
+	if allow := s.tools.getAllow(); len(allow) > 0 {
+		log.Printf("tools: control runs and agent-coordinator may only run %s (tools-allow, from %s)", strings.Join(allow, ", "), cfg.toolsAllowSrc)
+	} else {
+		log.Printf("tools: control runs and agent-coordinator may run any tool (tools-allow, from %s)", cfg.toolsAllowSrc)
+	}
+	go s.tools.watchLoop()
 	s.devMode = cfg.devMode
 	s.dev = cfg.dev
 	if s.devMode {

@@ -21,6 +21,9 @@ import type { Interaction, Timeline, TimelineEvent } from './types'
 // Blue is structure (propose, begin, response, target commits); green is the
 // interaction itself (lock, prompt, record, unlock). A dashed grey node is
 // where the interaction in flight goes next.
+//
+// condocv2/record.go draws the same picture into the timeline record's HTML
+// page; keep the two in step.
 
 const BLUE = '#4da6ff'
 const GREEN = '#4ec94e'
@@ -238,6 +241,13 @@ export function Swimlanes({ timeline, interactions, pendingPrompt, lockInteracti
           <span className="swim-key">click a node for its commit</span>
         </span>
       </div>
+      {timeline.source === 'record' && (
+        <div className="pointer-note">
+          Drawn from the condoc's{' '}
+          {timeline.recordUrl ? <a href={timeline.recordUrl} target="_blank" rel="noreferrer">timeline record</a> : 'timeline record'}
+          , saved when it was completed — its slopspace is gone.
+        </div>
+      )}
       {(timeline.errors ?? []).map((err) => (
         <div key={err} className="pointer-message">{err}</div>
       ))}

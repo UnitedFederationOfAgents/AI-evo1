@@ -75,6 +75,10 @@ export interface Timeline {
   lanes: TimelineLane[]
   events: TimelineEvent[]
   errors?: string[]
+  // "record": the slopspace is gone, so this is the timeline saved on
+  // completion (condocv2/record.go), at recordUrl.
+  source?: 'record'
+  recordUrl?: string
 }
 
 // CondocState is the selected condoc: its pointer, the text flow and the
@@ -86,6 +90,8 @@ export interface CondocState {
   interactions: Interaction[]
   pendingPrompt?: string
   timeline: Timeline
+  // The visual's prompt column when the timeline comes from the record.
+  recordPrompts?: Interaction[]
   // Completion -- see condocv2/complete.go.
   defaultPrGuidance: string
   prGuidance?: string

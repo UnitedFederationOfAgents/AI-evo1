@@ -63,6 +63,7 @@ type slopState struct {
 	busy    map[string]bool
 	wake    chan struct{}
 	prLive  map[string]prLiveCache // stem -> the raised PRs as last seen on GitHub (see complete.go)
+	records map[string]recordCache // stem -> a merged condoc's timeline record (see record.go)
 }
 
 // dungeonKeeperConfig reads the same environment dungeon-keeper does, so
@@ -95,6 +96,7 @@ func (s *Server) initSlopspace() {
 	s.slop.agent = "claude"
 	s.slop.busy = map[string]bool{}
 	s.slop.prLive = map[string]prLiveCache{}
+	s.slop.records = map[string]recordCache{}
 	s.slop.wake = make(chan struct{}, 1)
 }
 
@@ -1199,6 +1201,9 @@ type CondocState struct {
 	// PendingPrompt is a locked prompt not yet in the step file.
 	PendingPrompt string   `json:"pendingPrompt,omitempty"`
 	Timeline      Timeline `json:"timeline"`
+	// RecordPrompts is the visual's prompt column when the timeline comes
+	// from the record (see record.go).
+	RecordPrompts []Interaction `json:"recordPrompts,omitempty"`
 
 	// Completion (see complete.go).
 	DefaultPRGuidance string   `json:"defaultPrGuidance"`
@@ -1228,8 +1233,18 @@ func (s *Server) condocState(stem string) (CondocState, error) {
 		st.PendingPrompt = spec.Lock.Prompt
 	}
 	// A merged condoc's slopspace is gone; its files live on in the merged
-	// condoc repo (CondocURL points there).
-	if spec.SlopspaceID != "" && spec.Phase != PhaseMerged {
+	// condoc repo (CondocURL points there), and the visual tab is drawn from
+	// the timeline record saved there on completion.
+	if spec.Phase == PhaseMerged {
+		if rec, rerr := s.timelineRecord(&spec); rerr == nil {
+			st.Timeline = rec.Timeline
+			st.Timeline.Source, st.Timeline.RecordURL = "record", recordURL(&spec)
+			st.RecordPrompts = rec.Prompts
+		} else {
+			st.Timeline = s.buildTimeline(&spec, nil)
+			st.Timeline.Errors = append(st.Timeline.Errors, fmt.Sprintf("only the pointer lane can be drawn: no timeline record (%v)", rerr))
+		}
+	} else if spec.SlopspaceID != "" {
 		var meta *dktypes.SlopspaceMetadata
 		for attempt := 0; ; attempt++ {
 			if meta, err = s.slop.ss.Get(spec.SlopspaceID); err != nil {

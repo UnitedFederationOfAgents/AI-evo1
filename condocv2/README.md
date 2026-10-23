@@ -41,8 +41,9 @@ restart resumes it where it stopped.
 Between interactions, **Complete** ends the condoc and re-integrates its
 branches (`complete.go`):
 
-1. **complete** — `## Completed` is added to the main file (condoc commit)
-   and the pointer moves to `pr_drafting` (pointer commit)
+1. **complete** — `## Completed` is added to the main file and the timeline
+   record is saved beside the step file (condoc commit), and the pointer
+   moves to `pr_drafting` (pointer commit)
 2. **drafted** — an in-place agent turn writes `prs.yaml`: one PR per repo
    with changes (targets with nothing to merge are skipped), following the
    *PR guidance*, which defaults to *extremely concise*
@@ -65,6 +66,14 @@ A condoc opens with two tabs:
 - **Visual** — the swimlanes: one lane per repo (pointer, condoc, each
   target) and a node per commit above, read back from git by those subjects
   (`timeline.go`, `frontend/src/Swimlanes.tsx`).
+
+The condoc and target lanes are read from the slopspace's clones, which Merge
+deletes. So **complete** also saves the Visual tab's model as
+`<condoc>Impls/Record.html` (`record.go`): a standalone page drawing the same
+swimlanes, with the model embedded as JSON. Once merged, the Visual tab is
+drawn from that record, fetched from GitHub (the kept branch, else the
+default branch). Condocs completed before the record existed show only the
+pointer lane after merge.
 
 ## Building
 

@@ -2,8 +2,9 @@ package main
 
 // Completing a v2 condoc and re-integrating its branches:
 //
-//	complete  (condoc + pointer commits) -> the agent drafts one PR per repo
-//	          with changes (an in-place turn writing prs.yaml)
+//	complete  (condoc + pointer commits) -> the timeline record is saved
+//	          (record.go), then the agent drafts one PR per repo with changes
+//	          (an in-place turn writing prs.yaml)
 //	drafted   (pointer commit)  -> the human edits the drafts, or redrafts
 //	prs       (condoc + pointer commits) -> the PRs are raised, targets
 //	          first, the condoc repo last
@@ -41,7 +42,8 @@ const defaultPRGuidance = "Be extremely concise. Title: under 60 characters, imp
 // ---- complete ----
 
 // slopComplete ends the condoc's interactions: it marks the main file
-// completed (the condoc's complete commit) and queues the PR draft turn (the
+// completed and saves the timeline record (the condoc's complete commit), and
+// queues the PR draft turn (the
 // pointer's complete commit).
 func (s *Server) slopComplete(stem, guidance string) error {
 	if !s.claim(stem) {
@@ -58,7 +60,7 @@ func (s *Server) slopComplete(stem, guidance string) error {
 	if spec.Interactions == 0 {
 		return fmt.Errorf("%s has no interactions to complete", spec.Name)
 	}
-	_, main, err := s.idleMainFile(&spec)
+	meta, main, err := s.idleMainFile(&spec)
 	if err != nil {
 		return err
 	}
@@ -67,10 +69,16 @@ func (s *Server) slopComplete(stem, guidance string) error {
 		return err
 	}
 	if !strings.Contains(content, "\n## Completed\n") {
-		content = strings.TrimRight(content, "\n") + fmt.Sprintf("\n\n## Completed\n\nAfter %d interaction(s).\n", spec.Interactions)
+		content = strings.TrimRight(content, "\n") + fmt.Sprintf("\n\n## Completed\n\nAfter %d interaction(s). Timeline record: [%s](%s).\n",
+			spec.Interactions, recordFileName, filepath.ToSlash(filepath.Join(filepath.Base(implDir(main)), recordFileName)))
 		if err := writeFileString(main, content); err != nil {
 			return err
 		}
+	}
+	// The visual tab's model, for once Merge has deleted the slopspace (see
+	// record.go).
+	if err := s.writeTimelineRecord(&spec, meta, main); err != nil {
+		return fmt.Errorf("timeline record: %v", err)
 	}
 	if err := s.commitCondocRepo(&spec, commitMsg(&spec, "complete", 0)); err != nil {
 		return err

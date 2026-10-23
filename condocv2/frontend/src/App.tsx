@@ -932,7 +932,7 @@ function CondocView({ state, tab, onTab, onAction }: {
         ) : (
           <Swimlanes
             timeline={state.timeline}
-            interactions={state.interactions}
+            interactions={state.recordPrompts ?? state.interactions}
             pendingPrompt={state.pendingPrompt}
             lockInteraction={e.lockInteraction}
           />

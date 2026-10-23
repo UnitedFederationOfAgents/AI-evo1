@@ -12,6 +12,7 @@ package prkeeper
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -212,6 +213,31 @@ func (c *Client) DefaultBranch(repo string) (string, error) {
 		return "", err
 	}
 	return r.DefaultBranch, nil
+}
+
+// FileContent returns path's content in repo at ref (a branch, tag or SHA;
+// empty for the default branch). The contents API serves files up to 1 MB.
+func (c *Client) FileContent(repo, ref, path string) ([]byte, error) {
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	p := "/repos/" + repo + "/contents/" + strings.Join(segs, "/")
+	if ref != "" {
+		p += "?" + url.Values{"ref": {ref}}.Encode()
+	}
+	var f struct {
+		Type     string `json:"type"`
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := c.do(http.MethodGet, p, nil, &f); err != nil {
+		return nil, err
+	}
+	if f.Type != "file" || f.Encoding != "base64" {
+		return nil, fmt.Errorf("%s/%s: not a file the contents API can serve (type %q, encoding %q)", repo, path, f.Type, f.Encoding)
+	}
+	return base64.StdEncoding.DecodeString(strings.ReplaceAll(f.Content, "\n", ""))
 }
 
 // do sends one API request with body JSON-encoded (nil for none) and decodes

@@ -50,6 +50,11 @@ type Timeline struct {
 	Lanes  []TimelineLane  `json:"lanes"`
 	Events []TimelineEvent `json:"events"`
 	Errors []string        `json:"errors,omitempty"` // lanes that couldn't be read
+
+	// Source is "record" once the slopspace is gone and the timeline is the
+	// one saved on completion (see record.go), at RecordURL.
+	Source    string `json:"source,omitempty"`
+	RecordURL string `json:"recordUrl,omitempty"`
 }
 
 var timelineSubjectRe = regexp.MustCompile(`^condocv2: (\S+) ([a-z-]+)(?: (\d+))?\s*$`)

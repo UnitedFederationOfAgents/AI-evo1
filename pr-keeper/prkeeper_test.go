@@ -72,6 +72,11 @@ func TestClientRoundTrip(t *testing.T) {
 		case r.Method == http.MethodDelete && r.URL.Path == "/repos/o/r/git/refs/heads/condoc/X-1/main":
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			w.Write([]byte(`{"message":"Reference does not exist"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/contents/docs/a b.html":
+			if r.URL.Query().Get("ref") != "condoc/X-1/main" {
+				t.Errorf("contents ref = %q", r.URL.Query().Get("ref"))
+			}
+			w.Write([]byte(`{"type":"file","encoding":"base64","content":"aGVs\nbG8="}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/missing":
 			w.WriteHeader(http.StatusNotFound)
 			w.Write([]byte(`{"message":"Not Found"}`))
@@ -105,11 +110,14 @@ func TestClientRoundTrip(t *testing.T) {
 	if err := c.DeleteBranch("o/r", "condoc/X-1/main"); err != nil {
 		t.Fatalf("DeleteBranch of a missing branch: %v", err)
 	}
+	if b, err := c.FileContent("o/r", "condoc/X-1/main", "/docs/a b.html"); err != nil || string(b) != "hello" {
+		t.Fatalf("FileContent = %q, %v", b, err)
+	}
 	_, err = c.DefaultBranch("o/missing")
 	if !IsStatus(err, http.StatusNotFound) || !strings.Contains(err.Error(), "Not Found") {
 		t.Fatalf("DefaultBranch error = %v", err)
 	}
-	if len(seen) != 7 {
+	if len(seen) != 8 {
 		t.Errorf("requests = %v", seen)
 	}
 }

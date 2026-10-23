@@ -13,7 +13,8 @@ import type { SlopspaceInfo, WorkerSignalInfo, WorkerStateMsg } from './types'
 // The box sits just below the blue track, so work done while it was deployed
 // but not in it runs ABOVE it; work that ran in it is WITHIN it -- the box
 // rises around the part of the submission that ran. Clicking a submission, a
-// slopspace or a deployment shows it in the details panel on the right.
+// slopspace or a deployment shows it in the details panel on the right, and
+// clicking the blue track itself shows its agent type (Revision G).
 //
 // It only draws what dungeon-keeper reports in worker-state: ongoing signals
 // and the most recent completed ones, and the slopspaces still on the host
@@ -46,7 +47,7 @@ const BLUE = '#5bb8ff'
 const RED = '#e05555'
 const DEPLOY_FILL = '#2a1518'
 
-type Selection = { kind: 'signal'; key: string } | { kind: 'slopspace'; id: string } | null
+type Selection = { kind: 'signal'; key: string } | { kind: 'slopspace'; id: string } | { kind: 'agent-type'; type: string } | null
 
 interface SlopTrack {
   id: string
@@ -279,8 +280,8 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
   const selSignal = sel?.kind === 'signal' ? signals.find(s => signalKey(s) === sel.key) ?? null : null
   const selSlopspaceId = sel?.kind === 'slopspace' ? sel.id : null
   const isSel = (s: WorkerSignalInfo) => sel?.kind === 'signal' && sel.key === signalKey(s)
-  const toggle = (next: Selection) =>
-    setSel(cur => (cur && next && cur.kind === next.kind && (cur.kind === 'signal' ? cur.key === (next as { key: string }).key : cur.id === (next as { id: string }).id) ? null : next))
+  const selType = sel?.kind === 'agent-type' ? sel.type : null
+  const toggle = (next: Selection) => setSel(cur => (JSON.stringify(cur) === JSON.stringify(next) ? null : next))
 
   return (
     <div className="wv">
@@ -315,6 +316,19 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
 
             {lanes.map(l => (
               <g key={l.type}>
+                {/* the blue track's hit area, under everything else in the
+                    lane: clicking the track selects its agent type */}
+                {l.type !== UNDEPLOYED && (
+                  <rect
+                    className="wv-click"
+                    x={0} y={l.blueY - BOX_H / 2} width={width} height={BOX_H}
+                    fill="transparent"
+                    onClick={() => toggle({ kind: 'agent-type', type: l.type })}
+                  >
+                    <title>{`agent type ${l.type}`}</title>
+                  </rect>
+                )}
+
                 {/* slopspace lines */}
                 {l.tracks.map(tr => {
                   const used = l.signals.filter(s => ran.get(signalKey(s)) === tr.id)
@@ -375,7 +389,11 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
 
                 {/* the blue track and its submissions */}
                 {l.type !== UNDEPLOYED && (
-                  <line x1={0} x2={width} y1={l.blueY} y2={l.blueY} stroke={BLUE} strokeOpacity={0.55} />
+                  <line
+                    x1={0} x2={width} y1={l.blueY} y2={l.blueY}
+                    stroke={selType === l.type ? '#fff' : BLUE} strokeOpacity={selType === l.type ? 0.9 : 0.55} strokeWidth={selType === l.type ? 2 : 1}
+                    pointerEvents="none"
+                  />
                 )}
                 {l.signals.map(s => {
                   const x0 = x(s.created_at)
@@ -411,7 +429,19 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
                   onSignal={key => setSel({ kind: 'signal', key })}
                 />
               )
-              : <div className="worker-signal-detail">select a work submission or a slopspace</div>}
+              : selType
+                ? (
+                  <AgentTypeDetails
+                    type={selType}
+                    state={state}
+                    work={lanes.find(l => l.type === selType)?.signals ?? []}
+                    slopspaces={slopspaces}
+                    now={now}
+                    onSignal={key => setSel({ kind: 'signal', key })}
+                    onSlopspace={id => setSel({ kind: 'slopspace', id })}
+                  />
+                )
+                : <div className="worker-signal-detail">select a work submission, a slopspace or a blue track (its agent type)</div>}
         </div>
       </div>
       <div className="worker-signal-detail">
@@ -508,6 +538,58 @@ function SlopspaceDetails({ id, info, work, onSignal }: { id: string; info?: Slo
             ))}
           </div>
         )}
+    </div>
+  )
+}
+
+// AgentTypeDetails summarises a lane's agent type from what the worker
+// reports: whether this worker runs it, the slopspace deployed to it, its
+// reported submissions and the agents that ran them.
+function AgentTypeDetails({ type, state, work, slopspaces, now, onSignal, onSlopspace }: {
+  type: string
+  state: WorkerStateMsg
+  work: WorkerSignalInfo[]
+  slopspaces: SlopspaceInfo[]
+  now: number
+  onSignal: (key: string) => void
+  onSlopspace: (id: string) => void
+}) {
+  const ours = type === state.agent_type
+  const deployed = slopspaces.find(s => s.deployed && s.agent_type === type)
+  const deployedTo = slopspaces.filter(s => s.deployments?.some(d => d.agent_type === type))
+  const deployments = deployedTo.reduce((n, s) => n + (s.deployments?.filter(d => d.agent_type === type).length ?? 0), 0)
+  const byStatus = new Map<string, number>()
+  work.forEach(s => byStatus.set(s.status, (byStatus.get(s.status) ?? 0) + 1))
+  const ran = work.filter(s => s.started_at)
+  const busy = ran.reduce((ms, s) => ms + Math.max(0, signalEnd(s, now) - signalStart(s)), 0)
+  const agents = [...new Set(work.map(s => [s.agent, s.model && `(${s.model})`].filter(Boolean).join(' ')).filter(Boolean))]
+  const newest = [...work].sort((a, b) => b.created_at - a.created_at)
+  return (
+    <div className="wv-detail-body">
+      <div className="wv-detail-kind" style={{ color: BLUE }}>agent type</div>
+      <Field label="name">{type}</Field>
+      <Field label="this worker">{ours ? `runs it (${state.worker_id}, ${state.busy ? 'busy' : 'idle'})` : `runs ${state.agent_type || '—'}, not this`}</Field>
+      <Field label="deployed now">
+        {deployed
+          ? <button className="wv-link" onClick={() => onSlopspace(deployed.id)} title={deployed.id}>{deployed.id.slice(0, 8)}</button>
+          : 'no slopspace'}
+      </Field>
+      <Field label="deployments">{deployments} recorded, across {deployedTo.length} slopspace{deployedTo.length === 1 ? '' : 's'}</Field>
+      <Field label="submissions">{work.length ? [...byStatus].map(([st, n]) => `${n} ${st}`).join(', ') : 'none reported'}</Field>
+      {ran.length > 0 && <Field label="time working">{fmtDuration(busy)} over {ran.length} run{ran.length === 1 ? '' : 's'}</Field>}
+      {agents.length > 0 && <Field label="agents">{agents.join(', ')}</Field>}
+      {newest.length > 0 && (
+        <>
+          <div className="wv-field-label">work (newest first)</div>
+          <div className="wv-work-list">
+            {newest.map(s => (
+              <button key={signalKey(s)} className="wv-link wv-work-item" onClick={() => onSignal(signalKey(s))}>
+                {fmtTime(s.created_at)} · {s.status} · {s.prompt.split('\n')[0].slice(0, 60)}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

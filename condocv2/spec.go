@@ -54,10 +54,11 @@ const (
 	// The final states (see final.go): markers only -- nothing but the
 	// pointer changes, and the UI hides them unless "show final" is on.
 	PhaseArchived  = "archived"  // put away after the merge
-	PhaseAbandoned = "abandoned" // forced to an end from any non-final phase
+	PhaseAbandoned = "abandoned" // forced to an end before merge (Unabandon undoes it)
 )
 
-// isFinalPhase reports whether a phase is one condocv2 never moves on from.
+// isFinalPhase reports whether a phase is one condocv2 doesn't drive on from
+// (only Unabandon, by hand, leaves one).
 func isFinalPhase(phase string) bool {
 	return phase == PhaseArchived || phase == PhaseAbandoned
 }

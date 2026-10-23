@@ -17,7 +17,7 @@ import { isFinalPhase, wasMerged } from './types'
 
 type StemAction =
   | 'withdraw' | 'accept' | 'resubmit' | 'prompt' | 'submit'
-  | 'complete' | 'redraft' | 'raise-prs' | 'merge' | 'archive' | 'abandon'
+  | 'complete' | 'redraft' | 'raise-prs' | 'merge' | 'archive' | 'abandon' | 'unabandon'
 
 type ActionExtra = { text?: string; autoSubmit?: boolean; template?: string }
 type OnAction = (type: StemAction, stem: string, extra?: ActionExtra) => void
@@ -614,12 +614,13 @@ function PointerDetails({ entry }: { entry: PointerEntry }) {
   )
 }
 
-// AbandonButton forces a held, non-final condoc to its end, after a warning.
-// Like Archive it only marks the pointer (see condocv2/final.go).
+// AbandonButton forces a held condoc that hasn't merged yet to its end, after
+// a warning (a merged one is archived instead). Like Archive it only marks
+// the pointer (see condocv2/final.go); Unabandon undoes it.
 function AbandonButton({ entry, onAction }: { entry: PointerEntry; onAction: (type: StemAction, stem: string) => void }) {
-  if (!entry.heldHere || isFinalPhase(entry.phase)) return null
+  if (!entry.heldHere || isFinalPhase(entry.phase) || entry.phase === 'merged') return null
   const warn = `Abandon ${entry.name}?\n\n` +
-    'It moves to a final state for good: condocv2 stops driving it and hides it unless "show final" is on. ' +
+    'It moves to a final state: condocv2 stops driving it and hides it unless "show final" is on, until you Unabandon it. ' +
     'Nothing else is touched -- its slopspace, branches and any open PRs stay as they are, for you to clean up.'
   return (
     <button
@@ -873,6 +874,17 @@ function Completion({ state, onAction }: { state: CondocState; onAction: OnActio
           <div className="pointer-note">
             Abandoned while {PHASE_LABELS[e.finalFrom ?? 'proposed'] ?? e.finalFrom}. Its slopspace, branches and any PRs were left as they were.
           </div>
+          {held && (
+            <div className="pointer-actions">
+              <button
+                className="btn-secondary working-dir-btn"
+                title="puts the condoc back where it was abandoned -- condocv2 drives it again from there"
+                onClick={() => onAction('unabandon', e.stem)}
+              >
+                Unabandon
+              </button>
+            </div>
+          )}
         </div>
       )
   }

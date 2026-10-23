@@ -66,9 +66,12 @@ only**: one pointer commit moves the phase and records the phase it left
 touched, and condocv2 never drives the condoc again.
 
 - **archived** — *Archive*, after **merged**: the end of the normal lifecycle.
-- **abandoned** — *Abandon…*, from any non-final phase, after a warning. A
-  queued turn is dropped; a running one has to finish first. Whatever the
-  condoc had (slopspace, branches, open PRs) is left for you to clean up.
+- **abandoned** — *Abandon…*, from any phase before **merged** (a merged
+  condoc is archived instead), after a warning. A queued turn is dropped; a
+  running one has to finish first. Whatever the condoc had (slopspace,
+  branches, open PRs) is left for you to clean up. *Unabandon* undoes it: one
+  pointer commit puts the phase back to `finalFrom` and clears the marker, and
+  condocv2 drives the condoc again from there (re-queuing a dropped turn).
 
 The sidebar hides final condocs unless **show final** is ticked.
 

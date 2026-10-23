@@ -293,7 +293,7 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 
 	// Everything else is keyed on the condoc's pointer stem; a failure is
 	// reported back to the client that asked.
-	case "withdraw", "accept", "resubmit", "prompt", "submit", "complete", "redraft", "raise-prs", "merge", "archive", "abandon":
+	case "withdraw", "accept", "resubmit", "prompt", "submit", "complete", "redraft", "raise-prs", "merge", "archive", "abandon", "unabandon":
 		var p struct {
 			Stem       string `json:"stem"`
 			Text       string `json:"text"`
@@ -325,6 +325,8 @@ func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
 			err = s.slopArchive(p.Stem)
 		case "abandon":
 			err = s.slopAbandon(p.Stem)
+		case "unabandon":
+			err = s.slopUnabandon(p.Stem)
 		}
 		s.replyErr(c, err)
 		if m.Type != "withdraw" {

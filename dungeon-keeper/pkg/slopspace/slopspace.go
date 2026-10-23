@@ -177,6 +177,10 @@ func (m *Manager) Deploy(id string, agentType types.AgentType) error {
 	metadata.Iteration++
 	metadata.DeployPath = deployPath
 	metadata.DeployedAgentType = agentType
+	metadata.Deployments = append(metadata.Deployments, types.Deployment{AgentType: agentType, DeployedAt: time.Now()})
+	if n := len(metadata.Deployments); n > types.MaxDeployments {
+		metadata.Deployments = metadata.Deployments[n-types.MaxDeployments:]
+	}
 	if err := m.writeMetadata(metadata.RootPath, metadata); err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
@@ -232,6 +236,10 @@ func (m *Manager) Return(id string) error {
 	// Update metadata
 	metadata.Deployed = false
 	metadata.DeployPath = ""
+	if n := len(metadata.Deployments); n > 0 && metadata.Deployments[n-1].ReturnedAt == nil {
+		now := time.Now()
+		metadata.Deployments[n-1].ReturnedAt = &now
+	}
 	if err := m.writeMetadata(metadata.RootPath, metadata); err != nil {
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}

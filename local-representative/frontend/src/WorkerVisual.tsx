@@ -6,15 +6,23 @@ import type { SlopspaceInfo, WorkerSignalInfo, WorkerStateMsg } from './types'
 // Revision E): one horizontal swimlane per agent type, time running left to
 // right in proportion and zoomable. Each lane has a blue track of work
 // submissions (work signals), and below it a red track per slopspace -- one
-// line per writespace repo -- from its creation until now. A submission that
-// ran in a slopspace is enclosed by a red box joining it to that slopspace's
-// lines. Clicking a submission or a slopspace shows it in the details panel
-// on the right.
+// line per writespace repo -- from its creation until now.
+//
+// While a slopspace is deployed to the lane's agent type (Revision F), its
+// lines merge into a red box spanning the deployment, from deploy to return.
+// The box sits just below the blue track, so work done while it was deployed
+// but not in it runs ABOVE it; work that ran in it is WITHIN it -- the box
+// rises around the part of the submission that ran. Clicking a submission, a
+// slopspace or a deployment shows it in the details panel on the right.
 //
 // It only draws what dungeon-keeper reports in worker-state: ongoing signals
-// and the most recent completed ones, and the slopspaces still on the host.
-// A slopspace that has been deleted shows as a dashed track spanning the work
-// that ran in it.
+// and the most recent completed ones, and the slopspaces still on the host
+// with their last few deployments. Slopspace work is taken to have run in the
+// slopspace it recorded, or else in the one deployed to its agent type when it
+// started (there is at most one). Where work ran in a slopspace with no
+// recorded deployment covering it -- from before deployments were recorded,
+// or a deleted slopspace -- the box is dashed and spans only that work. A
+// deleted slopspace shows as a dashed track spanning the work that ran in it.
 //
 // Mirrored in agent-coordinator/frontend/src/WorkerVisual.tsx -- keep the
 // two in step.
@@ -30,11 +38,13 @@ const REPO_GAP = 4     // between one slopspace's repo lines
 const SLOP_GAP = 12    // between slopspaces
 const LANE_PAD = 14    // below a lane's last track
 const BOX_PAD = 6      // a red box's margin around what it encloses
+const DEPLOY_GAP = 4   // between the blue track's boxes and a deployment box below them
 const MIN_BOX_W = 8
 const MAX_ZOOM = 2000
 
 const BLUE = '#5bb8ff'
 const RED = '#e05555'
+const DEPLOY_FILL = '#2a1518'
 
 type Selection = { kind: 'signal'; key: string } | { kind: 'slopspace'; id: string } | null
 
@@ -65,23 +75,83 @@ function signalEnd(s: WorkerSignalInfo, now: number) {
   return s.status === 'pending' || s.status === 'processing' ? now : signalStart(s)
 }
 
+const signalType = (s: WorkerSignalInfo, fallbackType: string) => s.agent_type || fallbackType || BASE_AGENT_TYPES[0]
+
+// ranIn maps each slopspace submission to the slopspace it ran in: the one it
+// recorded, or else the one deployed to its agent type when it started.
+function ranIn(signals: WorkerSignalInfo[], slopspaces: SlopspaceInfo[], fallbackType: string, now: number) {
+  const out = new Map<string, string>()
+  for (const s of signals) {
+    if (s.slopspace_id) {
+      out.set(signalKey(s), s.slopspace_id)
+      continue
+    }
+    if (s.work_type !== 'slopspace' || !s.started_at) continue
+    const type = signalType(s, fallbackType)
+    const t = signalStart(s)
+    const deployed = slopspaces.find(sp => sp.deployments?.some(d => d.agent_type === type && d.deployed_at <= t && t <= (d.returned_at || now)))
+    if (deployed) out.set(signalKey(s), deployed.id)
+  }
+  return out
+}
+
+// A deployment box: one of a slopspace's deployments, with a raised part
+// around each submission that ran in it (clamped to the deployment).
+interface DeployBox {
+  key: string
+  from: number
+  to: number
+  open: boolean     // still deployed
+  inferred: boolean // no recorded deployment: spans the work that ran in it
+  work: { from: number; to: number }[]
+}
+
+// deployBoxes lists a track's deployments to the lane's agent type, plus
+// inferred ones for work in it that no recorded deployment covers.
+function deployBoxes(l: Lane, tr: SlopTrack, ran: Map<string, string>, now: number): DeployBox[] {
+  const boxes: DeployBox[] = (tr.info?.deployments ?? [])
+    .filter(d => d.agent_type === l.type)
+    .map((d): DeployBox => ({ key: `d-${d.deployed_at}`, from: d.deployed_at, to: d.returned_at || now, open: !d.returned_at, inferred: false, work: [] }))
+  for (const s of l.signals) {
+    if (ran.get(signalKey(s)) !== tr.id) continue
+    const from = signalStart(s)
+    const to = signalEnd(s, now)
+    let box = boxes.find(b => !b.inferred && b.from <= from && from <= b.to)
+    if (!box) {
+      box = { key: `w-${signalKey(s)}`, from, to, open: false, inferred: true, work: [] }
+      boxes.push(box)
+    }
+    box.work.push({ from: Math.max(from, box.from), to: Math.min(to, box.to) })
+  }
+  return boxes
+}
+
 // layoutLanes stacks the lanes: the base agent types always, then any other
 // type something reports, then one for slopspaces never deployed. A lane's
-// slopspaces are those last deployed to its type plus any its work ran in.
-function layoutLanes(signals: WorkerSignalInfo[], slopspaces: SlopspaceInfo[], fallbackType: string): Lane[] {
-  const typeOf = (s: WorkerSignalInfo) => s.agent_type || fallbackType || BASE_AGENT_TYPES[0]
+// slopspaces are those deployed to its type (now or before) plus any its work
+// ran in.
+function layoutLanes(signals: WorkerSignalInfo[], slopspaces: SlopspaceInfo[], fallbackType: string, ran: Map<string, string>): Lane[] {
+  const typeOf = (s: WorkerSignalInfo) => signalType(s, fallbackType)
   const types = [...BASE_AGENT_TYPES]
   const add = (t: string) => { if (t && !types.includes(t)) types.push(t) }
   signals.forEach(s => add(typeOf(s)))
-  slopspaces.forEach(s => add(s.agent_type ?? ''))
+  slopspaces.forEach(s => {
+    add(s.agent_type ?? '')
+    s.deployments?.forEach(d => add(d.agent_type))
+  })
   if (slopspaces.some(s => !s.agent_type)) types.push(UNDEPLOYED)
 
   const byId = new Map(slopspaces.map(s => [s.id, s]))
   let y = AXIS_H
   return types.map(type => {
     const laneSignals = signals.filter(s => typeOf(s) === type)
-    const ids = slopspaces.filter(s => (s.agent_type || UNDEPLOYED) === type).map(s => s.id)
-    laneSignals.forEach(s => { if (s.slopspace_id && !ids.includes(s.slopspace_id)) ids.push(s.slopspace_id) })
+    const ids = slopspaces
+      .filter(s => (s.agent_type || UNDEPLOYED) === type || s.deployments?.some(d => d.agent_type === type))
+      .map(s => s.id)
+    laneSignals.forEach(s => {
+      const id = ran.get(signalKey(s))
+      if (id && !ids.includes(id)) ids.push(id)
+    })
     ids.sort((a, b) => (byId.get(a)?.created_at ?? Infinity) - (byId.get(b)?.created_at ?? Infinity))
 
     const blueY = y + LANE_HEAD + BOX_H / 2
@@ -154,7 +224,8 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
 
   const signals = state?.signals ?? []
   const slopspaces = state?.slopspaces ?? []
-  const lanes = useMemo(() => layoutLanes(signals, slopspaces, state?.agent_type ?? ''), [signals, slopspaces, state?.agent_type])
+  const ran = useMemo(() => ranIn(signals, slopspaces, state?.agent_type ?? '', now), [signals, slopspaces, state?.agent_type, now])
+  const lanes = useMemo(() => layoutLanes(signals, slopspaces, state?.agent_type ?? '', ran), [signals, slopspaces, state?.agent_type, ran])
 
   // The time range: everything reported, up to now, with a little margin.
   const starts = [...signals.map(s => s.created_at), ...slopspaces.map(s => s.created_at)].filter(t => t > 0)
@@ -216,6 +287,7 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
       <div className="wv-toolbar">
         <span className="wv-legend"><span className="wv-swatch" style={{ borderColor: BLUE }} /> work submission</span>
         <span className="wv-legend"><span className="wv-swatch wv-swatch-line" style={{ borderColor: RED }} /> slopspace (a line per repo)</span>
+        <span className="wv-legend"><span className="wv-swatch" style={{ borderColor: RED, background: DEPLOY_FILL }} /> deployed (work within it ran in it)</span>
         <span className="wv-spacer" />
         <button className="worker-submit-btn" onClick={() => zoomTo(zoom / 2)} disabled={zoom <= 1}>−</button>
         <span className="wv-zoom">{zoom < 10 ? zoom.toFixed(1) : Math.round(zoom)}×</span>
@@ -245,7 +317,7 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
               <g key={l.type}>
                 {/* slopspace lines */}
                 {l.tracks.map(tr => {
-                  const used = l.signals.filter(s => s.slopspace_id === tr.id)
+                  const used = l.signals.filter(s => ran.get(signalKey(s)) === tr.id)
                   const from = tr.info ? tr.info.created_at : Math.min(...used.map(signalStart))
                   const to = tr.info ? now : Math.max(...used.map(s => signalEnd(s, now)))
                   const picked = selSlopspaceId === tr.id
@@ -268,29 +340,38 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
                   )
                 })}
 
-                {/* red boxes: work that ran in a slopspace */}
-                {l.signals.filter(s => s.slopspace_id).map(s => {
-                  const tr = l.tracks.find(t => t.id === s.slopspace_id)
-                  if (!tr) return null
-                  const x0 = x(s.created_at)
-                  const w = Math.max(MIN_BOX_W, x(signalEnd(s, now)) - x0)
-                  const top = l.blueY - BOX_H / 2 - BOX_PAD
+                {/* red boxes: a slopspace deployed, below the blue track,
+                    rising around the work that ran in it. Each is drawn as
+                    its outlines, then its fills over them, so the body and
+                    its raised parts read as one shape. */}
+                {l.tracks.map(tr => deployBoxes(l, tr, ran, now).map(b => {
+                  const x0 = x(b.from)
+                  const x1 = Math.max(x0 + MIN_BOX_W, x(b.to))
+                  const top = l.blueY + BOX_H / 2 + DEPLOY_GAP
                   const bottom = tr.y + (tr.lines - 1) * REPO_GAP + BOX_PAD
+                  const rises = b.work.map(w => {
+                    const wx0 = Math.max(x0, x(w.from) - BOX_PAD)
+                    const wx1 = Math.min(x1, Math.max(x(w.from) + MIN_BOX_W, x(w.to)) + BOX_PAD)
+                    return { x: wx0, w: Math.max(0, wx1 - wx0), y: l.blueY - BOX_H / 2 - BOX_PAD, h: top + BOX_PAD - (l.blueY - BOX_H / 2 - BOX_PAD) }
+                  })
+                  const parts = [{ x: x0, w: x1 - x0, y: top, h: bottom - top }, ...rises.filter(r => r.w > 0)]
                   const picked = selSlopspaceId === tr.id
+                  const stroke = picked ? '#fff' : RED
+                  const sw = picked ? 2 : 1.25
+                  const dash = b.inferred ? '4 3' : undefined
                   return (
-                    <rect
-                      key={`box-${signalKey(s)}`}
-                      className="wv-click"
-                      x={x0 - BOX_PAD} y={top} width={w + 2 * BOX_PAD} height={bottom - top}
-                      rx={3}
-                      fill="#1a1212" fillOpacity={0.85}
-                      stroke={picked ? '#fff' : RED} strokeWidth={picked ? 2 : 1.25}
-                      onClick={() => toggle({ kind: 'slopspace', id: tr.id })}
-                    >
-                      <title>{`slopspace ${tr.id}`}</title>
-                    </rect>
+                    <g key={`${tr.id}-${b.key}`} className="wv-click" onClick={() => toggle({ kind: 'slopspace', id: tr.id })}>
+                      <title>{`slopspace ${tr.id}\n${b.inferred ? 'ran work (deployment not recorded)' : `deployed ${fmtTime(b.from)} – ${b.open ? 'now' : fmtTime(b.to)}`}\n${b.work.length} submission${b.work.length === 1 ? '' : 's'} ran in it`}</title>
+                      {parts.map((p, k) => (
+                        <rect key={`s${k}`} x={p.x} y={p.y} width={p.w} height={p.h} rx={3} fill="none" stroke={stroke} strokeWidth={sw} strokeDasharray={dash} />
+                      ))}
+                      {/* inset by half the stroke: hides the outlines inside the shape, keeps its edge */}
+                      {parts.map((p, k) => (
+                        <rect key={`f${k}`} x={p.x + sw / 2} y={p.y + sw / 2} width={Math.max(0, p.w - sw)} height={Math.max(0, p.h - sw)} rx={2} fill={DEPLOY_FILL} />
+                      ))}
+                    </g>
                   )
-                })}
+                }))}
 
                 {/* the blue track and its submissions */}
                 {l.type !== UNDEPLOYED && (
@@ -320,13 +401,13 @@ export function WorkerVisual({ state }: { state: WorkerStateMsg | null }) {
         <div className="wv-details">
           <div className="wv-details-title">details</div>
           {selSignal
-            ? <SignalDetails signal={selSignal} now={now} onSlopspace={id => setSel({ kind: 'slopspace', id })} />
+            ? <SignalDetails signal={selSignal} slopspaceId={ran.get(signalKey(selSignal))} now={now} onSlopspace={id => setSel({ kind: 'slopspace', id })} />
             : selSlopspaceId
               ? (
                 <SlopspaceDetails
                   id={selSlopspaceId}
                   info={slopspaces.find(s => s.id === selSlopspaceId)}
-                  work={signals.filter(s => s.slopspace_id === selSlopspaceId)}
+                  work={signals.filter(s => ran.get(signalKey(s)) === selSlopspaceId)}
                   onSignal={key => setSel({ kind: 'signal', key })}
                 />
               )
@@ -350,7 +431,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-function SignalDetails({ signal: s, now, onSlopspace }: { signal: WorkerSignalInfo; now: number; onSlopspace: (id: string) => void }) {
+function SignalDetails({ signal: s, slopspaceId, now, onSlopspace }: { signal: WorkerSignalInfo; slopspaceId?: string; now: number; onSlopspace: (id: string) => void }) {
   const end = s.completed_at || (s.status === 'pending' || s.status === 'processing' ? now : 0)
   return (
     <div className={`wv-detail-body worker-status-${s.status}`}>
@@ -359,9 +440,10 @@ function SignalDetails({ signal: s, now, onSlopspace }: { signal: WorkerSignalIn
       <Field label="agent type">{s.agent_type || '—'}</Field>
       <Field label="role">{s.role}</Field>
       <Field label="work">{s.work_type}{s.work_location ? ` in ${s.work_location}` : ''}</Field>
-      {s.slopspace_id && (
-        <Field label="slopspace">
-          <button className="wv-link" onClick={() => onSlopspace(s.slopspace_id!)} title={s.slopspace_id}>{s.slopspace_id.slice(0, 8)}</button>
+      {slopspaceId && (
+        <Field label="ran in">
+          <button className="wv-link" onClick={() => onSlopspace(slopspaceId)} title={slopspaceId}>{slopspaceId.slice(0, 8)}</button>
+          {s.slopspace_id ? '' : ' (deployed then)'}
         </Field>
       )}
       {(s.agent || s.model || s.mode) && (
@@ -400,6 +482,18 @@ function SlopspaceDetails({ id, info, work, onSignal }: { id: string; info?: Slo
           <Field label="repos">{info.repos?.length ? info.repos.join(', ') : 'none'}</Field>
           {info.path && <Field label="path">{info.path}</Field>}
           {info.deployed && info.deploy_path && <Field label="deployed at">{info.deploy_path}</Field>}
+          {!!info.deployments?.length && (
+            <>
+              <div className="wv-field-label">deployments (last {info.deployments.length})</div>
+              <div className="wv-work-list">
+                {[...info.deployments].reverse().map(d => (
+                  <div key={d.deployed_at} className="worker-signal-detail">
+                    {d.agent_type} · {fmtTime(d.deployed_at)} – {d.returned_at ? fmtTime(d.returned_at) : 'now'}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
       <div className="wv-field-label">work run in it ({work.length})</div>

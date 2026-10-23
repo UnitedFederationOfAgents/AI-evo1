@@ -350,6 +350,14 @@ export interface SlopspaceInfo {
   // deployed (both absent from a dungeon-keeper older than the path field)
   path?: string
   deploy_path?: string
+  // its deployment cycles, oldest first (absent from an older dungeon-keeper)
+  deployments?: DeploymentInfo[]
+}
+
+export interface DeploymentInfo {
+  agent_type: string
+  deployed_at: number
+  returned_at?: number // absent while still deployed
 }
 
 export interface WorkerReplyMsg {

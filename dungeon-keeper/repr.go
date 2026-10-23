@@ -31,11 +31,12 @@ const (
 // the signal file; LR only needs enough to show it. maxStateBytes keeps the
 // whole push under representable's 64 KiB line limit -- see fitState.
 const (
-	maxStateCompleted  = 20
-	maxStateOutput     = 32 * 1024
-	maxStatePrompt     = 4 * 1024
-	maxStateBytes      = 48 * 1024
-	maxStateSlopspaces = 50
+	maxStateCompleted   = 20
+	maxStateOutput      = 32 * 1024
+	maxStatePrompt      = 4 * 1024
+	maxStateBytes       = 48 * 1024
+	maxStateSlopspaces  = 50
+	maxStateDeployments = 10
 )
 
 // submitRole is the role recorded on work submitted from LR's worker tab;
@@ -71,6 +72,18 @@ type SlopspaceInfo struct {
 	Repos      []string `json:"repos,omitempty"`       // writespace repos, owner/name
 	Path       string   `json:"path"`                  // its directory under the slopspaces dir: metadata, plus its spaces while stored
 	DeployPath string   `json:"deploy_path,omitempty"` // while deployed, where its readspaces and writespaces are
+
+	// Its deployment cycles, oldest first, at most maxStateDeployments.
+	Deployments []DeploymentInfo `json:"deployments,omitempty"`
+}
+
+// DeploymentInfo is one deployment cycle of a slopspace, for the worker tab's
+// visual: it was deployed to AgentType from DeployedAt until ReturnedAt (0
+// while still deployed).
+type DeploymentInfo struct {
+	AgentType  string `json:"agent_type"`
+	DeployedAt int64  `json:"deployed_at"`           // unix ms
+	ReturnedAt int64  `json:"returned_at,omitempty"` // unix ms
 }
 
 // WorkerSignalInfo summarises one work signal for the worker tab.
@@ -308,6 +321,7 @@ func (w *Worker) slopspaces(ongoing []string) ([]SlopspaceInfo, int) {
 		if m.Deployed {
 			info.DeployPath = m.DeployPath
 		}
+		info.Deployments = deployments(m)
 		info.Repos, _ = w.slopspaceMgr.WritespaceRepos(m.ID)
 		out = append(out, info)
 	}
@@ -332,6 +346,31 @@ func (w *Worker) slopspaces(ongoing []string) ([]SlopspaceInfo, int) {
 		out = out[:maxStateSlopspaces]
 	}
 	return out, omitted
+}
+
+// deployments summarises m's most recent deployment cycles. A slopspace
+// deployed before deployments were recorded has no open cycle; its current
+// one is taken to have started when the deploy marker was written.
+func deployments(m *types.SlopspaceMetadata) []DeploymentInfo {
+	ds := m.Deployments
+	if len(ds) > maxStateDeployments {
+		ds = ds[len(ds)-maxStateDeployments:]
+	}
+	var out []DeploymentInfo
+	for _, d := range ds {
+		info := DeploymentInfo{AgentType: string(d.AgentType), DeployedAt: d.DeployedAt.UnixMilli()}
+		if d.ReturnedAt != nil {
+			info.ReturnedAt = d.ReturnedAt.UnixMilli()
+		}
+		out = append(out, info)
+	}
+	open := len(out) > 0 && out[len(out)-1].ReturnedAt == 0
+	if m.Deployed && !open && m.DeployPath != "" {
+		if fi, err := os.Stat(filepath.Join(m.DeployPath, "SLOPSPACE_ID")); err == nil {
+			out = append(out, DeploymentInfo{AgentType: string(m.DeployedAgentType), DeployedAt: fi.ModTime().UnixMilli()})
+		}
+	}
+	return out
 }
 
 // fitState trims st until it marshals to at most maxStateBytes: representable

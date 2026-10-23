@@ -50,7 +50,8 @@ branches (`complete.go`):
    opens them, targets first and the condoc repo last, and lists them under
    `## Pull Requests` in the main file
 4. **merged** — *Merge*, once GitHub reports every PR mergeable, merges them
-   in that order with merge commits, deletes the branches and the slopspace
+   in that order with merge commits and deletes the slopspace; the
+   `condocv2/...` branches are kept
 
 A failure leaves the error on the pointer; *Resubmit* (drafting) or the same
 button again (raising, merging) resumes. The Visual tab doesn't draw these

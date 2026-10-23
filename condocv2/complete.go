@@ -8,7 +8,7 @@ package main
 //	prs       (condoc + pointer commits) -> the PRs are raised, targets
 //	          first, the condoc repo last
 //	merged    (pointer commit)  -> Merge, once every PR is mergeable, merges
-//	          them in that order and removes the branches and the slopspace
+//	          them in that order and removes the slopspace (the branches stay)
 //
 // The drafts are asked for with the human's PR guidance, which defaults to
 // defaultPRGuidance.
@@ -520,7 +520,8 @@ func (s *Server) refreshPRLive(stem string, prs []PointerPR) {
 
 // slopMerge merges every PR once all are mergeable -- targets first, the
 // condoc repo last, with merge commits so the condoc's record links keep
-// pointing at real history -- then deletes the branches and the slopspace.
+// pointing at real history -- then deletes the slopspace. The condoc
+// branches are kept.
 // A failure stops the run; Merge again resumes past the merged ones.
 func (s *Server) slopMerge(stem string) error {
 	if !s.claim(stem) {
@@ -571,11 +572,6 @@ func (s *Server) slopMerge(stem string) error {
 		}
 	}
 
-	for _, repo := range spec.Repos() {
-		if err := client.DeleteBranch(repo, spec.Branch); err != nil {
-			log.Printf("condocv2 %s: deleting %s in %s: %v", stem, spec.Branch, repo, err)
-		}
-	}
 	if meta, err := s.slop.ss.Get(spec.SlopspaceID); err == nil && !meta.Deployed {
 		if err := s.slop.ss.Delete(spec.SlopspaceID); err != nil {
 			log.Printf("condocv2 %s: deleting slopspace %s: %v", stem, spec.SlopspaceID, err)

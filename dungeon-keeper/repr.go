@@ -86,8 +86,11 @@ type WorkerSignalInfo struct {
 	WorkLocation  string `json:"work_location,omitempty"`
 	Status        string `json:"status"`
 	CreatedAt     int64  `json:"created_at"` // unix ms
+	StartedAt     int64  `json:"started_at,omitempty"`
 	CompletedAt   int64  `json:"completed_at,omitempty"`
-	Comment       string `json:"comment,omitempty"` // the last event's comment, e.g. why it failed
+	AgentType     string `json:"agent_type,omitempty"`
+	SlopspaceID   string `json:"slopspace_id,omitempty"` // slopspace work: the slopspace it ran in
+	Comment       string `json:"comment,omitempty"`      // the last event's comment, e.g. why it failed
 	Output        string `json:"output,omitempty"`
 	OutputTrimmed bool   `json:"output_trimmed,omitempty"`
 }
@@ -406,6 +409,10 @@ func (w *Worker) summarise(paths []string, limit int) []WorkerSignalInfo {
 			WorkLocation: signal.WorkLocation,
 			Status:       string(signal.Status),
 			CreatedAt:    signal.CreatedAt.UnixMilli(),
+			AgentType:    string(signal.AgentType),
+		}
+		if signal.StartedAt != nil {
+			info.StartedAt = signal.StartedAt.UnixMilli()
 		}
 		if signal.CompletedAt != nil {
 			info.CompletedAt = signal.CompletedAt.UnixMilli()
@@ -413,6 +420,9 @@ func (w *Worker) summarise(paths []string, limit int) []WorkerSignalInfo {
 		for _, e := range events {
 			if e.Output != "" {
 				info.Output = e.Output
+			}
+			if e.SlopspaceID != "" {
+				info.SlopspaceID = e.SlopspaceID
 			}
 			if e.Comment != "" {
 				info.Comment = e.Comment

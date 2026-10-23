@@ -899,6 +899,14 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 		metadata, _ = w.slopspaceMgr.Get(metadata.ID)
 	}
 
+	// Note which slopspace this work runs in, for LR's worker tab visual.
+	if metadata != nil {
+		event := &types.WorkEvent{StatusUpdate: "slopspace", SlopspaceID: metadata.ID}
+		if err := w.workSignalMgr.AppendEvent(signalPath, event); err != nil {
+			log.Printf("[%s] Failed to record slopspace: %v", w.workerID, err)
+		}
+	}
+
 	// Invoke the agent
 	workdir := w.config.DeployPath()
 	prompt := executor.FormatPromptForAgent(signal, workdir)

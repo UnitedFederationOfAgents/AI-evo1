@@ -59,7 +59,10 @@ type WorkerSignalInfo struct {
 	WorkLocation  string `json:"work_location,omitempty"`
 	Status        string `json:"status"`
 	CreatedAt     int64  `json:"created_at"`
+	StartedAt     int64  `json:"started_at,omitempty"`
 	CompletedAt   int64  `json:"completed_at,omitempty"`
+	AgentType     string `json:"agent_type,omitempty"`
+	SlopspaceID   string `json:"slopspace_id,omitempty"`
 	Comment       string `json:"comment,omitempty"`
 	Output        string `json:"output,omitempty"`
 	OutputTrimmed bool   `json:"output_trimmed,omitempty"`

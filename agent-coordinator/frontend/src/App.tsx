@@ -9,6 +9,7 @@ import type {
 import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
 import { detectTextFormat } from './textformat'
+import { WorkerVisual } from './WorkerVisual'
 import { noteTCStart } from './tcannounce'
 import type { ControlV1Props } from './ControlV1'
 
@@ -4323,14 +4324,15 @@ function GlobalView({
   )
 }
 
-const WORKER_SUBTABS = ['direct', 'slopspace'] as const
+const WORKER_SUBTABS = ['direct', 'slopspace', 'visual'] as const
 type WorkerSubTab = typeof WORKER_SUBTABS[number]
 
-// WorkerPanel is a host's worker tab, split in two: direct is a temporary
+// WorkerPanel is a host's worker tab, split in three: direct is a temporary
 // prompt box that hands prompt-only work to that host's dungeon-keeper, and
 // the work signals it reports, newest first; slopspace lists that host's
 // slopspaces, whether a local agent is using one, and a manual control
-// panel for them -- see worker.go. Mirrors
+// panel for them -- see worker.go; visual draws both as swimlanes over time
+// (see WorkerVisual.tsx). Mirrors
 // local-representative/frontend/src/App.tsx's own copy.
 function WorkerPanel({
   healthy,
@@ -4366,6 +4368,7 @@ function WorkerPanel({
       {sub === 'slopspace' && (
         <WorkerSlopspaceView healthy={healthy} state={state} reply={slopspaceReply} onControl={onControlSlopspace} />
       )}
+      {sub === 'visual' && <WorkerVisual state={state} />}
     </div>
   )
 }

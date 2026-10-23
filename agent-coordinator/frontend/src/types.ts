@@ -317,7 +317,12 @@ export interface WorkerSignalInfo {
   work_location?: string
   status: string // "pending" | "processing" | "completed" | "failed"
   created_at: number // unix ms
+  started_at?: number
   completed_at?: number
+  // the agent type it's for, and for slopspace work the slopspace it ran in
+  // (both absent from a dungeon-keeper older than the visual sub-tab)
+  agent_type?: string
+  slopspace_id?: string
   comment?: string
   output?: string
   output_trimmed?: boolean // only the end of the output is included, or none of it if empty

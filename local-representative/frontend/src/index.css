@@ -2781,3 +2781,42 @@ body {
 .worker-slopctl .worker-submit-btn { padding: 4px 12px; }
 .worker-slopctl-danger { background: #4a1e1e; border-color: #8a2e2e; }
 .worker-slopctl-ok { color: #4ec94e; font-size: 13px; }
+
+/* The worker tab's visual sub-tab -- see WorkerVisual.tsx */
+.wv { display: flex; flex-direction: column; gap: 8px; }
+.wv-toolbar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+.wv-toolbar .worker-submit-btn { padding: 2px 10px; }
+.wv-spacer { flex: 1; }
+.wv-zoom { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+.wv-legend { display: inline-flex; align-items: center; gap: 6px; }
+.wv-swatch { display: inline-block; width: 14px; height: 10px; border: 1.5px solid; border-radius: 2px; }
+.wv-swatch-line { height: 0; border-width: 1.5px 0 0; border-radius: 0; }
+.wv-main { display: flex; align-items: stretch; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; min-height: 200px; }
+.wv-labels { position: relative; width: 120px; flex-shrink: 0; border-right: 1px solid #2a2a2a; }
+.wv-label { position: absolute; left: 0; right: 0; padding: 14px 8px 0; font-size: 12px; color: #aaa; border-top: 1px solid #2a2a2a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wv-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+.wv-svg { display: block; }
+.wv-grid { stroke: #232323; }
+.wv-tick { fill: #666; font-size: 10px; }
+.wv-lane-edge { stroke: #2a2a2a; }
+.wv-lane-sep { stroke: #333; }
+.wv-now { stroke: #888; stroke-dasharray: 2 3; }
+.wv-click { cursor: pointer; }
+.wv-sub { fill: #10243a; }
+.wv-sub-pending { fill: #141414; stroke-dasharray: 3 2; }
+.wv-sub-processing { fill: #1a3a5c; }
+.wv-sub-failed { fill: #3a1414; }
+.wv-sub:hover { fill: #22486e; }
+.wv-details { width: 280px; flex-shrink: 0; border-left: 1px solid #2a2a2a; padding: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
+.wv-details-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.wv-detail-body { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.wv-detail-kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.wv-field { display: flex; gap: 8px; }
+.wv-field-label { width: 72px; flex-shrink: 0; font-size: 11px; color: #777; }
+.wv-detail-body > .wv-field-label { width: auto; margin-top: 6px; }
+.wv-field-value { min-width: 0; color: #d4d4d4; word-break: break-all; }
+.wv-field-value .worker-signal-status { width: auto; }
+.wv-link { background: none; border: none; padding: 0; color: #5bb8ff; font-family: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.wv-link:hover { text-decoration: underline; }
+.wv-work-list { display: flex; flex-direction: column; gap: 3px; }
+.wv-work-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

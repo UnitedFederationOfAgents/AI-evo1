@@ -5,6 +5,7 @@ import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
 import type { ControlV1Props } from './ControlV1'
 import { detectTextFormat } from './textformat'
+import { WorkerVisual } from './WorkerVisual'
 
 const TABS =['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
@@ -567,14 +568,15 @@ function FCCommandPanel({
   )
 }
 
-const WORKER_SUBTABS = ['direct', 'slopspace'] as const
+const WORKER_SUBTABS = ['direct', 'slopspace', 'visual'] as const
 type WorkerSubTab = typeof WORKER_SUBTABS[number]
 
-// WorkerPanel is the worker tab, split in two: direct is a temporary prompt
-// box that hands prompt-only work to this host's dungeon-keeper, and the
-// work signals it reports, newest first; slopspace lists this host's
+// WorkerPanel is the worker tab, split in three: direct is a temporary
+// prompt box that hands prompt-only work to this host's dungeon-keeper, and
+// the work signals it reports, newest first; slopspace lists this host's
 // slopspaces, whether a local agent is using one, and a manual control
-// panel for them -- see local-representative/worker.go.
+// panel for them -- see local-representative/worker.go; visual draws both
+// as swimlanes over time (see WorkerVisual.tsx).
 function WorkerPanel({
   healthy,
   state,
@@ -609,6 +611,7 @@ function WorkerPanel({
       {sub === 'slopspace' && (
         <WorkerSlopspaceView healthy={healthy} state={state} reply={slopspaceReply} onControl={onControlSlopspace} />
       )}
+      {sub === 'visual' && <WorkerVisual state={state} />}
     </div>
   )
 }

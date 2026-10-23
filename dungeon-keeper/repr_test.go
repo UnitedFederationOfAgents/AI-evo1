@@ -99,6 +99,35 @@ func TestStateCarriesOutputOfCompletedSignal(t *testing.T) {
 	}
 }
 
+// TestStateCarriesTimingAgentTypeAndSlopspace: what the worker tab's visual
+// sub-tab needs -- when work started, its agent type, and the slopspace it ran
+// in, recorded as an event before the agent starts.
+func TestStateCarriesTimingAgentTypeAndSlopspace(t *testing.T) {
+	w := testWorker(t)
+	path, err := w.submit(SubmitRequest{Prompt: "say hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.workSignalMgr.TakeOwnership(path, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.workSignalMgr.AppendEvent(path, &types.WorkEvent{StatusUpdate: "slopspace", SlopspaceID: "abc123"}); err != nil {
+		t.Fatal(err)
+	}
+	w.recordOutput(path, []byte("hello\n"))
+
+	got := w.state(false).Signals[0]
+	if got.StartedAt == 0 || got.StartedAt < got.CreatedAt {
+		t.Errorf("want a start time at or after creation, got created=%d started=%d", got.CreatedAt, got.StartedAt)
+	}
+	if got.AgentType != string(w.config.AgentType) {
+		t.Errorf("want agent type %s, got %q", w.config.AgentType, got.AgentType)
+	}
+	if got.SlopspaceID != "abc123" || got.Output != "hello\n" {
+		t.Errorf("want slopspace abc123 and the output, got %q and %q", got.SlopspaceID, got.Output)
+	}
+}
+
 // TestStateListsSlopspaces: a deployed slopspace is in use only while slopspace
 // work for its agent type is processing, and in-use ones sort first.
 func TestStateListsSlopspaces(t *testing.T) {

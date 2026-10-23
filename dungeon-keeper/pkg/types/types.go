@@ -56,7 +56,8 @@ type WorkEvent struct {
 	EventID      string    `json:"event_id"`
 	StatusUpdate string    `json:"status_update,omitempty"`
 	Comment      string    `json:"comment,omitempty"`
-	Output       string    `json:"output,omitempty"` // Captured agent output, on the event recorded when the agent finishes
+	Output       string    `json:"output,omitempty"`       // Captured agent output, on the event recorded when the agent finishes
+	SlopspaceID  string    `json:"slopspace_id,omitempty"` // The slopspace slopspace work runs in, on the event recorded before the agent starts
 	Timestamp    time.Time `json:"timestamp"`
 }
 

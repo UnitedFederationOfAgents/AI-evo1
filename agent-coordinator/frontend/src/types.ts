@@ -197,6 +197,7 @@ export interface AgentOp {
   command: string
   started_at: number
   ended_at?: number
+  response?: string
 }
 
 // AgentInfo is one agent in the per-host "agents & models" section, as that

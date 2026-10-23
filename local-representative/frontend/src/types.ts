@@ -154,6 +154,7 @@ export interface AgentOp {
   command: string
   started_at: number
   ended_at?: number
+  response?: string // once finished, from its -processed.txt (last 16 KiB)
 }
 
 // ModeMismatchMsg discloses that a connected peer's dev-mode status differs

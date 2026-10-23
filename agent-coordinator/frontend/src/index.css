@@ -1084,7 +1084,15 @@ body {
 .agent-op-agent { font-weight: 600; }
 .agent-op-session { color: #888; }
 .agent-op-time { margin-left: auto; font-size: 11px; color: #888; }
-.agent-op-cmd { flex-basis: 100%; font-family: monospace; font-size: 11px; color: #888; overflow-wrap: anywhere; padding-left: 17px; }
+/* The full-page view's text sub-tab: calls on the left, details on the right. */
+.agent-ops-split { display: flex; gap: 12px; align-items: flex-start; }
+.agent-ops-list { flex: 0 0 40%; display: flex; flex-direction: column; gap: 2px; }
+.agent-op-pick { cursor: pointer; padding: 3px 6px; border-radius: 3px; }
+.agent-op-pick:hover { background: #2a2d2e; }
+.agent-op-sel { background: #094771; }
+.agent-ops-details { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #d4d4d4; border-left: 1px solid #3c3c3c; padding-left: 12px; }
+.agent-ops-label { margin-top: 6px; font-size: 11px; color: #888; text-transform: uppercase; }
+.agent-ops-pre { margin: 0; font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; background: #1a1a1a; padding: 6px; }
 .sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
 .sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
 .sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }

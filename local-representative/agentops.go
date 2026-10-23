@@ -27,6 +27,13 @@ const (
 	// longer than this would be missed.
 	agentOpsDirWindow = 24 * time.Hour
 	agentOpsCmdMax    = 300
+	// agentOpsRespMax keeps the end of a finished call's response, where an
+	// agent's final answer is.
+	agentOpsRespMax = 16 << 10
+	// Separators in clauditable's processed record (clauditable/pkg/records):
+	// the raw file follows the first, its response the second.
+	agentOpsWrittenSep  = "\n----------WRITTEN_RAW----------\n"
+	agentOpsResponseSep = "\n\n----------RESPONSE----------\n\n"
 )
 
 // AgentOp is one agent call. EndedAt is 0 while it runs.
@@ -39,6 +46,9 @@ type AgentOp struct {
 	Command     string `json:"command"` // first agentOpsCmdMax bytes
 	StartedAt   int64  `json:"started_at"`
 	EndedAt     int64  `json:"ended_at,omitempty"`
+	// Response is the finished call's redacted response, from its
+	// -processed.txt (last agentOpsRespMax bytes); "" while running.
+	Response string `json:"response,omitempty"`
 }
 
 type agentOpsWatch struct {
@@ -84,6 +94,7 @@ func (w *agentOpsWatch) watchLoop() {
 // when anything started, finished or was dropped.
 func (w *agentOpsWatch) scan(now time.Time) {
 	seen := map[string]string{} // id -> writing file
+	ended := []string{}
 	sessions, _ := os.ReadDir(w.root)
 	for _, s := range sessions {
 		if !s.IsDir() {
@@ -126,6 +137,7 @@ func (w *agentOpsWatch) scan(now time.Time) {
 			if _, running := seen[id]; !running {
 				op.EndedAt = now.Unix()
 				w.ops[id] = op
+				ended = append(ended, id)
 				changed = true
 			}
 		case now.Sub(time.Unix(op.EndedAt, 0)) > agentOpsHold:
@@ -134,9 +146,46 @@ func (w *agentOpsWatch) scan(now time.Time) {
 		}
 	}
 	w.mu.Unlock()
+	// clauditable writes -processed.txt before removing the writing file, so
+	// a finished call's response is already there.
+	for _, id := range ended {
+		resp := readAgentOpResponse(w.root, id)
+		w.mu.Lock()
+		if op, ok := w.ops[id]; ok {
+			op.Response = resp
+			w.ops[id] = op
+		}
+		w.mu.Unlock()
+	}
 	if changed && w.notify != nil {
 		w.notify()
 	}
+}
+
+// readAgentOpResponse reads a finished call's response from its processed
+// record: -processed.txt, or -s-processed.txt for a secondary not yet folded.
+func readAgentOpResponse(root, id string) string {
+	session, prefix, _ := strings.Cut(id, "/")
+	var data []byte
+	for _, suffix := range []string{"-processed.txt", "-s-processed.txt"} {
+		var err error
+		if data, err = os.ReadFile(filepath.Join(root, session, prefix+suffix)); err == nil {
+			break
+		}
+	}
+	s := string(data)
+	if i := strings.Index(s, agentOpsWrittenSep); i >= 0 {
+		s = s[i+len(agentOpsWrittenSep):]
+	}
+	_, resp, ok := strings.Cut(s, agentOpsResponseSep)
+	if !ok {
+		return ""
+	}
+	resp = strings.TrimSpace(resp)
+	if len(resp) > agentOpsRespMax {
+		resp = "…" + strings.ToValidUTF8(resp[len(resp)-agentOpsRespMax:], "")
+	}
+	return resp
 }
 
 // readAgentOp parses a writing file: "<ts> <agent> <model>\n<command>\n".

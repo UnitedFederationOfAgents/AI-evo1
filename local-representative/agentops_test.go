@@ -41,9 +41,11 @@ func TestAgentOpsWatch(t *testing.T) {
 		t.Errorf("rename notified")
 	}
 
+	write("1000-s-processed.txt", "{\"step\":\"redact\"}\n{\"agent\":\"claude\"}\nIN>> claude -p hello\n"+
+		agentOpsWrittenSep+"claude -p hello"+agentOpsResponseSep+"hi there\n")
 	os.Remove(filepath.Join(dir, "1000-s-writing.txt"))
 	w.scan(now)
-	if o := w.snapshot()[1]; o.EndedAt != now.Unix() || notified != 2 {
+	if o := w.snapshot()[1]; o.EndedAt != now.Unix() || o.Response != "hi there" || notified != 2 {
 		t.Errorf("after finishing: %+v (notified %d)", o, notified)
 	}
 	w.scan(now.Add(agentOpsHold + time.Second))

@@ -1,5 +1,13 @@
 // Pointer phases -- see condocv2/spec.go.
-export type Phase = 'proposed' | 'awaiting_prompt' | 'locked' | 'pr_drafting' | 'pr_proposed' | 'pr_open' | 'merged'
+export type Phase =
+  | 'proposed' | 'awaiting_prompt' | 'locked' | 'pr_drafting' | 'pr_proposed' | 'pr_open' | 'merged'
+  | 'archived' | 'abandoned' // the final states -- see condocv2/final.go
+
+export const isFinalPhase = (p: Phase) => p === 'archived' || p === 'abandoned'
+
+// wasMerged: merged, whatever final state it has moved to since -- its views
+// come from the timeline record (condocv2/record.go).
+export const wasMerged = (e: PointerEntry) => e.phase === 'merged' || e.finalFrom === 'merged'
 
 // Interaction stages, in order -- see condocv2/spec.go.
 export type LockStage =
@@ -33,6 +41,8 @@ export interface PointerEntry {
   startTime?: number
   slopspaceId?: string
   holder?: string
+  finalFrom?: Phase // archived/abandoned: the phase it left, and when
+  finalAt?: string
   error?: string
   lockInteraction?: number
   lockStage?: LockStage

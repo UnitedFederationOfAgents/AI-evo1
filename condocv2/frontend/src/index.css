@@ -1550,6 +1550,9 @@ button:disabled {
 .badge-v2-pr_proposed,
 .badge-v2-pr_open         { background: #3a2a00; color: #e0b040; }
 .badge-v2-merged          { background: #2a1a3a; color: #b48ce0; }
+.badge-v2-archived        { background: #2a2a2a; color: #777; }
+.badge-v2-abandoned       { background: #3a1a1a; color: #c07070; }
+.btn-abandon              { margin-left: 8px; font-size: 11px; padding: 2px 8px; vertical-align: middle; color: #c07070; }
 
 /* ---- condocv2: the condoc view (Text / Visual tabs) ---- */
 

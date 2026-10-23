@@ -72,6 +72,8 @@ type PointerEntry struct {
 	StartTime    int64    `json:"startTime,omitempty"`
 	SlopspaceID  string   `json:"slopspaceId,omitempty"`
 	Holder       string   `json:"holder,omitempty"`
+	FinalFrom    string   `json:"finalFrom,omitempty"` // archived/abandoned: the phase it left (see final.go)
+	FinalAt      string   `json:"finalAt,omitempty"`
 	Error        string   `json:"error,omitempty"`
 
 	// The interaction holding the lock, if any.

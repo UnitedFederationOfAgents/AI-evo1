@@ -58,6 +58,20 @@ A failure leaves the error on the pointer; *Resubmit* (drafting) or the same
 button again (raising, merging) resumes. The Visual tab doesn't draw these
 commits yet.
 
+## Final states
+
+Two final states end a condoc for good (`final.go`). Both are **markers
+only**: one pointer commit moves the phase and records the phase it left
+(`finalFrom`) and when (`finalAt`); no slopspace, branch, PR or condoc file is
+touched, and condocv2 never drives the condoc again.
+
+- **archived** — *Archive*, after **merged**: the end of the normal lifecycle.
+- **abandoned** — *Abandon…*, from any non-final phase, after a warning. A
+  queued turn is dropped; a running one has to finish first. Whatever the
+  condoc had (slopspace, branches, open PRs) is left for you to clean up.
+
+The sidebar hides final condocs unless **show final** is ticked.
+
 ## The UI
 
 A condoc opens with two tabs:
@@ -67,13 +81,15 @@ A condoc opens with two tabs:
   target) and a node per commit above, read back from git by those subjects
   (`timeline.go`, `frontend/src/Swimlanes.tsx`).
 
-The condoc and target lanes are read from the slopspace's clones, which Merge
-deletes. So **complete** also saves the Visual tab's model as
+The condoc's files and its condoc and target lanes are read from the
+slopspace, which Merge deletes. So **complete** also saves the view's model as
 `<condoc>Impls/Record.html` (`record.go`): a standalone page drawing the same
-swimlanes, with the model embedded as JSON. Once merged, the Visual tab is
-drawn from that record, fetched from GitHub (the kept branch, else the
-default branch). Condocs completed before the record existed show only the
-pointer lane after merge.
+swimlanes and the text flow, with the model (timeline and interactions)
+embedded as JSON. Once merged, both tabs are drawn from that record, fetched
+from GitHub (the kept branch, else the default branch). A record saved before
+it carried the interactions gets its text from the step file beside it.
+Condocs completed before the record existed show only the pointer lane after
+merge, and no text.
 
 ## Building
 

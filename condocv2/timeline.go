@@ -123,8 +123,8 @@ func timelineEvents(name, lane, repo string, commits []gitCommit, kinds ...strin
 // pendingEvents is where an interaction in flight goes next, per its stage.
 func pendingEvents(spec *PointerSpec) []TimelineEvent {
 	l := spec.Lock
-	if l == nil {
-		return nil
+	if l == nil || isFinalPhase(spec.Phase) {
+		return nil // an abandoned condoc's lock goes nowhere
 	}
 	n := l.Interaction
 	one := func(lane, kind, note string) []TimelineEvent {

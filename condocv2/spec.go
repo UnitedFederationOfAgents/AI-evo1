@@ -50,7 +50,17 @@ const (
 	PhasePRProposed = "pr_proposed" // the drafts are ready to edit and raise
 	PhasePROpen     = "pr_open"     // the PRs are raised: Merge when all are mergeable
 	PhaseMerged     = "merged"      // merged, branches and slopspace removed
+
+	// The final states (see final.go): markers only -- nothing but the
+	// pointer changes, and the UI hides them unless "show final" is on.
+	PhaseArchived  = "archived"  // put away after the merge
+	PhaseAbandoned = "abandoned" // forced to an end from any non-final phase
 )
+
+// isFinalPhase reports whether a phase is one condocv2 never moves on from.
+func isFinalPhase(phase string) bool {
+	return phase == PhaseArchived || phase == PhaseAbandoned
+}
 
 // Interaction stages, in order. An interaction is the one linear step of a v2
 // condoc repeated: lock (pointer) -> prompt commit (condoc) -> the agent ->
@@ -121,6 +131,10 @@ type PointerSpec struct {
 	PRTemplate string
 	PRs        []PointerPR
 
+	// The final-state marker: the phase the condoc left and when.
+	FinalFrom string
+	FinalAt   string
+
 	Error     string
 	UpdatedAt string
 }
@@ -136,6 +150,12 @@ type PointerPR struct {
 // Stem is the pointer file's name without extension.
 func (p *PointerSpec) Stem() string {
 	return fmt.Sprintf("%s-%d", p.Name, p.StartTime)
+}
+
+// merged reports whether the condoc's PRs were merged -- and so its slopspace
+// deleted -- whatever final state it has moved to since.
+func (p *PointerSpec) merged() bool {
+	return p.Phase == PhaseMerged || p.FinalFrom == PhaseMerged
 }
 
 // Repos is every repo the condoc touches: the targets, then the condoc repo.
@@ -202,6 +222,8 @@ func (p *PointerSpec) render() string {
 			w.field(4, "state", pr.State, false)
 		}
 	}
+	w.field(0, "finalFrom", p.FinalFrom, false)
+	w.field(0, "finalAt", p.FinalAt, false)
 	w.field(0, "error", p.Error, false)
 	w.field(0, "updatedAt", p.UpdatedAt, false)
 	return w.String()
@@ -254,7 +276,9 @@ func parsePointerSpec(content string) (PointerSpec, error) {
 		PRRole:        yamlString(m, "prRole"),
 		PRWorkdir:     yamlString(m, "prWorkdir"),
 		PRTemplate:    yamlString(m, "prTemplate"),
-		Error:         yamlString(m, "error"),
+		FinalFrom:     yamlString(m, "finalFrom"),
+		FinalAt:       yamlString(m, "finalAt"),
+		Error:        yamlString(m, "error"),
 		UpdatedAt:     yamlString(m, "updatedAt"),
 	}
 	if p.ControlScheme != condocControlScheme {

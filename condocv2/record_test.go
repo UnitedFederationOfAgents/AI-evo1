@@ -24,16 +24,18 @@ func TestTimelineRecordRoundTrip(t *testing.T) {
 	}
 	interactions := []Interaction{{N: 1, Prompt: "Do </script> & <b>it</b>", Response: "Done.", Record: "- a/one: ..."}}
 	rec := newTimelineRecord(spec, tl, interactions, time.Unix(500, 0))
-	if !reflect.DeepEqual(rec.Prompts, []Interaction{{N: 1, Prompt: interactions[0].Prompt}}) {
-		t.Errorf("prompts = %+v", rec.Prompts)
+	if !reflect.DeepEqual(rec.Interactions, interactions) || rec.Prompts != nil {
+		t.Errorf("interactions = %+v, prompts = %+v", rec.Interactions, rec.Prompts)
 	}
 
 	page, err := renderRecordHTML(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every commit is a link, and the prompt can't break out of the page.
-	for _, want := range []string{commitURL("a/pointers", "p1"), commitURL("a/condocs", "c2"), commitURL("a/one", "t1"), "Do &lt;/script&gt;"} {
+	// Every commit is a link, the text side is on the page, and the prompt
+	// can't break out of it.
+	for _, want := range []string{commitURL("a/pointers", "p1"), commitURL("a/condocs", "c2"), commitURL("a/one", "t1"),
+		"Do &lt;/script&gt;", "Response 1</h2>\n<pre>Done.</pre>"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page lacks %q", want)
 		}

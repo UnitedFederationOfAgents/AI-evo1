@@ -349,9 +349,11 @@ func entryFromSpec(spec PointerSpec, file string) PointerEntry {
 		StartTime:    spec.StartTime,
 		SlopspaceID:  spec.SlopspaceID,
 		Holder:       spec.Holder,
+		FinalFrom:    spec.FinalFrom,
+		FinalAt:      spec.FinalAt,
 		Error:        spec.Error,
 	}
-	if l := spec.Lock; l != nil {
+	if l := spec.Lock; l != nil && !isFinalPhase(spec.Phase) {
 		e.LockInteraction = l.Interaction
 		e.LockStage = l.Stage
 		e.AutoSubmit = l.AutoSubmit
@@ -803,6 +805,9 @@ func (s *Server) readHeldSpecs() []pointerFileSpec {
 func (s *Server) slopTick() {
 	for _, ps := range s.readHeldSpecs() {
 		stem, spec := ps.stem, ps.spec
+		if isFinalPhase(spec.Phase) {
+			continue // archived or abandoned: never driven again (see final.go)
+		}
 		if spec.Phase == PhasePRDrafting && spec.Error == "" {
 			s.enqueueTurn(stem) // the PR draft turn (see complete.go)
 			continue
@@ -958,7 +963,7 @@ func (s *Server) runTurn(stem string) error {
 		return s.runDraftTurn(&spec)
 	}
 	l := spec.Lock
-	if l == nil || spec.Error != "" || stageOrder[l.Stage] < stageOrder[stageQueued] {
+	if l == nil || spec.Error != "" || isFinalPhase(spec.Phase) || stageOrder[l.Stage] < stageOrder[stageQueued] {
 		return nil
 	}
 	n := l.Interaction
@@ -1233,13 +1238,14 @@ func (s *Server) condocState(stem string) (CondocState, error) {
 		st.PendingPrompt = spec.Lock.Prompt
 	}
 	// A merged condoc's slopspace is gone; its files live on in the merged
-	// condoc repo (CondocURL points there), and the visual tab is drawn from
-	// the timeline record saved there on completion.
-	if spec.Phase == PhaseMerged {
+	// condoc repo (CondocURL points there), and both tabs are drawn from the
+	// timeline record saved there on completion.
+	if spec.merged() {
 		if rec, rerr := s.timelineRecord(&spec); rerr == nil {
 			st.Timeline = rec.Timeline
 			st.Timeline.Source, st.Timeline.RecordURL = "record", recordURL(&spec)
-			st.RecordPrompts = rec.Prompts
+			st.Interactions = rec.Interactions
+			st.RecordPrompts = rec.Interactions
 		} else {
 			st.Timeline = s.buildTimeline(&spec, nil)
 			st.Timeline.Errors = append(st.Timeline.Errors, fmt.Sprintf("only the pointer lane can be drawn: no timeline record (%v)", rerr))

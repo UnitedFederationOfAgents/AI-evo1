@@ -5,6 +5,7 @@ import type {
   BranchCheck, CondocState, LockStage, ModeMismatchMsg, Phase, PointerConfig, PointerEntry, PointerStatus,
   ReprStatus, ReprStatusMsg, SelfInfoMsg, SlopspaceProposal, TCAvailabilityMsg,
 } from './types'
+import { isFinalPhase, wasMerged } from './types'
 
 // condocv2's UI: slopspace condocs only, incompatible with condoccer's. The
 // sidebar lists the v2 pointers in the pointer repo; a proposal opens its
@@ -16,7 +17,7 @@ import type {
 
 type StemAction =
   | 'withdraw' | 'accept' | 'resubmit' | 'prompt' | 'submit'
-  | 'complete' | 'redraft' | 'raise-prs' | 'merge'
+  | 'complete' | 'redraft' | 'raise-prs' | 'merge' | 'archive' | 'abandon'
 
 type ActionExtra = { text?: string; autoSubmit?: boolean; template?: string }
 type OnAction = (type: StemAction, stem: string, extra?: ActionExtra) => void
@@ -439,6 +440,8 @@ const PHASE_LABELS: Record<Phase, string> = {
   pr_proposed: 'PRs drafted',
   pr_open: 'PRs open',
   merged: 'Merged',
+  archived: 'Archived',
+  abandoned: 'Abandoned',
 }
 
 function PhaseBadge({ phase }: { phase: Phase }) {
@@ -588,6 +591,11 @@ function PointerDetails({ entry }: { entry: PointerEntry }) {
         {entry.phase !== 'proposed' && <span className="step-label">{entry.interactions} interaction{entry.interactions === 1 ? '' : 's'}</span>}
         {lock && <span className="step-label">{entry.running && <span className="spinner" />} {lock}</span>}
         {entry.deployed && <span className="step-label">slopspace deployed</span>}
+        {entry.finalFrom && (
+          <span className="step-label">
+            from {PHASE_LABELS[entry.finalFrom] ?? entry.finalFrom}{entry.finalAt && `, ${new Date(entry.finalAt).toLocaleString()}`}
+          </span>
+        )}
       </div>
       <div className="slop-row"><span className="working-dir-label">Branch</span><code>{entry.branch}</code></div>
       <div className="slop-row"><span className="working-dir-label">Targets</span><code>{(entry.targets ?? []).join(', ')}</code></div>
@@ -603,6 +611,23 @@ function PointerDetails({ entry }: { entry: PointerEntry }) {
       {!entry.heldHere && <div className="pointer-note">Held by {entry.holder || 'nobody'} — shown read-only.</div>}
       {entry.description && <div className="slop-description">{entry.description}</div>}
     </div>
+  )
+}
+
+// AbandonButton forces a held, non-final condoc to its end, after a warning.
+// Like Archive it only marks the pointer (see condocv2/final.go).
+function AbandonButton({ entry, onAction }: { entry: PointerEntry; onAction: (type: StemAction, stem: string) => void }) {
+  if (!entry.heldHere || isFinalPhase(entry.phase)) return null
+  const warn = `Abandon ${entry.name}?\n\n` +
+    'It moves to a final state for good: condocv2 stops driving it and hides it unless "show final" is on. ' +
+    'Nothing else is touched -- its slopspace, branches and any open PRs stay as they are, for you to clean up.'
+  return (
+    <button
+      className="btn-secondary working-dir-btn btn-abandon"
+      onClick={() => { if (window.confirm(warn)) onAction('abandon', entry.stem) }}
+    >
+      Abandon…
+    </button>
   )
 }
 
@@ -636,6 +661,7 @@ function ProposalView({ pointer, entry, branchCheck, onPropose, onCheckBranch, o
               Accept — begin the condoc
             </button>
             <button className="btn-secondary working-dir-btn" onClick={() => onAction('withdraw', entry.stem)}>Withdraw</button>
+            <AbandonButton entry={entry} onAction={onAction} />
           </div>
         </>
       ) : (
@@ -810,7 +836,7 @@ function Completion({ state, onAction }: { state: CondocState; onAction: OnActio
               <button
                 className="btn-primary working-dir-btn"
                 disabled={!prs.every((pr) => pr.ready || pr.state === 'merged')}
-                title="merges the targets first and the condoc repo last, then removes the branches and the slopspace"
+                title="merges the targets first and the condoc repo last, then removes the slopspace (the branches stay)"
                 onClick={() => onAction('merge', e.stem)}
               >
                 Merge
@@ -820,11 +846,33 @@ function Completion({ state, onAction }: { state: CondocState; onAction: OnActio
         </div>
       )
     case 'merged':
+    case 'archived':
       return (
         <div className="v2-interaction">
-          <div className="v2-section-head v2-section-record">Merged</div>
+          <div className="v2-section-head v2-section-record">{e.phase === 'archived' ? 'Merged and archived' : 'Merged'}</div>
           {prList}
           {e.condocUrl && <div className="pointer-note">The condoc: <a href={e.condocUrl} target="_blank" rel="noreferrer">{e.condocRepo}/{e.condocPath}</a></div>}
+          {held && e.phase === 'merged' && (
+            <div className="pointer-actions">
+              <button
+                className="btn-primary working-dir-btn"
+                title="marks the pointer archived -- nothing else changes -- and hides the condoc unless 'show final' is on"
+                onClick={() => onAction('archive', e.stem)}
+              >
+                Archive
+              </button>
+            </div>
+          )}
+        </div>
+      )
+    case 'abandoned':
+      return (
+        <div className="v2-interaction">
+          <div className="v2-section-head v2-section-record">Abandoned</div>
+          {prs.length > 0 && prList}
+          <div className="pointer-note">
+            Abandoned while {PHASE_LABELS[e.finalFrom ?? 'proposed'] ?? e.finalFrom}. Its slopspace, branches and any PRs were left as they were.
+          </div>
         </div>
       )
   }
@@ -841,10 +889,18 @@ function TextFlow({ state, onAction }: { state: CondocState; onAction: OnAction 
   }, [count, lastResponse.length, e.lockStage])
 
   const inFlight = !!e.lockInteraction
+  const tl = state.timeline
   return (
     <div className="v2-text">
-      {state.interactions.length === 0 && !state.pendingPrompt && e.phase !== 'merged' && (
-        <div className="nav-empty">No interactions yet{e.heldHere ? ' — enter the first prompt below.' : '.'}</div>
+      {wasMerged(e) && (
+        <div className="pointer-note">
+          {tl.source === 'record'
+            ? <>The slopspace is gone; this is the text saved in the <a href={tl.recordUrl} target="_blank" rel="noreferrer">timeline record</a>.</>
+            : 'The slopspace is gone and there is no timeline record to read the text from.'}
+        </div>
+      )}
+      {state.interactions.length === 0 && !state.pendingPrompt && !wasMerged(e) && (
+        <div className="nav-empty">No interactions yet{e.heldHere && !isFinalPhase(e.phase) ? ' — enter the first prompt below.' : '.'}</div>
       )}
       {state.interactions.map((it) => (
         <div key={it.n} className="v2-interaction">
@@ -902,7 +958,7 @@ function CondocView({ state, tab, onTab, onAction }: {
   return (
     <div className="v2-condoc">
       <div className="v2-condoc-head">
-        <h2>{e.name}</h2>
+        <h2>{e.name} <AbandonButton entry={e} onAction={onAction} /></h2>
         <PointerDetails entry={e} />
         {e.error && (
           <div className="slop-error">
@@ -976,6 +1032,10 @@ export default function App() {
   const [selectedStem, setSelectedStem] = useState<string | null>(initialNav.stem)
   const [tab, setTab] = useState<CondocTab>(initialNav.tab)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  // "show final": archived and abandoned condocs are hidden unless it's on
+  // (the open one stays listed).
+  const [showFinal, setShowFinal] = useState(() => localStorage.getItem('condocv2.showFinal') === '1')
+  useEffect(() => { localStorage.setItem('condocv2.showFinal', showFinal ? '1' : '0') }, [showFinal])
   const tcCapture = useTCCapture(ws.tcAvailable, ws.reprHost, ws.reprHTTPPort)
 
   const selectedEntry = pointer?.pointers.find((p) => p.stem === selectedStem) ?? null
@@ -1021,6 +1081,8 @@ export default function App() {
   )
 
   const ready = connected && pointer !== null && pointer.state === 'ready'
+  const finalCount = pointer?.pointers.filter((p) => isFinalPhase(p.phase)).length ?? 0
+  const listed = (pointer?.pointers ?? []).filter((p) => showFinal || !isFinalPhase(p.phase) || p.stem === selectedStem)
 
   return (
     <TCCaptureContext.Provider value={tcCapture}>
@@ -1043,6 +1105,12 @@ export default function App() {
             <div className="sidebar-header">
               <h1>Condoc v2{ws.version && <span className="app-version-tag">{ws.version}</span>}</h1>
             </div>
+            {pointer?.state === 'ready' && (
+              <label className="list-filter" title="list archived and abandoned condocs too">
+                <input type="checkbox" checked={showFinal} onChange={(e) => setShowFinal(e.target.checked)} />
+                show final <span className="list-filter-count">({finalCount})</span>
+              </label>
+            )}
             <div className="nav-list">
               {pointer?.state === 'ready' && (
                 <div className={`nav-item nav-item-new${selectedStem === '' ? ' selected' : ''}`} onClick={() => select('')}>
@@ -1050,10 +1118,12 @@ export default function App() {
                 </div>
               )}
               {pointer?.state !== 'ready' && <div className="nav-empty">Set up the pointer repo to see condocs.</div>}
-              {pointer?.state === 'ready' && pointer.pointers.length === 0 && (
-                <div className="nav-empty">No v2 condocs in {pointer.repo} yet.</div>
+              {pointer?.state === 'ready' && listed.length === 0 && (
+                <div className="nav-empty">
+                  {pointer.pointers.length === 0 ? `No v2 condocs in ${pointer.repo} yet.` : 'Every condoc is final — tick "show final" to list them.'}
+                </div>
               )}
-              {pointer?.state === 'ready' && pointer.pointers.map((p) => (
+              {pointer?.state === 'ready' && listed.map((p) => (
                 <div
                   key={p.file}
                   className={`nav-item${selectedStem === p.stem ? ' selected' : ''}${p.heldHere ? '' : ' nav-item-readonly'}`}

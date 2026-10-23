@@ -80,7 +80,7 @@ func TestPointerSpecRoundTrip(t *testing.T) {
 		Branch: "condocv2/Foo-7/main", CondocRepo: "a/condocs", CondocPath: "condocs/Foo.md",
 		Targets: []string{"a/one", "a/two"}, Agent: "claude", Description: "two\nlines",
 		SlopspaceID: "ss1", Holder: "condocv2@box", Bases: []string{"a/one@111", "a/condocs@222"},
-		Phase: PhaseLocked, Interactions: 2,
+		Phase: PhaseAbandoned, FinalFrom: PhaseLocked, FinalAt: "2026-10-23T12:00:00Z", Interactions: 2,
 		Lock: &InteractionLock{
 			Interaction: 3, Stage: stageMapped, AutoSubmit: true, Prompt: "do it\n## not a heading",
 			Role: "condocv2-Foo-7", SignalAt: 99, Bases: []string{"a/one@111"}, Heads: []string{"a/one@333"},

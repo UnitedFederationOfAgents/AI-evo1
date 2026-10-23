@@ -1,10 +1,11 @@
 package main
 
-// The timeline record: the visual tab's model, saved into the condoc branch
-// when the condoc is completed, as Record.html beside its step file. It
-// renders the swimlanes as a standalone page and carries the model itself as
-// JSON, so once Merge has deleted the slopspace -- the only place the condoc
-// and target lanes could be read from -- the visual tab is drawn from the
+// The timeline record: the condoc view's model -- the visual tab's timeline
+// and the text tab's interactions -- saved into the condoc branch when the
+// condoc is completed, as Record.html beside its step file. It renders the
+// swimlanes and the text as a standalone page and carries the model itself
+// as JSON, so once Merge has deleted the slopspace -- the only place the
+// condoc's files and lanes could be read from -- both tabs are drawn from the
 // record instead, in the same detail.
 //
 // Nothing the visual tab draws happens after completion (the complete,
@@ -32,13 +33,17 @@ const (
 	recordRetry    = time.Minute // how soon a record that couldn't be read is fetched again
 )
 
-// TimelineRecord is the saved model.
+// TimelineRecord is the saved model: the visual side (Timeline) and the text
+// side (Interactions, each Prompt/Response/Record in full).
 type TimelineRecord struct {
-	Version    int           `json:"version"`
-	Condoc     string        `json:"condoc"`
-	RecordedAt int64         `json:"recordedAt"`
-	Timeline   Timeline      `json:"timeline"`
-	Prompts    []Interaction `json:"prompts"` // each interaction's n and prompt: the visual's prompt column
+	Version      int           `json:"version"`
+	Condoc       string        `json:"condoc"`
+	RecordedAt   int64         `json:"recordedAt"`
+	Timeline     Timeline      `json:"timeline"`
+	Interactions []Interaction `json:"interactions,omitempty"`
+	// Prompts is what records written before Interactions carry instead:
+	// each interaction's n and prompt only (see fetchTimelineRecord).
+	Prompts []Interaction `json:"prompts,omitempty"`
 }
 
 type recordCache struct {
@@ -61,11 +66,7 @@ func recordURL(spec *PointerSpec) string {
 }
 
 func newTimelineRecord(spec *PointerSpec, tl Timeline, interactions []Interaction, at time.Time) TimelineRecord {
-	prompts := make([]Interaction, len(interactions))
-	for i, it := range interactions {
-		prompts[i] = Interaction{N: it.N, Prompt: it.Prompt}
-	}
-	return TimelineRecord{Version: recordVersion, Condoc: spec.Name, RecordedAt: at.Unix(), Timeline: tl, Prompts: prompts}
+	return TimelineRecord{Version: recordVersion, Condoc: spec.Name, RecordedAt: at.Unix(), Timeline: tl, Interactions: interactions}
 }
 
 // writeTimelineRecord saves the record into the condoc repo's writespace,
@@ -118,6 +119,22 @@ func fetchTimelineRecord(spec *PointerSpec) (*TimelineRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s/%s: %v", spec.CondocRepo, path, err)
 	}
+	if len(rec.Interactions) == 0 {
+		// An older record has only the prompts: read the text side from the
+		// step file it was merged beside, else make do with the prompts.
+		rec.Interactions = rec.Prompts
+		step := filepath.ToSlash(stepFilePath(filepath.FromSlash(spec.CondocPath)))
+		content, err := client.FileContent(spec.CondocRepo, spec.Branch, step)
+		if prkeeper.IsStatus(err, http.StatusNotFound) {
+			content, err = client.FileContent(spec.CondocRepo, "", step)
+		}
+		if err == nil {
+			rec.Interactions = parseInteractions(string(content))
+		}
+	}
+	if rec.Interactions == nil {
+		rec.Interactions = []Interaction{}
+	}
 	return &rec, nil
 }
 
@@ -168,8 +185,18 @@ func renderRecordHTML(rec TimelineRecord) (string, error) {
 		fmt.Fprintf(&b, "<div class=\"swim-error\">%s</div>\n", esc(e))
 	}
 	b.WriteString("<div class=\"swim-scroll\">\n")
-	b.WriteString(swimlaneSVG(rec.Timeline, rec.Prompts))
+	b.WriteString(swimlaneSVG(rec.Timeline, rec.Interactions))
 	b.WriteString("</div>\n")
+	// The text side, as the Text tab shows it.
+	for _, it := range rec.Interactions {
+		fmt.Fprintf(&b, "<h2 class=\"text-prompt\">Prompt %d</h2>\n<pre>%s</pre>\n", it.N, esc(it.Prompt))
+		if it.Response != "" {
+			fmt.Fprintf(&b, "<h2 class=\"text-response\">Response %d</h2>\n<pre>%s</pre>\n", it.N, esc(it.Response))
+		}
+		if it.Record != "" {
+			fmt.Fprintf(&b, "<h2 class=\"text-record\">Record %d</h2>\n<pre>%s</pre>\n", it.N, esc(it.Record))
+		}
+	}
 	b.WriteString(`<ol class="swim-sequence">
 <li><b>propose</b> — the proposal's pointer commit</li>
 <li><b>begin</b> — the slopspace, a branch in every repo, the condoc's first commit</li>
@@ -208,6 +235,11 @@ h1 { font-size: 16px; margin: 0; }
 .swim-node-label { font-size: 10px; }
 .swim-sequence { margin: 4px 0 0; padding-left: 22px; font-size: 11px; color: #888; line-height: 1.7; }
 .swim-sequence b { color: #bbb; font-weight: 600; }
+h2 { font-size: 12px; margin: 10px 0 0; }
+.text-prompt { color: #4ec94e; }
+.text-response { color: #4da6ff; }
+.text-record { color: #b48ce0; }
+pre { margin: 0; padding: 8px; background: #222; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 </style>
 `
 

@@ -2209,8 +2209,8 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
 
 // FORCE_COMPLETABLE_PHASES are the phases Force Complete is offered in: any
 // started condoc not yet completed. Mid-run, federation-command kills the
-// agent and completes immediately; a slopspace condoc refuses while a turn
-// is in flight unless the turn failed.
+// agent and completes immediately; a slopspace condoc's worker can't be
+// interrupted, so it completes as soon as the turn in flight lands.
 const FORCE_COMPLETABLE_PHASES: Phase[] = ['awaiting_step', 'agent_running', 'awaiting_action', 'queued']
 
 // ForceCompletePanel jumps a condoc out of its current state straight to
@@ -2236,7 +2236,7 @@ function ForceCompletePanel({ slopspace, onConfirm }: { slopspace: boolean; onCo
         <div className="action-status" style={{ fontSize: 12, color: '#aaa' }}>
           Closes the open step and substep as they stand and marks the condoc completed, ready to PR and merge.
           {slopspace
-            ? 'If a turn is in flight, this is refused until it lands.'
+            ? 'If a turn is in flight, its reply is written and then the condoc completes.'
             : 'If an agent is running, it is killed immediately and its work so far is committed as-is.'}
         </div>
         <div className="action-row">
@@ -3406,6 +3406,7 @@ function PointerDetails({ entry }: { entry: PointerEntry }) {
         {entry.running && <span className="step-label"><span className="spinner" /> {entry.turnKind?.replace(/_/g, ' ')} turn {entry.turnStage}</span>}
         {!entry.running && entry.queuePos ? <span className="step-label">#{entry.queuePos} in the turn queue</span> : null}
         {entry.deployed && <span className="step-label">slopspace deployed</span>}
+        {entry.forcePending && <span className="step-label">force complete once the turn lands</span>}
       </div>
       <div className="slop-row"><span className="working-dir-label">Branch</span><code>{entry.branch}</code></div>
       <div className="slop-row"><span className="working-dir-label">Targets</span><code>{(entry.targets ?? []).join(', ')}</code></div>

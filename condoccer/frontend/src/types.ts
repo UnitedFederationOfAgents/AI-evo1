@@ -150,6 +150,7 @@ export interface PointerEntry {
   queuePos?: number
   running?: boolean
   deployed?: boolean
+  forcePending?: boolean
 }
 
 // SlopspaceProposal is the propose form: new when stem is empty, an edit of a

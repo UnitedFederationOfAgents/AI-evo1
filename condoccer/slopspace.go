@@ -96,6 +96,7 @@ type slopState struct {
 	queue    []string // pointer stems with a turn waiting, FIFO
 	running  string   // stem whose turn is running
 	busy     map[string]bool
+	force    map[string]bool // stems to force complete once their running turn lands
 	wake     chan struct{}
 	prLive   map[string][]PRLive
 	prPolled map[string]time.Time
@@ -130,6 +131,7 @@ func (s *Server) initSlopspace() {
 	s.slop.signals = worksignal.NewManager(cfg)
 	s.slop.agent = "claude"
 	s.slop.busy = map[string]bool{}
+	s.slop.force = map[string]bool{}
 	s.slop.wake = make(chan struct{}, 1)
 	s.slop.prLive = map[string][]PRLive{}
 	s.slop.prPolled = map[string]time.Time{}
@@ -500,6 +502,7 @@ func (s *Server) decoratePointerEntry(e PointerEntry) PointerEntry {
 		}
 	}
 	e.Running = s.slop.running == e.Stem
+	e.ForcePending = s.slop.force[e.Stem]
 	if live, ok := s.slop.prLive[e.Stem]; ok && len(live) > 0 {
 		e.PRs = live
 	}
@@ -1154,10 +1157,15 @@ func (s *Server) slopCompleteCondoc(spec *PointerSpec, meta *dktypes.SlopspaceMe
 // slopForceComplete completes the condoc from whatever state it's in, which
 // leads into propose-PR like an ordinary completion. condoccer is the
 // handler here, so it finalizes the files itself rather than leaving a
-// directive. A turn that failed is dropped along with its error; one still
-// running has to land first.
+// directive. A turn that failed, or is queued but not yet started, is
+// dropped (with its error). The worker can't be interrupted (D13), so a
+// turn already under way is left to land: the request is held and the turn
+// loop completes the condoc as soon as it does.
 func (s *Server) slopForceComplete(stem string) error {
 	if !s.claim(stem) {
+		if s.deferForceComplete(stem, false) {
+			return nil
+		}
 		return errBusy(stem)
 	}
 	defer s.release(stem)
@@ -1165,11 +1173,59 @@ func (s *Server) slopForceComplete(stem string) error {
 	if err != nil {
 		return err
 	}
+	if spec.Turn != nil && spec.Turn.Kind == turnProposePR {
+		return fmt.Errorf("%s is already completed", spec.Name)
+	}
+	if spec.Turn != nil && spec.Error == "" && spec.Turn.Stage != "" && spec.Turn.Stage != stageQueued {
+		// Under way but not running here yet -- resumed after a restart,
+		// which the queue picks up again.
+		s.deferForceComplete(stem, true)
+		return nil
+	}
+	return s.forceCompleteClaimed(stem, spec)
+}
+
+// deferForceComplete holds a force complete for the turn loop to carry out
+// once stem's turn lands -- if that turn is the one running, or regardless
+// when always is set (the caller holds the claim and has seen a turn under
+// way). It reports whether the request was held.
+func (s *Server) deferForceComplete(stem string, always bool) bool {
+	if !always {
+		// A propose-PR turn means the condoc is already completed.
+		if spec, err := s.readHeldSpec(stem); err != nil || spec.Turn == nil || spec.Turn.Kind == turnProposePR {
+			return false
+		}
+	}
+	s.slop.mu.Lock()
+	held := always || s.slop.running == stem
+	if held {
+		s.slop.force[stem] = true
+	}
+	s.slop.mu.Unlock()
+	if held {
+		s.broadcastPointer()
+	}
+	return held
+}
+
+// takeForceComplete reports and clears a held force complete for stem, and
+// stops showing its turn as running -- together, so a request that misses
+// the check finds nothing running and is refused rather than stranded.
+func (s *Server) takeForceComplete(stem string) bool {
+	s.slop.mu.Lock()
+	force := s.slop.force[stem]
+	delete(s.slop.force, stem)
+	s.slop.running = ""
+	s.slop.mu.Unlock()
+	s.broadcastPointer()
+	return force
+}
+
+// forceCompleteClaimed is slopForceComplete's work. The caller holds the
+// claim.
+func (s *Server) forceCompleteClaimed(stem string, spec PointerSpec) error {
 	if spec.SlopspaceID == "" {
 		return fmt.Errorf("%s hasn't been accepted yet", spec.Name)
-	}
-	if spec.Turn != nil && spec.Error == "" {
-		return fmt.Errorf("%s has a turn in flight -- force complete it once the turn lands", spec.Name)
 	}
 	meta, err := s.slop.ss.Get(spec.SlopspaceID)
 	if err != nil {
@@ -1309,19 +1365,37 @@ func (s *Server) slopTurnLoop() {
 		}
 		s.setRunning(stem)
 		err := s.runTurn(stem)
-		if errors.Is(err, errTurnWait) {
-			s.setRunning("")
-			s.release(stem)
-			time.Sleep(5 * time.Second)
-			continue
+		wait := errors.Is(err, errTurnWait)
+		if !wait {
+			s.dequeue(stem)
+			if err != nil {
+				log.Printf("slopspace %s: turn: %v", stem, err)
+				s.setSpecError(stem, err)
+			}
 		}
-		s.dequeue(stem)
-		if err != nil {
-			log.Printf("slopspace %s: turn: %v", stem, err)
-			s.setSpecError(stem, err)
+		// A force complete held while the turn ran (or waited) is carried
+		// out under the same claim, so nothing starts in between.
+		if s.takeForceComplete(stem) {
+			wait = false
+			s.forceCompleteHeld(stem)
 		}
-		s.setRunning("")
 		s.release(stem)
+		if wait {
+			time.Sleep(5 * time.Second)
+		}
+	}
+}
+
+// forceCompleteHeld carries out a force complete held for stem's turn. The
+// caller holds the claim.
+func (s *Server) forceCompleteHeld(stem string) {
+	spec, err := s.readHeldSpec(stem)
+	if err == nil {
+		err = s.forceCompleteClaimed(stem, spec)
+	}
+	if err != nil {
+		log.Printf("slopspace %s: force complete: %v", stem, err)
+		s.setSpecError(stem, fmt.Errorf("force complete: %v", err))
 	}
 }
 

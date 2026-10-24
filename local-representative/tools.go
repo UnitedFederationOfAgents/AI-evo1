@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -42,6 +43,7 @@ const (
 	toolsCallTimeout   = 2 * time.Minute  // list, describe and the author ops
 	toolsRunMargin     = 30 * time.Second // on top of a tool's own timeout, for dtt and uv to start
 	toolsDefaultLimit  = 2 * time.Minute  // a tool whose timeout couldn't be read
+	dttStopGrace       = 10 * time.Second // after SIGTERM, for dtt to kill its tool and answer
 	maxToolRuns        = 20
 	maxToolLogRelayed  = 1 << 10  // of each run's log, in tools-state relayed to agent-coordinator
 	maxRelayedTools    = 48 << 10 // a representable line is read up to 64 KiB
@@ -263,9 +265,17 @@ func newToolsWatch(notify, catalogChanged func(), resolve func() (string, error)
 // answers in JSON on stdout whatever its exit status (1 a failed tool, 2 bad
 // input), so stdout comes back despite an exit status; only a dtt that
 // didn't run, or said nothing, is an error.
+//
+// Stopping a call (a cancelled control run, or LR's own limit) sends dtt
+// SIGTERM rather than the default SIGKILL: dtt runs the tool in its own
+// process group, which only dtt kills on its way out, so a SIGKILLed dtt
+// would leave the tool (uv's python included) running. A dtt that hasn't
+// exited dttStopGrace later is killed.
 func runDTT(ctx context.Context, bin string, stdin []byte, args ...string) ([]byte, error) {
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = dttStopGrace
 	cmd.Stdin = bytes.NewReader(stdin)
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

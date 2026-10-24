@@ -5,12 +5,21 @@ import { ControlV1 } from './ControlV1'
 import { HostFilePicker } from './HostFilePicker'
 import type { ControlV1Props } from './ControlV1'
 import { detectTextFormat } from './textformat'
+import { WorkerVisual } from './WorkerVisual'
+import { AgentOps } from './AgentOps'
+import { ToolsPanel } from './Tools'
+import type { ToolsStateMsg, ToolsReply, ToolsRequest } from './Tools'
 
-const TABS =['federation-command', 'condoccer', 'convo', 'sessions', 'robot', 'control', 'worker', 'system', 'files'] as const
+// Every managed sub-application has a same-named tab. control, tools,
+// system and files are LR's own: they belong to no managed app, so they're
+// not in EMBED_TABS or LAUNCHABLE_APPS.
+const TABS =['federation-command', 'condoccer', 'condocv2', 'convo', 'sessions', 'robot', 'control', 'tools', 'worker', 'system', 'files'] as const
 type Tab = typeof TABS[number]
 
-// isTab narrows an app name (e.g. a ProcInfo.name) to one of the dashboard's
-// tabs -- every managed sub-application has a same-named tab.
+// isTab narrows a name to one of the dashboard's tabs. Given an app name
+// (e.g. a ProcInfo.name) it says whether that app has a tab to open: every
+// managed sub-application does, and none is named after one of LR's own
+// tabs (control, tools, system, files).
 function isTab(name: string): name is Tab {
   return (TABS as readonly string[]).includes(name)
 }
@@ -23,7 +32,7 @@ function isTab(name: string): name is Tab {
 // embedded app's own UI (including its own "DEV MODE" border, when that
 // sub-app runs in dev mode) fills the space instead of floating in a
 // padded, header-topped box.
-const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'sessions', 'convo', 'robot'])
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condoccer', 'condocv2', 'sessions', 'convo', 'robot'])
 
 // Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
 // Step5Prompt.md Revision M): how many recently-visited tabs we keep around
@@ -32,9 +41,12 @@ const NAV_HISTORY_MAX = 20
 
 // Applications the system tab offers a launch button for. `multi` apps are
 // N-per-host (launch stays enabled while instances run); others are singletons.
-const LAUNCHABLE_APPS: { name: string; multi: boolean }[] = [
+// `excludes` mirrors local-representative's launchSpec.excludes (procman.go):
+// launch is disabled while any of those apps is running.
+const LAUNCHABLE_APPS: { name: string; multi: boolean; excludes?: string[] }[] = [
   { name: 'federation-command', multi: true },
-  { name: 'condoccer', multi: false },
+  { name: 'condoccer', multi: false, excludes: ['condocv2'] },
+  { name: 'condocv2', multi: false, excludes: ['condoccer'] },
   { name: 'sessions', multi: false },
   { name: 'convo', multi: false },
   { name: 'robot', multi: false },
@@ -87,6 +99,11 @@ function useStatusWS() {
   const [workerReply, setWorkerReply] = useState<WorkerReplyMsg | null>(null)
   // ...and how the slopspace sub-tab's last manual control op went.
   const [slopspaceReply, setSlopspaceReply] = useState<WorkerSlopspaceReply | null>(null)
+  // The tools tab: the catalog and recent runs, and the replies to its
+  // requests by request id -- see local-representative/tools.go.
+  const [toolsState, setToolsState] = useState<ToolsStateMsg | null>(null)
+  const [toolsReplies, setToolsReplies] = useState<Record<string, ToolsReply>>({})
+  const toolsReqSeq = useRef(0)
   const wsRef = useRef<WebSocket | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fcStateRef = useRef<Record<string, string>>({})
@@ -257,6 +274,18 @@ function useStatusWS() {
     }
   }, [])
 
+  // requestTools sends a tools tab request and returns the id its
+  // "tools-reply" will carry. Unsent (not connected), it fails at once.
+  const requestTools = useCallback((r: ToolsRequest): string => {
+    const req = `t${++toolsReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'tools-request', payload: { ...r, req } }))
+    } else {
+      setToolsReplies(prev => ({ ...prev, [req]: { req, op: r.op, ok: false, error: 'not connected' } }))
+    }
+    return req
+  }, [])
+
   const controlSlopspace = useCallback((req: WorkerSlopspaceRequest) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setSlopspaceReply(null)
@@ -412,6 +441,14 @@ function useStatusWS() {
           case 'worker-slopspace-reply':
             setSlopspaceReply(msg.payload as WorkerSlopspaceReply)
             break
+          case 'tools-state':
+            setToolsState(msg.payload as ToolsStateMsg)
+            break
+          case 'tools-reply': {
+            const p = msg.payload as ToolsReply
+            setToolsReplies(prev => ({ ...prev, [p.req || p.op]: p }))
+            break
+          }
         }
       } catch {
         // ignore malformed messages
@@ -428,9 +465,9 @@ function useStatusWS() {
   }, [connect])
 
   return {
-    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply, toolsState, toolsReplies,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
-    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
+    rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace, requestTools,
   }
 }
 
@@ -564,14 +601,15 @@ function FCCommandPanel({
   )
 }
 
-const WORKER_SUBTABS = ['direct', 'slopspace'] as const
+const WORKER_SUBTABS = ['direct', 'slopspace', 'visual'] as const
 type WorkerSubTab = typeof WORKER_SUBTABS[number]
 
-// WorkerPanel is the worker tab, split in two: direct is a temporary prompt
-// box that hands prompt-only work to this host's dungeon-keeper, and the
-// work signals it reports, newest first; slopspace lists this host's
+// WorkerPanel is the worker tab, split in three: direct is a temporary
+// prompt box that hands prompt-only work to this host's dungeon-keeper, and
+// the work signals it reports, newest first; slopspace lists this host's
 // slopspaces, whether a local agent is using one, and a manual control
-// panel for them -- see local-representative/worker.go.
+// panel for them -- see local-representative/worker.go; visual draws both
+// as swimlanes over time (see WorkerVisual.tsx).
 function WorkerPanel({
   healthy,
   state,
@@ -606,6 +644,7 @@ function WorkerPanel({
       {sub === 'slopspace' && (
         <WorkerSlopspaceView healthy={healthy} state={state} reply={slopspaceReply} onControl={onControlSlopspace} />
       )}
+      {sub === 'visual' && <WorkerVisual state={state} />}
     </div>
   )
 }
@@ -1532,6 +1571,8 @@ function SystemPanel({
 }) {
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
   const troughEntries = useTrough(repoState.last_error)
+  // Drilled into "agent operations"' full-page view (its "↑ system" leaves).
+  const [opsPage, setOpsPage] = useState(false)
 
   useEffect(() => {
     const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
@@ -1540,6 +1581,9 @@ function SystemPanel({
 
   if (!state) {
     return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+  if (opsPage) {
+    return <div className="sys-panel"><AgentOps ops={state.agent_ops} nowSec={nowSec} onUp={() => setOpsPage(false)} /></div>
   }
 
   const runningCount = (name: string) =>
@@ -1590,18 +1634,20 @@ function SystemPanel({
 
       <div className="sys-launch">
         <span className="sys-launch-label">launch</span>
-        {LAUNCHABLE_APPS.map(({ name, multi }) => {
+        {LAUNCHABLE_APPS.map(({ name, multi, excludes }) => {
           const n = runningCount(name)
+          const blocker = excludes?.find(other => runningCount(other) > 0)
           return (
             <button
               key={name}
               className="sys-btn sys-btn-launch"
-              disabled={!multi && n > 0}
+              disabled={(!multi && n > 0) || blocker !== undefined}
+              title={blocker !== undefined ? `can't run alongside ${blocker} — terminate it first` : undefined}
               onClick={() => onLaunch(name)}
             >
               {multi
                 ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
-                : (n > 0 ? `${name} (running)` : name)}
+                : (n > 0 ? `${name} (running)` : blocker !== undefined ? `${name} (${blocker} running)` : name)}
             </button>
           )
         })}
@@ -1614,6 +1660,7 @@ function SystemPanel({
         onConnect={onConnectProvider}
         onDisconnect={onDisconnectProvider}
       />
+      <AgentOps ops={state.agent_ops} nowSec={nowSec} onOpen={() => setOpsPage(true)} />
       <Trough entries={troughEntries} />
     </div>
   )
@@ -3511,9 +3558,9 @@ export default function App() {
 
   const {
     connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
-    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply, toolsState, toolsReplies,
     sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
-    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace, requestTools,
   } = useStatusWS()
 
   // The federation-command tab follows one instance at a time: the one
@@ -3663,6 +3710,10 @@ export default function App() {
                 title="condoccer"
                 onLoad={handleCondoccerLoad}
               />
+            ) : activeTab === 'condocv2' ? (
+              // condocv2's own UI (its Text and Visual condoc tabs), as
+              // proxied at /condocv2/ -- see proxyToCondocv2.
+              <iframe className="embed-frame" src="/condocv2/" title="condocv2" />
             ) : activeTab === 'sessions' ? (
               <iframe className="embed-frame" src="/sessions/" title="sessions" />
             ) : activeTab === 'robot' ? (
@@ -3722,6 +3773,16 @@ export default function App() {
                   onRun={runControl}
                   onCancel={cancelControl}
                   onContinue={continueControl}
+                />
+              ) : activeTab === 'tools' ? (
+                <ToolsPanel
+                  connected={connected}
+                  state={toolsState}
+                  replies={toolsReplies}
+                  request={requestTools}
+                  fileUrl={fileRawUrl}
+                  hostApi=""
+                  node="this node"
                 />
               ) : (
                 <>

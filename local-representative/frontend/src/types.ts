@@ -139,6 +139,22 @@ export interface SystemStateMsg {
   managed: ProcInfo[]
   connections?: ConnectionInfo[]
   agents?: AgentsState
+  agent_ops?: AgentOp[]
+}
+
+// AgentOp is one agent call in the "agent operations" section, from its
+// agent-records writing file (see local-representative/agentops.go).
+// ended_at is absent while it runs; it's dropped 5 minutes after.
+export interface AgentOp {
+  id: string
+  session: string
+  session_name?: string
+  agent: string // "" from an older clauditable
+  model?: string
+  command: string
+  started_at: number
+  ended_at?: number
+  response?: string // once finished, from its -processed.txt (last 16 KiB)
 }
 
 // ModeMismatchMsg discloses that a connected peer's dev-mode status differs
@@ -245,7 +261,12 @@ export interface WorkerSignalInfo {
   work_location?: string
   status: string // "pending" | "processing" | "completed" | "failed"
   created_at: number // unix ms
+  started_at?: number
   completed_at?: number
+  // the agent type it's for, and for slopspace work the slopspace it ran in
+  // (both absent from a dungeon-keeper older than the visual sub-tab)
+  agent_type?: string
+  slopspace_id?: string
   comment?: string
   output?: string
   output_trimmed?: boolean // only the end of the output is included, or none of it if empty
@@ -273,6 +294,14 @@ export interface SlopspaceInfo {
   // deployed (both absent from a dungeon-keeper older than the path field)
   path?: string
   deploy_path?: string
+  // its deployment cycles, oldest first (absent from an older dungeon-keeper)
+  deployments?: DeploymentInfo[]
+}
+
+export interface DeploymentInfo {
+  agent_type: string
+  deployed_at: number
+  returned_at?: number // absent while still deployed
 }
 
 export interface WorkerReplyMsg {

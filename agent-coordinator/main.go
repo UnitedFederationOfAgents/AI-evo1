@@ -362,6 +362,8 @@ type SystemStateMsg struct {
 	Managed     []ProcInfo       `json:"managed"`
 	Connections []ConnectionInfo `json:"connections"`
 	Agents      *AgentsState     `json:"agents"`
+	// AgentOps is passed through untouched -- local-representative/agentops.go.
+	AgentOps json.RawMessage `json:"agent_ops"`
 }
 
 // AgentsState mirrors local-representative/agents.go's: which AI agents (and
@@ -524,6 +526,9 @@ type LRSystemStateMsg struct {
 	// Agents is null when that LR predates the "agents & models" section
 	// (or isn't connected).
 	Agents *AgentsState `json:"agents"`
+	// AgentOps is the "agent operations" section, as that LR sent it; null
+	// when it predates the section (or isn't connected).
+	AgentOps json.RawMessage `json:"agent_ops"`
 }
 
 // LRRepoStateMsg is the host-scoped "lr-repo-state" message sent to browser
@@ -678,13 +683,14 @@ type hostState struct {
 	stateboard *StateboardMsg
 	lrHTTPPort string
 
-	// fcInstances, control, controlLib and worker are relayed to browsers
-	// as-is -- see LRFCInstancesMsg, LRControlMsg, LRControlLibraryMsg and
-	// LRWorkerMsg.
+	// fcInstances, control, controlLib, worker and tools are relayed to
+	// browsers as-is -- see LRFCInstancesMsg, LRControlMsg,
+	// LRControlLibraryMsg, LRWorkerMsg and LRToolsMsg.
 	fcInstances json.RawMessage
 	control     json.RawMessage
 	controlLib  json.RawMessage
 	worker      json.RawMessage
+	tools       json.RawMessage
 }
 
 // Server manages WebSocket clients and coordinator state.
@@ -932,6 +938,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	control := hs.control
 	controlLib := hs.controlLib
 	worker := hs.worker
+	tools := hs.tools
 	hs.mu.RUnlock()
 
 	s.sendToClient(c, "lr-state", LRStateMsg{HostID: name, Active: connected, Services: services})
@@ -951,7 +958,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	}
 	if system != nil {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{
-			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections, Agents: system.Agents,
+			HostID: name, Active: connected, Self: system.Self, Managed: system.Managed, Connections: system.Connections, Agents: system.Agents, AgentOps: system.AgentOps,
 		})
 	} else {
 		s.sendToClient(c, "lr-system-state", LRSystemStateMsg{HostID: name, Active: false})
@@ -962,6 +969,7 @@ func (s *Server) sendHostSnapshot(c *wsClient, name string) {
 	s.sendToClient(c, "lr-convo-state", convoMsg(name, convo))
 	s.sendToClient(c, "lr-robot-state", robotMsg(name, robot))
 	s.sendToClient(c, "lr-worker-state", workerMsg(name, worker))
+	s.sendToClient(c, "lr-tools-state", toolsMsg(name, tools))
 	if files != nil {
 		s.sendToClient(c, "lr-files-state", LRFilesMsg{HostID: name, Active: connected, Files: files.Files})
 	} else {
@@ -1306,6 +1314,20 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					}
 					_ = json.Unmarshal(payload.Request, &req)
 					s.sendToClient(c, "lr-worker-slopspace-reply", workerSlopspaceReplyMsg(payload.HostID, req.Op, req.ID, err))
+					break
+				}
+				s.reprServer.SendCommand(payload.HostID, cmd)
+			}
+		case "lr-tools-request":
+			// The host's tools tab -- see tools.go.
+			var payload struct {
+				HostID  string          `json:"host_id"`
+				Request json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(m.Payload, &payload); err == nil && payload.HostID != "" && s.reprServer != nil {
+				cmd, err := toolsCommand(payload.Request)
+				if err != nil {
+					s.sendToClient(c, "lr-tools-reply", toolsReplyMsg(payload.HostID, payload.Request, err))
 					break
 				}
 				s.reprServer.SendCommand(payload.HostID, cmd)
@@ -1737,6 +1759,7 @@ func main() {
 			hs.control = nil
 			hs.controlLib = nil
 			hs.worker = nil
+			hs.tools = nil
 			hs.mu.Unlock()
 			s.broadcast("hosts", HostsMsg{Hosts: s.getHosts()})
 			s.broadcast("lr-state", LRStateMsg{HostID: name, Active: false})
@@ -1753,6 +1776,7 @@ func main() {
 			s.broadcast("lr-convo-state", LRConvoMsg{HostID: name, Available: false})
 			s.broadcast("lr-robot-state", LRRobotMsg{HostID: name, Available: false})
 			s.broadcast("lr-worker-state", workerMsg(name, nil))
+			s.broadcast("lr-tools-state", toolsMsg(name, nil))
 			s.broadcast("lr-files-state", LRFilesMsg{HostID: name, Active: false})
 			s.broadcast("lr-debug-log-state", LRDebugLogMsg{HostID: name, Active: false})
 			s.broadcast("lr-chain-call-state", LRChainCallMsg{HostID: name, Active: false})
@@ -1876,7 +1900,7 @@ func main() {
 				hs.system = &payload
 				hs.mu.Unlock()
 				s.broadcast("lr-system-state", LRSystemStateMsg{
-					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections, Agents: payload.Agents,
+					HostID: name, Active: true, Self: payload.Self, Managed: payload.Managed, Connections: payload.Connections, Agents: payload.Agents, AgentOps: payload.AgentOps,
 				})
 			}
 		case "repo-state":
@@ -1946,6 +1970,14 @@ func main() {
 			s.broadcast("lr-worker-reply", LRWorkerReplyMsg{HostID: name, Reply: data})
 		case "worker-slopspace-reply":
 			s.broadcast("lr-worker-slopspace-reply", LRWorkerSlopspaceReplyMsg{HostID: name, Reply: data})
+		case "tools-state":
+			// The host's tools tab -- see tools.go.
+			hs.mu.Lock()
+			hs.tools = append(json.RawMessage(nil), data...)
+			hs.mu.Unlock()
+			s.broadcast("lr-tools-state", toolsMsg(name, data))
+		case "tools-reply":
+			s.broadcast("lr-tools-reply", LRToolsReplyMsg{HostID: name, Reply: data})
 		case "lr-http":
 			var payload LRHTTPMsg
 			if err := json.Unmarshal(data, &payload); err == nil {

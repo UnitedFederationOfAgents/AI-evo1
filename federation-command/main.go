@@ -1755,6 +1755,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleCondocRevertDone(msg)
 
 	case condocExecReadyMsg:
+		if m.condoc != nil {
+			return m, tea.Exec(&condocAgentExec{cmd: msg.runCmd, mainPath: m.condoc.mainFilePath}, msg.callback)
+		}
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
 
 	case CondocDynapaneTickMsg:

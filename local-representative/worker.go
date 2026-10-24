@@ -44,6 +44,16 @@ type SlopspaceInfo struct {
 	Repos      []string `json:"repos,omitempty"`
 	Path       string   `json:"path"`
 	DeployPath string   `json:"deploy_path,omitempty"`
+
+	Deployments []DeploymentInfo `json:"deployments,omitempty"`
+}
+
+// DeploymentInfo mirrors dungeon-keeper/repr.go's type of the same name: one
+// deployment cycle of a slopspace.
+type DeploymentInfo struct {
+	AgentType  string `json:"agent_type"`
+	DeployedAt int64  `json:"deployed_at"`
+	ReturnedAt int64  `json:"returned_at,omitempty"`
 }
 
 // WorkerSignalInfo mirrors dungeon-keeper/repr.go's type of the same name.
@@ -59,7 +69,10 @@ type WorkerSignalInfo struct {
 	WorkLocation  string `json:"work_location,omitempty"`
 	Status        string `json:"status"`
 	CreatedAt     int64  `json:"created_at"`
+	StartedAt     int64  `json:"started_at,omitempty"`
 	CompletedAt   int64  `json:"completed_at,omitempty"`
+	AgentType     string `json:"agent_type,omitempty"`
+	SlopspaceID   string `json:"slopspace_id,omitempty"`
 	Comment       string `json:"comment,omitempty"`
 	Output        string `json:"output,omitempty"`
 	OutputTrimmed bool   `json:"output_trimmed,omitempty"`

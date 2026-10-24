@@ -2198,6 +2198,59 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
             </div>
           </div>
         )}
+
+        {FORCE_COMPLETABLE_PHASES.includes(info.phase) && info.stepNum > 0 && (
+          <ForceCompletePanel slopspace={info.path.startsWith('slopspace:')} onConfirm={() => onAction({ action: 'force_complete', path: info.path })} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// FORCE_COMPLETABLE_PHASES are the phases Force Complete is offered in: any
+// started condoc not yet completed. Mid-run, federation-command kills the
+// agent and completes immediately; for a slopspace condoc, condoccer abandons
+// the turn in flight rather than waiting on its worker.
+const FORCE_COMPLETABLE_PHASES: Phase[] = ['awaiting_step', 'agent_running', 'awaiting_action', 'queued']
+
+// ForceCompletePanel jumps a condoc out of its current state straight to
+// completed, where it may be PR'd and merged. Pending work in the open step
+// or substep is closed out as-is, so it asks for confirmation first.
+function ForceCompletePanel({ slopspace, onConfirm }: { slopspace: boolean; onConfirm: () => void }) {
+  const [confirming, setConfirming] = useState(false)
+  if (!confirming) {
+    return (
+      <div className="action-panel">
+        <div className="action-row">
+          <button className="btn-danger" onClick={() => setConfirming(true)}>
+            Force Complete
+          </button>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="action-panel">
+      <div className="action-form">
+        <div className="action-form-title">Force Complete</div>
+        <div className="action-status" style={{ fontSize: 12, color: '#aaa' }}>
+          Closes the open step and substep as they stand and marks the condoc completed, ready to PR and merge.
+          {slopspace
+            ? ' If a turn is in flight, it is abandoned without waiting on the worker: its work signal is failed, the slopspace returned, and its work so far committed as-is.'
+            : ' If an agent is running, it is killed immediately and its work so far is committed as-is.'}
+        </div>
+        <div className="action-row">
+          <button
+            className="btn-danger"
+            onClick={() => {
+              onConfirm()
+              setConfirming(false)
+            }}
+          >
+            Confirm Force Complete ✓
+          </button>
+          <button className="btn-secondary" onClick={() => setConfirming(false)}>Cancel</button>
+        </div>
       </div>
     </div>
   )
@@ -3353,6 +3406,7 @@ function PointerDetails({ entry }: { entry: PointerEntry }) {
         {entry.running && <span className="step-label"><span className="spinner" /> {entry.turnKind?.replace(/_/g, ' ')} turn {entry.turnStage}</span>}
         {!entry.running && entry.queuePos ? <span className="step-label">#{entry.queuePos} in the turn queue</span> : null}
         {entry.deployed && <span className="step-label">slopspace deployed</span>}
+        {entry.forcePending && <span className="step-label">force completing…</span>}
       </div>
       <div className="slop-row"><span className="working-dir-label">Branch</span><code>{entry.branch}</code></div>
       <div className="slop-row"><span className="working-dir-label">Targets</span><code>{(entry.targets ?? []).join(', ')}</code></div>

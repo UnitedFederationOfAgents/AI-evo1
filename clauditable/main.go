@@ -168,7 +168,10 @@ func main() {
 	// {ts}-<host>-*.txt (see sessionlog.go).
 	target := writeTargetFor(sessionDir)
 
-	// Write the writing file at dispatch time — signals that a writer is starting
+	// Write the writing file at dispatch time — signals that a writer is starting.
+	// Its first line is "<unix ts> <agent> <model>" ("-" for an unset one), which
+	// local-representative's "agent operations" reads (agentops.go); the
+	// dispatched command follows.
 	startTime := time.Now()
 	unixTimestamp := startTime.Unix()
 	prefix := recordPrefix(unixTimestamp, target.tag)
@@ -177,7 +180,7 @@ func main() {
 		dispatchCommand = cmdName + " " + strings.Join(cmdArgs, " ")
 	}
 	writingFilePath := filepath.Join(sessionDir, prefix+"-writing.txt")
-	if err := os.WriteFile(writingFilePath, []byte(fmt.Sprintf("%d\n%s\n", unixTimestamp, dispatchCommand)), 0644); err != nil {
+	if err := os.WriteFile(writingFilePath, []byte(fmt.Sprintf("%d %s %s\n%s\n", unixTimestamp, dashIfEmpty(agent), dashIfEmpty(model), dispatchCommand)), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write writing file: %v\n", err)
 	}
 
@@ -354,6 +357,14 @@ func eventTypeFor(agent, override string) string {
 		return records.EventTypeAIInvocation
 	}
 	return records.EventTypeCommandExecution
+}
+
+// dashIfEmpty keeps a writing file's header fields space-separable.
+func dashIfEmpty(s string) string {
+	if s = strings.Join(strings.Fields(s), "_"); s == "" {
+		return "-"
+	}
+	return s
 }
 
 // getEnvOrDefault returns the environment variable value or the default

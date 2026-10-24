@@ -1,4 +1,5 @@
 import type { ControlStateMsg, ControlLibraryMsg, ControlLibReply } from './controlTypes'
+import type { ToolsStateMsg, ToolsReply } from './Tools'
 
 export interface Host {
   id: string
@@ -183,6 +184,21 @@ export interface LRSystemStateMsg {
   managed: ProcInfo[]
   connections?: ConnectionInfo[] | null // null/absent for an older LR -- see ConnectionInfo
   agents?: AgentsState | null // null/absent for an older LR -- see AgentsState
+  agent_ops?: AgentOp[] | null // null/absent for an older LR
+}
+
+// AgentOp mirrors local-representative/frontend/src/types.ts's: one agent
+// call on that host (see local-representative/agentops.go).
+export interface AgentOp {
+  id: string
+  session: string
+  session_name?: string
+  agent: string
+  model?: string
+  command: string
+  started_at: number
+  ended_at?: number
+  response?: string
 }
 
 // AgentInfo is one agent in the per-host "agents & models" section, as that
@@ -317,7 +333,12 @@ export interface WorkerSignalInfo {
   work_location?: string
   status: string // "pending" | "processing" | "completed" | "failed"
   created_at: number // unix ms
+  started_at?: number
   completed_at?: number
+  // the agent type it's for, and for slopspace work the slopspace it ran in
+  // (both absent from a dungeon-keeper older than the visual sub-tab)
+  agent_type?: string
+  slopspace_id?: string
   comment?: string
   output?: string
   output_trimmed?: boolean // only the end of the output is included, or none of it if empty
@@ -345,6 +366,14 @@ export interface SlopspaceInfo {
   // deployed (both absent from a dungeon-keeper older than the path field)
   path?: string
   deploy_path?: string
+  // its deployment cycles, oldest first (absent from an older dungeon-keeper)
+  deployments?: DeploymentInfo[]
+}
+
+export interface DeploymentInfo {
+  agent_type: string
+  deployed_at: number
+  returned_at?: number // absent while still deployed
 }
 
 export interface WorkerReplyMsg {
@@ -386,6 +415,19 @@ export interface WorkerSlopspaceReply {
 export interface LRWorkerSlopspaceReplyMsg {
   host_id: string
   reply: WorkerSlopspaceReply
+}
+
+// A host's tools tab -- see tools.go and Tools.tsx (which holds the types
+// shared with local-representative). tools is null until that host
+// reports, and after it disconnects.
+export interface LRToolsMsg {
+  host_id: string
+  tools: ToolsStateMsg | null
+}
+
+export interface LRToolsReplyMsg {
+  host_id: string
+  reply: ToolsReply
 }
 
 export interface FileInfo {

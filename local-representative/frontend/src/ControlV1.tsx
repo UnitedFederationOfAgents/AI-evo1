@@ -717,8 +717,10 @@ function Definer({ lib, request, replies, connected, node, hostApi }: {
 }) {
   const actions = lib.actions ?? []
   const ops = lib.ops ?? []
-  const lrOps = ops.filter(o => !o.op.startsWith('robot.'))
+  const lrOps = ops.filter(o => !o.op.startsWith('robot.') && !o.op.startsWith('tool.'))
   const robotOps = ops.filter(o => o.op.startsWith('robot.'))
+  // tool.<name>: the node's T3s, run through dtt (its tools tab).
+  const toolOps = ops.filter(o => o.op.startsWith('tool.'))
   const ed = useLibraryEditor(actions, blankAction)
   const save = useRequest(request, replies)
   const pendingId = useRef('')
@@ -785,6 +787,11 @@ function Definer({ lib, request, replies, connected, node, hostApi }: {
       {robotOps.length > 0 && (
         <optgroup label="robot">
           {robotOps.map(o => <option key={o.op} value={o.op}>{o.op}</option>)}
+        </optgroup>
+      )}
+      {toolOps.length > 0 && (
+        <optgroup label="tools">
+          {toolOps.map(o => <option key={o.op} value={o.op}>{o.op}</option>)}
         </optgroup>
       )}
     </>

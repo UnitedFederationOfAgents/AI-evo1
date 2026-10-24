@@ -246,6 +246,15 @@ func validateControlInstruction(in ControlInstruction, robotOps []ControlOpSpec)
 			}
 			return nil // checked by IANAR when it runs
 		}
+		// A tool dtt doesn't list (yet, or any more -- tools come and go
+		// under a saved library) is only checked for its name; running it
+		// says it's missing.
+		if tool, isTool := strings.CutPrefix(op, toolOpPrefix); isTool {
+			if !toolNameRe.MatchString(tool) {
+				return fmt.Errorf("%q isn't a tool name", op)
+			}
+			return nil
+		}
 		return fmt.Errorf("unknown op %q", op)
 	}
 	for k := range in {
@@ -1211,12 +1220,13 @@ type ControlLibraryMsg struct {
 }
 
 func (l *controlLibrary) snapshot(robotOps []ControlOpSpec, node string) ControlLibraryMsg {
+	toolOps, _ := toolControlOps()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return ControlLibraryMsg{
 		Actions:   append([]ControlActionDef{}, l.actions...),
 		Sequences: append([]ControlSequenceDef{}, l.sequences...),
-		Ops:       append(append([]ControlOpSpec{}, controlOps...), robotOps...),
+		Ops:       append(append(append([]ControlOpSpec{}, controlOps...), robotOps...), toolOps...),
 		RobotOps:  robotOps != nil,
 		Builtins:  ctlBuiltinList(time.Now(), node),
 		Path:      l.path,
@@ -1448,6 +1458,9 @@ func controlActionRunner(a ControlActionDef, st ControlStepRef, robotOps []Contr
 				return strings.Join(notes, "; "), err
 			}
 			if !native {
+				if tool, isTool := strings.CutPrefix(in["op"], toolOpPrefix); isTool {
+					return strings.Join(notes, "; "), fmt.Errorf("instruction %d: no tool %q on this node -- the tools tab lists the ones dtt found", i+1, tool)
+				}
 				return strings.Join(notes, "; "), fmt.Errorf("instruction %d: unknown op %q", i+1, in["op"])
 			}
 			note, err := spec.run(r, args)

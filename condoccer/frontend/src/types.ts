@@ -150,6 +150,7 @@ export interface PointerEntry {
   queuePos?: number
   running?: boolean
   deployed?: boolean
+  forcePending?: boolean
 }
 
 // SlopspaceProposal is the propose form: new when stem is empty, an edit of a
@@ -217,7 +218,7 @@ export type ServerMsg =
   | { type: 'pointer'; payload: PointerStatus }
 
 export interface ActionRequest {
-  action: 'handoff' | 'completed' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit' | 'add_resource'
+  action: 'handoff' | 'completed' | 'force_complete' | 'revision' | 'retry' | 'substep' | 'start_step' | 'revert' | 'resubmit' | 'add_resource'
   path: string
   content?: string
   letter?: string

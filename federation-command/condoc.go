@@ -7,13 +7,16 @@ package main
 // cleanly drop condoc support without affecting anything else.
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -165,6 +168,146 @@ func deferCondocExec(cmd *exec.Cmd, cb func(error) tea.Msg) tea.Cmd {
 	return func() tea.Msg { return condocExecReadyMsg{runCmd: cmd, callback: cb} }
 }
 
+// ===== FORCE-COMPLETE INTERRUPT =====
+
+// errCondocForceCompleted is returned for an agent run skipped because
+// !FORCE-COMPLETED! was already on the main file when it was due to start.
+var errCondocForceCompleted = errors.New("force completed before the agent started")
+
+// condocAgentExec runs a condoc agent command under tea.Exec and kills it as
+// soon as !FORCE-COMPLETED! lands on the main file. tea.Exec blocks the event
+// loop for the whole run, so handleCondocTick can't see the directive until
+// the agent exits; this watches from alongside the process instead.
+// handleCondocAgentDone then completes the condoc rather than carrying on.
+type condocAgentExec struct {
+	cmd      *exec.Cmd
+	mainPath string
+}
+
+func (c *condocAgentExec) SetStdin(r io.Reader)  { c.cmd.Stdin = r }
+func (c *condocAgentExec) SetStdout(w io.Writer) { c.cmd.Stdout = w }
+func (c *condocAgentExec) SetStderr(w io.Writer) { c.cmd.Stderr = w }
+
+func (c *condocAgentExec) Run() error {
+	if condocFileHasForceCompleted(c.mainPath) {
+		return errCondocForceCompleted
+	}
+	if err := c.cmd.Start(); err != nil {
+		return err
+	}
+	pid := c.cmd.Process.Pid
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		t := time.NewTicker(condocPollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if condocFileHasForceCompleted(c.mainPath) {
+					killProcessTree(pid, 5*time.Second)
+					return
+				}
+			}
+		}
+	}()
+	err := c.cmd.Wait()
+	close(done)
+	// If the watcher fired, let it finish reaping stragglers before the TUI
+	// takes the terminal back.
+	<-watcherDone
+	return err
+}
+
+// killProcessTree sends SIGTERM to pid and every descendant (the agent runs
+// under `bash -c '… | tee …'`, so killing bash alone would orphan it), then
+// SIGKILLs whatever is still alive after grace. The tree is snapshotted
+// before signalling, since descendants are reparented once bash dies.
+func killProcessTree(pid int, grace time.Duration) {
+	pids := append([]int{pid}, processDescendants(pid)...)
+	for _, p := range pids {
+		_ = syscall.Kill(p, syscall.SIGTERM)
+	}
+	deadline := time.Now().Add(grace)
+	for time.Now().Before(deadline) {
+		alive := false
+		for _, p := range pids {
+			if processAlive(p) {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	for _, p := range pids {
+		if processAlive(p) {
+			_ = syscall.Kill(p, syscall.SIGKILL)
+		}
+	}
+}
+
+// processDescendants lists every descendant of pid, read from /proc.
+func processDescendants(pid int) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	children := map[int][]int{}
+	for _, e := range entries {
+		p, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if _, ppid, ok := procStat(p); ok {
+			children[ppid] = append(children[ppid], p)
+		}
+	}
+	var out []int
+	queue := []int{pid}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		out = append(out, children[p]...)
+		queue = append(queue, children[p]...)
+	}
+	return out
+}
+
+// processAlive reports whether pid exists and isn't a zombie.
+func processAlive(pid int) bool {
+	state, _, ok := procStat(pid)
+	return ok && state != 'Z' && state != 'X'
+}
+
+// procStat reads the state and parent pid from /proc/<pid>/stat.
+func procStat(pid int) (state byte, ppid int, ok bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, 0, false
+	}
+	// The command name is parenthesised and may itself contain ") ", so
+	// the fields of interest follow the last ')'.
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return 0, 0, false
+	}
+	fields := strings.Fields(string(b[i+1:]))
+	if len(fields) < 2 || len(fields[0]) == 0 {
+		return 0, 0, false
+	}
+	ppid, err = strconv.Atoi(fields[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	return fields[0][0], ppid, true
+}
+
 // ===== HELPERS =====
 
 var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b[^[]`)
@@ -212,6 +355,10 @@ var condocHandoffRe = regexp.MustCompile(`(?m)^!HANDOFF!\s*$`)
 var condocCompletedRe = regexp.MustCompile(`(?m)^!COMPLETED!\s*$`)
 var condocYAMLHeaderRe = regexp.MustCompile("(?s)<!--\\s*```condoc-yaml\\n(.*?)```\\s*-->")
 var condocCompletedMarkerRe = regexp.MustCompile(`(?m)^## Condoc Completed$`)
+
+// condocForceCompletedRe is condoccer's Force Complete, always written to the
+// main file -- see condocForceComplete.
+var condocForceCompletedRe = regexp.MustCompile(`(?m)^!FORCE-COMPLETED!\s*$`)
 
 // parseCondocYAML extracts startTime, branch, and callerPath from a condoc-yaml block.
 // Returns ok=false if the block is absent or branch cannot be parsed.
@@ -336,6 +483,11 @@ func condocFileHasHandoff(path string) bool {
 func condocFileHasCompleted(path string) bool {
 	b, err := os.ReadFile(path)
 	return err == nil && condocCompletedRe.Match(b)
+}
+
+func condocFileHasForceCompleted(path string) bool {
+	b, err := os.ReadFile(path)
+	return err == nil && condocForceCompletedRe.Match(b)
 }
 
 // ===== GIT HELPERS =====
@@ -481,7 +633,7 @@ func writeProposalFile(cs *CondocSession) error {
 }
 
 // removeHumanPromptSection strips the "## Human-Prompt" section and all content after it
-// until EOF. Also removes bare !HANDOFF!/!COMPLETED! lines throughout.
+// until EOF. Also removes bare !HANDOFF!/!COMPLETED!/!FORCE-COMPLETED! lines throughout.
 func removeHumanPromptSection(content string) string {
 	lines := strings.Split(content, "\n")
 	var out []string
@@ -495,7 +647,7 @@ func removeHumanPromptSection(content string) string {
 		if inSection {
 			continue
 		}
-		if t == "!HANDOFF!" || t == "!COMPLETED!" {
+		if t == "!HANDOFF!" || t == "!COMPLETED!" || t == "!FORCE-COMPLETED!" {
 			continue
 		}
 		out = append(out, line)
@@ -1594,6 +1746,17 @@ func (m appModel) handleCondocTick() (appModel, tea.Cmd) {
 		}
 	}
 
+	// Force complete is honored in any phase with nothing in flight, ahead of
+	// every other directive. A running agent is killed by condocAgentExec and
+	// handleCondocAgentDone completes the condoc; a git sequence in flight
+	// lands first.
+	switch cs.phase {
+	case condocPhaseAwaitingStep, condocPhaseAwaitingAction, condocPhaseGitFailed:
+		if cs.stepNum > 0 && condocFileHasForceCompleted(cs.mainFilePath) {
+			return m.condocForceComplete()
+		}
+	}
+
 	switch cs.phase {
 	case condocPhaseGitFailed:
 		if condocFileHasHandoff(cs.activeFile()) {
@@ -1929,6 +2092,17 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 		cs.replyTmpPath = ""
 	}
 
+	// Force Complete doesn't wait for the run: condocAgentExec kills the
+	// agent, and whatever it had printed is kept as the reply.
+	forceCompleted := cs.stepNum > 0 && condocFileHasForceCompleted(cs.mainFilePath)
+	if forceCompleted {
+		if errors.Is(msg.execErr, errCondocForceCompleted) {
+			replyText = "(agent not started -- the condoc was force completed)"
+		} else {
+			replyText = "(agent interrupted -- the condoc was force completed)\n\n" + replyText
+		}
+	}
+
 	revLetter := cs.pendingRevLetter
 	isRetry := cs.pendingIsRetry
 
@@ -1948,6 +2122,10 @@ func (m appModel) handleCondocAgentDone(msg condocAgentStepDoneMsg) (appModel, t
 	}
 	if err := appendReplyToStepFile(activeFile, revLetter, replyText, commitPreamble); err != nil {
 		return m.condocError("append reply to file: " + err.Error())
+	}
+	if forceCompleted {
+		m2, cmd := m.condocForceComplete()
+		return m2, tea.Batch(statusPrint, cmd)
 	}
 
 	var templateErr error
@@ -2673,6 +2851,32 @@ func (m appModel) condocCompleteStep() (appModel, tea.Cmd) {
 
 // condocCompleteCondoc handles !COMPLETED! on the main file.
 func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
+	return m.condocFinish("condoc: completed")
+}
+
+// condocForceComplete handles condoccer's !FORCE-COMPLETED! on the main file:
+// it closes the open substep and step (whatever was pending in them) and
+// completes the condoc, so it can be PR'd and merged from any state.
+func (m appModel) condocForceComplete() (appModel, tea.Cmd) {
+	cs := m.condoc
+	if cs.substepFile != "" {
+		if _, err := os.Stat(cs.substepFile); err == nil {
+			if err := finalizeSubstepFile(cs.substepFile); err != nil {
+				return m.condocError("finalize substep file: " + err.Error())
+			}
+		}
+	}
+	if cs.stepFile != "" {
+		if err := finalizeStepFile(cs.stepFile); err != nil {
+			return m.condocError("finalize step file: " + err.Error())
+		}
+	}
+	return m.condocFinish("condoc: force completed")
+}
+
+// condocFinish finalizes the main file, commits it as commitMsg and exits
+// condoc mode.
+func (m appModel) condocFinish(commitMsg string) (appModel, tea.Cmd) {
 	cs := m.condoc
 	if err := finalizeMainFile(cs.mainFilePath); err != nil {
 		return m.condocError("finalize main file: " + err.Error())
@@ -2686,7 +2890,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 
 	gitCmds := [][]string{
 		{"add", "."},
-		{"commit", "-m", "condoc: completed"},
+		{"commit", "-m", commitMsg},
 		{"push", "origin", cs.branch},
 	}
 	m.condocDynapane.Deactivate()
@@ -2697,7 +2901,7 @@ func (m appModel) condocCompleteCondoc() (appModel, tea.Cmd) {
 	m.prevInputLen = 0
 
 	return m, tea.Batch(
-		tea.Println(successStyle.Render("condoc: completed — "+filepath.Base(cs.mainFilePath))),
+		tea.Println(successStyle.Render(commitMsg+" — "+filepath.Base(cs.mainFilePath))),
 		cs.runGit(gitCmds),
 		m.blinker.ResetTick(),
 	)

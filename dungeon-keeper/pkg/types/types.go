@@ -56,7 +56,8 @@ type WorkEvent struct {
 	EventID      string    `json:"event_id"`
 	StatusUpdate string    `json:"status_update,omitempty"`
 	Comment      string    `json:"comment,omitempty"`
-	Output       string    `json:"output,omitempty"` // Captured agent output, on the event recorded when the agent finishes
+	Output       string    `json:"output,omitempty"`       // Captured agent output, on the event recorded when the agent finishes
+	SlopspaceID  string    `json:"slopspace_id,omitempty"` // The slopspace slopspace work runs in, on the event recorded before the agent starts
 	Timestamp    time.Time `json:"timestamp"`
 }
 
@@ -97,9 +98,21 @@ type WriteSpaces struct {
 // Note: DeployedAgentType is only populated when the slopspace is deployed.
 type SlopspaceMetadata struct {
 	Slopspace
-	WorkSignalPath    string    `json:"work_signal_path"`     // Associated work signal file
-	Iteration         int       `json:"iteration"`            // Number of deployment cycles
-	DeployedAgentType AgentType `json:"deployed_agent_type"`  // Agent type for current/last deployment
+	WorkSignalPath    string       `json:"work_signal_path"`      // Associated work signal file
+	Iteration         int          `json:"iteration"`             // Number of deployment cycles
+	DeployedAgentType AgentType    `json:"deployed_agent_type"`   // Agent type for current/last deployment
+	Deployments       []Deployment `json:"deployments,omitempty"` // Deployment cycles, oldest first, at most MaxDeployments
+}
+
+// MaxDeployments bounds the deployment history kept in a slopspace's metadata.
+const MaxDeployments = 50
+
+// Deployment is one deployment cycle of a slopspace: from Deploy to Return
+// (ReturnedAt is nil while it is still deployed).
+type Deployment struct {
+	AgentType  AgentType  `json:"agent_type"`
+	DeployedAt time.Time  `json:"deployed_at"`
+	ReturnedAt *time.Time `json:"returned_at,omitempty"`
 }
 
 // Config holds the runtime configuration for dungeon-keeper.

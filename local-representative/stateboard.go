@@ -44,6 +44,7 @@ type StateboardMsg struct {
 var stateboardApps = []struct{ clientName, label string }{
 	{"federation-command", "federation-command"},
 	{"condoccer", "condoccer"},
+	{"condocv2", "condocv2"},
 	{"sessions", "session-manager"},
 	{"convo", "the-conversationalist"},
 	{"robot", "ianar"},

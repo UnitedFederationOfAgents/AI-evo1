@@ -899,6 +899,18 @@ func (w *Worker) processSlopspaceWork(signal *types.WorkSignal, signalPath strin
 		metadata, _ = w.slopspaceMgr.Get(metadata.ID)
 	}
 
+	// Note which slopspace this work runs in, for LR's worker tab visual, and
+	// push it now: the watch loop is blocked until the agent finishes, so
+	// otherwise the tab wouldn't see it (or a deployment this worker just
+	// made) until then.
+	if metadata != nil {
+		event := &types.WorkEvent{StatusUpdate: "slopspace", SlopspaceID: metadata.ID}
+		if err := w.workSignalMgr.AppendEvent(signalPath, event); err != nil {
+			log.Printf("[%s] Failed to record slopspace: %v", w.workerID, err)
+		}
+		w.pushState()
+	}
+
 	// Invoke the agent
 	workdir := w.config.DeployPath()
 	prompt := executor.FormatPromptForAgent(signal, workdir)

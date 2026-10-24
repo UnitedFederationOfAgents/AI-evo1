@@ -277,6 +277,53 @@ func TestManagerDeployToDifferentAgentTypes(t *testing.T) {
 	}
 }
 
+func TestManagerRecordsDeployments(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := types.DefaultConfig()
+	cfg.SlopspacesDir = tmpDir
+	cfg.AgentSlopspaceRoot = filepath.Join(tmpDir, "agent")
+
+	mgr := NewManager(cfg)
+
+	metadata, err := mgr.Create()
+	if err != nil {
+		t.Fatalf("failed to create slopspace: %v", err)
+	}
+
+	// Deployed and returned to agent-worker, then deployed to heuristic-request
+	if err := mgr.Deploy(metadata.ID, types.AgentTypeWorker); err != nil {
+		t.Fatalf("failed to deploy: %v", err)
+	}
+	if err := mgr.Return(metadata.ID); err != nil {
+		t.Fatalf("failed to return: %v", err)
+	}
+	if err := mgr.Deploy(metadata.ID, types.AgentTypeHeuristic); err != nil {
+		t.Fatalf("failed to deploy again: %v", err)
+	}
+
+	got, err := mgr.Get(metadata.ID)
+	if err != nil {
+		t.Fatalf("failed to get slopspace: %v", err)
+	}
+	ds := got.Deployments
+	if len(ds) != 2 {
+		t.Fatalf("expected 2 deployments, got %d", len(ds))
+	}
+	if ds[0].AgentType != types.AgentTypeWorker || ds[0].ReturnedAt == nil {
+		t.Fatalf("first deployment: expected a returned agent-worker one, got %+v", ds[0])
+	}
+	if ds[0].ReturnedAt.Before(ds[0].DeployedAt) {
+		t.Errorf("first deployment returned before it was deployed: %+v", ds[0])
+	}
+	if ds[1].AgentType != types.AgentTypeHeuristic || ds[1].ReturnedAt != nil {
+		t.Errorf("second deployment: expected an open heuristic-request one, got %+v", ds[1])
+	}
+	if ds[1].DeployedAt.Before(*ds[0].ReturnedAt) {
+		t.Errorf("second deployment started before the first was returned")
+	}
+}
+
 func TestManagerDeployAlreadyDeployed(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -1,0 +1,34 @@
+# The reference T3 (see ../../README.md): the worked example the original
+# declarative-tool-tool README planned.
+format: dtt-v1
+name: materialize-tree
+description: Build a directory tree from a flat YAML description -- each relative path mapped to its file's content, a path ending in / for a directory -- and pack it as tree.zip.
+describe: materialize a directory tree from YAML
+inputs:
+  - name: spec
+    type: text
+    help: flat YAML mapping each relative path to its content (a | block for several lines); a path ending in / is a directory
+    required: true
+  - name: root
+    type: path
+    help: where to build the tree; empty for tree/ in the run's working directory
+  - name: overwrite
+    type: bool
+    help: true to replace files that already exist
+    default: "false"
+outputs:
+  values:
+    - name: root
+      help: the tree's absolute path
+    - name: file_count
+      help: how many files were written
+    - name: dir_count
+      help: how many directories were made
+  files:
+    - name: archive
+      help: the tree's files and directories as tree.zip
+entrypoint:
+  runtime: uv
+  script: main.py
+  # uv fetches pyyaml on the first run.
+  timeout: 120s

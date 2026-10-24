@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -781,6 +782,73 @@ func TestLaunchManagedSingleton(t *testing.T) {
 		t.Fatal("expected error launching a second singleton instance")
 	}
 	_ = s.terminateManaged(id)
+}
+
+// TestLaunchManagedExcludes verifies an app declaring another in excludes
+// can't be launched while that one runs, and that the exclusion holds both
+// ways even when only one side declares it.
+func TestLaunchManagedExcludes(t *testing.T) {
+	const a, b = "test-excl-a", "test-excl-b"
+	sleeper := func(s *Server, instanceID string) []string { return []string{"30"} }
+	managedApps[a] = launchSpec{binName: "sleep", singleton: true, excludes: []string{b}, buildArgs: sleeper}
+	managedApps[b] = launchSpec{binName: "sleep", singleton: true, buildArgs: sleeper}
+	defer delete(managedApps, a)
+	defer delete(managedApps, b)
+
+	s := newServer("test-lr")
+	idA, err := s.launchManaged(a)
+	if err != nil {
+		t.Fatalf("launchManaged(%s): %v", a, err)
+	}
+	if _, err := s.launchManaged(b); err == nil {
+		t.Fatalf("expected %s to be refused while %s runs", b, a)
+	}
+	if err := s.terminateManaged(idA); err != nil {
+		t.Fatalf("terminateManaged: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s.procMu.Lock()
+		running := s.runningCountLocked(a)
+		s.procMu.Unlock()
+		if running == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	idB, err := s.launchManaged(b)
+	if err != nil {
+		t.Fatalf("launchManaged(%s) after %s stopped: %v", b, a, err)
+	}
+	if _, err := s.launchManaged(a); err == nil {
+		t.Fatalf("expected %s to be refused while %s runs", a, b)
+	}
+	_ = s.terminateManaged(idB)
+}
+
+// TestCondocv2ManagedSpec verifies condocv2 is registered as a singleton,
+// non-terminal managed app, wired back into this LR on its own port, and
+// mutually exclusive with condoccer.
+func TestCondocv2ManagedSpec(t *testing.T) {
+	spec, ok := managedApps["condocv2"]
+	if !ok {
+		t.Fatal("condocv2 should be a managed application")
+	}
+	if !spec.singleton || spec.terminal {
+		t.Error("condocv2 should be a singleton, non-terminal app like condoccer")
+	}
+	if !slices.Contains(spec.excludes, "condoccer") || !slices.Contains(managedApps["condoccer"].excludes, "condocv2") {
+		t.Error("condoccer and condocv2 should exclude each other")
+	}
+	s := newServer("test-lr")
+	s.heartbeatPort = "8082"
+	s.condocv2Port = "8088"
+	args := strings.Join(spec.buildArgs(s, "condocv2"), " ")
+	for _, want := range []string{"--auto-connect", "--lr-port 8082", "--port 8088", "--name condocv2"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("condocv2 buildArgs %q missing %q", args, want)
+		}
+	}
 }
 
 // TestRecordLaunchFailure verifies a failed launch stays visible on the system

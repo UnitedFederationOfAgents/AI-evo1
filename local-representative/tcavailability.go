@@ -78,10 +78,14 @@ func (s *Server) pushTCAvailability() {
 // LR's own managed condoccer over the representable command channel --
 // called both whenever the aggregate changes (setTCAvailability) and right
 // after condoccer (re)connects, since it otherwise wouldn't learn a value
-// that hasn't changed since before it connected.
+// that hasn't changed since before it connected. condocv2 (a copy of
+// condoccer, mutually exclusive with it) gets the same push; SendCommand is a
+// no-op for whichever of the two isn't connected.
 func (s *Server) sendTCAvailabilityToCondoccer() {
 	if s.reprServer == nil {
 		return
 	}
-	s.reprServer.SendCommand("condoccer", tcAvailabilityCommand(s.getTCAvailability()))
+	cmd := tcAvailabilityCommand(s.getTCAvailability())
+	s.reprServer.SendCommand("condoccer", cmd)
+	s.reprServer.SendCommand("condocv2", cmd)
 }

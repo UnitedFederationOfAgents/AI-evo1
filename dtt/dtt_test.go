@@ -230,7 +230,7 @@ func TestCatalogScan(t *testing.T) {
 	for _, tl := range cat.tools {
 		names = append(names, tl.Name+"@"+tl.Origin)
 	}
-	if got := strings.Join(names, " "); got != "extra-one@tools-dirs good@user materialize-tree@builtin" {
+	if got := strings.Join(names, " "); got != "aws@builtin extra-one@tools-dirs filesystem@builtin github@builtin good@user materialize-tree@builtin" {
 		t.Errorf("tools: %s", got)
 	}
 	if len(cat.shadowed) != 2 {

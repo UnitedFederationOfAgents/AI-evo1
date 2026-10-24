@@ -28,14 +28,21 @@ flowchart LR
     end
 
     subgraph dtt["dtt (one call, then exit)"]
-        cmd["list / describe / validate<br/>create / install / run"]
+        cmd["list / describe / validate<br/>create / install / run<br/>read / assert"]
         scan["catalog scan, first name wins"]
         check["check inputs against tool.yaml<br/>fill in defaults"]
         collect["read $DTT_OUTPUT<br/>keep the log tail"]
+        engine["declarative engine<br/>document → measure → from rule → image"]
+    end
+
+    subgraph targets["What the engine reads and asserts"]
+        gh["GitHub REST API"]
+        files["files on this host"]
+        awscli["AWS CLI"]
     end
 
     subgraph sources["Where tools come from"]
-        builtin["first: built-in<br/>(embedded: materialize-tree)"]
+        builtin["first: built-in<br/>(embedded: materialize-tree,<br/>github, filesystem, aws)"]
         user["then: tools-dir<br/>~/.ufa/tools"]
         extra["last: tools-dirs"]
     end
@@ -59,6 +66,11 @@ flowchart LR
     outfile --> collect
     collect -- "one result: ok, outputs, files,<br/>log_tail, exit 0 / 1 / 2" --> lr
     cmd -- "install, create --install" --> user
+    cmd -- "read, assert" --> engine
+    script -- "built-in github / filesystem / aws:<br/>$DTT_BIN tool-engine" --> engine
+    engine --> gh
+    engine --> files
+    engine --> awscli
 ```
 
 ## Commands
@@ -71,6 +83,8 @@ dtt create <name>              [--dir <parent> | --install] [--runtime uv|exec] 
 dtt install <dir>              [--force] [--json]     (alias: register)
 dtt run <tool>                 [--arg name=value]... [--input <file|->]
                                [--workdir <dir>] [--timeout <d>] [--json]
+dtt read <document|->          [--image <file|->] [--force]
+dtt assert <document|->        [--image <file|->] [--force]
 dtt --version
 ```
 
@@ -90,7 +104,8 @@ works as it does for every UFA app.
 There's no index. Every call scans these places, in this order:
 
 1. **built-in**: tools embedded in the binary (`builtin/`), currently
-   `materialize-tree`.
+   `materialize-tree` and the declarative tools `github`, `filesystem` and
+   `aws` (see [Declarative tools](#declarative-tools-read-and-assert)).
 2. **user**: the `tools-dir` setting, `~/.ufa/tools` by default. `install`
    and `create --install` put tools here.
 3. **tools-dirs**: each directory in the `tools-dirs` setting (a comma- or
@@ -191,7 +206,9 @@ before anything runs. Defaults are filled in. Then dtt:
     with no default is `null`;
   - as **`DTT_IN_<NAME>`** environment variables, which are strings, with
     unset inputs left out. Alongside them are `DTT_TOOL`, `DTT_TOOL_DIR`,
-    `DTT_WORKDIR` and `DTT_OUTPUT`.
+    `DTT_WORKDIR`, `DTT_OUTPUT`, `DTT_BIN` (dtt's own path, so a tool can
+    call it back) and `DTT_CALLER_DIR` (where dtt was run from, for relative
+    paths a caller passed).
 - **reads the tool's results** from the file named by `$DTT_OUTPUT`:
 
   ```json
@@ -244,6 +261,156 @@ EOF
 dtt run materialize-tree --input spec.yaml
 ```
 
+## Declarative tools: read and assert
+
+Besides running T3s, dtt **reads** and **asserts** DTT documents. A
+document names DTT objects (a GitHub repository's pull requests, files under
+a directory, ECS tasks) and the state they should have:
+
+- **Reading** measures every object the document names and returns an
+  **image**: a JSON document of their measured state, plus what an assert
+  would do to each asserted field. Nothing changes.
+- **Asserting** makes the document true where it may, and always returns
+  the image as it left things.
+
+```sh
+dtt read   <document|->                       # the image on stdout
+dtt assert <document|-> [--image <file|->] [--force]
+```
+
+The three **built-in declarative tools** run the same engine through the
+tools interface. Each reads one provider's statements (plus `timestamp`):
+
+| Tool | Objects | Example |
+|---|---|---|
+| `github` | a repository, its open pull requests | [`examples/github-prs.dtt.yaml`](examples/github-prs.dtt.yaml) |
+| `filesystem` | JSON and text files under a directory | [`examples/filesystem-json.dtt.yaml`](examples/filesystem-json.dtt.yaml) |
+| `aws` | ECS tasks, selected by tag, and their tags | [`examples/aws-ecs-tags.dtt.yaml`](examples/aws-ecs-tags.dtt.yaml) |
+
+```sh
+dtt run filesystem --arg document_file=examples/filesystem-json.dtt.yaml --arg mode=assert
+```
+
+Their inputs are `document` (the text) or `document_file` (a path, relative
+to where dtt runs), `mode` (`read`, the default, or `assert`), `from_image`
+(an earlier image's JSON or its file's path) and `force`. Their outputs are
+the counts `changed`, `held`, `unchanged`, `would_change` and `objects`,
+plus the `image` file. In local-representative they are the `tool.github`,
+`tool.filesystem` and `tool.aws` control ops. They are `exec` tools whose
+script runs `"$DTT_BIN" tool-engine <provider>`, and `dtt run` sets
+`DTT_BIN` to its own path. So they need no `uv`, and they keep the run
+contract above: the timeout, the log, and `$DTT_OUTPUT`.
+
+More examples, proposed for discussion and not implemented yet, are in
+[`docs/additional-proposed-examples.md`](docs/additional-proposed-examples.md).
+
+### Documents
+
+A document is a list of **statements**. Each is a top-level key naming an
+object, with any of these under it:
+
+```yaml
+github.orgs.je-sidestuff.repos.AI-sandboxing:   # a DTT path: provider first
+  read: *              # measure its extra fields too (here, its open PRs); or a list of them
+  alias: the-repo      # a name later statements and ${{...}} references use
+timestamp:
+  select: "now"        # which object(s) under the path
+the-repo:              # an alias: the same object again
+  assert:              # the state it should have
+    prs:
+      select: {from: condoc/blah1/main, to: main, title: Merge one branch}
+      state:
+        exists: true
+        body: |
+          Updated ${{timestamp.human-readable}}
+```
+
+- The same key may start several statements. The example asserts two PRs
+  through `the-repo`, one statement each.
+- `${{name.field}}` is a field of an object measured earlier in the
+  document, named by its path or alias: `${{timestamp.unix}}` or
+  `${{the-repo.default_branch}}`.
+- A tab in a line's indent counts as four columns.
+- As in `tool.yaml`, every scalar is a string, unknown keys are errors, and
+  the whole document is checked before anything is measured. A mistake on
+  the last line changes nothing.
+
+### The from rule
+
+An assert changes a field only when what the field holds now is one of its
+**from** values. Anything else is **held**: left alone, and reported in the
+image as `held`. The from values are:
+
+1. **empty**, always: missing, blank, `false`, `{}`. An assert creates what
+   doesn't exist yet and fills in what's blank.
+2. any value under **`from.<field>`** beside the field. That can be one
+   value, a list, or a mapping whose keys are only labels:
+
+   ```yaml
+   body: ...
+   from.body:
+     empty: ''
+     notimeyet: |
+       This PR will reintegrate a branch.
+   ```
+
+3. with **`--image`** (`from_image`), the value that image saw. This is
+   optimistic concurrency: read, look at the image, then assert with it. A
+   field someone else changed in between is held.
+4. with **`--force`**, anything. It is the same as `from.<field>: "*"` on
+   every field.
+
+The rule covers `exists` too. Removing a file or closing a PR changes
+`exists` from `true`, which isn't empty, so it needs a from value, the
+image or `--force`. Values are compared with line endings and trailing
+whitespace evened out. A JSON file's content is compared as JSON, so
+spacing and key order don't count.
+
+### The image
+
+```json
+{
+  "ok": true, "format": "dtt-image-v1", "mode": "assert", "taken": "2026-10-24T15:04:05Z",
+  "objects": [
+    {"id": "filesystem.items[/tmp]", "path": "filesystem.items", "alias": "temp-folder", "line": 1,
+     "state": {"abspath": "/tmp", "exists": true, "kind": "dir"}},
+    {"id": "filesystem.items[/tmp/my-json.json]", "path": "filesystem.items", "line": 10,
+     "state": {"abspath": "/tmp/my-json.json", "exists": true, "type": "json", "content": {"name": "My Json File.", "...": "..."}}}
+  ],
+  "fields": [
+    {"object": "filesystem.items[/tmp/my-json.json]", "field": "content", "outcome": "held",
+     "why": "it holds something else (not empty, not a from value) -- ...", "was": {"name": "theirs"}, "want": {"...": "..."}, "line": 13}
+  ],
+  "summary": {"held": 1}
+}
+```
+
+Each object's `id` is what a later `--image` is matched by. A field's
+`outcome` is `unchanged`, `changed`, `held` or, when reading,
+`would-change`. Held fields don't fail the run. A document that doesn't
+check exits 2. A provider that fails part way (an API error, say) exits 1,
+and the image so far carries `error`.
+
+### Providers
+
+| Path | select | assert | Fields |
+|---|---|---|---|
+| `timestamp` | `now` (default) or an RFC 3339 time | (read only) | `unix`, `iso`, `human-readable`, `date` |
+| `filesystem.items` | `abspath:` a directory or file | `items:` a map of relative path to `{type: json\|text, content, exists}` | an item's `exists`, `content`. `read: *` lists a directory's items |
+| `github.orgs.<owner>.repos.<repo>` (or `users`) | (the path) | `prs:` one or a list of `{select: {from, to, title}, state: {exists, title, body}}` | a PR's `exists`, `title`, `body`. `read: *` lists open PRs |
+| `aws.accounts.<current\|id>[.regions.<r>].ecs.tasks` | `tags:` (`*` for any value), `cluster:` | `tags:` key: value | `tags.<key>`, per matched task |
+
+- **github** matches a PR by `from` and `to` (the default branch if
+  omitted) among the open ones. `select.title` is only the name a new PR
+  gets, and `exists: false` closes the PR. The token comes from
+  `$GITHUB_TOKEN`, then `$GH_TOKEN`, then `gh auth token`.
+  `$DTT_GITHUB_API` points the provider at another API host.
+- **filesystem** writes through a temporary file and rename, making
+  directories if it needs to. A JSON item keeps the document's key order.
+- **aws** runs the AWS CLI (`$DTT_AWS_CLI`, default `aws`), so credentials
+  and region come from wherever the CLI finds them. An account id in the
+  path is checked against `sts get-caller-identity`.
+
 ## Writing a tool
 
 ```sh
@@ -262,6 +429,9 @@ Use `dtt install <dir>` once it validates.
 make build    # ./dtt, built-ins embedded
 make test     # the materialize-tree run test is skipped without uv (and needs the network once, for pyyaml)
 ```
+
+The declarative tests run offline. GitHub is a fake REST server and AWS a
+fake CLI, and the `filesystem` tool runs end to end through `dtt run`.
 
 `make deploy-dev-binaries` at the repo root puts `dtt` in `/AI-evo1-dev/bin`,
 where local-representative finds it.

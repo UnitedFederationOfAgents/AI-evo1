@@ -57,6 +57,14 @@ commands:
                                  --input <file|-> (JSON or flat YAML of name: value)
                                  --workdir <dir> (default: a new temp dir, kept)
                                  --timeout <duration> (default: the tool's own)
+  read <document|->            measure a DTT document's objects; prints the image (JSON)
+  assert <document|->          make a DTT document true where its from values allow;
+                                 prints the image as it left things
+                                 --image <file|->: an earlier image (fields it saw may change)
+                                 --force: change asserted fields whatever they hold
+
+The built-in github, filesystem and aws tools run read/assert for one
+provider each, through dtt run (dtt describe github shows their inputs).
 
 --json prints one JSON document on stdout. Exit status: 0 ok, 1 the tool
 failed, 2 bad usage or input. --version prints the build version.
@@ -133,6 +141,10 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return c.install(cfg, rest)
 	case "run", "execute":
 		return c.run(ctx, cfg, rest)
+	case "read", "assert":
+		return c.declare(ctx, cmd, rest)
+	case "tool-engine":
+		return c.toolEngine(ctx, rest)
 	}
 	return c.fail(exitBadInput, fmt.Errorf("unknown command %q (dtt help lists them)", cmd))
 }

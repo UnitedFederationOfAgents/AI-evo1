@@ -17,7 +17,7 @@ clean:
 	rm -f $(BINARY_NAME)
 
 # Run Go tests. The materialize-tree run test is skipped when uv isn't
-# installed.
+# installed; the declarative tools' tests use fakes and run offline.
 test:
 	go test -v ./...
 

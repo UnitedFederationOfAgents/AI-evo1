@@ -1,0 +1,44 @@
+# A built-in declarative tool (see ../../README.md "Declarative tools"):
+# dtt's own engine reads or asserts the document, for filesystem and
+# timestamp statements.
+format: dtt-v1
+name: filesystem
+description: Read or assert files on this host -- JSON or text items under a directory -- from a DTT document, and return the image of what was measured. Asserting writes or removes items, changing a field only from empty, from its from values, from what from_image saw, or (force) from anything.
+describe: "filesystem {mode}"
+inputs:
+  - name: document
+    type: text
+    help: the DTT document (filesystem.items and timestamp statements); or give document_file
+  - name: document_file
+    type: path
+    help: a file holding the DTT document, relative to where dtt runs
+  - name: mode
+    choices: [read, assert]
+    default: read
+    help: read only measures; assert also makes the changes
+  - name: from_image
+    type: text
+    help: an earlier image (its JSON, or the path of its file) -- a field still as it saw it may change
+  - name: force
+    type: bool
+    default: "false"
+    help: true to change asserted fields whatever they hold (from "*")
+outputs:
+  values:
+    - name: changed
+      help: how many fields were changed
+    - name: held
+      help: how many asserted fields held a value they may not be changed from
+    - name: unchanged
+      help: how many asserted fields already held what was asserted
+    - name: would_change
+      help: in read mode, how many fields an assert would change
+    - name: objects
+      help: how many objects the image holds
+  files:
+    - name: image
+      help: the image, as JSON
+entrypoint:
+  runtime: exec
+  script: run.sh
+  timeout: 60s

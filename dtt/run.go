@@ -131,11 +131,21 @@ func runTool(ctx context.Context, cfg config, t *Tool, given map[string]string, 
 	cmd.Stdin = bytes.NewReader(stdin)
 	log := &tailBuffer{max: logKeepBytes}
 	cmd.Stdout, cmd.Stderr = log, log
+	// DTT_BIN lets a tool call dtt back (the built-in declarative tools run
+	// "dtt tool-engine"); DTT_CALLER_DIR is where dtt was run from, for
+	// relative paths a caller passed.
+	self, err := os.Executable()
+	if err != nil {
+		self = "dtt"
+	}
+	caller, _ := os.Getwd()
 	cmd.Env = append(os.Environ(),
 		"DTT_TOOL="+t.Name,
 		"DTT_TOOL_DIR="+toolDir,
 		"DTT_WORKDIR="+workdir,
 		"DTT_OUTPUT="+outPath,
+		"DTT_BIN="+self,
+		"DTT_CALLER_DIR="+caller,
 	)
 	for name, v := range strs {
 		cmd.Env = append(cmd.Env, "DTT_IN_"+strings.ToUpper(name)+"="+v)

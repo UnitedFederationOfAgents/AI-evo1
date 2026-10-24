@@ -1,0 +1,21 @@
+# DTT example -- AWS (see ../README.md "Declarative tools").
+#
+# This example stamps every ECS task tagged watched-by: dtt with the time it
+# was last watched. The first assert sets last-watched; after that the tag
+# holds an earlier time, so later asserts change it only with --force (or
+# the previous run's image, if nothing else has changed it since).
+#
+#   dtt read examples/aws-ecs-tags.dtt.yaml
+#   dtt run aws --arg document_file=examples/aws-ecs-tags.dtt.yaml --arg mode=assert --arg force=true
+
+timestamp:
+  select: "now"
+  alias: the-time
+
+aws.accounts.current.ecs.tasks:
+  select:
+    tags:
+      watched-by: dtt
+  assert:
+    tags:
+      last-watched: ${{timestamp.unix}}

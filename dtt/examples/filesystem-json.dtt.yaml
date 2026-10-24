@@ -1,0 +1,26 @@
+# DTT example -- files (see ../README.md "Declarative tools").
+#
+# This example creates a file in /tmp/.
+#
+#   dtt assert examples/filesystem-json.dtt.yaml
+#   dtt run filesystem --arg document_file=examples/filesystem-json.dtt.yaml --arg mode=assert
+
+filesystem.items:
+  select:
+    abspath: "/tmp/"
+  alias: temp-folder
+
+temp-folder:
+  assert:
+    items:
+      my-json.json:
+        type: json
+        content:
+          name: "My Json File."
+          contents1: stuff
+          contents2:
+            nested:
+              nested:
+                stuff
+            flatter:
+              stuff

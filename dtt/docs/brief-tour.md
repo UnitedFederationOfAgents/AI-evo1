@@ -37,7 +37,8 @@ echo "tools-dir: /tmp/dtt-tour/tools" > /tmp/dtt-tour/config/dtt.yaml
 
 dtt keeps no index. Every call scans the built-in tools, then the user tools
 directory, then any `tools-dirs`. With an empty tools directory, only the
-built-in tool shows up:
+built-in tools show up: the reference tool `materialize-tree` and the three
+declarative tools covered at the end of the tour.
 
 ```ridealong
 ./dtt --config /tmp/dtt-tour/config list
@@ -46,7 +47,10 @@ built-in tool shows up:
 Output (the summary, which is the tool's whole description, is shortened
 here and below):
 ```
-materialize-tree  built-in  Build a directory tree from a flat YAML description ...
+aws               builtin  Read or assert AWS objects -- ECS tasks, selected by their tags, ...
+filesystem        builtin  Read or assert files on this host -- JSON or text items ...
+github            builtin  Read or assert GitHub objects -- a repository and its open pull requests ...
+materialize-tree  builtin  Build a directory tree from a flat YAML description ...
 ```
 
 `describe` prints a tool's schema. A tool can also be named by its control
@@ -115,8 +119,11 @@ tour-echo is a valid dtt-v1 tool (1 input(s), 1 output value(s), 1 output file(s
 Output:
 ```
 installed tour-echo at /tmp/dtt-tour/tools/tour-echo
-materialize-tree  built-in  Build a directory tree from a flat YAML description ...
-tour-echo         user      What tour-echo does, in a sentence or two. ...
+aws               builtin  Read or assert AWS objects -- ECS tasks, selected by their tags, ...
+filesystem        builtin  Read or assert files on this host -- JSON or text items ...
+github            builtin  Read or assert GitHub objects -- a repository and its open pull requests ...
+materialize-tree  builtin  Build a directory tree from a flat YAML description ...
+tour-echo         user     What tour-echo does, in a sentence or two. ...
 ```
 
 ## Running a Tool
@@ -188,6 +195,129 @@ materialize-tree: ok in 412ms
 /tmp/dtt-tour/tree-run/tree/README.md
 /tmp/dtt-tour/tree-run/tree/src
 /tmp/dtt-tour/tree-run/tree/src/main.py
+```
+
+## Declarative Tools: Read and Assert
+
+dtt also reads and asserts **DTT documents**. A document names objects (a
+GitHub repository's pull requests, files under a directory, ECS tasks) and
+the state they should have. Reading measures them and returns an
+**image**, the measured state as JSON. Asserting makes the document true
+where the **from rule** allows and also returns an image. The rule: a
+field changes only from empty, from a value listed under `from.<field>`,
+from what a supplied image saw, or, with force, from anything. The
+built-in `github`, `filesystem` and `aws` tools run the same engine through
+`dtt run`.
+
+The files example writes a JSON file into `/tmp/`. Point a copy of it at
+the tour's directory instead:
+
+```ridealong
+cat examples/filesystem-json.dtt.yaml
+mkdir -p /tmp/dtt-tour/files
+sed 's|"/tmp/"|/tmp/dtt-tour/files/|' examples/filesystem-json.dtt.yaml > /tmp/dtt-tour/files.dtt.yaml
+```
+
+### Reading
+
+`dtt read` prints the image on stdout and logs what each asserted field
+would do on stderr. Nothing is written yet:
+
+```ridealong
+./dtt --config /tmp/dtt-tour/config read /tmp/dtt-tour/files.dtt.yaml > /tmp/dtt-tour/image0.json
+ls /tmp/dtt-tour/files
+```
+
+Both of the item's fields log as `would-change`, because the file doesn't
+exist yet and empty is always a from value. The directory is still empty.
+
+### Asserting Through the Tools Interface
+
+The same document goes through `dtt run filesystem`, the way
+local-representative's `tool.filesystem` op runs it:
+
+```ridealong
+./dtt --config /tmp/dtt-tour/config run filesystem --arg document_file=/tmp/dtt-tour/files.dtt.yaml --arg mode=assert --workdir /tmp/dtt-tour/assert1
+cat /tmp/dtt-tour/files/my-json.json
+```
+
+Output (approximately):
+```
+filesystem: ok in 6ms
+  changed = 2
+  held = 0
+  objects = 2
+  unchanged = 0
+  would_change = 0
+  file image: /tmp/dtt-tour/assert1/image.json (… bytes)
+  workdir: /tmp/dtt-tour/assert1
+{
+  "name": "My Json File.",
+  "contents1": "stuff",
+  "contents2": {
+    "nested": {
+      "nested": "stuff"
+    },
+    "flatter": "stuff"
+  }
+}
+```
+
+### Held Fields, Images and Force
+
+Change the file behind dtt's back. Its content is no longer empty and isn't
+a from value, so a plain assert holds it:
+
+```ridealong
+echo '{"name": "theirs"}' > /tmp/dtt-tour/files/my-json.json
+./dtt --config /tmp/dtt-tour/config run filesystem --arg document_file=/tmp/dtt-tour/files.dtt.yaml --arg mode=assert | grep -E '^  (changed|held) '
+```
+
+Output:
+```
+  changed = 0
+  held = 1
+```
+
+Read again to see the change, then assert with that image. The content is
+still as the image saw it, so the field may change:
+
+```ridealong
+./dtt --config /tmp/dtt-tour/config read /tmp/dtt-tour/files.dtt.yaml > /tmp/dtt-tour/image1.json
+./dtt --config /tmp/dtt-tour/config assert /tmp/dtt-tour/files.dtt.yaml --image /tmp/dtt-tour/image1.json | grep -A1 '"summary"'
+```
+
+Output:
+```
+  "summary": {
+    "changed": 1
+```
+
+`--force` (the tools' `force=true`) changes asserted fields whatever they
+hold. It is the same as `from.<field>: "*"` on every field.
+
+### GitHub and AWS
+
+The GitHub and AWS examples act on real accounts, so this tour only
+**reads** them, and only when credentials are there. A read makes no
+changes. It reports what an assert would do:
+
+```ridealong
+cat examples/github-prs.dtt.yaml
+if [ -n "${GITHUB_TOKEN:-}${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1; then
+  ./dtt --config /tmp/dtt-tour/config read examples/github-prs.dtt.yaml | grep -A4 '"summary"'
+else
+  echo "no GitHub token - skipping the github read"
+fi
+```
+
+```ridealong
+cat examples/aws-ecs-tags.dtt.yaml
+if command -v aws >/dev/null && aws sts get-caller-identity >/dev/null 2>&1; then
+  ./dtt --config /tmp/dtt-tour/config run aws --arg document_file=examples/aws-ecs-tags.dtt.yaml
+else
+  echo "no AWS CLI credentials - skipping the aws read"
+fi
 ```
 
 ## Cleanup

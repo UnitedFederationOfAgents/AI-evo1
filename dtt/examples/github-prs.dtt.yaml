@@ -1,0 +1,53 @@
+# DTT example -- github (see ../README.md "Declarative tools").
+#
+# This example creates PRs for the condoc/blah/main branches if they do not
+# exist, or updates the body if it does.
+#
+# If we run this in 'assert' mode without 'force' without supplying an image
+# then our blah1 PR would only get updated body text if it either didn't
+# exist or had a blank body. blah2's body may also be changed from either of
+# its from.body values.
+#
+#   dtt read examples/github-prs.dtt.yaml
+#   dtt run github --arg document_file=examples/github-prs.dtt.yaml --arg mode=assert
+
+github.orgs.je-sidestuff.repos.AI-sandboxing:
+  read: *
+  alias: the-repo
+
+timestamp:
+  select: "now"
+  alias: the-time
+
+the-repo:
+  assert:
+    prs:
+      select:
+        from: condoc/blah1/main
+        to: main
+        title: Merge one branch
+      state:
+        exists: true
+        body: |
+          This PR will reintegrate a branch.
+          The more you know.
+          ${{timestamp.human-readable}}
+
+the-repo:
+  assert:
+    prs:
+      select:
+        from: condoc/blah2/main
+        to: main
+        title: Merge another branch
+      state:
+        exists: true
+        body: |
+          This PR will reintegrate a branch.
+          The more you know.
+          ${{timestamp.human-readable}}
+        from.body:
+          empty: ''
+          notimeyet: |
+            This PR will reintegrate a branch.
+            The more you know.

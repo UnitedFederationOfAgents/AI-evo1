@@ -15,6 +15,52 @@ It modernizes the stub at `ignored-scratch/AI-sandboxing/declarative-tool-tool`
 (`tool-tool create/register/execute`). The registry file is gone: the tools
 on disk are the only record of what's installed.
 
+For a hands-on walkthrough, run the [brief tour](docs/brief-tour.md) as a
+ridealong (`ridealong dtt/docs/brief-tour.md` from federation-command).
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    subgraph callers["Callers"]
+        lr["local-representative<br/>tools tab, tool.&lt;name&gt; ops"]
+        cli["a person at a shell"]
+    end
+
+    subgraph dtt["dtt (one call, then exit)"]
+        cmd["list / describe / validate<br/>create / install / run"]
+        scan["catalog scan, first name wins"]
+        check["check inputs against tool.yaml<br/>fill in defaults"]
+        collect["read $DTT_OUTPUT<br/>keep the log tail"]
+    end
+
+    subgraph sources["Where tools come from"]
+        builtin["first: built-in<br/>(embedded: materialize-tree)"]
+        user["then: tools-dir<br/>~/.ufa/tools"]
+        extra["last: tools-dirs"]
+    end
+
+    subgraph runarea["The run, in its working directory"]
+        runtime["runtime: uv run --script<br/>or exec"]
+        script["the tool's script"]
+        outfile["$DTT_OUTPUT<br/>values + files"]
+    end
+
+    lr -- "dtt ... --json" --> cmd
+    cli --> cmd
+    cmd --> scan
+    scan --> builtin
+    scan --> user
+    scan --> extra
+    cmd -- "run" --> check
+    check -- "JSON on stdin<br/>DTT_IN_* env vars" --> runtime
+    runtime --> script
+    script --> outfile
+    outfile --> collect
+    collect -- "one result: ok, outputs, files,<br/>log_tail, exit 0 / 1 / 2" --> lr
+    cmd -- "install, create --install" --> user
+```
+
 ## Commands
 
 ```

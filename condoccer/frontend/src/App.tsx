@@ -2200,7 +2200,7 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
         )}
 
         {FORCE_COMPLETABLE_PHASES.includes(info.phase) && info.stepNum > 0 && (
-          <ForceCompletePanel onConfirm={() => onAction({ action: 'force_complete', path: info.path })} />
+          <ForceCompletePanel slopspace={info.path.startsWith('slopspace:')} onConfirm={() => onAction({ action: 'force_complete', path: info.path })} />
         )}
       </div>
     </div>
@@ -2208,15 +2208,15 @@ function CondocDetailView({ state, onAction }: CondocDetailViewProps) {
 }
 
 // FORCE_COMPLETABLE_PHASES are the phases Force Complete is offered in: any
-// started condoc not yet completed. Mid-run, federation-command holds the
-// directive until the run lands; a slopspace condoc refuses while a turn is
-// in flight unless the turn failed.
+// started condoc not yet completed. Mid-run, federation-command kills the
+// agent and completes immediately; a slopspace condoc refuses while a turn
+// is in flight unless the turn failed.
 const FORCE_COMPLETABLE_PHASES: Phase[] = ['awaiting_step', 'agent_running', 'awaiting_action', 'queued']
 
 // ForceCompletePanel jumps a condoc out of its current state straight to
 // completed, where it may be PR'd and merged. Pending work in the open step
 // or substep is closed out as-is, so it asks for confirmation first.
-function ForceCompletePanel({ onConfirm }: { onConfirm: () => void }) {
+function ForceCompletePanel({ slopspace, onConfirm }: { slopspace: boolean; onConfirm: () => void }) {
   const [confirming, setConfirming] = useState(false)
   if (!confirming) {
     return (
@@ -2235,7 +2235,9 @@ function ForceCompletePanel({ onConfirm }: { onConfirm: () => void }) {
         <div className="action-form-title">Force Complete</div>
         <div className="action-status" style={{ fontSize: 12, color: '#aaa' }}>
           Closes the open step and substep as they stand and marks the condoc completed, ready to PR and merge.
-          If an agent is running, this takes effect once it finishes.
+          {slopspace
+            ? 'If a turn is in flight, this is refused until it lands.'
+            : 'If an agent is running, it is killed immediately and its work so far is committed as-is.'}
         </div>
         <div className="action-row">
           <button

@@ -74,6 +74,10 @@ const (
 // deployed at the worker's deploy path; it stays at the head of the queue.
 var errTurnWait = errors.New("another slopspace is deployed")
 
+// errTurnAbandoned means the turn stopped waiting on its worker for a force
+// complete, which the turn loop then carries out.
+var errTurnAbandoned = errors.New("turn abandoned for a force complete")
+
 // PRLive is a raised PR as last seen on GitHub.
 type PRLive struct {
 	Repo   string `json:"repo"`
@@ -96,7 +100,7 @@ type slopState struct {
 	queue    []string // pointer stems with a turn waiting, FIFO
 	running  string   // stem whose turn is running
 	busy     map[string]bool
-	force    map[string]bool // stems to force complete once their running turn lands
+	force    map[string]bool // stems whose running turn is being abandoned for a force complete
 	wake     chan struct{}
 	prLive   map[string][]PRLive
 	prPolled map[string]time.Time
@@ -1158,12 +1162,14 @@ func (s *Server) slopCompleteCondoc(spec *PointerSpec, meta *dktypes.SlopspaceMe
 // leads into propose-PR like an ordinary completion. condoccer is the
 // handler here, so it finalizes the files itself rather than leaving a
 // directive. A turn that failed, or is queued but not yet started, is
-// dropped (with its error). The worker can't be interrupted (D13), so a
-// turn already under way is left to land: the request is held and the turn
-// loop completes the condoc as soon as it does.
+// dropped (with its error). A turn already under way is abandoned rather
+// than waited on -- its worker may be long dead (see abandonTurn). If the
+// turn loop is running it, the request is flagged, the loop's wait for the
+// worker gives up on it within a poll, and the loop completes the condoc
+// under the same claim.
 func (s *Server) slopForceComplete(stem string) error {
 	if !s.claim(stem) {
-		if s.deferForceComplete(stem, false) {
+		if s.deferForceComplete(stem) {
 			return nil
 		}
 		return errBusy(stem)
@@ -1176,28 +1182,18 @@ func (s *Server) slopForceComplete(stem string) error {
 	if spec.Turn != nil && spec.Turn.Kind == turnProposePR {
 		return fmt.Errorf("%s is already completed", spec.Name)
 	}
-	if spec.Turn != nil && spec.Error == "" && spec.Turn.Stage != "" && spec.Turn.Stage != stageQueued {
-		// Under way but not running here yet -- resumed after a restart,
-		// which the queue picks up again.
-		s.deferForceComplete(stem, true)
-		return nil
-	}
 	return s.forceCompleteClaimed(stem, spec)
 }
 
-// deferForceComplete holds a force complete for the turn loop to carry out
-// once stem's turn lands -- if that turn is the one running, or regardless
-// when always is set (the caller holds the claim and has seen a turn under
-// way). It reports whether the request was held.
-func (s *Server) deferForceComplete(stem string, always bool) bool {
-	if !always {
-		// A propose-PR turn means the condoc is already completed.
-		if spec, err := s.readHeldSpec(stem); err != nil || spec.Turn == nil || spec.Turn.Kind == turnProposePR {
-			return false
-		}
+// deferForceComplete flags a force complete for the turn loop if stem's turn
+// is the one running. It reports whether the request was held.
+func (s *Server) deferForceComplete(stem string) bool {
+	// A propose-PR turn means the condoc is already completed.
+	if spec, err := s.readHeldSpec(stem); err != nil || spec.Turn == nil || spec.Turn.Kind == turnProposePR {
+		return false
 	}
 	s.slop.mu.Lock()
-	held := always || s.slop.running == stem
+	held := s.slop.running == stem
 	if held {
 		s.slop.force[stem] = true
 	}
@@ -1206,6 +1202,13 @@ func (s *Server) deferForceComplete(stem string, always bool) bool {
 		s.broadcastPointer()
 	}
 	return held
+}
+
+// forceRequested reports whether a force complete is flagged for stem.
+func (s *Server) forceRequested(stem string) bool {
+	s.slop.mu.Lock()
+	defer s.slop.mu.Unlock()
+	return s.slop.force[stem]
 }
 
 // takeForceComplete reports and clears a held force complete for stem, and
@@ -1230,6 +1233,17 @@ func (s *Server) forceCompleteClaimed(stem string, spec PointerSpec) error {
 	meta, err := s.slop.ss.Get(spec.SlopspaceID)
 	if err != nil {
 		return err
+	}
+	if spec.Turn != nil {
+		if meta, err = s.abandonTurn(&spec, meta); err != nil {
+			// Kept with the turn, so Force Complete again retries from here.
+			spec.Error = fmt.Sprintf("force complete: %v", err)
+			s.dequeue(stem)
+			if werr := s.writeSpec(&spec, fmt.Sprintf("condoc: %s error", spec.Name)); werr != nil {
+				log.Printf("slopspace %s: %v", stem, werr)
+			}
+			return err
+		}
 	}
 	if meta.Deployed {
 		return fmt.Errorf("%s's slopspace is deployed", spec.Name)
@@ -1265,6 +1279,45 @@ func (s *Server) forceCompleteClaimed(stem string, spec PointerSpec) error {
 		return err
 	}
 	return s.resync(&spec, meta)
+}
+
+// abandonTurn tears down spec's turn for a force complete without waiting on
+// the worker, which may have died mid-turn and never will finish: the work
+// signal is failed (so a live worker sees it's no longer wanted), the
+// slopspace is returned, and each target's work so far is committed and
+// pushed as-is. Each step is skipped once done, so a failure part way is
+// retried by forcing again. It returns the slopspace's metadata afterwards.
+func (s *Server) abandonTurn(spec *PointerSpec, meta *dktypes.SlopspaceMetadata) (*dktypes.SlopspaceMetadata, error) {
+	t := spec.Turn
+	if t.Role != "" && t.SignalAt != 0 {
+		ongoing := filepath.Join(s.slop.dk.OngoingWorkDir(), worksignal.GenerateFilename(t.Role, time.Unix(t.SignalAt, 0), false))
+		if fileExists(ongoing) {
+			if err := s.slop.signals.Complete(ongoing, false, "abandoned: the condoc was force completed"); err != nil {
+				return meta, fmt.Errorf("failing the work signal: %v", err)
+			}
+		}
+	}
+	if meta.Deployed {
+		if err := s.slop.ss.Return(spec.SlopspaceID); err != nil {
+			return meta, fmt.Errorf("returning the slopspace: %v", err)
+		}
+		m, err := s.slop.ss.Get(spec.SlopspaceID)
+		if err != nil {
+			return meta, err
+		}
+		meta = m
+	}
+	os.Remove(filepath.Join(meta.RootPath, slopReplyFile))
+	if t.Stage == "" || t.Stage == stageQueued {
+		return meta, nil // the agent never started, so there's nothing of its to keep
+	}
+	for _, repo := range spec.Targets {
+		owner, name, _ := strings.Cut(repo, "/")
+		if _, err := s.slop.ss.WriteRepoChanges(spec.SlopspaceID, owner, name, "condoc: force completed"); err != nil {
+			return meta, fmt.Errorf("%s: %v", repo, err)
+		}
+	}
+	return meta, nil
 }
 
 // resync re-reads the condoc's files after an edit and mirrors them into
@@ -1368,7 +1421,7 @@ func (s *Server) slopTurnLoop() {
 		wait := errors.Is(err, errTurnWait)
 		if !wait {
 			s.dequeue(stem)
-			if err != nil {
+			if err != nil && !errors.Is(err, errTurnAbandoned) {
 				log.Printf("slopspace %s: turn: %v", stem, err)
 				s.setSpecError(stem, err)
 			}
@@ -1514,7 +1567,7 @@ func (s *Server) runTurn(stem string) error {
 			}
 
 		case stageSignalled:
-			reply, err := s.awaitSignal(t)
+			reply, err := s.awaitSignal(stem, t)
 			if err != nil {
 				return err
 			}
@@ -1681,12 +1734,17 @@ func fileExists(path string) bool {
 }
 
 // awaitSignal waits for the worker to move the turn's signal to complete/
-// and returns the agent's reply from it.
-func (s *Server) awaitSignal(t *PointerTurn) (string, error) {
+// and returns the agent's reply from it. A force complete flagged for stem
+// stops the wait with errTurnAbandoned -- nothing else can, and a worker
+// that died mid-turn never completes its signal.
+func (s *Server) awaitSignal(stem string, t *PointerTurn) (string, error) {
 	created := time.Unix(t.SignalAt, 0)
 	ongoing := filepath.Join(s.slop.dk.OngoingWorkDir(), worksignal.GenerateFilename(t.Role, created, false))
 	complete := filepath.Join(s.slop.dk.CompleteWorkDir(), worksignal.GenerateFilename(t.Role, created, true))
 	for !fileExists(complete) {
+		if s.forceRequested(stem) {
+			return "", errTurnAbandoned
+		}
 		if !fileExists(ongoing) {
 			time.Sleep(slopTurnPollInterval) // the worker writes complete/ before removing ongoing/
 			if !fileExists(complete) {
@@ -2106,7 +2164,7 @@ func (s *Server) runProposeTurn(spec *PointerSpec) error {
 			}
 
 		case stageSignalled:
-			reply, err := s.awaitSignal(t)
+			reply, err := s.awaitSignal(spec.Stem(), t)
 			if err != nil {
 				return err
 			}

@@ -85,7 +85,7 @@ type PointerEntry struct {
 	QueuePos     int  `json:"queuePos,omitempty"`     // 1-based position in the turn queue
 	Running      bool `json:"running,omitempty"`      // its turn is the one running
 	Deployed     bool `json:"deployed,omitempty"`     // its slopspace is deployed
-	ForcePending bool `json:"forcePending,omitempty"` // force complete waits for its running turn to land
+	ForcePending bool `json:"forcePending,omitempty"` // force complete is abandoning its running turn
 }
 
 // PointerStatus is the "pointer" WebSocket payload, sent on connect and

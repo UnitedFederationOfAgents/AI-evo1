@@ -2,14 +2,37 @@
 
 clauditable wraps any command and records its execution, capturing stdout/stderr with timestamps and metadata.
 
+This tour can be run as a ridealong from federation-command:
+```
+ridealong clauditable/docs/brief-tour.md
+```
+
+## Setup
+
+Navigate to the clauditable directory and set up environment:
+
+```ridealong
+cd clauditable
+```
+
+```ridealong
+export AGENT_RECORDS_PATH=/tmp/clauditable-tour
+```
+
+```ridealong
+export AGENT_SESSION=tour-session
+```
+
+```ridealong
+unset IS_CLAUDITABLE
+```
+
 ## Basic Usage
 
-Wrap any command for recording. For this tour we'll set a custom records path:
+Wrap any command for recording:
 
-```bash
-export AGENT_RECORDS_PATH=/tmp/clauditable-tour
-export AGENT_SESSION=tour-session
-./clauditable echo "Hello, recorded world"
+```ridealong
+AGENT_RECORDS_PATH=/tmp/clauditable-tour AGENT_SESSION=tour-session env -u IS_CLAUDITABLE ./clauditable echo "Hello, recorded world"
 ```
 
 ## Record Structure
@@ -18,6 +41,18 @@ After execution, the session directory contains:
 
 - `session.jsonl` - Consolidated JSON lines with metadata
 - `*-raw.txt` - Full untruncated command outputs
+
+View the session directory:
+
+```ridealong
+ls -la /tmp/clauditable-tour/tour-session/
+```
+
+View the session.jsonl entries:
+
+```ridealong
+cat /tmp/clauditable-tour/tour-session/session.jsonl
+```
 
 Example session.jsonl entry:
 ```json
@@ -40,7 +75,7 @@ clauditable sets `IS_CLAUDITABLE=true` in the environment. If this is already se
 
 ## Testing
 
-```bash
+```ridealong
 make test
 ```
 
@@ -48,9 +83,15 @@ make test
 
 When finished with this tour, clean up the environment:
 
-```bash
+```ridealong
 unset AGENT_RECORDS_PATH
+```
+
+```ridealong
 unset AGENT_SESSION
+```
+
+```ridealong
 rm -rf /tmp/clauditable-tour
 ```
 

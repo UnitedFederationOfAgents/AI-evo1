@@ -169,6 +169,123 @@ func TestParseMetadata(t *testing.T) {
 	}
 }
 
+func TestVerbosityRelayAfterLine(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	relay := newVerbosityRelay(VerbosityManagementAfterLine, "tokens used")
+	relay.write(tmpFile, []byte("noisy line\nmore noise\n"))
+	relay.write(tmpFile, []byte("tokens"))
+	relay.write(tmpFile, []byte(" used\nremaining text\n"))
+
+	if _, err := tmpFile.Seek(0, 0); err != nil {
+		t.Fatalf("failed to seek temp file: %v", err)
+	}
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+
+	got := string(data)
+	want := "tokens used\nremaining text\n"
+	if got != want {
+		t.Errorf("verbosity relay output = %q, want %q", got, want)
+	}
+}
+
+func TestVerbosityRelayRevealsOnContainingLine(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	relay := newVerbosityRelay(VerbosityManagementAfterLine, "tokens used")
+	relay.write(tmpFile, []byte("noisy line\n"))
+	relay.write(tmpFile, []byte("123 tokens used\nshown\n"))
+
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+
+	got := string(data)
+	want := "123 tokens used\nshown\n"
+	if got != want {
+		t.Errorf("verbosity relay output = %q, want %q", got, want)
+	}
+}
+
+func TestRunPassthroughAppliesVerbosityRelay(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "emit.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho noisy\necho '123 tokens used'\necho shown\n"), 0755); err != nil {
+		t.Fatalf("failed to write script: %v", err)
+	}
+
+	stdoutPath := filepath.Join(tmpDir, "stdout")
+	oldStdout := os.Stdout
+	stdoutFile, err := os.Create(stdoutPath)
+	if err != nil {
+		t.Fatalf("failed to capture stdout: %v", err)
+	}
+	os.Stdout = stdoutFile
+	defer func() {
+		os.Stdout = oldStdout
+	}()
+
+	exitCode := runPassthrough(scriptPath, nil, newVerbosityRelay(VerbosityManagementAfterLine, "tokens used"))
+	if exitCode != 0 {
+		t.Fatalf("runPassthrough exitCode = %d, want 0", exitCode)
+	}
+	if err := stdoutFile.Close(); err != nil {
+		t.Fatalf("failed to close stdout capture: %v", err)
+	}
+
+	data, err := os.ReadFile(stdoutPath)
+	if err != nil {
+		t.Fatalf("failed to read stdout capture: %v", err)
+	}
+	got := string(data)
+	want := "123 tokens used\nshown\n"
+	if got != want {
+		t.Errorf("runPassthrough output = %q, want %q", got, want)
+	}
+}
+
+func TestVerbosityRelayOff(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "clauditable-verbosity-*")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
+
+	relay := newVerbosityRelay("", "")
+	relay.write(tmpFile, []byte("all output\n"))
+
+	data, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("failed to read temp file: %v", err)
+	}
+	if string(data) != "all output\n" {
+		t.Errorf("verbosity relay off output = %q", string(data))
+	}
+}
+
+func TestExpectedRawRecordPath(t *testing.T) {
+	got := expectedRawRecordPath("/records", "session", 1705312200)
+	want := filepath.Join("/records", "session", "1705312200-raw.txt")
+	if got != want {
+		t.Errorf("expectedRawRecordPath = %q, want %q", got, want)
+	}
+}
+
 func TestWriteRecord(t *testing.T) {
 	// Create a temporary directory
 	tmpDir, err := os.MkdirTemp("", "clauditable-test-*")

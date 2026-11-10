@@ -1,0 +1,17 @@
+# Binary
+heuristic-agent
+
+# Local dependencies
+clauditable
+ambiguous-agent
+clod
+
+# Test artifacts
+*.test
+
+# Git
+.git
+.gitignore
+
+# Documentation (not needed in container)
+docs/

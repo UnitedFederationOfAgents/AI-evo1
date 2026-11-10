@@ -1,7 +1,9 @@
-.PHONY: test test-all build-all clean-all
+.PHONY: test test-all build-all clean-all deploy-dev-binaries
 
 # Sub-projects in this directory
-SUBPROJECTS = clauditable clod ambiguous-agent federation-command
+SUBPROJECTS = clauditable clod ambiguous-agent federation-command heuristic-agent
+
+DEV_BIN_DIR=/AI-evo1-dev/bin
 
 # Run tests in all sub-projects
 test: test-all
@@ -37,3 +39,18 @@ clean-all:
 	done
 	@echo ""
 	@echo "=== All sub-projects cleaned ==="
+
+# Clean dev bin dir and deploy all binaries there
+deploy-dev-binaries:
+	@echo "Cleaning $(DEV_BIN_DIR)..."
+	rm -rf $(DEV_BIN_DIR)
+	mkdir -p $(DEV_BIN_DIR)
+	@echo "Deploying all binaries to $(DEV_BIN_DIR)..."
+	@for proj in $(SUBPROJECTS); do \
+		echo ""; \
+		echo "=== Deploying $$proj ==="; \
+		$(MAKE) -C $$proj deploy-dev-binary || exit 1; \
+	done
+	@echo ""
+	@echo "=== All binaries deployed to $(DEV_BIN_DIR) ==="
+	@ls -la $(DEV_BIN_DIR)

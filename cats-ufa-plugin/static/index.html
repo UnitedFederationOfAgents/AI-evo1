@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cats — a hello-world UFA plug-in</title>
+<style>
+  body { margin: 0; padding: 24px; background: #1e1e1e; color: #d4d4d4; font: 14px/1.5 system-ui, sans-serif; }
+  h1 { margin: 0 0 4px; font-size: 20px; color: #f0a04b; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 20px; }
+  .card { display: flex; gap: 24px; align-items: center; padding: 16px; background: #252526; border: 1px solid #3c3c3c; border-radius: 6px; max-width: 640px; }
+  pre { margin: 0; font-size: 16px; color: #f0a04b; }
+  button { margin-top: 12px; font: inherit; font-size: 12px; padding: 4px 14px; border-radius: 3px; border: 1px solid #7a4a1a; background: #3a2a1a; color: #f0a04b; cursor: pointer; }
+  h2 { margin: 28px 0 8px; font-size: 13px; color: #d4d4d4; }
+  table { border-collapse: collapse; font-size: 12px; }
+  td { padding: 2px 16px 2px 0; vertical-align: top; }
+  td:first-child { font-family: monospace; color: #9c9c9c; }
+  .ok { color: #4ec9b0; } .bad { color: #f48771; } .info { color: #888; }
+  .cataas { align-items: flex-start; }
+  .cataas img { max-width: 320px; max-height: 320px; border-radius: 4px; background: #141414; }
+  .tags { margin: 6px 0; display: flex; flex-wrap: wrap; gap: 4px; }
+  .tags span { font-size: 11px; padding: 0 6px; border: 1px solid #7a4a1a; border-radius: 8px; color: #f0a04b; }
+</style>
+</head>
+<body>
+<h1>Cats</h1>
+<div class="sub">The hello-world external plug-in — see cats-ufa-plugin/README.md.</div>
+
+<div class="card">
+  <pre id="art">…</pre>
+  <div>
+    <div id="fact">fetching a cat…</div>
+    <button id="more">another cat</button>
+  </div>
+</div>
+
+<!-- Cats-as-a-service (cataas.go, Step3Prompt.md Revision G): the plug-in's
+     server picked this cat when it served the page; only its picture is
+     loaded from here, as a plain <img>. -->
+<h2>from cats-as-a-service</h2>
+<div class="card cataas">
+  <img id="cataas-img" alt="" hidden>
+  <div>
+    <div id="cataas-note" class="info">asking cats-as-a-service…</div>
+    <div id="cataas-tags" class="tags"></div>
+    <div id="cataas-count" class="info"></div>
+  </div>
+</div>
+
+<!-- What the sandboxed tier (docs/PluginTrust.md) should look like from
+     inside. Each check reports what this page could or couldn't do; when
+     opened outside the sandbox (straight from the plug-in's own port) they
+     read differently, which is the point. -->
+<h2>sandbox check</h2>
+<table id="checks"></table>
+
+<script>
+  // The cat comes with the page (main.go fills CAT in), not from a fetch:
+  // the page has no origin of its own in the sandbox, so its fetches go out
+  // without cookies, and behind a cookie login in front of agent-coordinator
+  // (web-exposure-poc's oauth2-proxy) they never reach the plug-in -- the
+  // "no cat: TypeError: NetworkError" of Step3Prompt.md Revision F. Loading
+  // the frame itself is a navigation, which does carry them, so "another
+  // cat" just reloads it.
+  const CAT = /*CAT*/null
+  if (CAT) {
+    document.getElementById('art').textContent = CAT.art
+    document.getElementById('fact').textContent = CAT.fact
+  } else {
+    document.getElementById('fact').textContent = 'no cat: the page was served without one'
+  }
+  document.getElementById('more').onclick = () => location.reload()
+
+  // The cats-as-a-service picture loads straight from there in the browser,
+  // so this settles once it has loaded or failed; the sandbox check below
+  // reports it.
+  const cataas = CAT && CAT.cataas
+  const cataasPicture = new Promise(resolve => {
+    const note = document.getElementById('cataas-note')
+    if (!cataas) {
+      note.textContent = 'not asked: the plug-in runs with --cataas-url ""'
+      return resolve({ ok: true, text: 'not asked (--cataas-url "")' })
+    }
+    if (cataas.count) document.getElementById('cataas-count').textContent = cataas.count.toLocaleString() + ' cats there to pick from'
+    if (!cataas.id) {
+      note.textContent = cataas.error || 'no cat id'
+      note.className = 'bad'
+      return resolve({ ok: false, text: 'no cat id from the plug-in server' })
+    }
+    const tags = document.getElementById('cataas-tags')
+    for (const t of cataas.tags || []) tags.appendChild(document.createElement('span')).textContent = t
+    const img = document.getElementById('cataas-img')
+    const src = cataas.base + '/cat/' + encodeURIComponent(cataas.id) + '?width=320'
+    img.onload = () => {
+      img.hidden = false
+      note.textContent = 'cat ' + cataas.id
+      resolve({ ok: true, text: 'loaded' })
+    }
+    img.onerror = () => {
+      note.textContent = 'the plug-in picked cat ' + cataas.id + ', but this browser could not load its picture from ' + cataas.base
+      note.className = 'bad'
+      resolve({ ok: false, text: 'failed to load from ' + cataas.base })
+    }
+    img.src = src
+  })
+
+  function check(name, want, fn) {
+    const row = document.getElementById('checks').insertRow()
+    row.insertCell().textContent = name
+    const cell = row.insertCell()
+    Promise.resolve().then(fn).then(
+      got => { cell.textContent = got.text; cell.className = got.ok ? 'ok' : 'bad' },
+      err => { cell.textContent = 'threw: ' + err; cell.className = 'bad' },
+    )
+    row.insertCell().textContent = want
+    row.cells[2].className = 'info'
+  }
+
+  check('origin', 'expected: null', () => ({ ok: window.origin === 'null', text: String(window.origin) }))
+
+  check('localStorage', 'expected: blocked', () => {
+    try {
+      window.localStorage.getItem('x')
+      return { ok: false, text: 'readable' }
+    } catch (err) {
+      return { ok: true, text: 'blocked (' + err.name + ')' }
+    }
+  })
+
+  check('host page', 'expected: blocked', () => {
+    if (window.parent === window) return { ok: true, text: 'not framed (opened directly)' }
+    try {
+      void window.parent.document.title
+      return { ok: false, text: 'readable' }
+    } catch (err) {
+      return { ok: true, text: 'blocked (' + err.name + ')' }
+    }
+  })
+
+  // The plug-in's own API, fetched from inside the sandbox. It answers when
+  // the host is reached directly; behind a cookie login it can't, because
+  // the request carries no cookies -- which is why the cat above isn't
+  // fetched. Not a sandbox failure either way.
+  check('own API (fetch)', 'expected: answers, unless behind a cookie login', async () => {
+    try {
+      const resp = await fetch('./api/cat', { cache: 'no-store' })
+      return { ok: resp.ok, text: 'answered ' + resp.status }
+    } catch (err) {
+      return { ok: true, text: 'unreachable (' + err.name + ') — a cookie login in front of the host?' }
+    }
+  })
+
+  // Cats-as-a-service, from both ends: the plug-in's server calls it, and
+  // the browser only loads the picture.
+  check('cataas (plug-in server)', 'expected: a cat id', () => !cataas
+    ? { ok: true, text: 'not asked (--cataas-url "")' }
+    : cataas.id ? { ok: true, text: 'cat ' + cataas.id } : { ok: false, text: cataas.error || 'no cat id' })
+  check('cataas (browser picture)', 'expected: loaded', () => cataasPicture)
+
+  // ../../api/plugins is the host's own registry API, one level above the
+  // plug-in's tree -- on local-representative or through agent-coordinator.
+  // The host refuses requests from a sandboxed page outside /apps/.
+  check('host API', 'expected: refused', async () => {
+    try {
+      const resp = await fetch('../../api/plugins', { cache: 'no-store' })
+      return { ok: false, text: 'answered ' + resp.status }
+    } catch (err) {
+      return { ok: true, text: 'refused (' + err.name + ')' }
+    }
+  })
+</script>
+</body>
+</html>

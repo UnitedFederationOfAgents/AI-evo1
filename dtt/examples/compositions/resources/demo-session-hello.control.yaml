@@ -1,0 +1,139 @@
+# local-representative control library: say hello world through a session
+# demo's windows, opened by dtt-demo-session-prep, for dtt's
+# localrep-demo-session-hello example (../localrep-demo-session-hello.dtt.yaml),
+# which imports it into the library of the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen, then
+# checks the session prep's federation-command terminal (fc, the prep run's
+# fc output) is still connected; the terminal is on the left half of the
+# screen and session-manager, in the prep's browser, on the right. Then, in
+# turn:
+#
+#   1. From the terminal: ufa session new <name> (hello-world-<the prep's
+#      time>), which also makes it the terminal's session, and ufa session
+#      note "hello world from <this node>, from its terminal".
+#   2. Seen in session-manager: the robot reloads the page (F5 -- the
+#      session list doesn't notice sessions made elsewhere until it
+#      reconnects), clicks the new session in the list and waits for the
+#      terminal's note in its transcript.
+#   3. From session-manager: the robot adds a note, "hello back from the
+#      browser on <this node>" (the Add Note box, Ctrl+Enter).
+#   4. Seen from the terminal: it finds that note in the session's records
+#      ($AGENT_RECORDS_PATH/sessions/$AGENT_SESSION) and says hello world,
+#      both windows in view for the recording.
+#
+# Before each check the robot counts the lines already on screen showing
+# what it will look for (count-text) and only takes a new one (click-text's
+# new_since): the terminal shows the session's name and the note's text as
+# it types them, and only session-manager can add another line showing
+# them. Nothing here runs an AI: a session and its notes are only records.
+# The session is kept, with the terminal's later commands in it (the
+# session shutdown's, say): session-manager's Archive All would take every
+# session, not just this one. Its name carries the prep's time, so each
+# demo makes a new one. The node's screen is recorded from the terminal's
+# first command to the end (steps 4-7). Every action is its own
+# (dtt-demo-shello-*), so importing this replaces none of the library's
+# other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-shello-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-shello-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-shello-check
+    name: Check the session prep's terminal is still there
+    description: wait for the session prep's federation-command to be connected in remote control
+    do:
+      - {op: fc-expect-state, fc: "{{fc}}", state: remote-control, timeout: 15s, hint: "the session prep's terminal isn't connected any more (closed, or a local-representative restart) -- close its browser and terminal by hand"}
+  - id: dtt-demo-shello-terminal
+    name: Make a session from the terminal
+    description: "through the terminal: ufa session new, making it the terminal's session, and ufa session note, a hello world in it"
+    controls:
+      - name: name
+        label: Session name
+        default: "hello-world-{{timestamp}}"
+    do:
+      - {op: set, save_as: hello, value: "hello world from {{this_node}}, from its terminal"}
+      - {op: fc-send, fc: "{{fc}}", command: "ufa session new {{name}}"}
+      - {op: random, save_as: made_token, length: "6"}
+      - {op: set, save_as: made, value: "session made - {{made_token}}"}
+      # The terminal runs its commands in turn: the echo comes back once the session is made.
+      - {op: fc-send, fc: "{{fc}}", command: "echo \"{{made}}\"", expect: "{{made}}", timeout: 20s}
+      - {op: fc-send, fc: "{{fc}}", command: "ufa session note \"{{hello}}\""}
+      - {op: random, save_as: noted_token, length: "6"}
+      - {op: set, save_as: noted, value: "note added - {{noted_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "echo \"{{noted}}\"", expect: "{{noted}}", timeout: 20s}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-shello-see
+    name: See the terminal's session in session-manager
+    description: "robot: reload session-manager, click the session the terminal made, and wait for the terminal's note in its transcript"
+    controls:
+      - name: name
+        label: Session name
+        default: "hello-world-{{timestamp}}"
+    do:
+      - {op: set, save_as: hello, value: "hello world from {{this_node}}, from its terminal"}
+      # What the terminal already shows doesn't count: only new lines are session-manager's.
+      - {op: robot.count-text, text: "{{name}}", save_as: name_before}
+      - {op: robot.count-text, text: "{{hello}}", save_as: hello_before}
+      - {op: robot.click-text, text: "Session Manager", exact: "false", timeout: 10s}
+      - {op: robot.key, keys: f5}
+      - {op: robot.wait, duration: 2s}
+      - {op: robot.click-text, text: "{{name}}", exact: "false", new_since: name_before, timeout: 30s}
+      - {op: robot.click-text, text: "{{hello}}", exact: "false", new_since: hello_before, timeout: 30s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-shello-reply
+    name: Add a note from session-manager
+    description: "robot: type a hello back into session-manager's note box and add it (Ctrl+Enter)"
+    do:
+      - {op: set, save_as: back, value: "hello back from the browser on {{this_node}}"}
+      - {op: robot.click-text, text: "add a note to this session", exact: "false", timeout: 10s}
+      - {op: robot.type, text: "{{back}}"}
+      - {op: robot.key, keys: ctrl+enter}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-shello-hear
+    name: See session-manager's note from the terminal
+    description: "through the terminal: find session-manager's note in the session's records, then say hello world"
+    do:
+      - {op: set, save_as: back, value: "hello back from the browser on {{this_node}}"}
+      - {op: random, save_as: heard_token, length: "6"}
+      - {op: set, save_as: heard, value: "the browser's note is in the session - {{heard_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "d=\"$AGENT_RECORDS_PATH/sessions/$AGENT_SESSION\"; for i in $(seq 20); do grep -rqF -- '{{back}}' \"$d\" && break; sleep 1; done; grep -rqF -- '{{back}}' \"$d\" && echo \"{{heard}}\" || echo \"no note from the browser in $d\"", expect: "{{heard}}", timeout: 40s}
+      - {op: random, save_as: done_token, length: "6"}
+      - {op: set, save_as: said, value: "hello world from {{this_node}} - {{done_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "echo \"{{said}}\"", expect: "{{said}}", timeout: 20s}
+      - {op: robot.wait, duration: 3s}
+      - {op: output, label: demo, value: "{{this_node}}: a session made from the terminal, seen in session-manager, and a note from session-manager seen from the terminal"}
+sequences:
+  - id: dtt-demo-session-hello
+    name: "Demo: hello world through a session demo's windows"
+    description: Start the robot if need be and wake the screen; then make a session and a note from the session prep's federation-command terminal and see them in session-manager beside it, and add a note in session-manager and find it from the terminal -- with this node's screen recorded while it works.
+    controls:
+      - name: fc
+        label: Terminal
+        help: the session prep's federation-command instance (its run's fc output, e.g. federation-command#2)
+      - name: name
+        label: Session name
+        default: "hello-world-{{timestamp}}"
+        help: the session the terminal makes (ufa session new)
+    steps:
+      - action: dtt-demo-shello-robot
+      - action: dtt-demo-shello-wake
+      - action: dtt-demo-shello-check
+      - action: dtt-demo-shello-terminal
+        with:
+          name: "{{name}}"
+      - action: dtt-demo-shello-see
+        with:
+          name: "{{name}}"
+      - action: dtt-demo-shello-reply
+      - action: dtt-demo-shello-hear
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 7, label: "session demo hello world"}

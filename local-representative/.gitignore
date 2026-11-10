@@ -1,0 +1,8 @@
+# Binary
+local-representative
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/

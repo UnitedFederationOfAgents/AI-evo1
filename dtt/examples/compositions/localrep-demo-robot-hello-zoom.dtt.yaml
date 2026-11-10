@@ -1,0 +1,83 @@
+# DTT example -- localrep, the robot's hello world: zoom the demo page, on a prepared node (see ../../README.md "The localrep tool").
+#
+# It takes node, the node to run on, as agent-coordinator names it ("" by
+# default, for this node); at, the unix seconds the node was prepared at
+# (localrep-demo-prepare's time); and greeting, what the robot prints. It
+# imports the control sequence in resources/demo-robot-hello-zoom.control.yaml
+# into that node's library and runs it there: the robot opens the demo page
+# the preparation made, ~/Desktop/demo-<at>.html, in a Chrome window of its
+# own, zooms it in and has the screen captured, zooms it back out and has
+# it captured again, prints "<greeting> from <node>" with the run's results
+# and closes the page. The node's screen is recorded while the robot works.
+# Then composer, on this node, puts a title card, the recording and a
+# closing card together into a WebM in the files tab.
+#
+# The run and the composition are named by at (demo-rh-zoom-<at>), so one
+# preparation has one of these: asserting again does nothing. The local
+# representative's robot-hello-zoom demo calls it between
+# localrep-demo-prepare and localrep-demo-shutdown, with the same at.
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it, the demo page from
+# localrep-demo-prepare, and google-chrome. Here: compose launched and
+# connected.
+#
+#   dtt read examples/compositions/localrep-demo-robot-hello-zoom.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-robot-hello-zoom.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var greeting="hello world"
+
+variables:
+  node:
+    default: ""
+    help: the node to run on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the demo page, the run and the composition
+  greeting:
+    default: hello world
+    help: what the robot prints with the run's results, before "from <node>"
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-rh-zoom
+    node: ${{var.node}}
+  alias: rh-zoom-seq
+  assert:
+    source_file: resources/demo-robot-hello-zoom.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-rh-zoom
+    key: demo-rh-zoom-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: rh-zoom-run
+  assert:
+    controls:
+      file: "~/Desktop/demo-${{the-time.unix}}.html"
+      greeting: ${{var.greeting}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-rh-zoom-${{the-time.unix}}
+  alias: rh-zoom-comp
+  assert:
+    composition: |
+      {
+        "name": "Robot hello (zoom) on ${{rh-zoom-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Robot hello world on ${{rh-zoom-seq.node}}: zooming the demo page", "color": "#ffffff", "background": "#5f3a1e"},
+          {"kind": "media", "file_id": "${{rh-zoom-run.recording.file_id}}", "file_name": "${{rh-zoom-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{rh-zoom-run.output.hello}}", "color": "#1a1a1a", "background": "#e0a060"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

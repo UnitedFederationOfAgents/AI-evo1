@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	ufaversion "ufa-version"
 )
 
 const (
@@ -24,9 +26,14 @@ var CatSentences = []string{
 }
 
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
 	// Define flags to mimic claude CLI
 	prompt := flag.String("p", "", "The prompt to process")
 	permissionMode := flag.String("permission-mode", "", "Permission mode (e.g., acceptEdits)")
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 
 	flag.Parse()
 

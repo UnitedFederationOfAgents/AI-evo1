@@ -1,0 +1,98 @@
+# local-representative control library: the robot's hello world with a note,
+# on a node prepared by dtt-demo-prepare, for dtt's
+# localrep-demo-robot-hello-note example
+# (../localrep-demo-robot-hello-note.dtt.yaml), which imports it into the
+# library of the node it targets and runs it there.
+#
+# The robot writes a note on the desktop (file: robot-hello-<time>.txt)
+# holding the greeting and this node's name, opens it in a browser of its
+# own, waits to see the greeting on screen -- the robot reading what it
+# wrote -- has its screen captured into the files tab (an artifact of the
+# demo's record), closes the note with ctrl+w, checks the file still holds
+# the greeting and deletes it. The node's screen is recorded from the note
+# being written to the end (steps 3-6). Every action is its own
+# (dtt-demo-rh-note-*), so importing this replaces none of the library's
+# other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-rh-note-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-rh-note-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-rh-note-write
+    name: Write the note and open it
+    description: "robot: write the note on the desktop, open it in a new browser window of its own and wait for the greeting to show on screen"
+    controls:
+      - name: note
+        label: Note
+        default: "~/Desktop/robot-hello-{{timestamp}}.txt"
+      - name: greeting
+        label: Greeting
+        default: hello world
+      - name: browser
+        label: Browser
+        default: "google-chrome --user-data-dir=/tmp/dtt-demo-rh-note-browser --no-first-run --no-default-browser-check --start-maximized --new-window"
+    do:
+      - {op: robot.create-file, path: "{{note}}", content: "{{greeting}} from {{this_node}}, written by its robot", overwrite: "true"}
+      - {op: robot.open, path: "{{note}}", app: "{{browser}}"}
+      - {op: robot.wait-for-text, text: "written by its robot", exact: "false", timeout: 30s}
+  - id: dtt-demo-rh-note-capture
+    name: Capture the screen
+    description: "robot: screenshot this node's screen into the files tab, the note on it"
+    do:
+      - {op: node-capture, node: "{{this_node}}", name: robot-hello-note}
+  - id: dtt-demo-rh-note-close
+    name: Close the note
+    description: "robot: close the note's window, leaving the workspace empty again"
+    do:
+      - {op: robot.key, keys: ctrl+w}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-rh-note-clean
+    name: Check the note and delete it
+    description: "robot: check the note still holds the greeting, then delete it"
+    controls:
+      - name: note
+        label: Note
+        default: "~/Desktop/robot-hello-{{timestamp}}.txt"
+      - name: greeting
+        label: Greeting
+        default: hello world
+    do:
+      - {op: robot.expect-file, path: "{{note}}", contains: "{{greeting}} from {{this_node}}"}
+      - {op: robot.delete-file, path: "{{note}}", missing_ok: "true"}
+      - {op: output, label: hello, value: "{{greeting}} from {{this_node}}: the robot wrote a note, read it back off the screen and cleaned it up"}
+sequences:
+  - id: dtt-demo-rh-note
+    name: "Robot hello: write and read a note"
+    description: Start the robot if need be and wake the screen, then have the robot write a note holding a greeting on the desktop, open it, read it back off the screen, capture the screen, close it and delete it -- with this node's screen recorded while the robot works.
+    controls:
+      - name: note
+        label: Note
+        default: "~/Desktop/robot-hello-{{timestamp}}.txt"
+        help: the note the robot writes and then deletes (~ is the node user's home)
+      - name: greeting
+        label: Greeting
+        default: hello world
+        help: what the note says, before "from <node>"
+    steps:
+      - action: dtt-demo-rh-note-robot
+      - action: dtt-demo-rh-note-wake
+      - action: dtt-demo-rh-note-write
+        with:
+          note: "{{note}}"
+          greeting: "{{greeting}}"
+      - action: dtt-demo-rh-note-capture
+      - action: dtt-demo-rh-note-close
+      - action: dtt-demo-rh-note-clean
+        with:
+          note: "{{note}}"
+          greeting: "{{greeting}}"
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 6, label: "robot hello: note"}

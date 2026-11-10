@@ -1,0 +1,162 @@
+export type ReprStatus = 'disconnected' | 'connecting' | 'connected'
+
+export interface ReprStatusMsg {
+  status: ReprStatus
+  host?: string
+  port?: string
+  // auto_connect is the persistent auto-connect toggle: true whenever the
+  // cycle is armed, whether or not it's currently connected/connecting -- it
+  // stays true across a successful connection, and only an explicit
+  // disconnect turns it off.
+  auto_connect?: boolean
+}
+
+// SelfInfoMsg discloses this instance's own dev-mode status and build
+// version (see docs/DevMode.md) -- sent once when the WebSocket connects.
+export interface SelfInfoMsg {
+  dev_mode: boolean
+  version: string
+}
+
+// ModeMismatchMsg discloses that the connected local-representative's
+// dev-mode status differs from this instance's own. mismatched: false clears
+// a prior disclosure.
+export interface ModeMismatchMsg {
+  mismatched: boolean
+  peer_mode?: string
+}
+
+// ---- Session management ("ufa session" sub-menu parity, see sessions.go) ----
+
+// SessionSummary is one row of the session list (the "sessions" payload).
+// remote/host are set only for a session discovered on another host but not
+// (yet) present in this host's own AGENT_RECORDS_PATH -- see sessions.go's
+// listSessionsWithRemote.
+export interface SessionSummary {
+  id: string
+  name: string
+  file_count: number
+  current: boolean
+  remote?: boolean
+  host?: string
+}
+
+// SessionsMsg is the "sessions" WebSocket payload: the full session list
+// plus which one (if any) is current, pushed on connect and after any
+// mutation (new/set/rename/archive).
+export interface SessionsMsg {
+  sessions: SessionSummary[]
+  current: string
+}
+
+// SessionInfo is the "session-info" payload ("ufa session describe" parity):
+// a session's on-disk location plus every field its session.yaml carries.
+export interface SessionInfo {
+  id: string
+  location: string
+  fields: [string, string][]
+}
+
+// SessionEntry is one readable turn of a session's transcript. record is the
+// turn's record ID (its files' {timestamp} prefix) -- what "view-processed"
+// takes to expand it; absent when the turn's header carries no record_path.
+// event_type is one of EVENT_TYPE_LABELS' keys in App.tsx (older sessions
+// recorded agent runs as command_execution too); a resource's metadata names
+// its file (resource_name/resource_file/resource_size). host is the host the
+// turn ran on (absent for records that don't name one). secondary_host is
+// set on a turn that so far only exists in that host's secondary log -- it
+// hasn't been fused into the owner's session.jsonl yet (see
+// ../sessionlog.go). record_missing is set when the turn's record file isn't
+// on this host, so it can't be expanded.
+export interface SessionEntry {
+  timestamp: string
+  event_type?: string
+  host?: string
+  agent?: string
+  model?: string
+  duration_ms: number
+  exit_code: number
+  record?: string
+  metadata?: Record<string, string>
+  input?: string
+  output?: string
+  error?: string
+  secondary_host?: string
+  record_missing?: boolean
+}
+
+// SessionView is the "session-view" payload: a session's transcript parsed
+// out of session.jsonl into readable entries. sync_incomplete is set when
+// local-representative's pre-view sync couldn't actually reach one of the
+// other LR-active hosts (Step1SubstepBPrompt.md Revision G) -- the transcript
+// may be missing turns a reachable peer would have had, so it's not
+// necessarily "genuinely empty/short". warnings describe log content that
+// couldn't be shown (unreadable lines, records not on this host).
+export interface SessionView {
+  id: string
+  name: string
+  entries: SessionEntry[]
+  warnings?: string[]
+  sync_incomplete?: boolean
+}
+
+// ProcessedView is the "processed-view" payload: one expanded turn's full
+// {record}-processed.txt (or -s-processed.txt), which the transcript only
+// previews. error is set instead of content when it couldn't be read.
+export interface ProcessedView {
+  id: string
+  record: string
+  file?: string
+  content: string
+  error?: string
+}
+
+// ArchiveResultMsg is the "archive-result" payload ("ufa session archive"
+// parity's outcome).
+export interface ArchiveResultMsg {
+  count: number
+  path?: string
+  error?: string
+}
+
+// AnnotationResultMsg is the "annotation-result" payload: the outcome of an
+// add-note/add-resource (see ../annotations.go). record is the new entry's
+// record ID; error is set instead when it failed. The "Highlighted" and
+// "From host" sources can attach several files at once (see
+// ../hostresources.go): name then lists them, comma-separated, and records
+// holds every new record ID.
+export interface AnnotationResultMsg {
+  id: string
+  kind: 'note' | 'resource'
+  name?: string
+  record?: string
+  records?: string[]
+  error?: string
+}
+
+// PromptResultMsg is the "prompt-result" payload: how a prompt entered on a
+// session's prompt box is going (see ../prompt.go). stage is 'queued' once
+// the worker has it, 'done' once it finished (ok says whether it succeeded,
+// status is the work's final status) and 'error' if it never reached the
+// worker. id is the session the prompt runs under.
+export interface PromptResultMsg {
+  id: string
+  stage: 'queued' | 'done' | 'error'
+  ok: boolean
+  error?: string
+  status?: string
+  comment?: string
+}
+
+export type ServerMsg =
+  | { type: 'repr-status'; payload: ReprStatusMsg }
+  | { type: 'self-info'; payload: SelfInfoMsg }
+  | { type: 'mode-mismatch'; payload: ModeMismatchMsg }
+  | { type: 'sessions'; payload: SessionsMsg }
+  | { type: 'session-info'; payload: SessionInfo }
+  | { type: 'session-view'; payload: SessionView }
+  | { type: 'processed-view'; payload: ProcessedView }
+  | { type: 'archive-result'; payload: ArchiveResultMsg }
+  | { type: 'annotation-result'; payload: AnnotationResultMsg }
+  | { type: 'prompt-result'; payload: PromptResultMsg }
+  | { type: 'error'; payload: string }

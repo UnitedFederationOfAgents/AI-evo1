@@ -1,0 +1,1679 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"representable"
+	ufaversion "ufa-version"
+)
+
+// ProcInfo is a snapshot of one process shown on the "system" tab: either
+// local-representative itself or a child application instance it manages.
+type ProcInfo struct {
+	Name       string `json:"name"`        // application name, e.g. "federation-command"
+	InstanceID string `json:"instance_id"` // unique key for a managed instance ("" for self)
+	Instance   int    `json:"instance"`    // per-app ordinal (0 for self / the first singleton)
+	PID        int    `json:"pid"`
+	Status     string `json:"status"` // "running", "exited", "failed"
+	Managed    bool   `json:"managed"`
+	StartedAt  int64  `json:"started_at"`       // unix seconds
+	ExitCode   int    `json:"exit_code"`        // meaningful once status != "running"
+	Detail     string `json:"detail,omitempty"` // launch/exit error text, if any
+	DevMode    bool   `json:"dev_mode,omitempty"` // launched with --dev-mode — see docs/DevMode.md
+
+	// LoaderManaged is only meaningful on Self: whether this local-representative
+	// process was launched by ufa-loader (see restartsignal.IsLoaderManaged),
+	// i.e. whether the system tab's "restart" control can be expected to
+	// actually come back up rather than just stop this process for good.
+	LoaderManaged bool `json:"loader_managed,omitempty"`
+
+	// Version is this process's build version (ufa-version.Version — see
+	// docs/DevMode.md "Versioning"). On Self it's this local-representative
+	// binary's own compiled-in version; on a managed instance it's whatever
+	// that instance most recently reported over representable's "version"
+	// data message (see setManagedVersion) -- empty until it has connected
+	// and reported at least once, or if it doesn't speak the protocol at
+	// all yet.
+	Version string `json:"version,omitempty"`
+
+	// UpdateAvailable is true once the on-disk binary for this process
+	// answers "--version" differently than the version currently running.
+	// On Self that's this local-representative binary itself (see
+	// selfversion.go) -- i.e. a newer build has landed since startup and
+	// pressing "restart" would pick it up; only ever true for a
+	// loader-managed process, see docs/DevMode.md "Loader". On a managed
+	// instance it's the same comparison against that application's resolved
+	// binary (see pollManagedVersions) -- i.e. a rebuild has landed since
+	// this instance was launched and re-launching it (terminate + launch)
+	// would pick it up. Drives the topology view's per-sub-app halo (see
+	// condocs/initialDistributedDevelopmentImpls/Step4Prompt.md Revision D).
+	UpdateAvailable bool `json:"update_available,omitempty"`
+
+	// PendingVersion is the on-disk version that UpdateAvailable refers to --
+	// i.e. what Version would become after a restart (Self) or a
+	// terminate+relaunch (a managed instance) picked up the update. Empty
+	// until the corresponding poll (selfversion.go / pollManagedVersions) has
+	// run at least once, and always empty when UpdateAvailable is false.
+	// Drives the system tab's per-process drill-down (see
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision J).
+	PendingVersion string `json:"pending_version,omitempty"`
+
+	// AutoUpdate is only meaningful on Self: whether an available update
+	// (UpdateAvailable above) should trigger a restart on its own, without an
+	// operator pressing the "update and restart" control -- the system tab's
+	// "auto-update" checkbox (see selfversion.go and
+	// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision E).
+	AutoUpdate bool `json:"auto_update,omitempty"`
+
+	// Session is federation-command-specific: the session it most recently
+	// reported over representable's "fc-session" data message (see
+	// setFCSessionState) -- its session.yaml display name when it has one,
+	// otherwise the bare session ID. Empty for every other managed app, and
+	// for FC itself until an instance has connected and reported at least
+	// once. See condocs/initialDistributedSessionsImpls/Step2Prompt.md
+	// Revision B.
+	Session string `json:"session,omitempty"`
+}
+
+// VersionMsg is the payload of a representable "version" data message: sent
+// once a managed sub-application connects, reporting its own build version
+// so LR can surface it on the system tab alongside its own (see
+// docs/DevMode.md "Versioning").
+type VersionMsg struct {
+	Version string `json:"version"`
+}
+
+// SystemStateMsg is the payload of "system-state" WebSocket messages.
+type SystemStateMsg struct {
+	Self    ProcInfo   `json:"self"`
+	Managed []ProcInfo `json:"managed"`
+	// Connections lists the providers this host holds credentials for --
+	// see connectivity.go. Empty (never null) when there are none.
+	Connections []ConnectionInfo `json:"connections"`
+	// Agents is the "agents & models" section: which AI agents (and models)
+	// this host can run, per ambiguous-agent -- see agents.go.
+	Agents AgentsState `json:"agents"`
+	// AgentOps is the "agent operations" section: agent calls running here,
+	// plus those finished in the last 5 minutes -- see agentops.go.
+	AgentOps []AgentOp `json:"agent_ops"`
+	// Tools is the tools tab's catalog: the T3s dtt lists here, and which
+	// tools-allow lets control runs use -- see tools.go.
+	Tools ToolsState `json:"tools"`
+}
+
+// launchSpec describes how to start one managed application.
+type launchSpec struct {
+	binName   string                                    // executable name to resolve
+	binPath   string                                    // when set, the only place the executable is looked for (a plug-in dev repo's deployed binary, extlaunch.go)
+	singleton bool                                    // true: at most one running instance per host; false: N-per-host
+	terminal  bool                                       // true: an interactive TUI that must be hosted in a terminal
+	buildArgs func(s *Server, instanceID string) []string // argv after the program name; instanceID is the id about to be launched (see nextInstanceLocked)
+	buildEnv  func(s *Server, instanceID string) []string // extra KEY=VALUE entries appended to the child environment
+	excludes  []string                                    // other apps that may not run alongside this one (checked on launch, both ways)
+}
+
+// conflictingRunningLocked returns the first app that can't run alongside app
+// and currently has a running instance, or "" if none. Exclusion is declared
+// on either side (launchSpec.excludes) and honoured both ways. Callers must
+// hold procMu.
+func (s *Server) conflictingRunningLocked(app string) string {
+	for other, spec := range managedApps {
+		if other == app {
+			continue
+		}
+		conflicts := slices.Contains(spec.excludes, app) || slices.Contains(managedApps[app].excludes, other)
+		if conflicts && s.runningCountLocked(other) > 0 {
+			return other
+		}
+	}
+	return ""
+}
+
+// managedApps is the fixed set of applications local-representative knows how to
+// launch. Adding an entry here is all it takes to expose another app on the
+// system tab and to auto-launch.
+var managedApps = map[string]launchSpec{
+	"condocv2": {
+		// Slopspace condocs (see sloppo condocs/condoccerV2Impls/Step1Prompt.md).
+		binName:   "condocv2",
+		singleton: true,  // condocv2 is one-per-box: it serves a single repo view
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			// Bring condocv2 up already wired to this LR: --auto-connect makes it
+			// retry the representable heartbeat to our server in the background,
+			// and --port fixes the HTTP port LR reverse-proxies its UI from (see
+			// proxyToCondocv2). With no --root it resolves a relative
+			// pointer-repo path against where it was started from.
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.condocv2Port,
+				"--name", "condocv2",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md. A dev/ops mismatch would otherwise leave the
+				// pair unable to do more than exchange health information.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"sessions": {
+		binName:   "session-manager",
+		singleton: true,  // one per box, like condocv2
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.sessionsPort,
+				"--name", "sessions",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			if id := s.smSession(); id != "" {
+				// A previous (or still-running) session-manager instance
+				// reported this session -- hand it straight back so a restart
+				// lands in the same place, mirroring federation-command's
+				// --session above (see
+				// condocs/initialDistributedSessionsImpls/Step2Prompt.md
+				// Revision H). Harmless on a first launch with nothing
+				// reported yet: smSession returns "" and this is skipped.
+				args = append(args, "--session", id)
+			}
+			return args
+		},
+	},
+	"convo": {
+		binName:   "the-conversationalist",
+		singleton: true,  // one per box, like condocv2
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.convoPort,
+				"--name", "convo",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"robot": {
+		binName:   "ianar",
+		singleton: true,  // one per box, like condocv2
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.robotPort,
+				"--name", "robot",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"compose": {
+		binName:   "composer",
+		singleton: true,  // one per box, like session-manager
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.composePort,
+				"--name", "compose",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"dg": {
+		binName:   "diagrammographer",
+		singleton: true,  // one per box, like composer
+		terminal:  false, // plain HTTP server — no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			// dg is reached only through its plug-in route (/apps/dg/), so
+			// --port is just where that route proxies to once it says hello.
+			args := []string{
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.dgPort,
+				"--name", "dg",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	examplePluginAppID: {
+		// cats-ufa-plugin, the hello-world external plug-in. Not on the
+		// system tab's launch list: the plugins tab's "register example"
+		// launches it (plugins.go, Step3Prompt.md Revision E), after
+		// approving it, since an external plug-in is otherwise only shown
+		// pending. It says hello under --name like any plug-in.
+		binName:   "cats-ufa-plugin",
+		singleton: true,  // one per box: it has one fixed port
+		terminal:  false, // plain HTTP server -- no TTY needed
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--port", s.examplePluginPort,
+				"--name", examplePluginAppID,
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"worker": {
+		binName:   "dungeon-keeper",
+		singleton: true,  // one per host for now (Step5SubstepGPrompt.md)
+		terminal:  false, // a background daemon; it has no UI of its own -- the worker tab shows its signals
+		buildArgs: func(s *Server, instanceID string) []string {
+			args := []string{
+				"watch",
+				"--auto-connect",
+				"--lr-host", "localhost",
+				"--lr-port", s.heartbeatPort,
+				"--name", "worker",
+			}
+			if s.devMode {
+				// Cascade this LR's dev mode to every instance it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			return args
+		},
+	},
+	"federation-command": {
+		binName:   "federation-command",
+		singleton: false, // federation-command is N-per-host
+		terminal:  true,  // it is an interactive shell — needs a real terminal
+		buildArgs: func(s *Server, instanceID string) []string {
+			// Bring FC up already wired to this LR. --auto-connect makes it retry
+			// the heartbeat connection in the background and adopt remote control
+			// the moment it lands (auto-connect implies remote — there is no
+			// separate --remote flag), and --lr-port points it at our
+			// representable server: a fully machine-driven auto-launch chain lands
+			// ready to drive from local-representative rather than in the foreground.
+			args := []string{"--auto-connect", "--lr-host", "localhost", "--lr-port", s.heartbeatPort}
+			if s.devMode {
+				// Cascade this LR's dev mode to every FC it launches — see
+				// docs/DevMode.md.
+				args = append(args, "--dev-mode")
+			}
+			if id := s.fcLaunchSessionID(); id != "" {
+				// A previous (or still-running) FC instance reported this session —
+				// hand it straight back so a restart lands in the same place (see
+				// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+				// With no FC session known yet (a brand-new instance, not a
+				// restart), this falls back to session-manager's current session
+				// instead (Revision I), so a new FC launched while SM has a
+				// session active lands there rather than minting its own. ""
+				// only when neither has reported anything, leaving FC to resolve
+				// its own default session as before.
+				args = append(args, "--session", id)
+			}
+			return args
+		},
+		buildEnv: func(s *Server, instanceID string) []string {
+			// Belt-and-braces with buildArgs: a terminal emulator or multiplexer
+			// wrapper can swallow or re-quote trailing argv, which would drop
+			// --auto-connect and leave FC in *local* control — unusable in a
+			// machine-driven chain because it then needs a keystroke at the FC
+			// terminal to hand control to LR. Environment variables pass through
+			// every wrapper untouched, and FC honours them below CLI flags.
+			// FC_AUTO_CONNECT alone is sufficient: it also selects remote control.
+			// FC_DEV_MODE mirrors it for --dev-mode, so a dropped argv still lands
+			// FC in the mode its launching LR is in (see docs/DevMode.md).
+			env := []string{
+				"FC_AUTO_CONNECT=1",
+				"FC_LR_HOST=localhost",
+				"FC_LR_PORT=" + s.heartbeatPort,
+				// Lets this instance self-report its head ID back under a
+				// stable key on the stateboard's "federation-command-instances"
+				// row (see stateboard.go's setFCHead) despite representable
+				// tracking one connection identity per app name regardless of
+				// how many instances share it.
+				"FC_INSTANCE_ID=" + instanceID,
+			}
+			if s.devMode {
+				env = append(env, "FC_DEV_MODE=1")
+			}
+			if id := s.fcLaunchSessionID(); id != "" {
+				// Mirrors buildArgs above (including the Revision I session-manager
+				// fallback) -- see its comment.
+				env = append(env, "FC_SESSION="+id)
+			}
+			return env
+		},
+	},
+}
+
+// managedProc tracks a single child process instance launched from the system tab.
+type managedProc struct {
+	app        string // application name
+	instanceID string // unique key, e.g. "federation-command#2"
+	instance   int    // per-app ordinal
+	cmd        *exec.Cmd
+	pid        int
+	startedAt  time.Time
+
+	// Set when the instance is hosted in a detached terminal multiplexer
+	// (tmux/screen): the launcher returns immediately and the child keeps
+	// running inside its own session, so LR can't wait(2) on it. It tears the
+	// session down with killCmd on terminate and shows attachHint in the UI.
+	detached   bool
+	termLabel  string   // chosen terminal, e.g. "tmux" ("" when launched directly)
+	killCmd    []string // argv that stops a detached session (nil if unknown)
+	attachHint string   // how an operator reconnects to interact
+
+	mu          sync.Mutex
+	status      string // "running", "exited", "failed"
+	exitCode    int
+	detail      string
+	terminating bool // an operator-requested stop is in flight
+}
+
+func (p *managedProc) state() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.status
+}
+
+func (p *managedProc) info() ProcInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return ProcInfo{
+		Name:       p.app,
+		InstanceID: p.instanceID,
+		Instance:   p.instance,
+		PID:        p.pid,
+		Status:     p.status,
+		Managed:    true,
+		StartedAt:  p.startedAt.Unix(),
+		ExitCode:   p.exitCode,
+		Detail:     p.detail,
+	}
+}
+
+// systemState returns the current system-tab snapshot: LR itself plus every
+// managed instance (running or finished), ordered by app then instance ordinal.
+func (s *Server) systemState() SystemStateMsg {
+	s.procMu.Lock()
+	procs := make([]ProcInfo, 0, len(s.managed))
+	for _, p := range s.managed {
+		info := p.info()
+		// Every instance LR launches cascades LR's own mode (see
+		// docs/DevMode.md) — there is no per-instance override.
+		info.DevMode = s.devMode
+		info.Version = s.managedVersion(p.app)
+		info.UpdateAvailable = s.managedUpdateAvailableFor(p.app)
+		info.PendingVersion = s.managedPendingVersionFor(p.app)
+		if p.app == "federation-command" {
+			// Each instance's own report first (see fcinstances.go), then the
+			// most recent report from any instance.
+			if sess := s.fcSessionFor(p.instanceID); sess != "" {
+				info.Session = sess
+			} else if id, name := s.fcSession(); id != "" {
+				if name != "" {
+					info.Session = name
+				} else {
+					info.Session = id
+				}
+			}
+		}
+		procs = append(procs, info)
+	}
+	s.procMu.Unlock()
+	sort.Slice(procs, func(i, j int) bool {
+		if procs[i].Name != procs[j].Name {
+			return procs[i].Name < procs[j].Name
+		}
+		return procs[i].Instance < procs[j].Instance
+	})
+
+	agents := s.agents.snapshot()
+	agents.Installs = s.agentInstalls.snapshot()
+
+	return SystemStateMsg{
+		Self: ProcInfo{
+			Name:            s.lrName,
+			PID:             os.Getpid(),
+			Status:          "running",
+			Managed:         false,
+			StartedAt:       s.selfStart.Unix(),
+			DevMode:         s.devMode,
+			LoaderManaged:   s.loaderManaged,
+			Version:         ufaversion.Version,
+			UpdateAvailable: s.selfVersion.available(),
+			PendingVersion:  s.selfVersion.pending(),
+			AutoUpdate:      s.selfVersion.autoUpdateEnabled(),
+		},
+		Managed:     procs,
+		Connections: append([]ConnectionInfo{}, s.connectivity.connections()...),
+		Agents:      agents,
+		AgentOps:    s.agentOps.snapshot(),
+		Tools:       s.tools.snapshot(),
+	}
+}
+
+// setManagedVersion records the build version a managed sub-application most
+// recently reported over representable (see the "version" data message
+// handled in main.go), broadcasting a fresh system-state if it's new or has
+// changed since the last report.
+func (s *Server) setManagedVersion(name, version string) {
+	s.versionMu.Lock()
+	changed := s.managedVersions[name] != version
+	if changed {
+		s.managedVersions[name] = version
+	}
+	s.versionMu.Unlock()
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// setFCSessionState records the session a federation-command instance most
+// recently reported over representable's "fc-session" data message (see
+// main.go's SetDataHandler), broadcasting a fresh system-state if it's new or
+// has changed since the last report -- mirrors setManagedVersion. Unlike
+// managedVersions, this is never cleared on disconnect: it has to survive the
+// gap between restartManaged's terminate and relaunch so buildArgs/buildEnv
+// below can hand it straight back (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision B).
+func (s *Server) setFCSessionState(id, name string) {
+	s.fcSessionMu.Lock()
+	changed := s.fcSessionID != id || s.fcSessionName != name
+	if changed {
+		s.fcSessionID = id
+		s.fcSessionName = name
+	}
+	s.fcSessionMu.Unlock()
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// fcSession returns the session most recently reported by a connected
+// federation-command instance: id for relaunching it (--session/FC_SESSION),
+// name for display when session.yaml has one (falling back to id otherwise
+// -- see systemState). Both empty if none has connected/reported yet.
+func (s *Server) fcSession() (id, name string) {
+	s.fcSessionMu.RLock()
+	defer s.fcSessionMu.RUnlock()
+	return s.fcSessionID, s.fcSessionName
+}
+
+// smSession returns the session most recently reported by a connected
+// session-manager instance, for relaunching it (--session) -- mirrors
+// fcSession. "" if none has connected/reported yet.
+func (s *Server) smSession() string {
+	s.smSessionMu.RLock()
+	defer s.smSessionMu.RUnlock()
+	return s.smSessionID
+}
+
+// fcLaunchSessionID picks the session id to hand a federation-command
+// instance on launch. A previously-reported FC session wins first (restart
+// continuity -- see fcSession/setFCSessionState and Revision B above); with
+// none yet reported -- i.e. this is a brand-new instance, not a restart --
+// fall back to session-manager's current session, so a fresh FC lands in
+// whatever session is already active in SM instead of minting its own (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision I). ""
+// if neither has reported anything, leaving FC to resolve its own default.
+func (s *Server) fcLaunchSessionID() string {
+	if id, _ := s.fcSession(); id != "" {
+		return id
+	}
+	return s.smSession()
+}
+
+// managedVersion returns the build version most recently reported by the
+// named application, or "" if none has connected/reported yet.
+func (s *Server) managedVersion(name string) string {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	return s.managedVersions[name]
+}
+
+// managedUpdateAvailableFor reports whether the named managed application's
+// on-disk binary currently differs from the version most recently reported
+// by a connected instance (see pollManagedVersions). Always false for a name
+// that has never reported a version, mirroring selfVersion.available() being
+// false until its own first poll.
+func (s *Server) managedUpdateAvailableFor(name string) bool {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	return s.managedUpdateAvailable[name]
+}
+
+// managedPendingVersionFor returns the on-disk version that would replace
+// the named application's currently-reported version on its next relaunch,
+// or "" if no update is available (or none has been observed yet) --
+// mirrors managedUpdateAvailableFor's guard so callers don't need to check
+// both.
+func (s *Server) managedPendingVersionFor(name string) string {
+	s.versionMu.RLock()
+	defer s.versionMu.RUnlock()
+	if !s.managedUpdateAvailable[name] {
+		return ""
+	}
+	return s.managedPendingVersion[name]
+}
+
+// pollManagedVersions re-derives managedUpdateAvailable for every managed
+// application that has reported a running version at least once, by
+// resolving that application's binary the same way launchManaged would and
+// comparing its own "--version" output against the version last reported
+// over representable (managedVersion). This is the per-sub-application
+// analogue of selfVersionWatch.poll -- the difference is that the "running"
+// side here is whatever a connected instance most recently self-reported,
+// not a value fixed at this process's own startup, since a managed instance
+// can be launched (and can report in) at any point in LR's lifetime.
+// Broadcasts a fresh system-state if anything changed.
+func (s *Server) pollManagedVersions() {
+	s.versionMu.RLock()
+	running := make(map[string]string, len(s.managedVersions))
+	for name, v := range s.managedVersions {
+		running[name] = v
+	}
+	s.versionMu.RUnlock()
+
+	changed := false
+	for name, runningVersion := range running {
+		if runningVersion == "" {
+			continue
+		}
+		spec, ok := s.launchSpecFor(name)
+		if !ok {
+			continue
+		}
+		bin, err := s.resolveSpecBinary(name, spec)
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(bin, "--version").Output()
+		if err != nil {
+			log.Printf("managed-version: %s --version failed: %v", bin, err)
+			continue
+		}
+		// Most managed apps answer "--version" with the bare version string
+		// (ufaversion.HandleVersionFlag), matching what they self-report over
+		// representable's "version" message (runningVersion, above) -- but
+		// federation-command hand-rolls its own --version handling and prints
+		// "federation-command <version>" instead, for a friendlier terminal
+		// experience. Strip that app-name prefix before comparing so FC isn't
+		// permanently flagged as having a pending update.
+		onDisk := strings.TrimSpace(string(out))
+		onDisk = strings.TrimPrefix(onDisk, spec.binName+" ")
+		updated := onDisk != runningVersion
+
+		s.versionMu.Lock()
+		s.managedPendingVersion[name] = onDisk
+		if s.managedUpdateAvailable[name] != updated {
+			s.managedUpdateAvailable[name] = updated
+			changed = true
+		}
+		s.versionMu.Unlock()
+	}
+	if changed {
+		s.broadcastSystemState()
+	}
+}
+
+// watchManagedVersions polls pollManagedVersions on selfVersionPollInterval,
+// forever. Run in its own goroutine, only while in dev mode (see main.go);
+// never returns.
+func (s *Server) watchManagedVersions() {
+	ticker := time.NewTicker(selfVersionPollInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.pollManagedVersions()
+	}
+}
+
+func (s *Server) broadcastSystemState() {
+	st := s.systemState()
+	s.broadcast("system-state", st)
+	// Mirror the system tab up to agent-coordinator so an operator can drive
+	// this LR's process management from the coordinator dashboard.
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("system-state", st)
+	}
+}
+
+// maxDebugLogEntries caps the in-memory buffer recordDebugLog appends to --
+// enough scrollback for the debug view's "very simple viewer" (Step1SubstepBPrompt.md
+// Revision E) without letting a chatty managed process grow it unbounded.
+const maxDebugLogEntries = 400
+
+// DebugLogEntry is one captured stdout/stderr line from an LR-managed
+// sub-app (see lineLogWriter). The debug view's other tab, "network", was
+// originally (Revision E) instrumented entirely in agent-coordinator's own
+// frontend with no backend counterpart; Revision F added one -- see
+// ChainCallEntry, below -- for the backend-to-backend half of that chain a
+// browser fetch wrapper can't see.
+type DebugLogEntry struct {
+	InstanceID string `json:"instance_id"` // e.g. "federation-command#1" -- matches ProcInfo.InstanceID
+	App        string `json:"app"`         // application name, e.g. "federation-command"
+	Stream     string `json:"stream"`      // "stdout" or "stderr"
+	Line       string `json:"line"`
+	TS         int64  `json:"ts"` // unix seconds
+}
+
+// DebugLogStateMsg is the payload of "debug-log-state" messages: the current
+// debug-log buffer, broadcast to browser clients and mirrored up to
+// agent-coordinator.
+type DebugLogStateMsg struct {
+	Entries []DebugLogEntry `json:"entries"`
+}
+
+// recordDebugLog appends one captured line to the debug-log buffer, called
+// from lineLogWriter.Write (so: once per newline-terminated chunk, from
+// whichever goroutine owns that managed process's stdout/stderr pipe).
+func (s *Server) recordDebugLog(instanceID, app, stream, line string) {
+	s.debugLogMu.Lock()
+	s.debugLog = append(s.debugLog, DebugLogEntry{
+		InstanceID: instanceID,
+		App:        app,
+		Stream:     stream,
+		Line:       line,
+		TS:         time.Now().Unix(),
+	})
+	if over := len(s.debugLog) - maxDebugLogEntries; over > 0 {
+		s.debugLog = s.debugLog[over:]
+	}
+	s.debugLogMu.Unlock()
+	s.broadcastDebugLog()
+}
+
+// debugLogState returns a snapshot of the current debug-log buffer.
+func (s *Server) debugLogState() DebugLogStateMsg {
+	s.debugLogMu.Lock()
+	defer s.debugLogMu.Unlock()
+	entries := make([]DebugLogEntry, len(s.debugLog))
+	copy(entries, s.debugLog)
+	return DebugLogStateMsg{Entries: entries}
+}
+
+func (s *Server) broadcastDebugLog() {
+	st := s.debugLogState()
+	s.broadcast("debug-log-state", st)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("debug-log-state", st)
+	}
+}
+
+// maxChainCallEntries caps the debug view's "network" tab chain-call buffer
+// -- see Server.chainCall. Mirrors maxDebugLogEntries' reasoning.
+const maxChainCallEntries = 400
+
+// ChainCallEntry is one outbound HTTP call made somewhere on the
+// SM<->LR<->AC chain (condocs/initialDistributedSessionsImpls/
+// Step1SubstepBPrompt.md Revision F): either this LR's own "lr->ac" hop
+// (httpGetWithTimeout/fetchSessionFile, see sessions.go) or session-
+// manager's "sm->lr" hop, reported here over representable as a
+// "chain-call" data message (see reprServer.SetDataHandler) -- mirrors
+// session-manager/repr.go's same-named type.
+type ChainCallEntry struct {
+	Hop        string `json:"hop"` // "sm->lr" or "lr->ac"
+	Method     string `json:"method"`
+	URL        string `json:"url"`
+	Status     int    `json:"status"` // 0 on a network-level failure
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+	TS         int64  `json:"ts"` // unix seconds, when the call was made
+}
+
+// ChainCallStateMsg is the payload of "chain-call-state" messages: the
+// current chain-call buffer, broadcast to browser clients and mirrored up
+// to agent-coordinator -- mirrors DebugLogStateMsg.
+type ChainCallStateMsg struct {
+	Entries []ChainCallEntry `json:"entries"`
+}
+
+// recordChainCall appends one captured HTTP call to the chain-call buffer --
+// called both from this LR's own instrumented "lr->ac" calls and from the
+// reprServer data handler relaying session-manager's "sm->lr" reports.
+// Mirrors recordDebugLog.
+func (s *Server) recordChainCall(entry ChainCallEntry) {
+	s.chainCallMu.Lock()
+	s.chainCall = append(s.chainCall, entry)
+	if over := len(s.chainCall) - maxChainCallEntries; over > 0 {
+		s.chainCall = s.chainCall[over:]
+	}
+	s.chainCallMu.Unlock()
+	s.broadcastChainCall()
+}
+
+// chainCallState returns a snapshot of the current chain-call buffer.
+func (s *Server) chainCallState() ChainCallStateMsg {
+	s.chainCallMu.Lock()
+	defer s.chainCallMu.Unlock()
+	entries := make([]ChainCallEntry, len(s.chainCall))
+	copy(entries, s.chainCall)
+	return ChainCallStateMsg{Entries: entries}
+}
+
+func (s *Server) broadcastChainCall() {
+	st := s.chainCallState()
+	s.broadcast("chain-call-state", st)
+	if ac := s.getACClient(); ac != nil {
+		ac.SendData("chain-call-state", trimChainCallForAC(st))
+	}
+}
+
+// maxChainCallACBytes bounds the chain-call-state copy sent up to
+// agent-coordinator. Each representable message is one line, and its reader
+// drops the connection on a line over 64 KiB; a full 400-entry buffer of
+// session-pull URLs is well over that, so a burst of session syncing used to
+// cut this LR off from agent-coordinator.
+const maxChainCallACBytes = 48 << 10
+
+// trimChainCallForAC drops the oldest entries until st marshals to under
+// maxChainCallACBytes.
+func trimChainCallForAC(st ChainCallStateMsg) ChainCallStateMsg {
+	entries := st.Entries
+	for len(entries) > 0 {
+		data, err := json.Marshal(ChainCallStateMsg{Entries: entries})
+		if err == nil && len(data) <= maxChainCallACBytes {
+			break
+		}
+		// Drop roughly the excess share at once rather than one at a time.
+		drop := 1
+		if err == nil {
+			drop = max(1, len(entries)*(len(data)-maxChainCallACBytes)/len(data))
+		}
+		entries = entries[min(drop, len(entries)):]
+	}
+	return ChainCallStateMsg{Entries: entries}
+}
+
+// handleSystemCommand executes a system-tab action requested remotely by
+// agent-coordinator. AC delivers these over the representable command channel
+// with a "__system:" prefix (mirroring "__ridealong:"); connectAC routes them
+// here instead of forwarding them to federation-command. Recognised forms:
+//
+//	__system:launch <app>
+//	__system:terminate <instance-id-or-app>
+//	__system:restart
+//	__system:restart-managed <instance-id-or-app>
+//	__system:rebuild
+//	__system:auto-rebuild <on|off>
+//	__system:auto-update <on|off>
+//	__system:switch-branch <name>
+//	__system:watch-external <path>
+//	__system:unwatch-external <path>
+//	__system:watch-external-plugin <path> [app-id]
+//	__system:build-external <path>
+//	__system:connect <provider> <credential>
+//	__system:disconnect <provider>
+//	__system:inspect-agents
+//	__system:install-agent <agent>
+func (s *Server) handleSystemCommand(raw string) {
+	rest := strings.TrimSpace(strings.TrimPrefix(raw, "__system:"))
+	verb, arg, _ := strings.Cut(rest, " ")
+	arg = strings.TrimSpace(arg)
+	switch verb {
+	case "launch":
+		if arg == "" {
+			log.Printf("system: remote launch command missing application name")
+			return
+		}
+		if _, err := s.launchManaged(arg); err != nil {
+			log.Printf("system: remote launch %q failed: %v", arg, err)
+		}
+	case "terminate":
+		if arg == "" {
+			log.Printf("system: remote terminate command missing target")
+			return
+		}
+		if err := s.terminateManaged(arg); err != nil {
+			log.Printf("system: remote terminate %q failed: %v", arg, err)
+		}
+	case "restart":
+		s.requestRestart("operator")
+	case "restart-managed":
+		if arg == "" {
+			log.Printf("system: remote restart-managed command missing target")
+			return
+		}
+		if err := s.restartManaged(arg); err != nil {
+			log.Printf("system: remote restart-managed %q failed: %v", arg, err)
+		}
+	case "rebuild":
+		s.requestRebuild("operator")
+	case "auto-rebuild":
+		s.setAutoRebuild(arg == "on" || arg == "true" || arg == "1")
+	case "switch-branch":
+		if arg == "" {
+			log.Printf("system: remote switch-branch command missing target")
+			return
+		}
+		s.switchBranch(arg)
+	case "watch-external", "unwatch-external":
+		if arg == "" {
+			log.Printf("system: remote %s command missing path", verb)
+			return
+		}
+		if verb == "watch-external" {
+			s.watchExternal(arg)
+		} else {
+			s.unwatchExternal(arg)
+		}
+	case "watch-external-plugin":
+		path, appID, _ := strings.Cut(arg, " ")
+		if path == "" {
+			log.Printf("system: remote %s command missing path", verb)
+			return
+		}
+		s.watchExternalPlugin(path, strings.TrimSpace(appID))
+	case "build-external":
+		if arg == "" {
+			log.Printf("system: remote %s command missing path", verb)
+			return
+		}
+		s.buildExternal(arg)
+	case "auto-update":
+		s.setAutoUpdate(arg == "on" || arg == "true" || arg == "1")
+	case "connect":
+		provider, credential, _ := strings.Cut(arg, " ")
+		if provider == "" {
+			log.Printf("system: remote connect command missing provider")
+			return
+		}
+		s.connectProvider(provider, credential)
+	case "disconnect":
+		if arg == "" {
+			log.Printf("system: remote disconnect command missing provider")
+			return
+		}
+		s.disconnectProvider(arg)
+	case "inspect-agents":
+		s.agents.reinspect()
+	case "install-agent":
+		if arg == "" {
+			log.Printf("system: remote install-agent command missing agent")
+			return
+		}
+		s.installAgent(arg)
+	default:
+		// Only the verb: the rest may be a credential.
+		log.Printf("system: ignoring unrecognised remote system command %q", verb)
+	}
+}
+
+// nextInstanceLocked allocates the next per-app ordinal and its instance id.
+// Callers must hold procMu.
+func (s *Server) nextInstanceLocked(app string) (int, string) {
+	for {
+		s.instanceSeq[app]++
+		n := s.instanceSeq[app]
+		id := fmt.Sprintf("%s#%d", app, n)
+		// A federation-command still connected under this id -- one a
+		// previous run of this LR launched, which outlived it in its own
+		// terminal -- would share the new instance's representable name, and
+		// with it its commands (Step3Prompt.md Revision A). Skip past it.
+		if app == fcAppName && s.fcInstanceIDClaimed(id) {
+			log.Printf("procman: %s is still connected from before; skipping that instance id", id)
+			continue
+		}
+		return n, id
+	}
+}
+
+// runningCountLocked reports how many instances of app are currently running.
+// Callers must hold procMu.
+func (s *Server) runningCountLocked(app string) int {
+	n := 0
+	for _, p := range s.managed {
+		if p.app == app && p.state() == "running" {
+			n++
+		}
+	}
+	return n
+}
+
+// resolveInstanceLocked maps a target that is either an instance id or (when only
+// one instance is present) a bare app name to a concrete instance id. Returns ""
+// if the target is ambiguous or unknown. Callers must hold procMu.
+func (s *Server) resolveInstanceLocked(target string) string {
+	if _, ok := s.managed[target]; ok {
+		return target
+	}
+	var match string
+	n := 0
+	for id, p := range s.managed {
+		if p.app == target {
+			match, n = id, n+1
+		}
+	}
+	if n == 1 {
+		return match
+	}
+	return ""
+}
+
+// resolveAppBinary locates the executable for a managed application. It checks,
+// in order: an explicit config override, the directory holding the LR binary,
+// $AI_EVO1_DEV_BIN (default /AI-evo1-dev/bin), and finally $PATH.
+func (s *Server) resolveAppBinary(name, binName string) (string, error) {
+	if ov := s.binOverrides[name]; ov != "" {
+		if info, err := os.Stat(ov); err != nil || info.IsDir() {
+			return "", fmt.Errorf("configured %s binary %q is not usable", name, ov)
+		}
+		return ov, nil
+	}
+
+	var candidates []string
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), binName))
+	}
+	devBin := devBinDir()
+	candidates = append(candidates, filepath.Join(devBin, binName))
+
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c, nil
+		}
+	}
+	if p, err := exec.LookPath(binName); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("could not locate %q (looked next to local-representative, in %s, and on PATH)", binName, devBin)
+}
+
+// resolveSpecBinary is resolveAppBinary for spec, except that a spec with a
+// binPath (a plug-in dev repo's plug-in, extlaunch.go) is only ever run from
+// there, short of a config override.
+func (s *Server) resolveSpecBinary(app string, spec launchSpec) (string, error) {
+	if spec.binPath == "" || s.binOverrides[app] != "" {
+		return s.resolveAppBinary(app, spec.binName)
+	}
+	if info, err := os.Stat(spec.binPath); err != nil || info.IsDir() {
+		return "", fmt.Errorf("%s isn't deployed at %s yet: build it first", app, spec.binPath)
+	}
+	return spec.binPath, nil
+}
+
+// terminalCandidate is one way to host an interactive child in a terminal. args
+// are the fixed arguments that precede the child command.
+type terminalCandidate struct {
+	prog string
+	args []string
+}
+
+// terminalCandidates lists the terminal emulators / multiplexers probed, in
+// order, when no explicit "terminal" override is configured. A visible window is
+// what we want: the operator should see federation-command come up. Foreground
+// emulators (xterm, konsole, alacritty, kitty, foot, wezterm) come first because
+// LR execs the child directly under them and keeps full PID / lifecycle /
+// terminate tracking. The double-forking emulators follow. tmux and screen are
+// last: they only produce a *detached* (invisible) session, so they are a
+// headless last resort, not the preferred host. Focus stealing is handled
+// separately — see terminalLaunchEnv. tmux and screen are special-cased in
+// wrapInTerminal because they need a generated session name.
+var terminalCandidates = []terminalCandidate{
+	{prog: "xterm", args: []string{"-e"}},
+	{prog: "konsole", args: []string{"-e"}},
+	{prog: "alacritty", args: []string{"-e"}},
+	{prog: "kitty", args: nil},
+	{prog: "foot", args: nil},
+	{prog: "wezterm", args: []string{"start", "--"}},
+	{prog: "xfce4-terminal", args: []string{"-x"}},
+	{prog: "x-terminal-emulator", args: []string{"-e"}},
+	{prog: "gnome-terminal", args: []string{"--"}},
+	{prog: "tmux", args: nil},
+	{prog: "screen", args: nil},
+}
+
+// terminalLaunchEnv returns the environment for a terminal-hosted child with the
+// X11 / Wayland startup-notification tokens stripped. DESKTOP_STARTUP_ID and
+// XDG_ACTIVATION_TOKEN are how a newly mapped window asks the window manager /
+// compositor to raise and focus it; without them an EWMH-compliant WM maps the
+// terminal window *visible but unfocused*, so an auto-launched federation-command
+// no longer steals focus from whatever the operator is doing. The window is
+// still shown — this only suppresses the activation request, not the window.
+func terminalLaunchEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		if strings.HasPrefix(kv, "DESKTOP_STARTUP_ID=") || strings.HasPrefix(kv, "XDG_ACTIVATION_TOKEN=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// terminalHosting records how a terminal-wrapped launch runs so the reaper and
+// terminate path can treat a detached multiplexer session (which returns control
+// the instant it is created) differently from a foreground emulator LR waits on.
+type terminalHosting struct {
+	detached   bool     // launcher backgrounds the child in its own session
+	label      string   // chosen terminal, e.g. "tmux"
+	killCmd    []string // argv that stops a detached session (nil if unknown)
+	attachHint string   // how an operator reconnects to interact
+}
+
+// wrapInTerminal returns the program, argv and hosting metadata to exec so that
+// bin (with appArgs) runs inside an interactive terminal. It honours the
+// configured "terminal" override first — a space-separated command prefix, e.g.
+// `xterm -e` or `tmux new-session -d -s fc` — otherwise it probes
+// terminalCandidates on $PATH, preferring a visible windowed emulator (which
+// keeps full lifecycle tracking) and falling back to a detached tmux/screen
+// session only where no emulator exists. Focus stealing by the new window is
+// suppressed via terminalLaunchEnv. If nothing is found it returns an actionable
+// error rather than letting federation-command fail deep inside its input reader
+// ("error creating cancelreader").
+func (s *Server) wrapInTerminal(bin string, appArgs []string) (string, []string, terminalHosting, error) {
+	child := append([]string{bin}, appArgs...)
+
+	if ov := strings.TrimSpace(s.terminalCmd); ov != "" {
+		parts := strings.Fields(ov)
+		h := terminalHosting{label: filepath.Base(parts[0])}
+		// A `-d` / `-dm` in the override (tmux/screen style) means the launcher
+		// detaches; LR then can't wait on the child. We don't know the session
+		// name the operator chose, so teardown falls back to "close it yourself".
+		for _, p := range parts[1:] {
+			if p == "-d" || p == "-dm" || p == "-dmS" || strings.HasPrefix(p, "-dm") {
+				h.detached = true
+				h.attachHint = "attach to the '" + h.label + "' session you configured"
+			}
+		}
+		return parts[0], append(append([]string{}, parts[1:]...), child...), h, nil
+	}
+
+	for _, c := range terminalCandidates {
+		path, err := exec.LookPath(c.prog)
+		if err != nil {
+			continue
+		}
+		switch c.prog {
+		case "tmux":
+			sess := "fc-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			return path, append([]string{"new-session", "-d", "-s", sess}, child...),
+				terminalHosting{
+					detached:   true,
+					label:      "tmux",
+					killCmd:    []string{path, "kill-session", "-t", sess},
+					attachHint: "tmux attach -t " + sess,
+				}, nil
+		case "screen":
+			sess := "fc-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			return path, append([]string{"-dmS", sess}, child...),
+				terminalHosting{
+					detached:   true,
+					label:      "screen",
+					killCmd:    []string{path, "-S", sess, "-X", "quit"},
+					attachHint: "screen -r " + sess,
+				}, nil
+		default:
+			return path, append(append([]string{}, c.args...), child...),
+				terminalHosting{label: c.prog}, nil
+		}
+	}
+	return "", nil, terminalHosting{}, fmt.Errorf(
+		"no terminal found to host %s (it is an interactive shell); set 'terminal' in config "+
+			"(e.g. terminal: \"xterm -e\", or terminal: \"tmux new-session -d -s fc\" for a detached fallback) "+
+			"or install one of: xterm, konsole, gnome-terminal, x-terminal-emulator, tmux, screen",
+		filepath.Base(bin))
+}
+
+// launchManaged starts a new instance of a managed application. Singleton apps
+// reject a launch while an instance is already running; N-per-host apps (e.g.
+// federation-command) may have many. Returns the new instance id (also set on a
+// recorded failure so the caller/UI can correlate).
+func (s *Server) launchManaged(app string) (string, error) {
+	spec, ok := s.launchSpecFor(app)
+	if !ok {
+		return "", fmt.Errorf("unknown application %q", app)
+	}
+
+	s.procMu.Lock()
+	if spec.singleton && s.runningCountLocked(app) > 0 {
+		s.procMu.Unlock()
+		return "", fmt.Errorf("%s is already running", app)
+	}
+	if other := s.conflictingRunningLocked(app); other != "" {
+		s.procMu.Unlock()
+		return "", fmt.Errorf("%s can't run while %s is running; terminate %s first", app, other, other)
+	}
+	instance, id := s.nextInstanceLocked(app)
+	s.procMu.Unlock()
+
+	bin, err := s.resolveSpecBinary(app, spec)
+	if err != nil {
+		s.recordLaunchFailure(app, instance, id, err)
+		return id, err
+	}
+
+	appArgs := spec.buildArgs(s, id)
+	prog, args := bin, appArgs
+	var hosting terminalHosting
+	if spec.terminal {
+		// Interactive TUI shells must run in a real terminal or their input
+		// reader dies on startup. Wrap the launch in a visible terminal emulator
+		// (falling back to a detached tmux/screen session only where none is
+		// installed); terminalLaunchEnv keeps the window from stealing focus.
+		prog, args, hosting, err = s.wrapInTerminal(bin, appArgs)
+		if err != nil {
+			s.recordLaunchFailure(app, instance, id, err)
+			return id, err
+		}
+	}
+
+	cmd := exec.Command(prog, args...)
+	if spec.terminal {
+		// Visible terminal window, but without the startup-notification token
+		// that would make the WM raise/focus it over the operator's work.
+		cmd.Env = terminalLaunchEnv()
+	} else {
+		cmd.Env = os.Environ()
+	}
+	if spec.buildEnv != nil {
+		cmd.Env = append(cmd.Env, spec.buildEnv(s, id)...)
+	}
+	// Belt-and-braces with --dev-mode, for every app: representable.Connect
+	// connects in this mode whatever the child made of its flags, so an
+	// external plug-in can't come up in the other mode from this LR (see
+	// docs/DevMode.md). Set for ops too, so it is never inherited.
+	cmd.Env = append(cmd.Env, representable.LaunchModeEnvVar+"="+representable.Mode(s.devMode))
+	// A connected provider credential overrides LR's own environment's (exec
+	// keeps the last of duplicate keys) -- see connectivity.go.
+	cmd.Env = append(cmd.Env, s.connectivity.childEnv()...)
+	cmd.Env = append(cmd.Env, s.agents.childEnv()...) // likewise a connected agent's (agents.go)
+	// Own process group so terminate can signal the whole child tree (terminal
+	// wrapper included).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Fan the wrapper's own output into LR's log stream. The interactive child
+	// itself draws in its terminal window; this only catches launcher errors.
+	cmd.Stdout = &lineLogWriter{prefix: id, onLine: func(line string) { s.recordDebugLog(id, app, "stdout", line) }}
+	cmd.Stderr = &lineLogWriter{prefix: id, onLine: func(line string) { s.recordDebugLog(id, app, "stderr", line) }}
+
+	if err := cmd.Start(); err != nil {
+		s.recordLaunchFailure(app, instance, id, err)
+		return id, err
+	}
+
+	p := &managedProc{
+		app:        app,
+		instanceID: id,
+		instance:   instance,
+		cmd:        cmd,
+		pid:        cmd.Process.Pid,
+		startedAt:  time.Now(),
+		status:     "running",
+		detached:   hosting.detached,
+		termLabel:  hosting.label,
+		killCmd:    hosting.killCmd,
+		attachHint: hosting.attachHint,
+	}
+	s.procMu.Lock()
+	s.managed[id] = p
+	s.procMu.Unlock()
+
+	log.Printf("system: launched %s (pid %d): %s %v", id, p.pid, prog, args)
+	if hosting.detached && hosting.attachHint != "" {
+		log.Printf("system: %s runs in a detached %s session — %s", id, hosting.label, hosting.attachHint)
+	}
+
+	go s.reapManaged(p)
+
+	s.broadcastSystemState()
+	return id, nil
+}
+
+// reapManaged waits for a child to exit and records its final status.
+func (s *Server) reapManaged(p *managedProc) {
+	err := p.cmd.Wait()
+
+	if p.detached && err == nil {
+		// A detached multiplexer launcher (tmux new-session -d, screen -dmS)
+		// returns as soon as the session exists; federation-command keeps
+		// running inside it. We can't wait(2) on the real child, so record it as
+		// running-but-untracked and point the operator at how to attach.
+		p.mu.Lock()
+		p.status = "running"
+		p.pid = 0
+		if p.detail == "" {
+			p.detail = "hosted in a detached " + p.termLabel + " session — " + p.attachHint
+		}
+		p.mu.Unlock()
+		log.Printf("system: %s handed off to a detached %s session — %s", p.instanceID, p.termLabel, p.attachHint)
+		s.broadcastSystemState()
+		return
+	}
+
+	p.mu.Lock()
+	switch {
+	case err == nil:
+		p.status = "exited"
+		p.exitCode = 0
+	case p.terminating:
+		// Operator asked for this stop; not a failure.
+		p.status = "exited"
+		if ee, ok := err.(*exec.ExitError); ok {
+			p.exitCode = ee.ExitCode()
+		}
+	default:
+		p.status = "failed"
+		if ee, ok := err.(*exec.ExitError); ok {
+			p.exitCode = ee.ExitCode()
+		} else {
+			p.exitCode = -1
+		}
+		p.detail = err.Error()
+	}
+	status, code := p.status, p.exitCode
+	p.mu.Unlock()
+
+	log.Printf("system: %s (pid %d) %s (exit %d)", p.instanceID, p.pid, status, code)
+	if p.app == "federation-command" {
+		// This instance is no longer reachable -- drop its self-reported
+		// head from the stateboard's "federation-command-instances" row
+		// (see stateboard.go's setFCHead).
+		s.clearFCHead(p.instanceID)
+	}
+	s.broadcastSystemState()
+}
+
+// terminateManaged signals a running managed instance to stop; if the target has
+// already exited it is simply dropped from the system-tab list. target is an
+// instance id, or a bare app name when only one instance is present.
+func (s *Server) terminateManaged(target string) error {
+	s.procMu.Lock()
+	id := s.resolveInstanceLocked(target)
+	p := s.managed[id]
+	s.procMu.Unlock()
+	if p == nil {
+		return fmt.Errorf("%q is not managed by this local-representative", target)
+	}
+
+	if p.detached {
+		// LR never owned the child directly (it runs inside a detached
+		// tmux/screen session), so there is no process group to signal. Tear the
+		// session down with the recorded command and drop the entry.
+		s.procMu.Lock()
+		delete(s.managed, id)
+		s.procMu.Unlock()
+		if p.app == "federation-command" {
+			s.clearFCHead(id)
+		}
+		if len(p.killCmd) > 0 {
+			log.Printf("system: stopping detached session for %s: %v", id, p.killCmd)
+			if out, err := exec.Command(p.killCmd[0], p.killCmd[1:]...).CombinedOutput(); err != nil {
+				log.Printf("system: %s session teardown failed: %v (%s)", id, err, strings.TrimSpace(string(out)))
+			}
+		} else {
+			log.Printf("system: %s ran in a detached terminal LR cannot address — close its session manually", id)
+		}
+		s.broadcastSystemState()
+		return nil
+	}
+
+	if p.state() != "running" {
+		s.procMu.Lock()
+		delete(s.managed, id)
+		s.procMu.Unlock()
+		if p.app == "federation-command" {
+			s.clearFCHead(id)
+		}
+		s.broadcastSystemState()
+		return nil
+	}
+
+	p.mu.Lock()
+	p.terminating = true
+	p.mu.Unlock()
+
+	log.Printf("system: terminating %s (pid %d)", id, p.pid)
+	if p.cmd != nil && p.cmd.Process != nil {
+		if err := syscall.Kill(-p.pid, syscall.SIGTERM); err != nil {
+			_ = p.cmd.Process.Signal(syscall.SIGTERM)
+		}
+	}
+
+	// Escalate to SIGKILL if it hasn't gone after a grace period.
+	go func() {
+		time.Sleep(5 * time.Second)
+		if p.state() == "running" && p.cmd != nil && p.cmd.Process != nil {
+			log.Printf("system: %s ignored SIGTERM, sending SIGKILL", id)
+			if err := syscall.Kill(-p.pid, syscall.SIGKILL); err != nil {
+				_ = p.cmd.Process.Kill()
+			}
+		}
+	}()
+	return nil
+}
+
+// stopMismatchedManaged stops the running instance this LR launched under the
+// connection name name once it has connected in peerMode, the other mode
+// from this LR's own. That can't be a matter of choice: every launch carries
+// this LR's mode both as --dev-mode and as representable.LaunchModeEnvVar,
+// which representable.Connect honours. So the instance ignored both (an
+// external plug-in that doesn't parse --dev-mode, built against a
+// representable from before LaunchModeEnvVar), and it would sit mismatched,
+// heartbeats only, its hello refused. Its row keeps the reason. Connections
+// LR didn't launch -- and federation-command, whose connection names are
+// per instance -- are left to the mismatch banner alone.
+func (s *Server) stopMismatchedManaged(name, peerMode string) {
+	s.procMu.Lock()
+	var p *managedProc
+	for _, q := range s.managed {
+		if q.app == name && q.state() == "running" {
+			p = q
+			break
+		}
+	}
+	s.procMu.Unlock()
+	if p == nil {
+		return
+	}
+	own := representable.Mode(s.devMode)
+	launchedWith := representable.LaunchModeEnvVar + "=" + own
+	if s.devMode {
+		launchedWith = "--dev-mode and " + launchedWith
+	}
+	reason := fmt.Sprintf("stopped: it connected in %s mode, but this local-representative is in %s mode and launched it with %s -- "+
+		"it must honour --dev-mode, or be rebuilt against a representable that reads %s", peerMode, own, launchedWith, representable.LaunchModeEnvVar)
+	log.Printf("system: %s %s", p.instanceID, reason)
+	p.mu.Lock()
+	p.detail = reason
+	p.mu.Unlock()
+	if err := s.terminateManaged(p.instanceID); err != nil {
+		log.Printf("system: stopping mode-mismatched %s: %v", p.instanceID, err)
+	}
+}
+
+// restartManaged terminates a managed instance and, once it has actually
+// stopped, launches a fresh instance of the same application -- the system
+// tab's per-managed-row "restart"/"restart and update" control (see
+// Step4Prompt.md Revision H). Unlike self's "restart" (which just relies on
+// ufa-loader to relaunch LR), a managed sub-app has no loader watching it, so
+// LR does the terminate-then-launch itself. target is an instance id, or a
+// bare app name when only one instance is present.
+func (s *Server) restartManaged(target string) error {
+	s.procMu.Lock()
+	id := s.resolveInstanceLocked(target)
+	p := s.managed[id]
+	s.procMu.Unlock()
+	if p == nil {
+		return fmt.Errorf("%q is not managed by this local-representative", target)
+	}
+	app := p.app
+
+	if err := s.terminateManaged(id); err != nil {
+		return err
+	}
+
+	// terminateManaged's SIGTERM/SIGKILL escalation runs asynchronously, so
+	// wait for the instance to actually stop before launching its
+	// replacement -- otherwise a singleton app's launch would race the still
+	// -running old instance and be rejected as "already running".
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		s.procMu.Lock()
+		cur, stillPresent := s.managed[id]
+		s.procMu.Unlock()
+		if !stillPresent || cur.state() != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Drop the now-stopped instance (mirrors the "dismiss" action) so the
+	// replacement doesn't sit alongside a stale exited row.
+	s.procMu.Lock()
+	delete(s.managed, id)
+	s.procMu.Unlock()
+	s.broadcastSystemState()
+
+	if _, err := s.launchManaged(app); err != nil {
+		return fmt.Errorf("restarted %s but relaunch failed: %w", app, err)
+	}
+	return nil
+}
+
+// runningManagedTokens returns auto-launch-style tokens ("app" or "app:N",
+// see parseAutoLaunchEntry) for every currently-running LR-launched managed
+// instance, one token per app name, ordered by name. This is the snapshot a
+// restart attaches to its announcement (see lrState.ManagedApps in
+// reststate.go) so the instance replacing this one relaunches the same
+// sub-apps -- Step4Prompt.md Revision I. Every entry in s.managed today is
+// LR-launched (there is no "manage-on-connect" yet), so nothing is excluded
+// here on that basis.
+func (s *Server) runningManagedTokens() []string {
+	counts := map[string]int{}
+	s.procMu.Lock()
+	for _, p := range s.managed {
+		if p.state() == "running" {
+			counts[p.app]++
+		}
+	}
+	s.procMu.Unlock()
+
+	apps := make([]string, 0, len(counts))
+	for app := range counts {
+		apps = append(apps, app)
+	}
+	sort.Strings(apps)
+
+	tokens := make([]string, 0, len(apps))
+	for _, app := range apps {
+		if n := counts[app]; n == 1 {
+			tokens = append(tokens, app)
+		} else {
+			tokens = append(tokens, fmt.Sprintf("%s:%d", app, n))
+		}
+	}
+	return tokens
+}
+
+// terminateManagedForRestart terminates every currently-running LR-launched
+// managed instance and waits (bounded) for them to actually stop -- LR's own
+// last act before announcing a restart and exiting (see
+// announceRestartAndExit and Step4Prompt.md Revision I). Without this, those
+// instances would be orphaned by LR's exit rather than cleanly restarted
+// alongside it: the newly launched LR instance relaunches fresh ones from
+// the ManagedApps snapshot captured just before this runs (see
+// runningManagedTokens/currentState), so leaving the old ones running would
+// merely double them up. LR is exiting either way, so a termination failure
+// here is logged, not fatal.
+func (s *Server) terminateManagedForRestart() {
+	s.procMu.Lock()
+	ids := make([]string, 0, len(s.managed))
+	for id, p := range s.managed {
+		if p.state() == "running" {
+			ids = append(ids, id)
+		}
+	}
+	s.procMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+
+	log.Printf("restart: terminating %d LR-launched managed instance(s) before exit: %s", len(ids), strings.Join(ids, ", "))
+	for _, id := range ids {
+		if err := s.terminateManaged(id); err != nil {
+			log.Printf("restart: terminating %s: %v", id, err)
+		}
+	}
+
+	// terminateManaged's SIGTERM/SIGKILL escalation runs asynchronously (same
+	// pattern as restartManaged's wait loop above); give every instance a
+	// chance to actually stop before this process exits, rather than racing
+	// still-live children out from under the restart.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		stillRunning := 0
+		s.procMu.Lock()
+		for _, id := range ids {
+			if p, ok := s.managed[id]; ok && p.state() == "running" {
+				stillRunning++
+			}
+		}
+		s.procMu.Unlock()
+		if stillRunning == 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// recordLaunchFailure keeps a failed launch visible on the system tab instead of
+// silently dropping it.
+func (s *Server) recordLaunchFailure(app string, instance int, id string, cause error) {
+	s.procMu.Lock()
+	s.managed[id] = &managedProc{
+		app:        app,
+		instanceID: id,
+		instance:   instance,
+		startedAt:  time.Now(),
+		status:     "failed",
+		exitCode:   -1,
+		detail:     cause.Error(),
+	}
+	s.procMu.Unlock()
+	log.Printf("system: failed to launch %s: %v", id, cause)
+	s.broadcastSystemState()
+}
+
+// lineLogWriter buffers writes from a child process and emits one LR log line
+// per newline-terminated chunk. Each instance is written by a single goroutine.
+// onLine, when set, also feeds that line into the debug view's buffer (see
+// recordDebugLog) -- nil for call sites that have no app/instance to tag it
+// with (none today, but kept optional rather than required).
+type lineLogWriter struct {
+	prefix string
+	buf    []byte
+	onLine func(line string)
+}
+
+func (w *lineLogWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		if line := strings.TrimRight(string(w.buf[:i]), "\r"); line != "" {
+			log.Printf("[%s] %s", w.prefix, line)
+			if w.onLine != nil {
+				w.onLine(line)
+			}
+		}
+		w.buf = w.buf[i+1:]
+	}
+	return len(p), nil
+}
+
+// autoLaunchEntry is one parsed auto-launch token: an app and how many instances
+// of it to start on boot.
+type autoLaunchEntry struct {
+	app   string
+	count int
+}
+
+// parseAutoLaunchEntry parses a single auto-launch token of the form "app" or
+// "app:N" (N >= 1). federation-command is N-per-host, so "federation-command:3"
+// brings up three instances.
+func parseAutoLaunchEntry(tok string) (autoLaunchEntry, error) {
+	name, countStr, hasCount := strings.Cut(tok, ":")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return autoLaunchEntry{}, fmt.Errorf("empty auto-launch entry %q", tok)
+	}
+	e := autoLaunchEntry{app: name, count: 1}
+	if hasCount {
+		n, err := strconv.Atoi(strings.TrimSpace(countStr))
+		if err != nil || n < 1 {
+			return autoLaunchEntry{}, fmt.Errorf("invalid instance count in auto-launch entry %q", tok)
+		}
+		e.count = n
+	}
+	return e, nil
+}
+
+// removedCondoccerApp is the managed-app name condoccer (condocs v1) had
+// before it was removed; startAutoLaunch skips it with a log line so an LR
+// relaunched with an old --auto-launch or restart state still comes up.
+const removedCondoccerApp = "condoccer"
+
+// startAutoLaunch launches each configured child application shortly after
+// startup, in its own goroutine so a slow or failing launch never blocks LR
+// from coming up. Tokens are "app" or "app:N".
+func (s *Server) startAutoLaunch(tokens []string) {
+	go func() {
+		for _, tok := range tokens {
+			entry, err := parseAutoLaunchEntry(tok)
+			if err != nil {
+				log.Printf("auto-launch: %v", err)
+				continue
+			}
+			if entry.app == removedCondoccerApp {
+				// A token carried over from an older LR's --auto-launch or
+				// restart state (lrState.ManagedApps): condoccer is no
+				// longer a managed app, so skip it rather than fail.
+				log.Printf("auto-launch: skipping %q: condoccer (condocs v1) has been removed; launch condocv2 instead", tok)
+				continue
+			}
+			if _, ok := s.launchSpecFor(entry.app); !ok {
+				log.Printf("auto-launch: skipping unknown application %q", entry.app)
+				continue
+			}
+			for i := 0; i < entry.count; i++ {
+				log.Printf("auto-launch: starting %s (%d/%d)", entry.app, i+1, entry.count)
+				if _, err := s.launchManaged(entry.app); err != nil {
+					log.Printf("auto-launch: %s failed: %v", entry.app, err)
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}()
+}

@@ -1,0 +1,49 @@
+# A built-in declarative tool (see ../../README.md "Declarative tools"):
+# dtt's own engine reads or asserts the document, for git and timestamp
+# statements.
+format: dtt-v1
+name: git
+description: Read or assert local git repositories with no remote -- the local/<name> repos slopspaces and condocv2 use, under $UFA_LOCAL_ROOT (~/workspace/ufa-local by default) or another root -- and any repository's files at a ref, fetched from its URL (git.trees, private github.com ones with the github token), filters of them with their lines counted (git.files), and commits of a tree's or a directory's files pushed to a branch or tag (git.commits) -- from a DTT document, and return the image of what was measured. Asserting creates a repository (git init, its branch, optionally a first commit) or pushes a commit; removing a repository needs approve_delete, changing a field only from empty, from its from values, from what from_image saw, or (force) from anything.
+describe: "git {mode}"
+inputs:
+  - name: document
+    type: text
+    help: the DTT document (git.* and timestamp statements); or give document_file
+  - name: document_file
+    type: path
+    help: a file holding the DTT document, relative to where dtt runs
+  - name: variables
+    type: text
+    help: values for the document's variables, name=value on each line (or a JSON object); the rest take their defaults
+  - name: mode
+    choices: [read, assert, delete]
+    default: read
+    help: read only measures; assert also makes the changes; delete removes what an assert would make (repositories, which need approve_delete)
+  - name: from_image
+    type: text
+    help: an earlier image (its JSON, or the path of its file) -- a field still as it saw it may change
+  - name: force
+    type: bool
+    default: "false"
+    help: true to change asserted fields whatever they hold (from "*")
+outputs:
+  values:
+    - name: changed
+      help: how many fields were changed
+    - name: held
+      help: how many asserted fields held a value they may not be changed from
+    - name: unchanged
+      help: how many asserted fields already held what was asserted
+    - name: would_change
+      help: in read mode, how many fields an assert would change
+    - name: objects
+      help: how many objects the image holds
+    - name: image_json
+      help: the image itself, as JSON -- every field of every selected object, as the run left it
+  files:
+    - name: image
+      help: the image, as JSON
+entrypoint:
+  runtime: exec
+  script: run.sh
+  timeout: 300s

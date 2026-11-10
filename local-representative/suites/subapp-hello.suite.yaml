@@ -1,0 +1,21 @@
+# Suite -- Sub-app hello world: session-manager, then condocv2, each between a terminal and the browser.
+#
+# The demo tab's second suite (PrivateRepoOps Step 5, Revision C). Where
+# robot-hello stays inside the robot, this one says hello world through
+# two other sub-apps in turn: session-hello makes a session from a
+# terminal and finds its note in session-manager, and back; condoc-hello
+# proposes a condoc in condocv2 and withdraws it from a terminal. Each has
+# the full shape -- a general lead-in, the area's lead-in, the subject,
+# the area's tear-down and the general tear-down -- so one that fails
+# leaves the node ready for the next, and the suite carries on.
+#
+# Selected on the demo tab, it lights up a different part of the
+# protosurf map from robot-hello: session-manager and condocv2 focal, the
+# robot and federation-command supporting.
+#
+# Their variables are asked for once, up front: node and ac_url go to
+# both, pointer_dir to condoc-hello.
+demos:
+  - session-hello
+  - condoc-hello
+on_failure: continue

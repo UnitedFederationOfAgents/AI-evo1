@@ -1,0 +1,94 @@
+# local-representative control library: a short, cool demo for a node
+# prepared by dtt-demo-prepare, for dtt's localrep-demo-cool example
+# (../localrep-demo-cool.dtt.yaml), which imports it into the library of the
+# node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen, then
+# has the robot open the demo page the preparation put on the desktop
+# (file: demo-<time>.html) in a browser of its own (browser: Chrome with a
+# throwaway profile under /tmp, in a new maximized window), wait to see the
+# page's heading on screen, read back off the screen when the page says the
+# node was prepared, zoom the page in and back out, and close it again with
+# ctrl+w -- leaving the demo's workspace empty, as the preparation left it,
+# for the shutdown.
+#
+# Not the page's default app: that hands the file to a browser already
+# running, which opens it as a tab of its window on the workspace the
+# preparation left -- not on screen (most likely why the first run waited
+# 30s for a heading it never saw). A browser with its own profile is a new instance,
+# whose window opens on the workspace on screen and closes, browser and all,
+# with ctrl+w. The node's screen is recorded from the page opening to
+# the end (steps 3-6). Every action is its own (dtt-demo-cool-*), so
+# importing this replaces none of the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-cool-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-cool-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-cool-open
+    name: Open the demo page with the robot
+    description: "robot: open the demo page in a new browser window of its own, on the demo's workspace, and wait for its heading to show on screen"
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+      - name: browser
+        label: Browser
+        default: "google-chrome --user-data-dir=/tmp/dtt-demo-cool-browser --no-first-run --no-default-browser-check --start-maximized --new-window"
+    do:
+      - {op: robot.open, path: "{{file}}", app: "{{browser}}"}
+      - {op: robot.wait-for-text, text: "Demo on {{this_node}}", exact: "false", timeout: 30s}
+  - id: dtt-demo-cool-read
+    name: Read the page back off the screen
+    description: "robot: read, off the screen, when the page says this node was prepared"
+    do:
+      - {op: robot.read-text, pattern: "demo at (.+)", near: "prepared for", save_as: prepared_at, report: "the page says it was prepared at"}
+  - id: dtt-demo-cool-zoom
+    name: Zoom the page in and back out
+    description: "robot: click the page's heading, zoom in three steps, then back to its normal size"
+    do:
+      - {op: robot.click-text, text: "Demo on {{this_node}}", exact: "false", timeout: 10s}
+      - {op: robot.key, keys: "ctrl+plus ctrl+plus ctrl+plus"}
+      - {op: robot.wait, duration: 1500ms}
+      - {op: robot.key, keys: ctrl+0}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-cool-close
+    name: Close the demo page
+    description: "robot: close the page's tab (its window, when it's the only one), leaving the workspace empty again"
+    do:
+      - {op: robot.key, keys: ctrl+w}
+      - {op: robot.wait, duration: 1s}
+      - {op: output, label: demo, value: "{{this_node}}: the robot opened the demo page, read it back and zoomed it"}
+sequences:
+  - id: dtt-demo-cool
+    name: "Demo: a short robot demo on a prepared node"
+    description: Start the robot if need be and wake the screen, then have the robot open the demo page on the desktop, read it back off the screen, zoom it in and out and close it -- with this node's screen recorded while the robot works.
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+        help: the demo page dtt-demo-prepare put on the desktop (~ is the node user's home); dtt's examples name it demo-<unix seconds>.html
+      - name: browser
+        label: Browser
+        default: "google-chrome --user-data-dir=/tmp/dtt-demo-cool-browser --no-first-run --no-default-browser-check --start-maximized --new-window"
+        help: the command that opens the page, the path added last -- a browser of its own (its own profile), so its window opens on the demo's workspace and ctrl+w closes it, whatever browser is already open elsewhere
+    steps:
+      - action: dtt-demo-cool-robot
+      - action: dtt-demo-cool-wake
+      - action: dtt-demo-cool-open
+        with:
+          file: "{{file}}"
+          browser: "{{browser}}"
+      - action: dtt-demo-cool-read
+      - action: dtt-demo-cool-zoom
+      - action: dtt-demo-cool-close
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 6, label: "cool demo"}

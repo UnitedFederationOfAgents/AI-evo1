@@ -1,0 +1,49 @@
+# A built-in declarative tool (see ../../README.md "Declarative tools"):
+# dtt's own engine reads or asserts the document, for aws and timestamp
+# statements, through boto3.
+format: dtt-v1
+name: aws
+description: Read or assert AWS objects -- ECS tasks, selected by their tags, and those tags; VPCs, selected by their tags, with their subnets -- from a DTT document through boto3, and return the image of what was measured. Asserting sets tags and creates, changes or deletes VPCs and subnets, changing a field only from empty, from its from values, from what from_image saw, or (force) from anything.
+describe: "aws {mode}"
+inputs:
+  - name: document
+    type: text
+    help: the DTT document (aws.* and timestamp statements); or give document_file
+  - name: document_file
+    type: path
+    help: a file holding the DTT document, relative to where dtt runs
+  - name: variables
+    type: text
+    help: values for the document's variables, name=value on each line (or a JSON object); the rest take their defaults
+  - name: mode
+    choices: [read, assert, delete]
+    default: read
+    help: read only measures; assert also makes the changes; delete removes the VPCs (named by plain tags) and subnets an assert would make, leaving ECS tags alone
+  - name: from_image
+    type: text
+    help: an earlier image (its JSON, or the path of its file) -- a field still as it saw it may change
+  - name: force
+    type: bool
+    default: "false"
+    help: true to change asserted fields whatever they hold (from "*")
+outputs:
+  values:
+    - name: changed
+      help: how many fields were changed
+    - name: held
+      help: how many asserted fields held a value they may not be changed from
+    - name: unchanged
+      help: how many asserted fields already held what was asserted
+    - name: would_change
+      help: in read mode, how many fields an assert would change
+    - name: objects
+      help: how many objects the image holds
+    - name: image_json
+      help: the image itself, as JSON -- every field of every selected object, as the run left it
+  files:
+    - name: image
+      help: the image, as JSON
+entrypoint:
+  runtime: exec
+  script: run.sh
+  timeout: 300s

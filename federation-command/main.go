@@ -12,12 +12,16 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -25,15 +29,28 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
+	"representable"
+	ufaconfig "ufa-configurable"
+	ufahostid "ufa-hostid"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
 )
-
-// Version information
-const Version = "0.1.0"
 
 // Default configuration
 const (
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 	DefaultAgent       = "claude"
+	// local-representative representable TCP endpoint. --lr-port overrides the port.
+	DefaultLRHost = "localhost"
+	DefaultLRPort = 8082
+)
+
+// Auto-connect (--auto-connect) tuning: on startup FC dials local-representative
+// in the background, retrying on an interval until the window elapses.
+const (
+	autoConnectInterval    = 10 * time.Second
+	autoConnectWindow      = 10 * time.Minute
+	autoConnectDialTimeout = 3 * time.Second
 )
 
 // Mode constants for agent permission levels
@@ -46,15 +63,68 @@ const (
 
 // Environment variables
 const (
-	EnvAgentRecordsPath = "AGENT_RECORDS_PATH"
-	EnvAgentName        = "AGENT_NAME"
-	EnvAgentModel       = "AGENT_MODEL"
-	EnvAgentSession     = "AGENT_SESSION"
-	EnvIsClauditable    = "IS_CLAUDITABLE" // Used to prevent double-wrapping
+	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
+	EnvAgentName               = "AGENT_NAME"
+	EnvAgentModel              = "AGENT_MODEL"
+	EnvAgentSession             = "AGENT_SESSION"
+	EnvUFAHead                  = "UFA_HEAD"
+	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 )
 
+// fcHeadID identifies this FC instance for the duration of its lifecycle.
+// Initialized once in main() as "fc-<4-char-random-alphanumeric>".
+var fcHeadID string
+
+// fcHostID is the stable per-host identifier, resolved once in main() via ufahostid.
+var fcHostID string
+
+// fallbackDefaultSessionID mirrors clauditable's defaultSessionIDFor
+// (YYYY-MM-DD-<host>-default) for when clauditable get-default-session is
+// unavailable, so each host still lands on its own daily default session.
+func fallbackDefaultSessionID(day time.Time, hostID string) string {
+	var b strings.Builder
+	for _, r := range hostID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	host := strings.Trim(b.String(), ".-")
+	if host == "" {
+		host = "unknown"
+	}
+	return day.Format("2006-01-02") + "-" + host + "-default"
+}
+
+// fcInstanceID is the LR-assigned instance id this FC instance was launched
+// with (FC_INSTANCE_ID -- set by local-representative's managedApps
+// ["federation-command"].buildEnv, see local-representative/procman.go),
+// read once in main(). Empty for an independently-launched FC that
+// --auto-connects without having been launched by an LR -- sendSessionState
+// then reports no head for the stateboard's "federation-command-instances"
+// row (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E),
+// the same way such an instance is absent from the system tab's managed list.
+var fcInstanceID string
+
+// fcReprName is the name this instance connects to local-representative
+// under. Representable tracks one connection per name, so every FC instance
+// needs its own for LR to tell them apart (condocs/initialRobotImpls/
+// Step3Prompt.md): the LR-assigned instance id ("federation-command#2") when
+// LR launched it, otherwise "federation-command@<head>". LR recognises all
+// three forms, the bare "federation-command" included (see
+// local-representative/fcinstances.go's isFCName).
+func fcReprName() string {
+	if fcInstanceID != "" {
+		return fcInstanceID
+	}
+	return "federation-command@" + fcHeadID
+}
+
 // Available agents (must match ambiguous-agent configurations)
-var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
+var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "pi", "grok", "clod"}
 
 // AgentModelConfig defines model support for each agent
 type AgentModelConfig struct {
@@ -86,6 +156,7 @@ var agentModelConfigs = map[string]AgentModelConfig{
 		ModelFlag:    "--model",
 		DefaultModel: "",
 		Models: []string{
+			"xai/grok-4.7",
 			"openai/gpt-4.1", "openai/gpt-4.1-mini", "openai/gpt-4.1-nano",
 			"openai/o4-mini", "openai/o3", "openai/o3-mini",
 			"anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-5-20251101",
@@ -93,6 +164,13 @@ var agentModelConfigs = map[string]AgentModelConfig{
 		},
 	},
 	"codex": {ModelFlag: "", DefaultModel: "", Models: nil},
+	// Patterns from hello-pi (provider/id). `pi --list-models` replaces these
+	// when the binary is installed; the static list marks model selection.
+	"pi": {
+		ModelFlag:    "--model",
+		DefaultModel: "",
+		Models:       []string{"anthropic/sonnet", "google/gemini", "xai/grok"},
+	},
 	"grok": {
 		ModelFlag:    "--model",
 		DefaultModel: "",
@@ -113,6 +191,13 @@ var agentModelConfigs = map[string]AgentModelConfig{
 	"clod": {ModelFlag: "", DefaultModel: "", Models: nil},
 }
 
+// devGreen is the single source of truth for FC's --dev-mode green (Revision
+// B): the blinker brackets (blinkerBracketDevStyle, blinker.go), the prompt
+// cursor and startup/mismatch banners (devModeStyle, below) all render in
+// this exact color so the two never drift apart. Same "healthy"/"connected"
+// green used across the web UIs — see docs/DevMode.md.
+const devGreen = lipgloss.Color("34")
+
 // Agent colors for visual distinction (matching ambiguous-agent)
 var agentColors = map[string]lipgloss.Color{
 	"copilot":  lipgloss.Color("39"),  // Cyan (GitHub blue)
@@ -120,6 +205,7 @@ var agentColors = map[string]lipgloss.Color{
 	"claude":   lipgloss.Color("208"), // Orange (Anthropic)
 	"opencode": lipgloss.Color("34"),  // Green
 	"codex":    lipgloss.Color("99"),  // Purple (OpenAI)
+	"pi":       lipgloss.Color("51"),  // Bright cyan (Pi)
 	"grok":     lipgloss.Color("196"), // Red (xAI)
 	"clod":     lipgloss.Color("141"), // Light purple (test agent)
 }
@@ -147,6 +233,14 @@ var (
 				Foreground(lipgloss.Color("220")).
 				Bold(true)
 
+	// devModeStyle renders in devGreen — used for the startup banner, the
+	// prompt cursor, and any --dev-mode notices (distinct from
+	// devWarningStyle's yellow, which flags dev *dependencies*, an unrelated
+	// concept). See docs/DevMode.md.
+	devModeStyle = lipgloss.NewStyle().
+			Foreground(devGreen).
+			Bold(true)
+
 	continuationStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
 
@@ -156,6 +250,38 @@ var (
 		ModeWrite:   lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true), // orange
 		ModeExecute: lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true), // red
 	}
+)
+
+var (
+	pickerBorderStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("39"))
+
+	pickerTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39")).
+				Bold(true)
+
+	pickerFilterStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("220"))
+
+	pickerSelectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("82")).
+				Bold(true)
+
+	pickerEntryStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252"))
+
+	pickerCurrentStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
+
+	pickerHintStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("238")).
+				Italic(true)
+
+	pickerEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("243")).
+				Italic(true)
 )
 
 // completeFilepath returns filepath completion candidates for the given prefix
@@ -270,6 +396,8 @@ type CommandRecord struct {
 	Timestamp string `json:"ts"`
 	DeltaMs   int64  `json:"delta_ms"`
 	ExitCode  int    `json:"exit"`
+	Host      string `json:"host,omitempty"`
+	Head      string `json:"head,omitempty"`
 }
 
 // ===== BUBBLETEA MODEL =====
@@ -294,7 +422,12 @@ type appModel struct {
 	sessionDir   string
 	recordsPath  string
 
-	logFile *os.File
+	// hadActivity is set once any command runs, and cleared when the daily
+	// default rolls over -- see sessions_daily.go's rolloverDailyDefault.
+	hadActivity bool
+
+	// encoder logs federation-command's own records to the current session
+	// (see sessionlog.go's sessionEncoder).
 	encoder *json.Encoder
 
 	lastCmdTime time.Time
@@ -320,12 +453,51 @@ type appModel struct {
 	pendingCmd string // deferred command waiting for roll-up animation to finish
 
 	// Ridealong state
-	ridealong         *Ridealong
-	ridealongDynapane RidealongDynapane
+	ridealong          *Ridealong
+	ridealongDynapane  RidealongDynapane
+	ridealongPrevState BlinkerState // blinker state before ridealong started, for restore on exit
+
+	// Session picker state
+	sessionPicker *SessionPicker
+
+	// Agent/model picker state
+	agentPicker *AgentPicker
 
 	// Visual log state (scrollback-log)
 	visualLogFile *os.File
 	visualLogPath string
+
+	// Representable connection to local-representative
+	reprClient    *representable.Client
+	remoteCmdCh   chan string   // receives commands sent from LR to execute in FC
+	listenerStop  chan struct{} // closed to cancel the active listenForRemoteCmdCmd goroutine
+	reprOutPath   string       // temp file path for tee'd output when LR is connected
+	reprOutOffset int64        // bytes already forwarded from reprOutPath
+
+	// Auto-connect: background retry loop that dials local-representative on startup.
+	lrAddr              string    // representable address used for both manual and auto connects
+	autoConnect         bool      // true while the background retry loop is currently running
+	autoConnectDeadline time.Time // stop retrying once this instant has passed
+	remoteDefault       bool      // auto-connect implies this: adopt remote control (not local) when the background connection is established
+	// autoConnectEnabled is the persistent auto-connect toggle (see Revision
+	// I of Step3Prompt.md: "ufa fc auto-connect [<enable|disable>]") -- a
+	// first-class state independent of autoConnect above (which just tracks
+	// whether the retry loop is currently running) or of any single
+	// connection attempt. It stays true across a successful connection, so a
+	// later unintentional disconnect resumes the retry cycle on its own (see
+	// the reprDisconnectedMsg handler); only an explicit disconnect (see
+	// disconnectRepr) turns it off. disconnectRepr also nils reprClient
+	// synchronously, so the reprDisconnectedMsg handler's own staleness
+	// check (msg.client no longer matching m.reprClient) is what tells an
+	// intentional disconnect apart from the remote end dropping
+	// unexpectedly -- no separate "was this intentional" flag is needed.
+	autoConnectEnabled bool
+
+	// Dev mode: launch-time only (no runtime switch — see docs/DevMode.md).
+	devMode          bool
+	modeMismatchCh   chan modeMismatchInfo // receives mode-mismatch verdicts from reprClient's handler
+	modeMismatch     bool                  // true once the connected LR's mode is known to differ from ours
+	modeMismatchPeer string                // the mismatched peer's disclosed mode ("dev" or "ops")
 
 	quitting    bool
 	windowWidth int
@@ -376,6 +548,94 @@ type ridealongFixDoneMsg struct {
 	deltaMs  int64
 }
 
+type ridealongCustomCmdDoneMsg struct {
+	exitCode int
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
+type sessionNewDoneMsg struct {
+	exitCode     int
+	newSessionID string
+	followsFrom  string // new-session -f's resolved session ID, "" if none
+	line         string
+	cmdTime      time.Time
+	deltaMs      int64
+}
+
+type sessionPickerEntry struct {
+	id        string
+	name      string
+	fileCount int
+}
+
+// SessionPicker holds state for the interactive session-selection overlay.
+type SessionPicker struct {
+	entries []sessionPickerEntry
+	filter  string
+	cursor  int
+	line    string
+	cmdTime time.Time
+	deltaMs int64
+}
+
+// agentPickerEntry holds an agent and its available models.
+type agentPickerEntry struct {
+	agent  string
+	models []string
+}
+
+// AgentPicker holds state for the interactive agent+model-selection overlay.
+// Right arrow enters model selection (to the right of agent); left returns to agent selection.
+type AgentPicker struct {
+	entries     []agentPickerEntry
+	filter      string
+	cursor      int
+	modelMode   bool
+	modelCursor int
+	line        string
+	cmdTime     time.Time
+	deltaMs     int64
+}
+
+func (sp *SessionPicker) filteredEntries() []sessionPickerEntry {
+	if sp.filter == "" {
+		return sp.entries
+	}
+	lower := strings.ToLower(sp.filter)
+	var out []sessionPickerEntry
+	for _, e := range sp.entries {
+		if strings.Contains(strings.ToLower(e.id), lower) ||
+			strings.Contains(strings.ToLower(e.name), lower) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (ap *AgentPicker) filteredEntries() []agentPickerEntry {
+	if ap.filter == "" {
+		return ap.entries
+	}
+	lower := strings.ToLower(ap.filter)
+	var out []agentPickerEntry
+	for _, e := range ap.entries {
+		if strings.Contains(strings.ToLower(e.agent), lower) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+type sessionRenameDoneMsg struct {
+	exitCode int
+	newName  string
+	line     string
+	cmdTime  time.Time
+	deltaMs  int64
+}
+
 // deferRidealongExec returns a Cmd that sends ridealongExecReadyMsg on the next
 // Update, giving Bubble Tea one render cycle to clear the now-inactive pane.
 func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd {
@@ -384,7 +644,334 @@ func deferRidealongExec(runCmd *exec.Cmd, callback func(error) tea.Msg) tea.Cmd 
 	}
 }
 
-func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, encoder *json.Encoder) appModel {
+// reprConnectedMsg is sent when a TCP connection to local-representative succeeds.
+type reprConnectedMsg struct {
+	client *representable.Client
+}
+
+// reprConnectFailedMsg is sent when the connection attempt times out or errors.
+type reprConnectFailedMsg struct{}
+
+// reprRemoteCmdMsg is sent when LR delivers a command for FC to execute.
+type reprRemoteCmdMsg struct{ cmd string }
+
+// modeMismatchInfo carries one mode-mismatch verdict from reprClient's
+// SetModeMismatchHandler callback (which runs on the client's read-loop
+// goroutine) into a reprModeMismatchMsg the Update loop can safely act on.
+type modeMismatchInfo struct {
+	mismatched bool
+	peerMode   string
+}
+
+// reprModeMismatchMsg is sent whenever the connected local-representative's
+// disclosed dev-mode verdict changes — see docs/DevMode.md. A mismatched LR
+// already refuses everything past the representable protocol's health/hello
+// exchange; this just surfaces that disclosure in the FC UI.
+type reprModeMismatchMsg modeMismatchInfo
+
+// listenForModeMismatchCmd blocks until reprClient's mode-mismatch handler
+// reports a verdict or the stop channel closes (mirrors listenForRemoteCmdCmd).
+func listenForModeMismatchCmd(ch <-chan modeMismatchInfo, stop <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case info := <-ch:
+			return reprModeMismatchMsg(info)
+		case <-stop:
+			return nil
+		}
+	}
+}
+
+// ridealongStatePayload is sent over the representable data channel to broadcast ridealong state.
+type ridealongStatePayload struct {
+	Active       bool     `json:"active"`
+	Title        string   `json:"title,omitempty"`
+	CurrentIndex int      `json:"current_index,omitempty"`
+	TotalSteps   int      `json:"total_steps,omitempty"`
+	CurrentCmd   string   `json:"current_cmd,omitempty"`
+	PrevCmd      string   `json:"prev_cmd,omitempty"`
+	PrevExitCode int      `json:"prev_exit_code,omitempty"`
+	NextCmd      string   `json:"next_cmd,omitempty"`
+	Autoplay     bool     `json:"autoplay,omitempty"`
+	Countdown    string   `json:"countdown,omitempty"`
+	Waypoints    []string `json:"waypoints,omitempty"`
+}
+
+// versionPayload is sent once over the representable data channel right
+// after connecting, so local-representative's system tab can list this
+// instance's build version alongside its own (see docs/DevMode.md
+// "Versioning").
+type versionPayload struct {
+	Version string `json:"version"`
+}
+
+// sendVersion reports this binary's build version to local-representative.
+// Called once a representable connection lands, mirroring how control state
+// is announced immediately after connecting.
+func (m appModel) sendVersion() {
+	if m.reprClient == nil {
+		return
+	}
+	m.reprClient.SendData("version", versionPayload{Version: ufaversion.Version})
+}
+
+// sessionStatePayload is sent over the representable data channel to report
+// this instance's currently active session, so local-representative (and,
+// relayed through it, agent-coordinator) can show which session a given FC
+// instance is on, and so LR can relaunch this instance back into the same
+// session on a restart (see local-representative/procman.go's
+// managedApps["federation-command"] and condocs/initialDistributedSessionsImpls/
+// Step2Prompt.md Revision B). Name is session.yaml's name field when one has
+// been set (via new-session/rename-session), empty otherwise.
+type sessionStatePayload struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+
+	// InstanceID and Head piggyback the stateboard's "federation-command-
+	// instances" row (local-representative/stateboard.go's setFCHead) onto
+	// this already-frequent message rather than a dedicated one.
+	InstanceID string `json:"instance_id,omitempty"`
+	Head       string `json:"head,omitempty"`
+}
+
+// sendSessionState reports the current session to local-representative.
+// Called whenever the active session changes and right after a representable
+// connection lands, mirroring sendVersion.
+func (m appModel) sendSessionState() {
+	if m.reprClient == nil {
+		return
+	}
+	m.reprClient.SendData("fc-session", sessionStatePayload{
+		ID:         m.sessionID,
+		Name:       readSessionName(m.sessionDir),
+		InstanceID: fcInstanceID,
+		Head:       fcHeadID,
+	})
+}
+
+// sendRidealongState pushes the current ridealong state to local-representative.
+func (m appModel) sendRidealongState() {
+	if m.reprClient == nil {
+		return
+	}
+	if m.ridealong == nil || !m.ridealong.IsActive() {
+		m.reprClient.SendData("ridealong-state", ridealongStatePayload{Active: false})
+		return
+	}
+	r := m.ridealong
+	prevCmd, prevExitCode := r.PreviousCommand()
+	m.reprClient.SendData("ridealong-state", ridealongStatePayload{
+		Active:       true,
+		Title:        r.DisplayTitle(),
+		CurrentIndex: r.currentIndex,
+		TotalSteps:   len(r.steps),
+		CurrentCmd:   r.CurrentCommand(),
+		PrevCmd:      prevCmd,
+		PrevExitCode: prevExitCode,
+		NextCmd:      r.NextCommand(),
+		Autoplay:     r.autoplay,
+		Countdown:    r.CountdownDisplay(),
+		Waypoints:    r.waypointOrder,
+	})
+}
+
+// attemptConnectCmd dials local-representative's representable TCP port (3s timeout).
+func attemptConnectCmd(addr string, devMode bool) tea.Cmd {
+	return func() tea.Msg {
+		client, err := representable.Connect(addr, fcReprName(), representable.Mode(devMode), 3*time.Second)
+		if err != nil {
+			return reprConnectFailedMsg{}
+		}
+		return reprConnectedMsg{client: client}
+	}
+}
+
+// reprDisconnectedMsg is delivered when an established representable
+// connection to local-representative drops -- via DisconnectCh, so it fires
+// whether the remote end closed it (unintentional) or this side called
+// Close (an intentional disconnectRepr -- see Revision I of Step3Prompt.md).
+// client guards against a stale message: disconnectRepr nils m.reprClient
+// synchronously, so by the time an intentional disconnect's message is
+// processed it no longer matches, and the handler tells the two cases apart
+// that way rather than via a separate flag.
+type reprDisconnectedMsg struct{ client *representable.Client }
+
+// listenForDisconnectCmd blocks until client's connection drops, then
+// delivers reprDisconnectedMsg so Update can decide whether to resume
+// auto-connect. Started once per adopted connection (see reprConnectedMsg and
+// the successful half of autoConnectResultMsg).
+func listenForDisconnectCmd(client *representable.Client) tea.Cmd {
+	return func() tea.Msg {
+		<-client.DisconnectCh()
+		return reprDisconnectedMsg{client: client}
+	}
+}
+
+// autoConnectTickMsg fires on the auto-connect retry interval.
+type autoConnectTickMsg struct{}
+
+// autoConnectResultMsg carries the outcome of one background dial attempt;
+// client is nil when the attempt failed.
+type autoConnectResultMsg struct{ client *representable.Client }
+
+// autoConnectDialCmd performs one background connection attempt to local-representative.
+// It never blocks the UI: the dial runs inside the returned tea.Cmd goroutine.
+func autoConnectDialCmd(addr string, devMode bool) tea.Cmd {
+	return func() tea.Msg {
+		client, err := representable.Connect(addr, fcReprName(), representable.Mode(devMode), autoConnectDialTimeout)
+		if err != nil {
+			return autoConnectResultMsg{}
+		}
+		return autoConnectResultMsg{client: client}
+	}
+}
+
+// autoConnectControlState decides which control mode a completed background
+// auto-connect adopts. preferRemote (set whenever auto-connect is configured)
+// forces remote control so a fully machine-driven auto-launch/auto-connect chain
+// lands ready to drive from local-representative. Otherwise: if the blinker dot
+// is selected — or a manual connect is already in flight — the user is angling
+// for remote control, so honour that; if the user is mid-entry at the prompt we
+// take local control so the foreground session is not yanked away.
+func autoConnectControlState(b *Blinker, preferRemote bool) BlinkerState {
+	if preferRemote || b.IsSelectMode() || b.IsConnecting() {
+		return BlinkerConnected
+	}
+	return BlinkerLocalControl
+}
+
+// autoConnectRetryCmd schedules the next background dial attempt.
+func autoConnectRetryCmd() tea.Cmd {
+	return tea.Tick(autoConnectInterval, func(t time.Time) tea.Msg {
+		return autoConnectTickMsg{}
+	})
+}
+
+// autoConnectGaveUp disables the background retry loop and returns the notice /
+// blinker commands to emit when the window elapses without a connection.
+func (m *appModel) autoConnectGaveUp() tea.Cmd {
+	m.autoConnect = false
+	m.blinker.DisableAccent()
+	cmds := []tea.Cmd{
+		tea.Println(errorStyle.Render(fmt.Sprintf(
+			"auto-connect: gave up after %s — local-representative at %s did not respond", autoConnectWindow, m.lrAddr))),
+		m.blinker.ResetTick(),
+	}
+	if m.remoteDefault && !m.input.Focused() {
+		// We suppressed local input while waiting for the machine-driven chain;
+		// hand the terminal back now that it will not arrive.
+		m.input.Focus()
+		cmds = append(cmds, textinput.Blink)
+	}
+	return tea.Batch(cmds...)
+}
+
+// autoConnectStatusLine renders the persistent auto-connect toggle plus a
+// hint at the enable/disable commands -- used by both "auto-connect" and
+// "ufa fc auto-connect" with no argument (see Revision I of Step3Prompt.md).
+func (m *appModel) autoConnectStatusLine() string {
+	state := "disabled"
+	if m.autoConnectEnabled {
+		switch {
+		case m.reprClient != nil:
+			state = fmt.Sprintf("enabled (connected to local-representative at %s)", m.lrAddr)
+		case m.autoConnect:
+			state = fmt.Sprintf("enabled (retrying local-representative at %s)", m.lrAddr)
+		default:
+			state = "enabled (idle)"
+		}
+	}
+	return fmt.Sprintf("auto-connect: %s\ncommands: auto-connect enable | auto-connect disable (or: ufa fc auto-connect enable|disable)", state)
+}
+
+// enableAutoConnect arms the persistent auto-connect toggle (see Revision I
+// of Step3Prompt.md) and, unless already connected or already retrying,
+// starts the background retry loop at m.lrAddr.
+func (m *appModel) enableAutoConnect() tea.Cmd {
+	m.autoConnectEnabled = true
+	if m.reprClient != nil || m.autoConnect {
+		return nil // already connected, or already retrying
+	}
+	m.autoConnect = true
+	m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+	m.blinker.EnableAccent()
+	return tea.Batch(autoConnectDialCmd(m.lrAddr, m.devMode), m.blinker.accentTickCmd())
+}
+
+// disableAutoConnect clears the persistent auto-connect toggle and, if a
+// retry loop is currently running (not yet connected), cancels it. It never
+// drops an already-established connection -- only disconnectRepr does that.
+func (m *appModel) disableAutoConnect() tea.Cmd {
+	m.autoConnectEnabled = false
+	if !m.autoConnect {
+		return nil
+	}
+	m.autoConnect = false
+	m.blinker.DisableAccent()
+	return m.blinker.ResetTick()
+}
+
+// listenForRemoteCmdCmd blocks until LR sends a command or the stop channel is closed.
+func listenForRemoteCmdCmd(ch <-chan string, stop <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case cmd := <-ch:
+			return reprRemoteCmdMsg{cmd: cmd}
+		case <-stop:
+			return nil
+		}
+	}
+}
+
+// disconnectRepr closes the representable client and resets the listener stop channel
+// so any in-flight listenForRemoteCmdCmd goroutine exits. Being operator-driven,
+// this also terminates auto-connect entirely (see Revision I of Step3Prompt.md:
+// "Intentionally disconnect terminates auto-connect") -- unlike an unintentional
+// drop, which resumes the retry cycle automatically as long as auto-connect is
+// still armed (see the reprDisconnectedMsg handler).
+func (m *appModel) disconnectRepr() {
+	m.autoConnectEnabled = false
+	if m.autoConnect {
+		// A background retry loop was still running (not yet connected) --
+		// stop it too, mirroring autoConnectGaveUp's cleanup.
+		m.autoConnect = false
+		m.blinker.DisableAccent()
+	}
+	if m.reprClient != nil {
+		m.reprClient.Close()
+		m.reprClient = nil
+	}
+	// Cancel the running listener goroutine by closing the old stop channel.
+	close(m.listenerStop)
+	m.listenerStop = make(chan struct{})
+	// Clean up output capture temp file.
+	if m.reprOutPath != "" {
+		os.Remove(m.reprOutPath)
+		m.reprOutPath = ""
+		m.reprOutOffset = 0
+	}
+	// A fresh connection starts with a clean mismatch verdict; the next
+	// "hello" (or lack of one) re-establishes it via wireModeMismatchHandler.
+	m.modeMismatch = false
+	m.modeMismatchPeer = ""
+}
+
+// wireModeMismatchHandler registers reprClient's mode-mismatch callback so a
+// verdict lands on modeMismatchCh for listenForModeMismatchCmd to pick up.
+// The callback runs on the client's read-loop goroutine, so it must not touch
+// appModel directly — see docs/DevMode.md for the representable-level protocol
+// this discloses.
+func (m *appModel) wireModeMismatchHandler() {
+	ch := m.modeMismatchCh
+	m.reprClient.SetModeMismatchHandler(func(mismatched bool, peerMode string) {
+		select {
+		case ch <- modeMismatchInfo{mismatched: mismatched, peerMode: peerMode}:
+		default: // drop if full; the next heartbeat's verdict will follow
+		}
+	})
+}
+
+func newAppModel(recordsPath, sessionID, sessionDir string, cfg cliConfig) appModel {
 	ti := textinput.New()
 	ti.Focus()
 	ti.PromptStyle = lipgloss.NewStyle() // pass-through: prompt is already ANSI-styled
@@ -399,20 +986,41 @@ func newAppModel(recordsPath, sessionID, sessionDir string, logFile *os.File, en
 	currentModel := os.Getenv(EnvAgentModel)
 
 	m := appModel{
-		input:        ti,
-		cwd:          cwd,
-		oldCwd:       cwd,
-		currentAgent: currentAgent,
-		currentModel: currentModel,
-		sessionID:    sessionID,
-		sessionDir:   sessionDir,
-		recordsPath:  recordsPath,
-		logFile:      logFile,
-		encoder:      encoder,
-		blinker:      NewBlinker(),
+		input:         ti,
+		cwd:           cwd,
+		oldCwd:        cwd,
+		currentAgent:  currentAgent,
+		currentModel:  currentModel,
+		sessionID:     sessionID,
+		sessionDir:    sessionDir,
+		recordsPath:   recordsPath,
+		encoder:       sessionEncoder(sessionDir),
+		blinker:            NewBlinker(cfg.devMode),
+		remoteCmdCh:        make(chan string, 8),
+		listenerStop:       make(chan struct{}),
+		lrAddr:             cfg.lrAddr,
+		autoConnect:        cfg.autoConnect,
+		autoConnectEnabled: cfg.autoConnect,
+		remoteDefault:      cfg.remote,
+		devMode:            cfg.devMode,
+		modeMismatchCh:     make(chan modeMismatchInfo, 4),
 	}
 
-	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0)
+	if cfg.autoConnect {
+		m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+		m.blinker.EnableAccent()
+	}
+
+	if cfg.remote {
+		// Machine-driven chain: local-representative will drive this FC over the
+		// representable channel. Don't accept local keystrokes while the
+		// background auto-connect completes — otherwise there is a window where
+		// the FC terminal is locally controllable, which the paradigm forbids.
+		// autoConnectGaveUp / a completed connect restore focus as appropriate.
+		m.input.Blur()
+	}
+
+	m.input.Prompt = buildPrompt(cwd, currentAgent, currentModel, 0, m.devMode)
 	m.history = loadHistory(historyFilePath())
 	m.historyIdx = len(m.history)
 
@@ -502,21 +1110,41 @@ func longestCommonPrefix(strs []string) string {
 	return prefix
 }
 
+// fcWindowTitle is the terminal window title FC sets at startup, so other
+// tools can find FC's window by title -- e.g. ianar's sequence-v1 "Select the
+// terminal with federation-command" step (see ianar/window.go).
+const fcWindowTitle = "federation-command"
+
 func (m appModel) Init() tea.Cmd {
 	info := strings.Join([]string{
-		sessionStyle.Render("● session: " + m.sessionDir),
+		sessionStyle.Render("● started: " + time.Now().Format("2006-01-02 15:04:05 MST")),
+		sessionStyle.Render("  session: " + m.sessionDir),
 		sessionStyle.Render("  agent: " + m.currentAgent + " | 'set-agent <name>' to change | 'list-agents' for options"),
 		sessionStyle.Render("  model: 'set-model <name>' to override | 'list-models' for options"),
 		sessionStyle.Render("  type 'exit' to end | 'agent [-p|-r|-w|-x] <prompt>' to invoke AI"),
 		sessionStyle.Render("  modes: -p (prompt) | -r (read) | -w (write) | -x (execute)"),
-		sessionStyle.Render("  records: 'list-sessions' | add '-provide-records <id>' to agent command"),
+		sessionStyle.Render("  records: 'list-sessions' | 'select-session' to switch interactively | add '-provide-records <id>' to agent command"),
 		sessionStyle.Render("  multi-line: trailing \\, unclosed quotes, or <<<DELIMITER"),
 		"",
 	}, "\n")
-	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd()}
+	cmds := []tea.Cmd{textinput.Blink, tea.Println(info), m.blinker.tickCmd(), tea.SetWindowTitle(fcWindowTitle)}
+	if m.devMode {
+		cmds = append(cmds, tea.Println(devModeStyle.Render(
+			"◆ dev mode — launched with --dev-mode; the blinker brackets [ ] and the prompt cursor render green for the life of this session")))
+	}
 	if devBins := devBinaries(); len(devBins) > 0 {
 		devNotice := devWarningStyle.Render("⚠ DEV DEPENDENCIES ACTIVE (/AI-evo1-dev/bin): " + strings.Join(devBins, ", "))
 		cmds = append(cmds, tea.Println(devNotice))
+	}
+	if m.autoConnect {
+		adopts := "local control unless the dot is selected"
+		if m.remoteDefault {
+			adopts = "remote control — local input suspended until local-representative connects"
+		}
+		acNotice := successStyle.Render(fmt.Sprintf(
+			"⟳ auto-connect enabled: dialing local-representative at %s every %s for up to %s (runs in background; adopts %s)",
+			m.lrAddr, autoConnectInterval, autoConnectWindow, adopts))
+		cmds = append(cmds, tea.Println(acNotice), autoConnectDialCmd(m.lrAddr, m.devMode), m.blinker.accentTickCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -528,6 +1156,14 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ridealong != nil && m.ridealong.IsActive() {
 			return m.handleRidealongKey(msg)
 		}
+		// Handle interactive session picker.
+		if m.sessionPicker != nil {
+			return m.handleSessionPickerKey(msg)
+		}
+		// Handle interactive agent/model picker.
+		if m.agentPicker != nil {
+			return m.handleAgentPickerKey(msg)
+		}
 
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -538,18 +1174,19 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mlQuote = 0
 				m.mlMode = mlNone
 				m.input.SetValue("")
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				// Reset blinker to idle (was inactive while typing multi-line)
 				m.blinker.SetState(BlinkerIdle)
 				m.prevInputLen = 0
 				m.input.Focus()
 				return m, m.blinker.ResetTick()
 			}
-			// Exit blinker select mode if active
-			if m.blinker.IsSelectMode() {
+			// Exit blinker select/connecting/connected/local-control mode if active
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() || m.blinker.IsLocalControl() {
+				m.disconnectRepr()
 				m.blinker.SetState(BlinkerIdle)
 				m.input.Focus()
-				return m, nil // tick chain is already running (select→idle, same gen)
+				return m, m.blinker.ResetTick()
 			}
 			if m.input.Value() == "" {
 				m.quitting = true
@@ -590,9 +1227,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleBackspace()
 
 		default:
-			// Handle other keys in blinker select mode
-			if m.blinker.IsSelectMode() {
-				// Flash the blinker to alert user they're in select mode
+			// Reject keys (with a flash) in select/connecting/remote-control states.
+			// Local-control falls through so the user can type normally.
+			if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
 				cmd := m.blinker.StartFlash()
 				return m, cmd
 			}
@@ -603,7 +1240,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
 			Command:   msg.line,
@@ -612,14 +1249,79 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
-		// Reset blinker to idle state after command completes
-		m.blinker.SetState(BlinkerIdle)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
+		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		m.prevInputLen = 0
+		return m, m.blinker.ResetTick()
+
+	case sessionNewDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
+		if msg.exitCode == 0 && msg.newSessionID != "" {
+			if err := applyFollowsFrom(m.recordsPath, msg.newSessionID, msg.followsFrom); err != nil {
+				m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 1)
+				if !m.blinker.IsRemoteControlActive() {
+					m.blinker.SetState(BlinkerIdle)
+				}
+				m.prevInputLen = 0
+				return m, tea.Batch(tea.Println(errorStyle.Render("new-session: "+err.Error())), m.blinker.ResetTick())
+			}
+			newM, switchErr := m.switchToSession(msg.newSessionID)
+			if switchErr == nil {
+				newM.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 0)
+				if !newM.blinker.IsRemoteControlActive() {
+					newM.blinker.SetState(BlinkerIdle)
+				}
+				newM.prevInputLen = 0
+				return newM, tea.Batch(tea.Println(successStyle.Render("new session: "+newM.sessionDir)), newM.blinker.ResetTick())
+			}
+		}
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		m.prevInputLen = 0
+		return m, m.blinker.ResetTick()
+
+	case sessionCreateConfirmMsg:
+		return m.finishSessionCreateConfirm(msg)
+
+	case sessionRenameDoneMsg:
+		m.lastExitCode = msg.exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
+		if msg.exitCode == 0 && msg.newName != "" {
+			if err := updateSessionName(m.sessionDir, msg.newName); err != nil {
+				m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 1)
+				if !m.blinker.IsRemoteControlActive() {
+					m.blinker.SetState(BlinkerIdle)
+				}
+				m.prevInputLen = 0
+				return m, tea.Batch(tea.Println(errorStyle.Render("rename-session: "+err.Error())), m.blinker.ResetTick())
+			}
+			m.sendSessionState()
+			m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, 0)
+			if !m.blinker.IsRemoteControlActive() {
+				m.blinker.SetState(BlinkerIdle)
+			}
+			m.prevInputLen = 0
+			return m, tea.Batch(tea.Println(successStyle.Render("session renamed to: "+msg.newName)), m.blinker.ResetTick())
+		}
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
 		m.prevInputLen = 0
 		return m, m.blinker.ResetTick()
 
 	case agentDoneMsg:
 		m.lastExitCode = msg.exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode)
 		record := CommandRecord{
 			ID:        uuid.New().String()[:8],
 			Command:   msg.line,
@@ -628,6 +1330,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 		var postOutput string
 		if msg.execErr != nil {
 			if _, ok := msg.execErr.(*exec.ExitError); ok {
@@ -638,14 +1344,16 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
-		// Reset blinker to idle state after agent completes
-		m.blinker.SetState(BlinkerIdle)
+		// Preserve connected/local-control blinker state; only reset to idle in normal mode.
+		if !m.blinker.IsRemoteControlActive() {
+			m.blinker.SetState(BlinkerIdle)
+		}
 		m.prevInputLen = 0
 		return m, tea.Batch(tea.Println(postOutput), m.blinker.ResetTick())
 
 	case listModelsDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		var suffix string
 		if msg.currentModel != "" {
 			suffix = "\n" + sessionStyle.Render("current selection: "+msg.currentModel)
@@ -653,6 +1361,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			suffix = "\n" + sessionStyle.Render("no model explicitly set - using agent's built-in default")
 		}
 		return m, tea.Println(suffix)
+
+	case agentInspectDoneMsg:
+		output, exitCode := renderAgentInspectDone(msg, m.currentAgent, m.currentModel)
+		m.lastExitCode = exitCode
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, exitCode)
+		return m, tea.Println(output)
 
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
@@ -669,6 +1384,236 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case BlinkerFlashMsg:
 		cmd := m.blinker.Flash()
 		return m, cmd
+
+	case BlinkerConnectingTickMsg:
+		cmd := m.blinker.ConnectingTick()
+		return m, cmd
+
+	case AccentBlinkMsg:
+		cmd := m.blinker.AccentTick(msg.gen)
+		return m, cmd
+
+	case autoConnectTickMsg:
+		if !m.autoConnect || m.reprClient != nil {
+			return m, nil // already connected, or the loop was cancelled
+		}
+		if time.Now().After(m.autoConnectDeadline) {
+			cmd := m.autoConnectGaveUp()
+			return m, cmd
+		}
+		return m, autoConnectDialCmd(m.lrAddr, m.devMode)
+
+	case autoConnectResultMsg:
+		if !m.autoConnect || m.reprClient != nil {
+			if msg.client != nil {
+				msg.client.Close() // connected another way meanwhile
+			}
+			return m, nil
+		}
+		if msg.client == nil {
+			// Attempt failed — retry after the interval unless the window has closed.
+			if time.Now().After(m.autoConnectDeadline) {
+				cmd := m.autoConnectGaveUp()
+				return m, cmd
+			}
+			return m, autoConnectRetryCmd()
+		}
+		// Success — adopt the connection (mirrors the reprConnectedMsg path).
+		// Whether we land in remote or local control depends on what the CLI was
+		// doing when the background dial completed (see autoConnectControlState).
+		controlState := autoConnectControlState(&m.blinker, m.remoteDefault)
+		wantsRemote := controlState == BlinkerConnected
+		m.autoConnect = false
+		m.blinker.DisableAccent()
+		m.reprClient = msg.client
+		ch := m.remoteCmdCh
+		m.reprClient.SetCommandHandler(func(cmd string) {
+			select {
+			case ch <- cmd:
+			default: // drop if full
+			}
+		})
+		m.wireModeMismatchHandler()
+		m.sendVersion()
+		m.sendSessionState()
+		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
+			tf.Close()
+			m.reprOutPath = tf.Name()
+			m.reprOutOffset = 0
+		}
+		m.blinker.SetState(controlState)
+		var controlNotice string
+		if wantsRemote {
+			controlNotice = "auto-connect: connected to local-representative at " + m.lrAddr + " (remote control)"
+			m.reprClient.SendState("remote-control")
+			m.input.Blur()
+		} else {
+			controlNotice = "auto-connect: connected to local-representative at " + m.lrAddr + " (local control — press → for remote)"
+			m.reprClient.SendState("local-control")
+			m.input.Focus()
+		}
+		resetTick := m.blinker.ResetTick()
+		cmds := []tea.Cmd{
+			tea.Println(successStyle.Render(controlNotice)),
+			resetTick,
+			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+			listenForDisconnectCmd(m.reprClient),
+			sessionsDiscoveryDelayCmd(m.reprClient),
+		}
+		if !wantsRemote {
+			cmds = append(cmds, textinput.Blink)
+		}
+		return m, tea.Batch(cmds...)
+
+	case reprConnectedMsg:
+		if !m.blinker.IsConnecting() {
+			// Arrived after cancellation; discard and close.
+			msg.client.Close()
+			return m, nil
+		}
+		// A manual connection supersedes any in-flight background auto-connect.
+		m.autoConnect = false
+		m.blinker.DisableAccent()
+		if m.reprClient != nil {
+			m.reprClient.Close()
+		}
+		m.reprClient = msg.client
+		// Wire up remote command delivery via the channel.
+		ch := m.remoteCmdCh
+		m.reprClient.SetCommandHandler(func(cmd string) {
+			select {
+			case ch <- cmd:
+			default: // drop if full
+			}
+		})
+		m.wireModeMismatchHandler()
+		m.sendVersion()
+		m.sendSessionState()
+		// Create temp file for output capture.
+		if tf, err := os.CreateTemp("", "lr-out-*"); err == nil {
+			tf.Close()
+			m.reprOutPath = tf.Name()
+			m.reprOutOffset = 0
+		}
+		// Announce initial control mode so LR shows the entry field immediately.
+		m.reprClient.SendState("remote-control")
+		m.blinker.SetState(BlinkerConnected)
+		return m, tea.Batch(
+			m.blinker.ResetTick(),
+			listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop),
+			listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop),
+			listenForDisconnectCmd(m.reprClient),
+			sessionsDiscoveryDelayCmd(m.reprClient),
+		)
+
+	case reprConnectFailedMsg:
+		if m.blinker.IsConnecting() {
+			// Failed to connect — return to select mode so user can try again.
+			m.blinker.SetState(BlinkerSelect)
+			return m, m.blinker.ResetTick()
+		}
+		return m, nil
+
+	case sessionsDiscoveryTickMsg:
+		if m.reprClient != msg.client {
+			// Superseded (disconnected, or replaced by a fresh connect) by
+			// the time sessionsDiscoveryDelay elapsed -- drop it rather than
+			// poll a connection nothing still points at.
+			return m, nil
+		}
+		if remote := m.discoverRemoteSessions(); len(remote) > 0 {
+			return m, tea.Println(sessionsDiscoveryNotice(remote))
+		}
+		return m, nil
+
+	case reprDisconnectedMsg:
+		if m.reprClient != msg.client {
+			// Stale: this connection was already superseded or torn down --
+			// which also covers an *intentional* disconnect, since
+			// disconnectRepr nils m.reprClient synchronously (before this
+			// async message can ever arrive), so it always lands here too.
+			return m, nil
+		}
+		m.reprClient = nil
+		wasActive := m.blinker.IsRemoteControlActive()
+		if !m.autoConnectEnabled {
+			if !wasActive {
+				return m, nil
+			}
+			m.blinker.SetState(BlinkerIdle)
+			return m, tea.Batch(
+				tea.Println(errorStyle.Render("disconnected from local-representative at "+m.lrAddr)),
+				m.blinker.ResetTick(),
+			)
+		}
+		// Auto-connect is still armed and this wasn't an operator-driven
+		// disconnect -- the cycle begins automatically again at the same
+		// target (see Revision I of Step3Prompt.md: "the auto-connect cycle
+		// begins automatically upon unintentional disconnection").
+		m.autoConnect = true
+		m.autoConnectDeadline = time.Now().Add(autoConnectWindow)
+		m.blinker.EnableAccent()
+		if wasActive {
+			m.blinker.SetState(BlinkerIdle)
+		}
+		notice := fmt.Sprintf(
+			"auto-connect: connection to local-representative at %s dropped unexpectedly — resuming the retry cycle",
+			m.lrAddr)
+		return m, tea.Batch(
+			tea.Println(errorStyle.Render(notice)),
+			autoConnectDialCmd(m.lrAddr, m.devMode),
+			m.blinker.accentTickCmd(),
+			m.blinker.ResetTick(),
+		)
+
+	case reprModeMismatchMsg:
+		listenCmd := listenForModeMismatchCmd(m.modeMismatchCh, m.listenerStop)
+		if m.reprClient == nil {
+			return m, listenCmd // stale verdict from a connection we've since dropped
+		}
+		wasMismatched := m.modeMismatch
+		m.modeMismatch = msg.mismatched
+		m.modeMismatchPeer = msg.peerMode
+		if !msg.mismatched {
+			if wasMismatched {
+				return m, tea.Batch(tea.Println(devModeStyle.Render("✓ dev-mode mismatch with local-representative cleared")), listenCmd)
+			}
+			return m, listenCmd
+		}
+		ourMode := representable.Mode(m.devMode)
+		notice := devWarningStyle.Render(fmt.Sprintf(
+			"⚠ dev-mode mismatch: this FC is %q but local-representative at %s is %q — remote control and log/data exchange are refused until the mismatch is resolved (health checks still work)",
+			ourMode, m.lrAddr, msg.peerMode))
+		return m, tea.Batch(tea.Println(notice), listenCmd)
+
+	case reprRemoteCmdMsg:
+		if msg.cmd == "" {
+			return m, nil
+		}
+		// Restart listener regardless of whether we execute the command.
+		listenCmd := listenForRemoteCmdCmd(m.remoteCmdCh, m.listenerStop)
+		// Intercept ridealong control commands before the IsConnected gate so they
+		// continue to work after FC transitions from BlinkerConnected to BlinkerRidealong.
+		if strings.HasPrefix(msg.cmd, "__ridealong:") {
+			if m.blinker.IsConnected() || m.blinker.IsRidealongMode() {
+				newM, ridCmd := m.handleRidealongRemoteCmd(strings.TrimPrefix(msg.cmd, "__ridealong:"))
+				return newM, tea.Batch(ridCmd, listenCmd)
+			}
+			return m, listenCmd
+		}
+		if !m.blinker.IsConnected() {
+			return m, listenCmd
+		}
+		// Echo the command to LR's output pane so the remote operator sees it.
+		if m.reprClient != nil {
+			m.reprClient.SendLog(msg.cmd)
+		}
+		// Execute the command directly (bypass handleEnter's key-rejection checks).
+		echoLine := m.input.Prompt + msg.cmd
+		echo := m.printlnLogged(echoLine)
+		newM, execCmd := m.executeCommand(msg.cmd)
+		return newM, tea.Batch(tea.Sequence(echo, execCmd), listenCmd)
 
 	case DynapaneTickMsg:
 		cmd := m.dynapane.Tick()
@@ -698,7 +1643,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
 			m.cwd = newCwd
 		}
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 
 		// Log the command
 		record := CommandRecord{
@@ -709,6 +1654,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ExitCode:  msg.exitCode,
 		}
 		m.encoder.Encode(record)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
 
 		// Deactivate autoplay on non-zero exit code.
 		if msg.exitCode != 0 && m.ridealong != nil {
@@ -727,7 +1676,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongReviewDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		reviewText := ""
 		if b, err := os.ReadFile(msg.cachePath); err == nil {
@@ -744,6 +1693,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("review cached")
 		}
+		if reviewText != "" {
+			m.writeVisualLog(reviewText)
+		}
+		m.writeVisualLog(postOutput)
 		if m.ridealong != nil && m.ridealong.IsActive() && reviewText != "" {
 			m.ridealong.CacheReview(reviewText)
 		}
@@ -752,7 +1705,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ridealongFixDoneMsg:
 		m.lastExitCode = msg.exitCode
-		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode), m.windowWidth)
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
 		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
 		var postOutput string
 		if msg.execErr != nil {
@@ -764,8 +1717,23 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			postOutput = successStyle.Render("agent completed")
 		}
+		m.writeVisualLog(postOutput)
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(postOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+
+	case ridealongCustomCmdDoneMsg:
+		m.lastExitCode = msg.exitCode
+		if newCwd, err := os.Getwd(); err == nil && newCwd != m.cwd {
+			m.cwd = newCwd
+		}
+		setPromptWidth(&m.input, buildPrompt(m.cwd, m.currentAgent, m.currentModel, msg.exitCode, m.devMode), m.windowWidth)
+		m.logRecord(msg.line, msg.cmdTime, msg.deltaMs, msg.exitCode)
+		// Forward any new output lines to LR.
+		if m.reprOutPath != "" && m.reprClient != nil {
+			m.reprOutOffset = sendNewOutputToRepr(m.reprOutPath, m.reprOutOffset, m.reprClient)
+		}
+		m.blinker.SetState(BlinkerRidealong)
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 
 	case ridealongExecReadyMsg:
 		return m, tea.ExecProcess(msg.runCmd, msg.callback)
@@ -774,10 +1742,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 
-	// Track input changes to manage blinker state
+	// Track input changes to manage blinker state.
+	// Don't deactivate the indicator while in remote/local-control mode so the
+	// orange/blue dot remains visible to the user even when they are typing.
 	currentLen := len(m.input.Value())
 	if currentLen != m.prevInputLen {
-		if currentLen > 0 && m.ridealong == nil {
+		if currentLen > 0 && m.ridealong == nil && !m.blinker.IsRemoteControlActive() {
 			// User has typed something - deactivate blinker
 			if m.blinker.State() != BlinkerInactive {
 				m.blinker.SetState(BlinkerInactive)
@@ -793,9 +1763,13 @@ func (m appModel) View() string {
 	if m.quitting {
 		return ""
 	}
-	// Show ridealong dynapane if active, otherwise regular dynapane
+	// Show the highest-priority dynapane that is active.
 	var pane string
-	if m.ridealongDynapane.IsActive() {
+	if m.sessionPicker != nil {
+		pane = m.sessionPickerView(m.windowWidth)
+	} else if m.agentPicker != nil {
+		pane = m.agentPickerView(m.windowWidth)
+	} else if m.ridealongDynapane.IsActive() {
 		pane = m.ridealongDynapane.View(m.windowWidth)
 	} else {
 		pane = m.dynapane.View(m.windowWidth)
@@ -866,8 +1840,8 @@ func wrapAtWidth(s string, width int) string {
 }
 
 func (m appModel) handleEnter() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash and do nothing
-	if m.blinker.IsSelectMode() {
+	// Reject Enter in select/connecting/remote-control states.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() || m.blinker.IsConnected() {
 		cmd := m.blinker.StartFlash()
 		return m, cmd
 	}
@@ -887,7 +1861,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 				m.mlAccumulated = ""
 				m.mlDelim = ""
 				m.mlMode = mlNone
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				newM, execCmd := m.executeCommand(accumulated)
 				return newM, tea.Sequence(echo, execCmd)
 			}
@@ -915,7 +1889,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 				m.mlAccumulated = ""
 				m.mlQuote = 0
 				m.mlMode = mlNone
-				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+				m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 				newM, execCmd := m.executeCommand(newAccumulated)
 				return newM, tea.Sequence(echo, execCmd)
 			}
@@ -929,7 +1903,7 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 	// Not in multi-line mode
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return m, nil
+		return m, tea.Println("")
 	}
 
 	echo := m.printlnLogged(echoLine)
@@ -958,6 +1932,11 @@ func (m appModel) handleEnter() (appModel, tea.Cmd) {
 		return m, echo
 	}
 
+	// In local-control mode, stream the command to LR for display.
+	if m.blinker.IsLocalControl() && m.reprClient != nil {
+		m.reprClient.SendLog(line)
+	}
+
 	newM, execCmd := m.executeCommand(line)
 	return newM, tea.Sequence(echo, execCmd)
 }
@@ -970,10 +1949,16 @@ func continuationPromptFor(quoteChar rune) string {
 }
 
 func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash
 	if m.blinker.IsSelectMode() {
-		cmd := m.blinker.StartFlash()
-		return m, cmd
+		// Up in select mode: initiate LR connection attempt.
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr, m.devMode))
+	}
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
+		// Cancel/disconnect — return to select mode (not back to terminal).
+		m.disconnectRepr()
+		m.blinker.SetState(BlinkerSelect)
+		return m, m.blinker.ResetTick()
 	}
 
 	if len(m.history) == 0 || m.inMultiLine {
@@ -987,8 +1972,8 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 		m.input.SetValue(m.history[m.historyIdx])
 		m.input.CursorEnd()
 		m.prevInputLen = len(m.input.Value())
-		// History item selected - deactivate blinker
-		if m.blinker.State() != BlinkerInactive {
+		// History item selected - deactivate blinker (preserve LR control states)
+		if m.blinker.State() != BlinkerInactive && !m.blinker.IsRemoteControlActive() {
 			m.blinker.SetState(BlinkerInactive)
 		}
 	}
@@ -996,10 +1981,16 @@ func (m appModel) handleHistoryUp() (appModel, tea.Cmd) {
 }
 
 func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
-	// If in blinker select mode, flash
 	if m.blinker.IsSelectMode() {
-		cmd := m.blinker.StartFlash()
-		return m, cmd
+		// Down in select mode: initiate LR connection attempt.
+		connectCmd := m.blinker.StartConnecting()
+		return m, tea.Batch(connectCmd, attemptConnectCmd(m.lrAddr, m.devMode))
+	}
+	if m.blinker.IsConnecting() || m.blinker.IsConnected() {
+		// Cancel/disconnect — return to select mode (not back to terminal).
+		m.disconnectRepr()
+		m.blinker.SetState(BlinkerSelect)
+		return m, m.blinker.ResetTick()
 	}
 
 	if m.inMultiLine {
@@ -1015,15 +2006,15 @@ func (m appModel) handleHistoryDown() (appModel, tea.Cmd) {
 		m.input.CursorEnd()
 		m.prevInputLen = len(m.input.Value())
 
-		// If we're back to empty input (stash was empty), resume blinker
+		// If we're back to empty input (stash was empty), resume blinker (preserve LR control states)
 		if m.input.Value() == "" {
 			if m.blinker.State() == BlinkerInactive {
 				m.blinker.SetState(BlinkerIdle)
 				return m, m.blinker.ResetTick()
 			}
 		} else {
-			// Has content - ensure blinker is inactive
-			if m.blinker.State() != BlinkerInactive {
+			// Has content - ensure blinker is inactive (preserve LR control states)
+			if m.blinker.State() != BlinkerInactive && !m.blinker.IsRemoteControlActive() {
 				m.blinker.SetState(BlinkerInactive)
 			}
 		}
@@ -1098,10 +2089,10 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 	if cursorPos == 0 && inputVal == "" {
 		switch m.blinker.State() {
 		case BlinkerIdle:
-			// Enter blinker select mode — tick chain is already running, no new one needed
+			// Left selects the blinker (solid grey dot); up or down then initiates connection.
 			m.blinker.SetState(BlinkerSelect)
 			m.input.Blur()
-			return m, nil
+			return m, m.blinker.ResetTick()
 		case BlinkerInactive:
 			// Resume idle blinking from stopped state
 			m.blinker.SetState(BlinkerIdle)
@@ -1110,6 +2101,14 @@ func (m appModel) handleLeft() (appModel, tea.Cmd) {
 			// Already in select mode, flash to indicate we can't go further left
 			cmd := m.blinker.StartFlash()
 			return m, cmd
+		case BlinkerLocalControl:
+			// Return to remote control — LR entry field re-appears.
+			if m.reprClient != nil {
+				m.reprClient.SendState("remote-control")
+			}
+			m.blinker.SetState(BlinkerConnected)
+			m.input.Blur()
+			return m, m.blinker.ResetTick()
 		}
 	}
 
@@ -1132,12 +2131,22 @@ func (m appModel) handleRight() (appModel, tea.Cmd) {
 		return m, cmd
 	}
 
-	// If in blinker select mode, exit to idle mode and restore cursor
-	// Tick chain is still running (select→idle, same gen) so no new tick needed.
-	if m.blinker.IsSelectMode() {
+	// Right while in select/connecting mode: cancel and return to idle.
+	if m.blinker.IsSelectMode() || m.blinker.IsConnecting() {
+		m.disconnectRepr()
 		m.blinker.SetState(BlinkerIdle)
 		m.input.Focus()
-		return m, textinput.Blink
+		return m, m.blinker.ResetTick()
+	}
+
+	// Right while in remote control (connected): switch to local control.
+	if m.blinker.IsConnected() {
+		if m.reprClient != nil {
+			m.reprClient.SendState("local-control")
+		}
+		m.blinker.SetState(BlinkerLocalControl)
+		m.input.Focus()
+		return m, tea.Batch(textinput.Blink, m.blinker.ResetTick())
 	}
 
 	inputVal := m.input.Value()
@@ -1249,7 +2258,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		m.oldCwd = m.cwd
 		m.cwd = newDir
 		m.lastExitCode = exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode)
 		return true, m, seqPrint(cdOutput, exitCode)
 	}
 
@@ -1269,7 +2278,7 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		if isValidAgent(newAgent) {
 			m.currentAgent = newAgent
 			m.currentModel = ""
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			return true, m, seqPrint(successStyle.Render("agent set to: "+m.currentAgent), 0)
 		}
 		out := errorStyle.Render("unknown agent: "+newAgent) + "\n" +
@@ -1290,11 +2299,12 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	// set-model <name>
 	if strings.HasPrefix(line, "set-model ") {
 		newModel := strings.TrimSpace(strings.TrimPrefix(line, "set-model "))
-		if err := setModel(m.currentAgent, newModel); err != nil {
+		canonical, err := setModel(m.currentAgent, newModel)
+		if err != nil {
 			return true, m, seqPrint(errorStyle.Render(err.Error()), 1)
 		}
-		m.currentModel = newModel
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.currentModel = canonical
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		return true, m, seqPrint(successStyle.Render("model set to: "+m.currentModel), 0)
 	}
 	if line == "set-model" {
@@ -1306,13 +2316,13 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	// clear-model
 	if line == "clear-model" {
 		m.currentModel = ""
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		return true, m, seqPrint(successStyle.Render("model cleared - using agent's default"), 0)
 	}
 
 	// list-models — runs a subprocess but advances ridealong when done
 	if line == "list-models" {
-		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.sessionDir)
+		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
 		if cmd == nil {
 			return true, m, seqPrint(fallbackText, 0)
 		}
@@ -1323,27 +2333,56 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 
 	// list-sessions
 	if line == "list-sessions" {
-		return true, m, seqPrint(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)), 0)
+		remote := m.discoverRemoteSessions()
+		return true, m, seqPrint(renderSessions(m.recordsPath, m.sessionID, remote), 0)
+	}
+
+	// version / ufa version
+	if line == "version" || line == "ufa version" {
+		return true, m, seqPrint(successStyle.Render(ufaversion.Version), 0)
+	}
+
+	// select-session — interactive picker not available inside ridealong
+	if line == "select-session" {
+		return true, m, seqPrint(errorStyle.Render("select-session: interactive picker not available in ridealong context — use set-session <id>"), 1)
 	}
 
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
+		args := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
+		var newSessionID string
+		if strings.HasPrefix(args, "-n ") {
+			name := strings.TrimSpace(strings.TrimPrefix(args, "-n "))
+			if name == "" {
+				return true, m, seqPrint(errorStyle.Render("usage: set-session -n <name>"), 1)
+			}
+			foundID, findErr := findSessionByName(m.recordsPath, name)
+			if findErr != nil {
+				return true, m, seqPrint(errorStyle.Render("set-session: "+findErr.Error()), 1)
+			}
+			newSessionID = foundID
+		} else {
+			newSessionID = args
 		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		if strings.HasSuffix(newSessionID, "-default") {
+			return true, m, seqPrint(errorStyle.Render("set-session: session IDs ending in '-default' are reserved for daily defaults"), 1)
+		}
+		if !validSessionIDArg(newSessionID) {
+			return true, m, seqPrint(errorStyle.Render(fmt.Sprintf("set-session: invalid session ID %q", newSessionID)), 1)
+		}
+		// Join an existing session only: creating one needs a confirmation
+		// this context can't ask for (see handleSetSession).
+		if !sessionExistsLocally(m.recordsPath, newSessionID) {
+			m.pullSessionFromPeers(newSessionID)
+		}
+		if !sessionExistsLocally(m.recordsPath, newSessionID) {
+			return true, m, seqPrint(errorStyle.Render(fmt.Sprintf("set-session: session %q not found on this host or any connected host -- create it with new-session, or run set-session interactively to confirm creating it", newSessionID)), 1)
+		}
+		newM, err := m.switchToSession(newSessionID)
 		if err != nil {
 			return true, m, seqPrint(errorStyle.Render("set-session: "+err.Error()), 1)
 		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		return true, m, seqPrint(successStyle.Render("session set to: "+newSessionDir), 0)
+		return true, newM, seqPrint(successStyle.Render("session set to: "+newM.sessionDir), 0)
 	}
 	if line == "set-session" {
 		return true, m, seqPrint(errorStyle.Render("usage: set-session <id>"), 1)
@@ -1353,27 +2392,62 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 	if line == "clear-session" {
 		now := time.Now()
 		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+		if err := createSessionWithID(m.recordsPath, newSessionID, newSessionID); err != nil {
 			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
 		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		newM, err := m.switchToSession(newSessionID)
 		if err != nil {
 			return true, m, seqPrint(errorStyle.Render("clear-session: "+err.Error()), 1)
 		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		return true, m, seqPrint(successStyle.Render("session reset to: "+newSessionDir), 0)
+		return true, newM, seqPrint(successStyle.Render("session reset to: "+newM.sessionDir), 0)
+	}
+
+	// new-session [-f <session>] [name] — creates a new named session via clauditable
+	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
+		followsRef, name, parseErr := parseFollowsFlag(strings.TrimPrefix(line, "new-session"))
+		if parseErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+parseErr.Error()), 1)
+		}
+		name = stripSurroundingQuotes(name)
+		followsFrom := ""
+		if followsRef != "" {
+			id, err := resolveSessionRef(m.recordsPath, followsRef)
+			if err != nil {
+				return true, m, seqPrint(errorStyle.Render("new-session: -f: "+err.Error()), 1)
+			}
+			followsFrom = id
+		}
+		if name == "" {
+			name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
+		}
+		clauditablePath, findErr := findBinary("clauditable")
+		if findErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: clauditable not found — "+findErr.Error()), 1)
+		}
+		cmd := exec.Command(clauditablePath, "new-session", name)
+		cmd.Env = append(environWithoutClauditableGuard(), EnvAgentRecordsPath+"="+m.recordsPath)
+		out, runErr := cmd.Output()
+		if runErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+runErr.Error()), 1)
+		}
+		newID := strings.TrimSpace(string(out))
+		if newID == "" {
+			return true, m, seqPrint(errorStyle.Render("new-session: clauditable returned empty session ID"), 1)
+		}
+		if err := applyFollowsFrom(m.recordsPath, newID, followsFrom); err != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+err.Error()), 1)
+		}
+		newM, switchErr := m.switchToSession(newID)
+		if switchErr != nil {
+			return true, m, seqPrint(errorStyle.Render("new-session: "+switchErr.Error()), 1)
+		}
+		return true, newM, seqPrint(successStyle.Render("new session: "+newM.sessionDir), 0)
 	}
 
 	// agent <args> — runs subprocess but advances ridealong when done
 	if strings.HasPrefix(line, "agent ") {
 		prompt := strings.TrimPrefix(line, "agent ")
-		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.sessionDir)
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
 		if agentCmd == nil {
 			return true, m, seqPrint(errOutput, 1)
 		}
@@ -1438,11 +2512,406 @@ func (m appModel) handleRidealongBuiltin(line string, cmdTime time.Time, deltaMs
 		return true, m, tea.Sequence(cmd, mkDone(0, ""))
 	}
 
+	// get-session
+	if line == "get-session" {
+		return true, m, seqPrint(renderSessionInfo(m.sessionID, m.sessionDir), 0)
+	}
+
+	// get-head
+	if line == "get-head" {
+		return true, m, seqPrint(renderHeadInfo(fcHeadID), 0)
+	}
+
+	// describe-session [-a] — -a not supported in ridealong
+	if line == "describe-session" || strings.HasPrefix(line, "describe-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "describe-session"))
+		if args == "-a" {
+			return true, m, seqPrint(errorStyle.Render("describe-session: -a flag not supported in ridealong context"), 1)
+		}
+		return true, m, seqPrint(renderSessionDescribe(m.sessionID, m.sessionDir), 0)
+	}
+
+	// rename-session [name|-a] — -a not supported in ridealong
+	if line == "rename-session" || strings.HasPrefix(line, "rename-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "rename-session"))
+		if strings.HasSuffix(m.sessionID, "-default") {
+			return true, m, seqPrint(errorStyle.Render("rename-session: cannot rename a default session"), 1)
+		}
+		if args == "" {
+			return true, m, seqPrint(errorStyle.Render("rename-session: provide a name or use -a"), 1)
+		}
+		if args == "-a" {
+			return true, m, seqPrint(errorStyle.Render("rename-session: -a flag not supported in ridealong context"), 1)
+		}
+		if err := updateSessionName(m.sessionDir, args); err != nil {
+			return true, m, seqPrint(errorStyle.Render("rename-session: "+err.Error()), 1)
+		}
+		return true, m, seqPrint(successStyle.Render("session renamed to: "+args), 0)
+	}
+
 	return false, m, nil
+}
+
+// handleSessionPickerKey handles key presses while the interactive session picker is active.
+func (m appModel) handleSessionPickerKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	sp := m.sessionPicker
+	switch msg.Type {
+	case tea.KeyUp:
+		if sp.cursor > 0 {
+			sp.cursor--
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		filtered := sp.filteredEntries()
+		if sp.cursor < len(filtered)-1 {
+			sp.cursor++
+		}
+		return m, nil
+
+	case tea.KeyEnter:
+		filtered := sp.filteredEntries()
+		if len(filtered) == 0 {
+			return m, nil
+		}
+		selected := filtered[sp.cursor]
+		cmdLine := sp.line
+		cmdTime := sp.cmdTime
+		deltaMs := sp.deltaMs
+		m.sessionPicker = nil
+		if selected.id == m.sessionID {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 0)
+			return m, tea.Println(sessionStyle.Render("already on session: " + selected.id))
+		}
+		newM, switchErr := m.switchToSession(selected.id)
+		if switchErr != nil {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-session: " + switchErr.Error()))
+		}
+		newM.logRecord(cmdLine, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("session set to: " + newM.sessionDir))
+
+	case tea.KeyEsc, tea.KeyCtrlC:
+		cmdLine := sp.line
+		cmdTime := sp.cmdTime
+		deltaMs := sp.deltaMs
+		m.sessionPicker = nil
+		m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+		return m, tea.Println(sessionStyle.Render("select-session: cancelled"))
+
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if len(sp.filter) > 0 {
+			runes := []rune(sp.filter)
+			sp.filter = string(runes[:len(runes)-1])
+			sp.cursor = 0
+		}
+		return m, nil
+
+	case tea.KeyRunes:
+		sp.filter += string(msg.Runes)
+		sp.cursor = 0
+		return m, nil
+
+	case tea.KeySpace:
+		sp.filter += " "
+		sp.cursor = 0
+		return m, nil
+
+	default:
+		return m, nil
+	}
+}
+
+// sessionPickerView renders the interactive session-selection overlay.
+func (m appModel) sessionPickerView(windowWidth int) string {
+	sp := m.sessionPicker
+	filtered := sp.filteredEntries()
+	cursor := sp.cursor
+	if len(filtered) > 0 && cursor >= len(filtered) {
+		cursor = len(filtered) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+
+	if windowWidth <= 0 {
+		windowWidth = 100
+	}
+	innerWidth := windowWidth - 4
+	if innerWidth < 40 {
+		innerWidth = 40
+	}
+
+	divider := sessionStyle.Render(strings.Repeat("─", innerWidth))
+
+	var rows []string
+	filterDisplay := sp.filter + "█"
+	rows = append(rows,
+		pickerTitleStyle.Render("select session"),
+		pickerFilterStyle.Render("filter: "+filterDisplay),
+		divider,
+	)
+
+	if len(filtered) == 0 {
+		rows = append(rows, pickerEmptyStyle.Render("  (no sessions match)"))
+	} else {
+		for i, entry := range filtered {
+			nameStr := ""
+			if entry.name != "" {
+				nameStr = " — " + entry.name
+			}
+			currentSuffix := ""
+			if entry.id == m.sessionID {
+				currentSuffix = pickerCurrentStyle.Render(" (current)")
+			}
+			row := fmt.Sprintf("%s (%d files)%s%s", entry.id, entry.fileCount, nameStr, currentSuffix)
+			if i == cursor {
+				rows = append(rows, pickerSelectedStyle.Render("▸ "+row))
+			} else {
+				rows = append(rows, pickerEntryStyle.Render("  "+row))
+			}
+		}
+	}
+
+	rows = append(rows, divider,
+		pickerHintStyle.Render("  ↑↓ navigate  enter to select  esc to cancel  type to filter  backspace to clear"),
+	)
+
+	content := strings.Join(rows, "\n")
+	pane := pickerBorderStyle.Width(innerWidth).Render(content)
+	return pane + "\n"
+}
+
+// buildSessionPicker reads the sessions directory (sessionsRoot of the records
+// root recordsPath) and returns an initialised SessionPicker, or nil if the
+// directory cannot be read.
+func buildSessionPicker(recordsPath string, line string, cmdTime time.Time, deltaMs int64) *SessionPicker {
+	sessionsDir := sessionsRoot(recordsPath)
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, e := range entries {
+		if e.IsDir() {
+			ids = append(ids, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+
+	pickerEntries := make([]sessionPickerEntry, 0, len(ids))
+	for _, id := range ids {
+		sessionPath := filepath.Join(sessionsDir, id)
+		files, _ := os.ReadDir(sessionPath)
+		name := readSessionName(sessionPath)
+		pickerEntries = append(pickerEntries, sessionPickerEntry{
+			id:        id,
+			name:      name,
+			fileCount: len(files),
+		})
+	}
+	return &SessionPicker{
+		entries: pickerEntries,
+		line:    line,
+		cmdTime: cmdTime,
+		deltaMs: deltaMs,
+	}
+}
+
+// handleAgentPickerKey handles keys for agent+model picker (right/left for model subselect).
+func (m appModel) handleAgentPickerKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	ap := m.agentPicker
+	switch msg.Type {
+	case tea.KeyUp:
+		if ap.modelMode {
+			if ap.modelCursor > 0 {
+				ap.modelCursor--
+			}
+		} else if ap.cursor > 0 {
+			ap.cursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		filtered := ap.filteredEntries()
+		if ap.modelMode {
+			if len(filtered) > 0 && ap.cursor < len(filtered) {
+				models := filtered[ap.cursor].models
+				if ap.modelCursor < len(models)-1 {
+					ap.modelCursor++
+				}
+			}
+		} else if ap.cursor < len(filtered)-1 {
+			ap.cursor++
+		}
+		return m, nil
+	case tea.KeyRight:
+		if !ap.modelMode {
+			filtered := ap.filteredEntries()
+			if len(filtered) > 0 && len(filtered[ap.cursor].models) > 0 {
+				ap.modelMode = true
+				ap.modelCursor = 0
+			}
+		}
+		return m, nil
+	case tea.KeyLeft:
+		if ap.modelMode {
+			ap.modelMode = false
+		}
+		return m, nil
+	case tea.KeyEnter:
+		// similar to session: apply selection (agent or model)
+		filtered := ap.filteredEntries()
+		if len(filtered) == 0 {
+			return m, nil
+		}
+		entry := filtered[ap.cursor]
+		cmdLine := ap.line
+		cmdTime := ap.cmdTime
+		deltaMs := ap.deltaMs
+		m.agentPicker = nil
+		if ap.modelMode && len(entry.models) > 0 {
+			model := entry.models[ap.modelCursor]
+			m.currentModel = model
+			agentChanged := entry.agent != m.currentAgent
+			m.currentAgent = entry.agent
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
+			m.logRecord(cmdLine, cmdTime, deltaMs, 0)
+			if agentChanged {
+				return m, tea.Println(successStyle.Render(fmt.Sprintf("agent set to: %s, model set to: %s", entry.agent, model)))
+			}
+			return m, tea.Println(successStyle.Render("model set to: " + model))
+		}
+		// select agent
+		if entry.agent == m.currentAgent {
+			m.logRecord(cmdLine, cmdTime, deltaMs, 0)
+			return m, tea.Println(sessionStyle.Render("already on agent: " + entry.agent))
+		}
+		m.currentAgent = entry.agent
+		m.currentModel = "" // clear model when only selecting agent
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
+		m.logRecord(cmdLine, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render("agent set to: " + entry.agent))
+	case tea.KeyEsc, tea.KeyCtrlC:
+		cmdLine := ap.line
+		cmdTime := ap.cmdTime
+		deltaMs := ap.deltaMs
+		m.agentPicker = nil
+		m.logRecord(cmdLine, cmdTime, deltaMs, 1)
+		return m, tea.Println(sessionStyle.Render("select-agent: cancelled"))
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		if len(ap.filter) > 0 {
+			runes := []rune(ap.filter)
+			ap.filter = string(runes[:len(runes)-1])
+			ap.cursor = 0
+		}
+		return m, nil
+	case tea.KeyRunes:
+		ap.filter += string(msg.Runes)
+		ap.cursor = 0
+		return m, nil
+	case tea.KeySpace:
+		ap.filter += " "
+		ap.cursor = 0
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+// agentPickerView renders agent list; right arrow shows models to the right.
+func (m appModel) agentPickerView(windowWidth int) string {
+	ap := m.agentPicker
+	filtered := ap.filteredEntries()
+	cursor := ap.cursor
+	if len(filtered) > 0 && cursor >= len(filtered) {
+		cursor = len(filtered) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if windowWidth <= 0 {
+		windowWidth = 100
+	}
+	innerWidth := windowWidth - 4
+	if innerWidth < 40 {
+		innerWidth = 40
+	}
+	divider := sessionStyle.Render(strings.Repeat("─", innerWidth))
+	var rows []string
+	filterDisplay := ap.filter + "█"
+	title := "select agent"
+	if ap.modelMode {
+		title = "select model (left arrow to return)"
+	}
+	rows = append(rows, pickerTitleStyle.Render(title), pickerFilterStyle.Render("filter: "+filterDisplay), divider)
+	if len(filtered) == 0 {
+		rows = append(rows, pickerEmptyStyle.Render("  (no agents match)"))
+	} else {
+		for i, entry := range filtered {
+			currentSuffix := ""
+			if entry.agent == m.currentAgent {
+				currentSuffix = pickerCurrentStyle.Render(" (current)")
+			}
+			if i == cursor {
+				row := "▸ " + entry.agent + currentSuffix
+				rows = append(rows, pickerSelectedStyle.Render(row))
+				if ap.modelMode && i == cursor && len(entry.models) > 0 {
+					for mi, mod := range entry.models {
+						mrow := "    " + mod
+						if mi == ap.modelCursor {
+							mrow = "  ▸ " + mod
+						}
+						rows = append(rows, pickerEntryStyle.Render(mrow))
+					}
+				}
+			} else {
+				rows = append(rows, pickerEntryStyle.Render("  "+entry.agent+currentSuffix))
+			}
+		}
+	}
+	rows = append(rows, divider, pickerHintStyle.Render("  ↑↓ nav  ←→ model/agent  enter select  esc cancel  type filter"))
+	content := strings.Join(rows, "\n")
+	pane := pickerBorderStyle.Width(innerWidth).Render(content)
+	return pane + "\n"
+}
+
+// buildAgentPicker builds from agentModelConfigs.
+func buildAgentPicker(line string, cmdTime time.Time, deltaMs int64) *AgentPicker {
+	var entries []agentPickerEntry
+	for name, cfg := range agentModelConfigs {
+		// Populate models dynamically when opening the picker so the list is accurate
+		models := getDynamicModels(name)
+		if len(models) == 0 {
+			models = cfg.Models
+		}
+		entries = append(entries, agentPickerEntry{agent: name, models: models})
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].agent < entries[j].agent })
+	return &AgentPicker{entries: entries, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+}
+
+// buildModelPickerForCurrent for select-model on current agent.
+func buildModelPickerForCurrent(m appModel, line string, cmdTime time.Time, deltaMs int64) *AgentPicker {
+	cfg, ok := agentModelConfigs[m.currentAgent]
+	models := getDynamicModels(m.currentAgent)
+	if len(models) == 0 {
+		models = cfg.Models
+	}
+	if !ok || len(models) == 0 {
+		return nil
+	}
+	entries := []agentPickerEntry{{agent: m.currentAgent, models: models}}
+	return &AgentPicker{entries: entries, line: line, cmdTime: cmdTime, deltaMs: deltaMs, modelMode: true, modelCursor: 0}
 }
 
 // handleRidealongKey handles key presses in ridealong mode
 func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	if m.ridealong.customCmdMenuActive {
+		return m.handleCustomCmdKey(msg)
+	}
 	switch msg.Type {
 	case tea.KeyEnter:
 		if m.ridealong.waypointMenuActive {
@@ -1451,12 +2920,18 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 		switch m.ridealong.MenuAction() {
 		case ridealongActionExit:
 			return m.exitRidealong()
+		case ridealongActionCustomCommand:
+			m.ridealong.OpenCustomCmdMenu()
+			return m, nil
 		case ridealongActionReview:
 			return m.reviewLastRidealongStep()
 		case ridealongActionFixReviewed:
 			return m.fixReviewedRidealongIssue()
 		case ridealongActionFixLastStep:
 			return m.fixLastRidealongStep()
+		case ridealongActionAutoProposeFix:
+			m.ridealong.ToggleAutoProposeFix()
+			return m, nil
 		case ridealongActionWaypoint:
 			m.ridealong.waypointMenuActive = true
 			m.ridealong.waypointMenuIndex = 0
@@ -1505,6 +2980,123 @@ func (m appModel) handleRidealongKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
 	}
 }
 
+// handleRidealongRemoteCmd dispatches a ridealong control action received from local-representative.
+// The action is the string after "__ridealong:" in the command.
+func (m appModel) handleRidealongRemoteCmd(action string) (appModel, tea.Cmd) {
+	if m.ridealong == nil || !m.ridealong.IsActive() {
+		return m, nil
+	}
+	switch {
+	case action == "execute":
+		return m.executeRidealongCommand()
+	case action == "exit":
+		return m.exitRidealong()
+	case action == "autoplay":
+		if m.ridealong.autoplay {
+			m.ridealong.AutoplayDeactivate()
+		} else {
+			m.ridealong.EnableAutoplay()
+		}
+		m.sendRidealongState()
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	case strings.HasPrefix(action, "waypoint:"):
+		name := strings.TrimPrefix(action, "waypoint:")
+		if m.ridealong.JumpToWaypoint(name) {
+			if m.ridealong.IsDiveStep() {
+				return m.enterDiveStep()
+			}
+			m.input.SetValue(m.ridealong.CurrentCommand())
+			m.blinker.SetState(BlinkerRidealong)
+		}
+		m.sendRidealongState()
+		return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
+	case strings.HasPrefix(action, "custom:"):
+		text := strings.TrimSpace(strings.TrimPrefix(action, "custom:"))
+		if text != "" {
+			return m.executeRidealongCustomCmd(text)
+		}
+	}
+	return m, nil
+}
+
+// handleCustomCmdKey handles key presses while the custom command sub-menu is open.
+func (m appModel) handleCustomCmdKey(msg tea.KeyMsg) (appModel, tea.Cmd) {
+	r := m.ridealong
+	switch msg.Type {
+	case tea.KeyEnter:
+		text := strings.TrimSpace(r.customCmdText)
+		if text == "" {
+			return m, nil
+		}
+		return m.executeRidealongCustomCmd(text)
+	case tea.KeyEsc:
+		r.CloseCustomCmdMenu()
+		return m, nil
+	case tea.KeyBackspace, tea.KeyCtrlH, tea.KeyDelete:
+		r.CustomCmdBackspace()
+		return m, nil
+	case tea.KeyCtrlC:
+		return m.exitRidealong()
+	case tea.KeyRunes:
+		r.CustomCmdAppend(string(msg.Runes))
+		return m, nil
+	case tea.KeySpace:
+		r.CustomCmdAppend(" ")
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+// executeRidealongCustomCmd runs an arbitrary command without advancing the ridealong step.
+func (m appModel) executeRidealongCustomCmd(text string) (appModel, tea.Cmd) {
+	r := m.ridealong
+	if r == nil {
+		return m, nil
+	}
+	r.CloseCustomCmdMenu()
+
+	m.ridealongDynapane.Deactivate()
+	m.input.SetValue("")
+	m.blinker.SetState(BlinkerInactive)
+
+	cmdTime := time.Now()
+	var deltaMs int64
+	if !m.lastCmdTime.IsZero() {
+		deltaMs = cmdTime.Sub(m.lastCmdTime).Milliseconds()
+	}
+	m.lastCmdTime = cmdTime
+
+	echoLine := m.input.Prompt + text
+	echo := m.printlnLogged(echoLine)
+
+	mkDone := func(err error) tea.Msg {
+		return ridealongCustomCmdDoneMsg{
+			exitCode: extractExitCode(err),
+			line:     text,
+			cmdTime:  cmdTime,
+			deltaMs:  deltaMs,
+		}
+	}
+
+	if strings.HasPrefix(text, "agent ") {
+		prompt := strings.TrimPrefix(text, "agent ")
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
+		if agentCmd == nil {
+			m.blinker.SetState(BlinkerRidealong)
+			return m, tea.Sequence(echo, tea.Println(errorStyle.Render(errOutput)),
+				m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
+		}
+		if m.visualLogPath != "" {
+			agentCmd = teeCommandAppend(agentCmd, m.visualLogPath)
+		}
+		return m, tea.Sequence(echo, deferRidealongExec(agentCmd, mkDone))
+	}
+
+	runCmd := buildRunCmd(text, m.recordsPath, m.sessionID, m.visualLogPath, m.reprOutPath)
+	return m, tea.Sequence(echo, deferRidealongExec(runCmd, mkDone))
+}
+
 // handleWaypointMenuSelect handles Enter in the waypoint sub-menu.
 func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
 	r := m.ridealong
@@ -1519,25 +3111,55 @@ func (m appModel) handleWaypointMenuSelect() (appModel, tea.Cmd) {
 	}
 	m.input.SetValue(r.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(r), m.blinker.ResetTick())
 }
 
 // exitRidealong exits ridealong mode and restores normal shell state
 func (m appModel) exitRidealong() (appModel, tea.Cmd) {
+	var finishedLogMsg tea.Cmd
 	if m.ridealong != nil && m.ridealong.debug && m.visualLogPath == m.ridealong.scrollbackLogPath && m.visualLogFile != nil {
+		finishedLogPath := m.visualLogPath
 		m.visualLogFile.Close()
 		m.visualLogFile = nil
 		m.visualLogPath = ""
+		finishedLogMsg = tea.Println(successStyle.Render("finished writing to: " + finishedLogPath))
+	}
+	if startPath := m.ridealong.RootStartPath(); startPath != "" && startPath != m.cwd {
+		if err := os.Chdir(startPath); err == nil {
+			m.oldCwd = m.cwd
+			m.cwd = startPath
+		}
 	}
 	m.ridealong.Deactivate()
 	m.ridealong = nil
+	m.sendRidealongState()
 	m.ridealongDynapane.Deactivate()
-	m.blinker.SetState(BlinkerIdle)
 	m.input.SetValue("")
-	m.input.Focus()
+	m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
+	// Restore the control mode that was active before the ridealong started.
+	switch m.ridealongPrevState {
+	case BlinkerConnected:
+		if m.reprClient != nil {
+			m.reprClient.SendState("remote-control")
+		}
+		m.blinker.SetState(BlinkerConnected)
+		m.input.Blur()
+	case BlinkerLocalControl:
+		if m.reprClient != nil {
+			m.reprClient.SendState("local-control")
+		}
+		m.blinker.SetState(BlinkerLocalControl)
+		m.input.Focus()
+	default:
+		m.blinker.SetState(BlinkerIdle)
+		m.input.Focus()
+	}
 	m.prevInputLen = 0
 	return m, tea.Batch(
 		tea.Println(sessionStyle.Render("ridealong ended")),
+		finishedLogMsg,
+		textinput.Blink,
 		m.blinker.ResetTick(),
 	)
 }
@@ -1562,6 +3184,10 @@ func (m appModel) advanceRidealong(exitCode int) (appModel, tea.Cmd) {
 	}
 	m.input.SetValue(m.ridealong.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	if exitCode != 0 && m.ridealong.debug && m.ridealong.autoProposeFix {
+		return m.reviewLastRidealongStep()
+	}
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
 }
 
@@ -1590,7 +3216,8 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 		parent:        m.ridealong,
 		waypoints:     result.waypoints,
 		waypointOrder: result.waypointOrder,
-		autoplay:      m.ridealong.autoplay,
+		autoplay:       m.ridealong.autoplay,
+		autoProposeFix: m.ridealong.autoProposeFix,
 	}
 	if m.ridealong.debug {
 		child.EnableDebug(m.ridealong.scrollbackLogPath)
@@ -1598,6 +3225,7 @@ func (m appModel) enterDiveStep() (appModel, tea.Cmd) {
 	m.ridealong = child
 	m.input.SetValue(child.CurrentCommand())
 	m.blinker.SetState(BlinkerRidealong)
+	m.sendRidealongState()
 	return m, tea.Batch(m.ridealongDynapane.Activate(child), m.blinker.ResetTick())
 }
 
@@ -1620,10 +3248,10 @@ func (m appModel) reviewLastRidealongStep() (appModel, tea.Cmd) {
 		return m, tea.Println(errorStyle.Render("ridealong debug: no scrollback log active"))
 	}
 	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
-	prompt := "Explain what happened in the last step of the ridealong with scrollback log " + m.ridealong.scrollbackLogPath
+	prompt := "Review the last step of the ridealong using scrollback log " + m.ridealong.scrollbackLogPath + ". Identify any issues and propose a specific fix plan for each issue found."
 	line := "agent -p " + shellQuote(prompt)
 	cachePath := filepath.Join(os.TempDir(), fmt.Sprintf("federation-command-ridealong-review-%s-%d.log", time.Now().Format("20060102-150405"), time.Now().UnixNano()))
-	agentCmd, errOutput := buildAgentPromptCmd(ModePrompt, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	agentCmd, errOutput := buildAgentPromptCmd(ModePrompt, prompt, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
 	if agentCmd == nil {
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
@@ -1660,9 +3288,13 @@ func (m appModel) fixLastRidealongStep() (appModel, tea.Cmd) {
 }
 
 func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
+	return m.runRidealongModePrompt(ModeWrite, prompt)
+}
+
+func (m appModel) runRidealongModePrompt(mode, prompt string) (appModel, tea.Cmd) {
 	m, cmdTime, deltaMs := m.prepareRidealongAgentRun()
-	line := "agent -w " + shellQuote(prompt)
-	agentCmd, errOutput := buildAgentPromptCmd(ModeWrite, prompt, m.currentAgent, m.currentModel, m.sessionDir)
+	line := "agent -" + mode + " " + shellQuote(prompt)
+	agentCmd, errOutput := buildAgentPromptCmd(mode, prompt, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
 	if agentCmd == nil {
 		m.blinker.SetState(BlinkerRidealong)
 		return m, tea.Batch(tea.Println(errOutput), m.ridealongDynapane.Activate(m.ridealong), m.blinker.ResetTick())
@@ -1670,7 +3302,11 @@ func (m appModel) runRidealongFixPrompt(prompt string) (appModel, tea.Cmd) {
 	if sp := m.ridealong.RootStartPath(); sp != "" {
 		agentCmd.Dir = sp
 	}
-	return m, deferRidealongExec(agentCmd, func(err error) tea.Msg {
+	runCmd := agentCmd
+	if m.visualLogPath != "" {
+		runCmd = teeCommandAppend(agentCmd, m.visualLogPath)
+	}
+	return m, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongFixDoneMsg{exitCode: extractExitCode(err), execErr: err, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
 	})
 }
@@ -1710,7 +3346,7 @@ func (m appModel) executeRidealongCommand() (appModel, tea.Cmd) {
 	}
 
 	// Regular command — run via subprocess
-	runCmd := buildRunCmd(currentCmd, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(currentCmd, m.recordsPath, m.sessionID, m.visualLogPath, m.reprOutPath)
 	return m, tea.Sequence(echo, deferRidealongExec(runCmd, func(err error) tea.Msg {
 		return ridealongCmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -1758,11 +3394,18 @@ func (m appModel) logRecord(line string, cmdTime time.Time, deltaMs int64, exitC
 		Timestamp: cmdTime.Format(time.RFC3339),
 		DeltaMs:   deltaMs,
 		ExitCode:  exitCode,
+		Host:      fcHostID,
+		Head:      fcHeadID,
 	}
 	m.encoder.Encode(record)
 }
 
 func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
+	// The first command on a new day moves a stale daily default onto
+	// today's before it runs, so it's logged in today's session.
+	m, rolloverNotice := m.rolloverDailyDefault(time.Now())
+	m.hadActivity = true
+
 	// Add to history
 	m.history = append(m.history, line)
 	m.historyIdx = len(m.history)
@@ -1770,12 +3413,17 @@ func (m appModel) executeCommand(line string) (appModel, tea.Cmd) {
 	appendHistoryEntry(historyFilePath(), line)
 
 	// If dynapane is open, roll it up first then execute.
+	var cmd tea.Cmd
 	if m.dynapane.IsActive() && line != "dynapane demo" {
 		m.pendingCmd = line
-		return m, m.dynapane.StartRollUp()
+		cmd = m.dynapane.StartRollUp()
+	} else {
+		m, cmd = m.executeCommandCore(line)
 	}
-
-	return m.executeCommandCore(line)
+	if rolloverNotice != "" {
+		cmd = tea.Sequence(tea.Println(rolloverNotice), cmd)
+	}
+	return m, cmd
 }
 
 func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
@@ -1836,11 +3484,13 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			ridealong.EnableDebug(logPath)
 			debugMsg = tea.Println(successStyle.Render("ridealong debug scrollback log: " + logPath))
 		}
+		m.ridealongPrevState = m.blinker.State()
 		m.ridealong = ridealong
 		m.blinker.SetState(BlinkerRidealong)
 		m.input.SetValue(ridealong.CurrentCommand())
 		m.input.Blur() // Disable normal input in ridealong mode
 		m.logRecord(line, cmdTime, deltaMs, 0)
+		m.sendRidealongState()
 		cmd := tea.Batch(debugMsg, m.ridealongDynapane.Activate(ridealong), m.blinker.ResetTick())
 		return m, cmd
 	}
@@ -1877,7 +3527,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 			}
 		}
 		m.lastExitCode = exitCode
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, exitCode, m.devMode)
 		m.logRecord(line, cmdTime, deltaMs, exitCode)
 		if output != "" {
 			return m, tea.Println(output)
@@ -1912,7 +3562,7 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		if isValidAgent(newAgent) {
 			m.currentAgent = newAgent
 			m.currentModel = ""
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			output = successStyle.Render("agent set to: " + m.currentAgent)
 		} else {
 			exitCode = 1
@@ -1941,12 +3591,12 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		newModel := strings.TrimSpace(strings.TrimPrefix(line, "set-model "))
 		var output string
 		var exitCode int
-		if err := setModel(m.currentAgent, newModel); err != nil {
+		if canonical, err := setModel(m.currentAgent, newModel); err != nil {
 			exitCode = 1
 			output = errorStyle.Render(err.Error())
 		} else {
-			m.currentModel = newModel
-			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+			m.currentModel = canonical
+			m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 			output = successStyle.Render("model set to: " + m.currentModel)
 		}
 		m.lastExitCode = exitCode
@@ -1963,13 +3613,13 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "clear-model" {
 		m.currentModel = ""
-		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode)
+		m.input.Prompt = buildPrompt(m.cwd, m.currentAgent, m.currentModel, m.lastExitCode, m.devMode)
 		m.logRecord(line, cmdTime, deltaMs, 0)
 		return m, tea.Println(successStyle.Render("model cleared - using agent's default"))
 	}
 
 	if line == "list-models" {
-		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.sessionDir)
+		cmd, fallbackText := buildListModelsCmd(m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
 		if cmd == nil {
 			m.logRecord(line, cmdTime, deltaMs, 0)
 			return m, tea.Println(fallbackText)
@@ -1982,30 +3632,68 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 
 	if line == "list-sessions" {
 		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(renderSessions(filepath.Dir(m.sessionDir), filepath.Base(m.sessionDir)))
+		remote := m.discoverRemoteSessions()
+		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID, remote))
+	}
+
+	// version (also available as "ufa version", handled by the "ufa "
+	// dispatch below)
+	if line == "version" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(ufaversion.Version))
+	}
+
+	// auto-connect | auto-connect enable | auto-connect disable (also
+	// available as "ufa fc auto-connect [<enable|disable>]", handled by the
+	// "ufa " dispatch below) -- see Revision I of Step3Prompt.md.
+	if line == "auto-connect" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(m.autoConnectStatusLine()))
+	}
+	if line == "auto-connect enable" {
+		cmd := m.enableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+	}
+	if line == "auto-connect disable" {
+		cmd := m.disableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+	}
+
+	if line == "select-session" {
+		sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
+		if sp == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-session: failed to read sessions directory"))
+		}
+		m.sessionPicker = sp
+		return m, nil
+	}
+
+	if line == "select-agent" {
+		ap := buildAgentPicker(line, cmdTime, deltaMs)
+		if ap == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-agent: no agents available"))
+		}
+		m.agentPicker = ap
+		return m, nil
+	}
+
+	if line == "select-model" {
+		ap := buildModelPickerForCurrent(m, line, cmdTime, deltaMs)
+		if ap == nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("select-model: no models for current agent"))
+		}
+		m.agentPicker = ap
+		return m, nil
 	}
 
 	// set-session <id>
 	if strings.HasPrefix(line, "set-session ") {
-		newSessionID := strings.TrimSpace(strings.TrimPrefix(line, "set-session "))
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
-			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
-		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			m.logRecord(line, cmdTime, deltaMs, 1)
-			return m, tea.Println(errorStyle.Render("set-session: " + err.Error()))
-		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(successStyle.Render("session set to: " + newSessionDir))
+		return m.handleSetSession(strings.TrimPrefix(line, "set-session "), "set-session", line, cmdTime, deltaMs)
 	}
 
 	if line == "set-session" {
@@ -2016,33 +3704,35 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	if line == "clear-session" {
 		now := time.Now()
 		newSessionID := fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
-		newSessionDir := filepath.Join(m.recordsPath, newSessionID)
-		if err := os.MkdirAll(newSessionDir, 0755); err != nil {
+		if err := createSessionWithID(m.recordsPath, newSessionID, newSessionID); err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("clear-session: " + err.Error()))
 		}
-		newLogFile, err := os.OpenFile(filepath.Join(newSessionDir, "session.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		newM, err := m.switchToSession(newSessionID)
 		if err != nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errorStyle.Render("clear-session: " + err.Error()))
 		}
-		m.logFile.Close()
-		m.logFile = newLogFile
-		m.encoder = json.NewEncoder(newLogFile)
-		m.sessionID = newSessionID
-		m.sessionDir = newSessionDir
-		os.Setenv(EnvAgentSession, newSessionID)
-		m.logRecord(line, cmdTime, deltaMs, 0)
-		return m, tea.Println(successStyle.Render("session reset to: " + newSessionDir))
+		newM.logRecord(line, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("session reset to: " + newM.sessionDir))
+	}
+
+	// new-session [-f <session>] [name] — creates a new named session via clauditable
+	if line == "new-session" || strings.HasPrefix(line, "new-session ") {
+		return m.handleNewSession(strings.TrimPrefix(line, "new-session"), line, cmdTime, deltaMs)
 	}
 
 	// agent <args>
 	if strings.HasPrefix(line, "agent ") {
 		prompt := strings.TrimPrefix(line, "agent ")
-		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.sessionDir)
+		agentCmd, errOutput := buildAgentCmd(prompt, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
 		if agentCmd == nil {
 			m.logRecord(line, cmdTime, deltaMs, 1)
 			return m, tea.Println(errOutput)
+		}
+		if m.reprOutPath != "" {
+			agentCmd.Env = append(agentCmd.Env, "FORCE_COLOR=1", "CLICOLOR_FORCE=1")
+			agentCmd = teeCommandAppend(agentCmd, m.reprOutPath)
 		}
 		return m, tea.ExecProcess(agentCmd, func(err error) tea.Msg {
 			return agentDoneMsg{
@@ -2102,8 +3792,47 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 		return m, tea.Println(successStyle.Render("scrollback log cleared: " + path))
 	}
 
+	// get-session
+	if line == "get-session" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
+	}
+
+	// get-head
+	if line == "get-head" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHeadInfo(fcHeadID))
+	}
+
+	// describe-session [-a]
+	if line == "describe-session" || strings.HasPrefix(line, "describe-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "describe-session"))
+		return m.handleDescribeSession(args, line, cmdTime, deltaMs)
+	}
+
+	// rename-session [name|-a]
+	if line == "rename-session" || strings.HasPrefix(line, "rename-session ") {
+		args := strings.TrimSpace(strings.TrimPrefix(line, "rename-session"))
+		return m.handleRenameSession(args, line, cmdTime, deltaMs)
+	}
+
+	// session-note <text> (alias for "ufa session note")
+	if line == "session-note" || strings.HasPrefix(line, "session-note ") {
+		return m.handleSessionNote(strings.TrimPrefix(line, "session-note"), line, cmdTime, deltaMs)
+	}
+
+	// session-resource <path> [-name <name>] (alias for "ufa session resource")
+	if line == "session-resource" || strings.HasPrefix(line, "session-resource ") {
+		return m.handleSessionResource(strings.TrimPrefix(line, "session-resource"), line, cmdTime, deltaMs)
+	}
+
+	// ufa [subcommand...]
+	if line == "ufa" || strings.HasPrefix(line, "ufa ") {
+		return m.handleUFACommand(line, cmdTime, deltaMs)
+	}
+
 	// Regular command - wrap with clauditable
-	runCmd := buildRunCmd(line, m.sessionDir, m.visualLogPath)
+	runCmd := buildRunCmd(line, m.recordsPath, m.sessionID, m.visualLogPath, m.reprOutPath)
 	return m, tea.ExecProcess(runCmd, func(err error) tea.Msg {
 		return cmdDoneMsg{
 			exitCode: extractExitCode(err),
@@ -2114,20 +3843,683 @@ func (m appModel) executeCommandCore(line string) (appModel, tea.Cmd) {
 	})
 }
 
-// buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
-// If logPath is non-empty, command output is tee'd to that file (non-interactive commands only).
-// Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
-	actualCmd := cmdLine
-	if logPath != "" {
-		escapedPath := "'" + strings.ReplaceAll(logPath, "'", "'\\''") + "'"
-		actualCmd = fmt.Sprintf("set -o pipefail; { %s; } 2>&1 | tee -a %s", cmdLine, escapedPath)
+// switchToSession points the session log at an existing session directory
+// and updates all session state. Does not log a command record — callers are
+// responsible for that.
+func (m appModel) switchToSession(newID string) (appModel, error) {
+	newSessionDir := filepath.Join(sessionsRoot(m.recordsPath), newID)
+	if info, err := os.Stat(newSessionDir); err != nil || !info.IsDir() {
+		return m, fmt.Errorf("session %q not found", newID)
+	}
+	m.encoder = sessionEncoder(newSessionDir)
+	m.sessionID = newID
+	m.sessionDir = newSessionDir
+	os.Setenv(EnvAgentSession, newID)
+	m.sendSessionState()
+	return m, nil
+}
+
+// handleNewSession creates a new named session via clauditable. args is
+// everything after "new-session": an optional "-f <session>" (the name or ID
+// of the session the new one follows, recorded as its follows_from -- see
+// parseFollowsFlag) and then the name. If the name is empty, it launches an
+// interactive bash prompt; otherwise calls clauditable synchronously.
+func (m appModel) handleNewSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	followsRef, name, parseErr := parseFollowsFlag(args)
+	if parseErr != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("new-session: " + parseErr.Error()))
+	}
+	name = stripSurroundingQuotes(name)
+	followsFrom := ""
+	if followsRef != "" {
+		id, err := resolveSessionRef(m.recordsPath, followsRef)
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: -f: " + err.Error()))
+		}
+		followsFrom = id
 	}
 
-	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command("bash", "-c", actualCmd)
-		cmd.Env = os.Environ()
-		return cmd
+	clauditablePath, findErr := findBinary("clauditable")
+	if findErr != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("new-session: clauditable not found — " + findErr.Error()))
+	}
+
+	if name != "" {
+		cmd := exec.Command(clauditablePath, "new-session", name)
+		cmd.Env = append(environWithoutClauditableGuard(), EnvAgentRecordsPath+"="+m.recordsPath)
+		out, runErr := cmd.Output()
+		if runErr != nil {
+			msg := runErr.Error()
+			if ee, ok := runErr.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+				msg = strings.TrimSpace(string(ee.Stderr))
+			}
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: " + msg))
+		}
+		newID := strings.TrimSpace(string(out))
+		if newID == "" {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: clauditable returned empty session ID"))
+		}
+		if err := applyFollowsFrom(m.recordsPath, newID, followsFrom); err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: " + err.Error()))
+		}
+		newM, switchErr := m.switchToSession(newID)
+		if switchErr != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("new-session: " + switchErr.Error()))
+		}
+		newM.logRecord(line, cmdTime, deltaMs, 0)
+		return newM, tea.Println(successStyle.Render("new session: " + newM.sessionDir))
+	}
+
+	// Interactive: bash prompt writes session ID to a temp file.
+	tmpFile, tmpErr := os.CreateTemp("", "ufa-new-session-*")
+	if tmpErr != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("new-session: " + tmpErr.Error()))
+	}
+	tmpFile.Close()
+	tmpPath := tmpFile.Name()
+	script := buildNewSessionScript(clauditablePath, m.recordsPath, tmpPath)
+	execCmd := exec.Command("bash", "-c", script)
+	return m, tea.ExecProcess(execCmd, func(procErr error) tea.Msg {
+		defer os.Remove(tmpPath)
+		exitCode := extractExitCode(procErr)
+		newID := ""
+		if exitCode == 0 {
+			if data, readErr := os.ReadFile(tmpPath); readErr == nil {
+				newID = strings.TrimSpace(string(data))
+			}
+			if newID == "" {
+				exitCode = 1
+			}
+		}
+		return sessionNewDoneMsg{exitCode: exitCode, newSessionID: newID, followsFrom: followsFrom, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+	})
+}
+
+// buildNewSessionScript returns a bash script that prompts for a session name,
+// calls clauditable new-session, and writes the resulting session ID to tmpPath.
+func buildNewSessionScript(clauditablePath, recordsPath, tmpPath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; R='\033[0m'
+printf "\n"
+printf "${Y}  ╔═══════════════════════════╗${R}\n"
+printf "${Y}  ║  ✦  New Session            ║${R}\n"
+printf "${Y}  ╚═══════════════════════════╝${R}\n"
+printf "\n"
+read -p "  Enter session name (blank for unnamed): " _ufa_name
+if [ -z "$_ufa_name" ]; then
+    _ufa_name="Unnamed - $(date '+%%Y-%%m-%%d - %%H:%%M:%%S')"
+fi
+AGENT_RECORDS_PATH=%s %s new-session "$_ufa_name" > %s
+`, escape(recordsPath), escape(clauditablePath), escape(tmpPath))
+}
+
+// handleUFACommand dispatches ufa subcommands.
+func (m appModel) handleUFACommand(line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	sub := strings.TrimSpace(strings.TrimPrefix(line, "ufa"))
+
+	switch sub {
+	case "", "help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHelpText())
+
+	case "host", "host help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHostHelpText())
+
+	case "host get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHostInfo(ufahostid.GetHostDetails()))
+
+	case "head", "head help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaHeadHelpText())
+
+	case "head get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderHeadInfo(fcHeadID))
+
+	case "session", "session help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaSessionHelpText())
+
+	case "session list":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		remote := m.discoverRemoteSessions()
+		return m, tea.Println(renderSessions(m.recordsPath, m.sessionID, remote))
+
+	case "session get":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(renderSessionInfo(m.sessionID, m.sessionDir))
+
+	case "version":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(ufaversion.Version))
+
+	case "fc", "fc help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaFcHelpText())
+
+	case "fc auto-connect":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(successStyle.Render(m.autoConnectStatusLine()))
+
+	case "fc auto-connect enable":
+		cmd := m.enableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+
+	case "fc auto-connect disable":
+		cmd := m.disableAutoConnect()
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Batch(tea.Println(successStyle.Render(m.autoConnectStatusLine())), cmd)
+
+	case "agent", "agent help", "agent model", "agent model help":
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(ufaAgentHelpText())
+
+	case "agent list":
+		return m, inspectAgentsCmd("", false, line, cmdTime, deltaMs)
+
+	case "session archive":
+		clauditablePath, err := findBinary("clauditable")
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("ufa session archive: clauditable not found — " + err.Error()))
+		}
+		recordsPath := m.recordsPath
+		archivePath := os.Getenv(EnvAgentRecordsArchivePath)
+		if archivePath == "" {
+			archivePath = recordsPath + "-archive"
+		}
+		script := buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath)
+		cmd := exec.Command("bash", "-c", script)
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+			return cmdDoneMsg{
+				exitCode: extractExitCode(err),
+				line:     line,
+				cmdTime:  cmdTime,
+				deltaMs:  deltaMs,
+			}
+		})
+
+	default:
+		if sub == "session new" || strings.HasPrefix(sub, "session new ") {
+			return m.handleNewSession(strings.TrimPrefix(sub, "session new"), line, cmdTime, deltaMs)
+		}
+		if sub == "session set" || strings.HasPrefix(sub, "session set ") {
+			return m.handleSetSession(strings.TrimPrefix(sub, "session set"), "ufa session set", line, cmdTime, deltaMs)
+		}
+		if sub == "session describe" || strings.HasPrefix(sub, "session describe ") {
+			args := strings.TrimSpace(strings.TrimPrefix(sub, "session describe"))
+			return m.handleDescribeSession(args, line, cmdTime, deltaMs)
+		}
+		if sub == "session rename" || strings.HasPrefix(sub, "session rename ") {
+			args := strings.TrimSpace(strings.TrimPrefix(sub, "session rename"))
+			return m.handleRenameSession(args, line, cmdTime, deltaMs)
+		}
+		if sub == "session note" || strings.HasPrefix(sub, "session note ") {
+			return m.handleSessionNote(strings.TrimPrefix(sub, "session note"), line, cmdTime, deltaMs)
+		}
+		if sub == "session resource" || strings.HasPrefix(sub, "session resource ") {
+			return m.handleSessionResource(strings.TrimPrefix(sub, "session resource"), line, cmdTime, deltaMs)
+		}
+		if sub == "agent model list" || strings.HasPrefix(sub, "agent model list ") {
+			agent := strings.TrimSpace(strings.TrimPrefix(sub, "agent model list"))
+			if agent == "" {
+				agent = m.currentAgent
+			}
+			if !isValidAgent(agent) {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ufa agent model list: unknown agent '"+agent+"'") + "\n" +
+					sessionStyle.Render("use 'ufa agent list' to see available agents"))
+			}
+			return m, inspectAgentsCmd(agent, true, line, cmdTime, deltaMs)
+		}
+		if sub == "session select" {
+			sp := buildSessionPicker(m.recordsPath, line, cmdTime, deltaMs)
+			if sp == nil {
+				m.logRecord(line, cmdTime, deltaMs, 1)
+				return m, tea.Println(errorStyle.Render("ufa session select: failed to read sessions directory"))
+			}
+			m.sessionPicker = sp
+			return m, nil
+		}
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		if strings.HasPrefix(sub, "session ") {
+			unknown := strings.TrimPrefix(sub, "session ")
+			return m, tea.Println(errorStyle.Render("ufa session: unknown subcommand '"+unknown+"'")+"\n"+ufaSessionHelpText())
+		}
+		if strings.HasPrefix(sub, "host ") {
+			unknown := strings.TrimPrefix(sub, "host ")
+			return m, tea.Println(errorStyle.Render("ufa host: unknown subcommand '"+unknown+"'")+"\n"+ufaHostHelpText())
+		}
+		if strings.HasPrefix(sub, "head ") {
+			unknown := strings.TrimPrefix(sub, "head ")
+			return m, tea.Println(errorStyle.Render("ufa head: unknown subcommand '"+unknown+"'")+"\n"+ufaHeadHelpText())
+		}
+		if strings.HasPrefix(sub, "fc ") {
+			unknown := strings.TrimPrefix(sub, "fc ")
+			return m, tea.Println(errorStyle.Render("ufa fc: unknown subcommand '"+unknown+"'")+"\n"+ufaFcHelpText())
+		}
+		if strings.HasPrefix(sub, "agent ") {
+			unknown := strings.TrimPrefix(sub, "agent ")
+			return m, tea.Println(errorStyle.Render("ufa agent: unknown subcommand '"+unknown+"'")+"\n"+ufaAgentHelpText())
+		}
+		return m, tea.Println(errorStyle.Render("ufa: unknown subcommand '"+sub+"'")+"\n"+ufaHelpText())
+	}
+}
+
+func ufaHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa — unified federation actions"),
+		"",
+		"  ufa help               show this help",
+		"  ufa version            print federation-command's version",
+		"  ufa host <sub>         host identification commands",
+		"  ufa head <sub>         head (instance) identification commands",
+		"  ufa session <sub>      session management commands",
+		"  ufa fc <sub>           federation-command auto-connect commands",
+		"  ufa agent <sub>        agents and models on this host",
+		"",
+		sessionStyle.Render("run 'ufa host help', 'ufa head help', 'ufa session help', 'ufa fc help', or 'ufa agent help' for subcommands"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaFcHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa fc — federation-command auto-connect"),
+		"",
+		"  ufa fc help                     show this help",
+		"  ufa fc auto-connect             show whether auto-connect is armed",
+		"  ufa fc auto-connect enable      arm auto-connect (also: 'auto-connect enable')",
+		"  ufa fc auto-connect disable     disarm auto-connect (also: 'auto-connect disable')",
+		"",
+		sessionStyle.Render("also available unprefixed: 'auto-connect [enable|disable]'"),
+		sessionStyle.Render("armed auto-connect stays armed across a successful connection, and resumes"),
+		sessionStyle.Render("on its own after an unintentional disconnect; an explicit disconnect (^C) disarms it"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaHostHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa host — host identification"),
+		"",
+		"  ufa host help    show this help",
+		"  ufa host get     show host ID and first-configured timestamp",
+		"",
+		sessionStyle.Render("host ID is read from ~/.ufa/host.yaml (created on first use)"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaHeadHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa head — head (instance) identification"),
+		"",
+		"  ufa head help    show this help",
+		"  ufa head get     show this FC instance's head ID",
+		"",
+		sessionStyle.Render("head ID is generated at FC startup and lasts for this process lifetime"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func ufaSessionHelpText() string {
+	lines := []string{
+		sessionStyle.Render("ufa session — session management"),
+		"",
+		"  ufa session help              show this help",
+		"  ufa session list              list all sessions",
+		"  ufa session select            interactively select a session",
+		"  ufa session new [-f <session>] [name]",
+		"                                create a new named session; -f records the",
+		"                                session (name or ID) it follows from",
+		"  ufa session set <id>          switch to an existing session",
+		"  ufa session get               show ID, name, and location of current session",
+		"  ufa session describe [-a]     show full session info; -a for agent description",
+		"  ufa session rename [name|-a]  rename current session",
+		"  ufa session note <text>       add a note to the current session",
+		"  ufa session resource <path> [-name <name>]",
+		"                                attach a file to the current session",
+		"  ufa session archive           archive all current sessions",
+		"",
+		sessionStyle.Render("note and resource are also available as 'session-note' and 'session-resource'"),
+		sessionStyle.Render("each session has an ID (folder name) and a name stored in session.yaml"),
+		sessionStyle.Render("session IDs ending in '-default' are reserved for daily defaults"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+// buildArchiveConfirmScript returns a bash script that shows a decorative confirmation
+// dialog before invoking 'clauditable archive'.
+func buildArchiveConfirmScript(clauditablePath, recordsPath, archivePath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; R='\033[0m'
+records_path=%s
+archive_path=%s
+printf "\n"
+printf "${Y}  ╔═══════════════════════════╗${R}\n"
+printf "${Y}  ║  ⚡ Archive Sessions       ║${R}\n"
+printf "${Y}  ╚═══════════════════════════╝${R}\n"
+printf "\n"
+printf "  ${W}From:${R} $records_path/sessions\n"
+printf "  ${W}To:${R}   $archive_path/<datetime>\n"
+printf "\n"
+printf "  This will move all sessions and cannot be easily undone.\n"
+printf "\n"
+read -p "  Type 'yes' to confirm, anything else to cancel: " _ufa_confirm
+if [ "$_ufa_confirm" = "yes" ]; then
+    AGENT_RECORDS_PATH="$records_path" AGENT_RECORDS_ARCHIVE_PATH="$archive_path" %s archive
+else
+    printf "\n  Archive cancelled.\n"
+    exit 1
+fi
+`, escape(recordsPath), escape(archivePath), escape(clauditablePath))
+}
+
+// readSessionName returns the name field from session.yaml, or empty string if not found.
+func readSessionName(sessionDir string) string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "name: ") {
+			return strings.TrimPrefix(line, "name: ")
+		}
+	}
+	return ""
+}
+
+// findSessionByName scans sessionsRoot(recordsPath) for the first session directory whose session.yaml name matches.
+func findSessionByName(recordsPath, name string) (string, error) {
+	sessionsDir := sessionsRoot(recordsPath)
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return "", fmt.Errorf("cannot read sessions directory: %v", err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if readSessionName(filepath.Join(sessionsDir, entry.Name())) == name {
+			return entry.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no session found with name %q", name)
+}
+
+// readSessionYAMLFields returns all key-value pairs from session.yaml in order.
+func readSessionYAMLFields(sessionDir string) [][2]string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return nil
+	}
+	var fields [][2]string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 && parts[0] != "" {
+			fields = append(fields, [2]string{parts[0], parts[1]})
+		}
+	}
+	return fields
+}
+
+// updateSessionName writes the new name into session.yaml, creating the file
+// if needed. A freshly-created file's owner is this host (fcHostID) --
+// see condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
+func updateSessionName(sessionDir, newName string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		sessionID := filepath.Base(sessionDir)
+		content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+			sessionID, newName, fcHostID, time.Now().Format(time.RFC3339))
+		return os.WriteFile(yamlPath, []byte(content), 0644)
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, l := range lines {
+		if strings.HasPrefix(l, "name: ") {
+			lines[i] = "name: " + newName
+			found = true
+			break
+		}
+	}
+	if !found {
+		newLines := make([]string, 0, len(lines)+1)
+		idInserted := false
+		for _, l := range lines {
+			newLines = append(newLines, l)
+			if !idInserted && strings.HasPrefix(l, "id: ") {
+				newLines = append(newLines, "name: "+newName)
+				idInserted = true
+			}
+		}
+		if !idInserted {
+			newLines = append(newLines, "name: "+newName)
+		}
+		lines = newLines
+	}
+	return os.WriteFile(yamlPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func renderHostInfo(d ufahostid.HostDetails) string {
+	lines := []string{
+		sessionStyle.Render("current host"),
+		"  ID:               " + d.ID,
+	}
+	if d.FirstConfigured != "" {
+		lines = append(lines, "  First configured: "+d.FirstConfigured)
+	}
+	if d.Created {
+		lines = append(lines, successStyle.Render("  host.yaml created"))
+	}
+	if d.AccessError {
+		lines = append(lines, devWarningStyle.Render("  host.yaml inaccessible — using hostname"))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderHeadInfo(headID string) string {
+	lines := []string{
+		sessionStyle.Render("current head"),
+		"  ID:    " + headID,
+		sessionStyle.Render("head ID is ephemeral — regenerated each time FC starts"),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderSessionInfo(sessionID, sessionDir string) string {
+	name := readSessionName(sessionDir)
+	if name == "" {
+		name = "(no name)"
+	}
+	return strings.Join([]string{
+		sessionStyle.Render("current session"),
+		"  ID:       " + sessionID,
+		"  Name:     " + name,
+		"  Location: " + sessionDir,
+	}, "\n")
+}
+
+// renderSessionDescribe returns session info plus all fields from session.yaml.
+func renderSessionDescribe(sessionID, sessionDir string) string {
+	fields := readSessionYAMLFields(sessionDir)
+	lines := []string{
+		sessionStyle.Render("current session"),
+		"  ID:       " + sessionID,
+		"  Location: " + sessionDir,
+	}
+	shown := map[string]bool{"id": true}
+	for _, f := range fields {
+		if f[0] == "id" {
+			continue
+		}
+		label := strings.ToUpper(f[0][:1]) + f[0][1:]
+		lines = append(lines, fmt.Sprintf("  %-9s %s", label+":", f[1]))
+		shown[f[0]] = true
+	}
+	if len(fields) == 0 {
+		lines = append(lines, "  (no session.yaml)")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// handleDescribeSession handles the describe-session command.
+// With -a it also runs the agent in read mode for a brief description.
+func (m appModel) handleDescribeSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	info := renderSessionDescribe(m.sessionID, m.sessionDir)
+	if args != "-a" {
+		m.logRecord(line, cmdTime, deltaMs, 0)
+		return m, tea.Println(info)
+	}
+	prompt := "Briefly describe in 2-3 sentences what has been going on in this session, based on the session records."
+	agentCmd, errMsg := buildAgentPromptCmd(ModeRead, prompt, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID)
+	if agentCmd == nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("describe-session: " + errMsg))
+	}
+	return m, tea.Sequence(
+		tea.Println(info),
+		tea.ExecProcess(agentCmd, func(err error) tea.Msg {
+			return cmdDoneMsg{exitCode: extractExitCode(err), line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		}),
+	)
+}
+
+// handleRenameSession handles the rename-session command.
+// With no args or insufficient info, returns an error.
+// With -a, uses an agent to suggest a name interactively.
+// Otherwise renames directly.
+func (m appModel) handleRenameSession(args, line string, cmdTime time.Time, deltaMs int64) (appModel, tea.Cmd) {
+	if strings.HasSuffix(m.sessionID, "-default") {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: cannot rename a default session"))
+	}
+
+	if args == "" {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: provide a name or use -a for agent suggestion"))
+	}
+
+	if args == "-a" {
+		ambiguousPath, err := findBinary("ambiguous-agent")
+		if err != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("rename-session: ambiguous-agent not found — " + err.Error()))
+		}
+		tmpFile, tmpErr := os.CreateTemp("", "ufa-rename-*")
+		if tmpErr != nil {
+			m.logRecord(line, cmdTime, deltaMs, 1)
+			return m, tea.Println(errorStyle.Render("rename-session: " + tmpErr.Error()))
+		}
+		tmpFile.Close()
+		tmpPath := tmpFile.Name()
+		script := buildRenameAgentScript(ambiguousPath, m.currentAgent, m.currentModel, m.recordsPath, m.sessionID, tmpPath)
+		execCmd := exec.Command("bash", "-c", script)
+		return m, tea.ExecProcess(execCmd, func(procErr error) tea.Msg {
+			defer os.Remove(tmpPath)
+			exitCode := extractExitCode(procErr)
+			newName := ""
+			if exitCode == 0 {
+				if data, readErr := os.ReadFile(tmpPath); readErr == nil {
+					newName = strings.TrimSpace(string(data))
+				}
+				if newName == "" {
+					exitCode = 1
+				}
+			}
+			return sessionRenameDoneMsg{exitCode: exitCode, newName: newName, line: line, cmdTime: cmdTime, deltaMs: deltaMs}
+		})
+	}
+
+	// Direct rename
+	if err := updateSessionName(m.sessionDir, args); err != nil {
+		m.logRecord(line, cmdTime, deltaMs, 1)
+		return m, tea.Println(errorStyle.Render("rename-session: " + err.Error()))
+	}
+	m.sendSessionState()
+	m.logRecord(line, cmdTime, deltaMs, 0)
+	return m, tea.Println(successStyle.Render("session renamed to: " + args))
+}
+
+// buildRenameAgentScript returns a bash script that asks the agent to suggest a session name,
+// prompts the user to accept/modify/cancel, and writes the final name to resultPath.
+func buildRenameAgentScript(ambiguousPath, agent, model, recordsPath, sessionID, resultPath string) string {
+	escape := func(s string) string {
+		return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+	}
+	modelFlag := ""
+	if model != "" {
+		modelFlag = " -m " + escape(model)
+	}
+	return fmt.Sprintf(`
+Y='\033[1;33m'; W='\033[1;37m'; G='\033[1;32m'; R='\033[0m'
+TMP_OUT=$(mktemp)
+printf "\n"
+printf "${Y}  ╔═══════════════════════════════╗${R}\n"
+printf "${Y}  ║  ✦  Rename Session (AI Assist) ║${R}\n"
+printf "${Y}  ╚═══════════════════════════════╝${R}\n"
+printf "\n"
+printf "  Asking agent to suggest a name...\n\n"
+AGENT_RECORDS_PATH=%s AGENT_SESSION=%s %s -r -a %s%s \
+    "Based on the session records here, suggest a short name (3-7 words) for this session. Output ONLY the name, nothing else." \
+    2>&1 | tee "$TMP_OUT"
+SUGGESTED=$(sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$TMP_OUT" | grep -v '^[[:space:]]*$' | grep -Ev '^(invoking |● session:|agent completed|agent exited)' | tail -1)
+rm -f "$TMP_OUT"
+printf "\n"
+if [ -z "$SUGGESTED" ]; then
+    printf "  ${W}No suggestion returned from agent.${R}\n"
+    exit 1
+fi
+printf "  ${W}Suggested name:${R} ${G}${SUGGESTED}${R}\n\n"
+read -p "  [enter/y] accept, [n] cancel, or type a new name: " _choice
+case "$_choice" in
+    ""|y|Y) printf '%%s' "$SUGGESTED" > %s ;;
+    n|N) printf "\n  Rename cancelled.\n"; exit 1 ;;
+    *) printf '%%s' "$_choice" > %s ;;
+esac
+`, escape(recordsPath), escape(sessionID), escape(ambiguousPath), escape(agent), modelFlag, escape(resultPath), escape(resultPath))
+}
+
+// buildRunCmd builds an exec.Cmd for a shell command (wrapped with clauditable if available).
+// logPath and reprOutPath are optional tee targets (non-interactive commands only).
+// Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
+// recordsPath is the records ROOT (AGENT_RECORDS_PATH), not the session's
+// directory: clauditable finds the session under its sessions/ itself.
+func buildRunCmd(cmdLine, recordsPath, sessionID, logPath, reprOutPath string) *exec.Cmd {
+	actualCmd := cmdLine
+	escape := func(p string) string {
+		return "'" + strings.ReplaceAll(p, "'", "'\\''") + "'"
+	}
+	switch {
+	case logPath != "" && reprOutPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s | tee -a %s",
+			cmdLine, escape(logPath), escape(reprOutPath))
+	case logPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escape(logPath))
+	case reprOutPath != "":
+		actualCmd = fmt.Sprintf("set -o pipefail; {\n%s\n} 2>&1 | tee -a %s", cmdLine, escape(reprOutPath))
 	}
 
 	clauditablePath, err := findBinary("clauditable")
@@ -2138,22 +4530,51 @@ func buildRunCmd(cmdLine, sessionDir, logPath string) *exec.Cmd {
 	}
 
 	cmd := exec.Command(clauditablePath, "bash", "-c", actualCmd)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
+		EnvAgentRecordsPath+"="+recordsPath,
+		EnvAgentSession+"="+sessionID,
 		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	cmd.Env = env
 	return cmd
 }
 
+// sendNewOutputToRepr reads lines appended to path since offset and sends each via client.SendOutput.
+// Returns the new file offset after reading.
+func sendNewOutputToRepr(path string, offset int64, client *representable.Client) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return offset
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() <= offset {
+		return offset
+	}
+	if _, err := f.Seek(offset, 0); err != nil {
+		return offset
+	}
+	buf := make([]byte, fi.Size()-offset)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return offset
+	}
+	for _, line := range strings.Split(string(buf[:n]), "\n") {
+		if line != "" {
+			client.SendOutput(stripAnsiCodes(line))
+		}
+	}
+	return offset + int64(n)
+}
+
 // buildAgentCmd builds an exec.Cmd for agent invocation, parsing mode flags and -provide-records.
 // Returns (nil, errMsg) if the invocation is invalid.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
+func buildAgentCmd(input, agent, model, recordsPath, sessionID string) (*exec.Cmd, string) {
 	mode := ModeRead
+	selectedAgent := agent
 	args := parseArgs(input)
 	var promptParts []string
 	var provideRecordsSessions []string
@@ -2168,6 +4589,11 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 			mode = ModeWrite
 		case "-x":
 			mode = ModeExecute
+		case "-a":
+			if i+1 < len(args) {
+				i++
+				selectedAgent = args[i]
+			}
 		case "-provide-records":
 			if i+1 < len(args) {
 				i++
@@ -2190,7 +4616,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 
 	var agentArgs []string
 	agentArgs = append(agentArgs, "-"+mode)
-	agentArgs = append(agentArgs, "-a", agent)
+	agentArgs = append(agentArgs, "-a", selectedAgent)
 	if model != "" {
 		agentArgs = append(agentArgs, "-m", model)
 	}
@@ -2198,12 +4624,6 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 		agentArgs = append(agentArgs, "-provide-records", id)
 	}
 	agentArgs = append(agentArgs, prompt)
-
-	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
 
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
@@ -2214,12 +4634,12 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 
 	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
-		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
+		EnvAgentRecordsPath+"="+recordsPath,
+		EnvAgentSession+"="+sessionID,
+		"UFA_AGENT="+selectedAgent,
+		EnvUFAHead+"="+fcHeadID,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2228,7 +4648,7 @@ func buildAgentCmd(input, agent, model, sessionDir string) (*exec.Cmd, string) {
 	return cmd, ""
 }
 
-func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.Cmd, string) {
+func buildAgentPromptCmd(mode, prompt, agent, model, recordsPath, sessionID string) (*exec.Cmd, string) {
 	if strings.TrimSpace(prompt) == "" {
 		return nil, errorStyle.Render("no prompt provided")
 	}
@@ -2244,12 +4664,6 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 	}
 	agentArgs = append(agentArgs, prompt)
 
-	if os.Getenv(EnvIsClauditable) == "true" {
-		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
 	clauditablePath, err := findBinary("clauditable")
 	if err != nil {
 		cmd := exec.Command(ambiguousAgentPath, agentArgs...)
@@ -2259,12 +4673,12 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 
 	clauditableArgs := append([]string{ambiguousAgentPath}, agentArgs...)
 	cmd := exec.Command(clauditablePath, clauditableArgs...)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
+		EnvAgentRecordsPath+"="+recordsPath,
+		EnvAgentSession+"="+sessionID,
 		"UFA_AGENT="+agent,
-		EnvIsClauditable+"=true",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	if model != "" {
 		env = append(env, "UFA_MODEL="+model)
@@ -2275,6 +4689,21 @@ func buildAgentPromptCmd(mode, prompt, agent, model, sessionDir string) (*exec.C
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// stripSurroundingQuotes removes one matching pair of leading/trailing
+// double or single quotes from s, e.g. `"My New Session"` -> `My New
+// Session`. Used for new-session's name argument, which is typed directly
+// into the REPL line (not shell-parsed), so a user quoting a multi-word name
+// out of habit would otherwise end up with the quotes baked into the name.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {
@@ -2292,19 +4721,24 @@ func teeCommand(cmd *exec.Cmd, outputPath string) *exec.Cmd {
 	return teeCmd
 }
 
+func teeCommandAppend(cmd *exec.Cmd, outputPath string) *exec.Cmd {
+	var quotedArgs []string
+	for _, arg := range cmd.Args {
+		quotedArgs = append(quotedArgs, shellQuote(arg))
+	}
+	teeCmd := exec.Command("bash", "-c", fmt.Sprintf("set -o pipefail; %s 2>&1 | tee -a %s", strings.Join(quotedArgs, " "), shellQuote(outputPath)))
+	if cmd.Env != nil {
+		teeCmd.Env = cmd.Env
+	} else {
+		teeCmd.Env = os.Environ()
+	}
+	teeCmd.Dir = cmd.Dir
+	return teeCmd
+}
+
 // buildListModelsCmd builds an exec.Cmd for listing models, or returns fallback text if unavailable.
 // Stdin/Stdout/Stderr are NOT set; tea.ExecProcess handles those.
-func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, string) {
-	if os.Getenv(EnvIsClauditable) == "true" {
-		ambiguousAgentPath, err := findBinary("ambiguous-agent")
-		if err != nil {
-			return nil, renderModelsFallback(agent, currentModel)
-		}
-		cmd := exec.Command(ambiguousAgentPath, "--list-models", "-a", agent)
-		cmd.Env = os.Environ()
-		return cmd, ""
-	}
-
+func buildListModelsCmd(agent, currentModel, recordsPath, sessionID string) (*exec.Cmd, string) {
 	ambiguousAgentPath, err := findBinary("ambiguous-agent")
 	if err != nil {
 		return nil, renderModelsFallback(agent, currentModel)
@@ -2318,12 +4752,12 @@ func buildListModelsCmd(agent, currentModel, sessionDir string) (*exec.Cmd, stri
 	}
 
 	cmd := exec.Command(clauditablePath, ambiguousAgentPath, "--list-models", "-a", agent)
-	env := os.Environ()
+	env := environWithoutClauditableGuard()
 	env = append(env,
-		EnvAgentRecordsPath+"="+filepath.Dir(sessionDir),
-		EnvAgentSession+"="+filepath.Base(sessionDir),
+		EnvAgentRecordsPath+"="+recordsPath,
+		EnvAgentSession+"="+sessionID,
 		"UFA_AGENT=none",
-		EnvIsClauditable+"=true",
+		EnvUFAHead+"="+fcHeadID,
 	)
 	cmd.Env = env
 	return cmd, ""
@@ -2339,54 +4773,103 @@ func isValidAgent(name string) bool {
 	return false
 }
 
-// setModel validates and sets the model for the current agent
-func setModel(agent string, model string) error {
-	cfg, ok := agentModelConfigs[agent]
-	if !ok || cfg.ModelFlag == "" {
-		return fmt.Errorf("agent '%s' does not support model selection", agent)
+// matchListedModel accepts an exact provider/model id or a unique model id
+// suffix (grok-4.7 -> xai/grok-4.7).
+func matchListedModel(models []string, model string) (string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", fmt.Errorf("empty model")
 	}
+	var suffix []string
+	for _, listed := range models {
+		if listed == model {
+			return listed, nil
+		}
+		if strings.HasSuffix(listed, "/"+model) {
+			suffix = append(suffix, listed)
+		}
+	}
+	switch len(suffix) {
+	case 1:
+		return suffix[0], nil
+	case 0:
+		return "", fmt.Errorf("model %q is not available", model)
+	default:
+		return "", fmt.Errorf("model %q is ambiguous: %s", model, strings.Join(suffix, ", "))
+	}
+}
 
+func filterChatModels(models []string) []string {
+	var out []string
+	for _, model := range models {
+		if !strings.Contains(strings.ToLower(model), "imagine") {
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
+func getDynamicModels(agent string) []string {
 	var models []string
-
-	// Query models dynamically for agents that support it
 	switch agent {
+	case "pi":
+		cmd := exec.Command("pi", "--list-models")
+		output, err := cmd.Output()
+		if err == nil {
+			models = parsePiModels(string(output))
+		}
 	case "opencode":
 		cmd := exec.Command("opencode", "models")
 		output, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to query models from opencode: %v - ensure it's installed", err)
-		}
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				models = append(models, line)
+		if err == nil {
+			for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					models = append(models, line)
+				}
 			}
+			models = filterChatModels(models)
 		}
 	case "grok":
 		cmd := exec.Command("grok", "models")
 		output, err := cmd.Output()
-		if err != nil {
-			return fmt.Errorf("failed to query models from grok: %v - ensure it's installed", err)
-		}
-		models = parseGrokModels(string(output))
-	default:
-		// For agents without dynamic model listing, accept the model without validation
-		return nil
-	}
-
-	valid := false
-	for _, m := range models {
-		if m == model {
-			valid = true
-			break
+		if err == nil {
+			models = parseGrokModels(string(output))
 		}
 	}
-	if !valid {
-		return fmt.Errorf("model '%s' is not available for agent '%s'", model, agent)
+	if len(models) == 0 {
+		if cfg, ok := agentModelConfigs[agent]; ok {
+			return cfg.Models
+		}
+	}
+	return models
+}
+
+// setModel validates a model for the current agent and returns the canonical
+// id (provider/model when the user passed a unique suffix).
+func setModel(agent string, model string) (string, error) {
+	cfg, ok := agentModelConfigs[agent]
+	if !ok || cfg.ModelFlag == "" {
+		return "", fmt.Errorf("agent '%s' does not support model selection", agent)
 	}
 
-	return nil
+	models := getDynamicModels(agent)
+	if len(models) == 0 {
+		// If we couldn't fetch dynamic models and there are no static ones, just accept it
+		return model, nil
+	}
+
+	var canonical string
+	var err error
+	if agent == "pi" {
+		canonical, err = matchPiModel(models, model)
+	} else {
+		canonical, err = matchListedModel(models, model)
+	}
+	if err != nil {
+		return "", fmt.Errorf("%w for agent '%s'", err, agent)
+	}
+	return canonical, nil
 }
 
 // renderAgents returns a styled string listing available agents
@@ -2583,7 +5066,11 @@ func processExportAssignment(assignment string) error {
 		return fmt.Errorf("'%s': not a valid identifier", name)
 	}
 
-	if strings.Contains(value, "$(") || strings.Contains(value, "`") {
+	needsBash := strings.Contains(value, "$(") || strings.Contains(value, "`")
+	if !needsBash && len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' && strings.Contains(value, "$") {
+		needsBash = true
+	}
+	if needsBash {
 		script := assignment + "\nprintf '%s' \"$" + name + "\""
 		out, err := exec.Command("bash", "-c", script).Output()
 		if err != nil {
@@ -2661,7 +5148,7 @@ func abbreviatePath(path string, maxLen int) string {
 	return result
 }
 
-func buildPrompt(cwd string, agent string, model string, lastExitCode int) string {
+func buildPrompt(cwd string, agent string, model string, lastExitCode int, devMode bool) string {
 	dir := abbreviatePath(cwd, 30)
 	color := agentColors[agent]
 	if color == "" {
@@ -2675,7 +5162,14 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 	} else {
 		promptLabel = "[" + agent + "]"
 	}
-	prompt := agentPromptStyle.Render(promptLabel) + " " + promptStyle.Render(dir) + " > "
+	// Revision B: the cursor itself ('>') also renders in devModeStyle's green
+	// while --dev-mode is on, alongside the blinker's green brackets — see
+	// docs/DevMode.md.
+	cursor := "> "
+	if devMode {
+		cursor = devModeStyle.Render(cursor)
+	}
+	prompt := agentPromptStyle.Render(promptLabel) + " " + promptStyle.Render(dir) + " " + cursor
 	if lastExitCode != 0 {
 		rcStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 		prompt = rcStyle.Render(fmt.Sprintf("[%d]", lastExitCode)) + " " + prompt
@@ -2687,6 +5181,24 @@ func buildPrompt(cwd string, agent string, model string, lastExitCode int) strin
 // (unlimited) so View() can perform explicit wrapping via wrapAtWidth.
 func setPromptWidth(input *textinput.Model, prompt string, windowWidth int) {
 	input.Prompt = prompt
+}
+
+// environWithoutClauditableGuard returns the current environment with
+// CLAUDITABLE_ALREADY_ACTIVE stripped. federation-command's own process may
+// have inherited that flag from whatever launched it (e.g. an outer
+// clauditable wrap), but that says nothing about whether the individual
+// command we're about to dispatch has been recorded. Without stripping it,
+// a freshly-spawned clauditable child would see the inherited flag and
+// silently skip recording for every command, for the life of the shell.
+func environWithoutClauditableGuard() []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, EnvClauditableAlreadyActive+"=") {
+			filtered = append(filtered, kv)
+		}
+	}
+	return filtered
 }
 
 // findBinary finds a binary by checking PATH first, then the directory of the running executable
@@ -2705,6 +5217,16 @@ func findBinary(name string) (string, error) {
 	}
 
 	return "", fmt.Errorf("%s not found on PATH or in %s", name, filepath.Dir(self))
+}
+
+func fcRandomAlphanumeric(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = chars[r.Intn(len(chars))]
+	}
+	return string(b)
 }
 
 // devBinaries returns the names of binaries running from /AI-evo1-dev/bin
@@ -2760,8 +5282,57 @@ func parseArgs(input string) []string {
 
 // stripAnsiCodes removes ANSI escape sequences from a string
 func stripAnsiCodes(s string) string {
-	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[mG]`)
+	ansiRegex := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// parsePiModels reads `pi --list-models` table rows as provider/id.
+func parsePiModels(output string) []string {
+	var models []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(stripAnsiCodes(line))
+		if line == "" || strings.HasPrefix(line, "Warning:") || strings.HasPrefix(line, "No models") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || (fields[0] == "provider" && fields[1] == "model") {
+			continue
+		}
+		models = append(models, fields[0]+"/"+fields[1])
+	}
+	return models
+}
+
+// matchPiModel accepts provider/id, a unique id suffix, or a unique fuzzy
+// substring (hello-pi's sonnet / gemini / grok patterns).
+func matchPiModel(models []string, model string) (string, error) {
+	if resolved, err := matchListedModel(models, model); err == nil {
+		return resolved, nil
+	}
+	needle := strings.ToLower(strings.TrimSpace(model))
+	if needle == "" {
+		return "", fmt.Errorf("empty model")
+	}
+	var hits []string
+	for _, listed := range models {
+		id := listed
+		if i := strings.LastIndex(listed, "/"); i >= 0 {
+			id = listed[i+1:]
+		}
+		lowID := strings.ToLower(id)
+		lowListed := strings.ToLower(listed)
+		if lowID == needle || strings.Contains(lowID, needle) || strings.Contains(lowListed, needle) {
+			hits = append(hits, listed)
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], nil
+	case 0:
+		return "", fmt.Errorf("model %q is not available", model)
+	default:
+		return "", fmt.Errorf("model %q is ambiguous: %s", model, strings.Join(hits, ", "))
+	}
 }
 
 // parseGrokModels parses the output of 'grok models' command
@@ -2852,21 +5423,29 @@ func modeDescription(mode string) string {
 	}
 }
 
-// renderSessions returns a styled string listing available sessions
-func renderSessions(recordsPath string, currentSession string) string {
+// renderSessions returns a styled string listing available sessions, plus
+// any remote entries returned so far -- see discoverRemoteSessions. remote
+// entries whose ID is already among the local sessions are skipped: that ID
+// isn't "remote" to this host once it has its own copy (e.g. already
+// pulled). recordsPath is the records root; the sessions listed are those in
+// sessionsRoot(recordsPath).
+func renderSessions(recordsPath string, currentSession string, remote []remoteSessionEntry) string {
 	var b strings.Builder
-	entries, err := os.ReadDir(recordsPath)
+	sessionsDir := sessionsRoot(recordsPath)
+	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
-		return errorStyle.Render(fmt.Sprintf("Error reading records directory: %v", err))
+		return errorStyle.Render(fmt.Sprintf("Error reading sessions directory: %v", err))
 	}
 
-	b.WriteString(sessionStyle.Render(fmt.Sprintf("available sessions in %s:", recordsPath)))
+	b.WriteString(sessionStyle.Render(fmt.Sprintf("available sessions in %s:", sessionsDir)))
 	b.WriteString("\n\n")
 
 	var sessions []string
+	known := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			sessions = append(sessions, entry.Name())
+			known[entry.Name()] = true
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(sessions)))
@@ -2878,10 +5457,28 @@ func renderSessions(recordsPath string, currentSession string) string {
 			prefix = "  -> "
 			suffix = " (current)"
 		}
-		sessionPath := filepath.Join(recordsPath, session)
+		sessionPath := filepath.Join(sessionsDir, session)
 		files, _ := os.ReadDir(sessionPath)
 		fileCount := len(files)
-		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)", prefix, session, suffix, fileCount)))
+		name := readSessionName(sessionPath)
+		nameStr := ""
+		if name != "" {
+			nameStr = " — " + name
+		}
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("%s%s%s (%d files)%s", prefix, session, suffix, fileCount, nameStr)))
+		b.WriteString("\n")
+	}
+
+	for _, r := range remote {
+		if known[r.ID] {
+			continue
+		}
+		known[r.ID] = true
+		nameStr := ""
+		if r.Name != "" {
+			nameStr = " — " + r.Name
+		}
+		b.WriteString(sessionStyle.Render(fmt.Sprintf("    %s (remote on %s)%s", r.ID, r.HostID, nameStr)))
 		b.WriteString("\n")
 	}
 
@@ -2890,27 +5487,254 @@ func renderSessions(recordsPath string, currentSession string) string {
 	return b.String()
 }
 
-func main() {
-	for _, arg := range os.Args[1:] {
-		switch arg {
-		case "--version", "-v":
-			fmt.Printf("federation-command %s\n", Version)
-			return
+// cliConfig holds federation-command's resolved startup options. Values come
+// from (lowest to highest priority) the built-in defaults,
+// ~/.ufa/config/global.yaml, the per-app ~/.ufa/config/federation-command.yaml,
+// the FC_* environment variables, and finally the command-line flags. See
+// README.md for the config keys.
+type cliConfig struct {
+	autoConnect bool   // --auto-connect / auto-connect / FC_AUTO_CONNECT: dial local-representative in the background on startup
+	remote      bool   // derived: true whenever autoConnect is set — a machine-driven auto-launch/auto-connect chain always adopts remote control (no separate --remote flag)
+	lrAddr      string // local-representative representable address (--lr-host / --lr-port / FC_LR_HOST / FC_LR_PORT override host / port)
+	devMode     bool   // --dev-mode / dev-mode / FC_DEV_MODE: launched from an in-progress dev branch — see docs/DevMode.md. Unrelated to the ambiguous-agent-style "--dev" flag other sub-apps use for frontend development.
+	// session is the session ID to begin with (--session / session / FC_SESSION),
+	// taking priority over AGENT_SESSION and the clauditable default-session
+	// lookup in main — see docs/DevMode.md-style launch-arg cascading. Set by
+	// local-representative when relaunching a managed federation-command
+	// instance, so a restart lands back in the same session (see
+	// local-representative/procman.go's managedApps["federation-command"]).
+	session string
+}
+
+// Config-file keys recognised for federation-command (see README.md).
+const (
+	cfgKeyAutoConnect = "auto-connect"
+	cfgKeyLRHost      = "lr-host"
+	cfgKeyLRPort      = "lr-port"
+	cfgKeyDevMode     = "dev-mode"
+	cfgKeySession     = "session"
+)
+
+// Environment variables recognised for the local-representative connection.
+// local-representative sets these when it auto-launches FC so the machine-driven
+// chain survives being started inside a terminal emulator / tmux / screen that
+// could otherwise drop trailing argv. Priority: config file < environment < CLI
+// flags.
+const (
+	envAutoConnect = "FC_AUTO_CONNECT"
+	envLRHost      = "FC_LR_HOST"
+	envLRPort      = "FC_LR_PORT"
+	// envDevMode is set by a dev-mode local-representative when it auto-launches
+	// FC, so a managed instance always cascades its launcher's mode (see
+	// docs/DevMode.md) even if the terminal wrapper mangles trailing argv.
+	envDevMode = "FC_DEV_MODE"
+	// envSession is set by local-representative when relaunching a managed FC
+	// instance it already knows the session of, so a dropped argv still lands
+	// FC back in the same session (mirrors envAutoConnect/envDevMode).
+	envSession = "FC_SESSION"
+	// envInstanceID is set by local-representative to tag a managed FC instance.
+	envInstanceID = "FC_INSTANCE_ID"
+)
+
+// launchEnvVars are the FC_* variables a launcher hands to this one FC process.
+var launchEnvVars = []string{envAutoConnect, envLRHost, envLRPort, envDevMode, envSession, envInstanceID}
+
+// clearLaunchEnv removes launchEnvVars from this process's environment once
+// they have been read. Without it every shell and agent FC spawns would inherit
+// them, so an FC (or `go test`) started from one of those shells would silently
+// auto-connect, enter dev mode and claim this instance's ID and session.
+func clearLaunchEnv() {
+	for _, k := range launchEnvVars {
+		os.Unsetenv(k)
+	}
+}
+
+// envTruthy interprets a boolean-ish environment variable. Unset, "", "0",
+// "false", "no" and "off" (any case) are false; anything else is true.
+func envTruthy(key string) (val, set bool) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return false, false
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return false, true
+	default:
+		return true, true
+	}
+}
+
+// parseCLIArgs loads the ufa-configurable config files (honouring a --config
+// directory override) and then applies command-line flags on top. handled is
+// true when the args triggered a terminal action (e.g. --version) and main
+// should just exit.
+func parseCLIArgs(args []string) (cfg cliConfig, handled bool, err error) {
+	configDir, rest, err := ufaconfig.ExtractConfigDir(args)
+	if err != nil {
+		return cfg, false, err
+	}
+	conf, err := ufaconfig.Load("federation-command", configDir)
+	if err != nil {
+		return cfg, false, err
+	}
+	return parseCLIArgsWithConfig(rest, conf)
+}
+
+// parseCLIArgsWithConfig seeds cliConfig from conf, then lets the flags in args
+// override it (flags always win). args must already have any --config flag
+// removed.
+func parseCLIArgsWithConfig(args []string, conf *ufaconfig.Config) (cfg cliConfig, handled bool, err error) {
+	if cfg.autoConnect, err = conf.Bool(cfgKeyAutoConnect, false); err != nil {
+		return cfg, false, err
+	}
+	if cfg.devMode, err = conf.Bool(cfgKeyDevMode, false); err != nil {
+		return cfg, false, err
+	}
+	port, err := conf.Int(cfgKeyLRPort, DefaultLRPort)
+	if err != nil {
+		return cfg, false, err
+	}
+	if port <= 0 || port > 65535 {
+		return cfg, false, fmt.Errorf("invalid %s value %d in config (want 1-65535)", cfgKeyLRPort, port)
+	}
+	host := conf.String(cfgKeyLRHost, DefaultLRHost)
+	cfg.session = conf.String(cfgKeySession, "")
+
+	// Environment overrides sit between the config file and the CLI flags: a
+	// launcher (local-representative) sets FC_* so the connection is configured
+	// even when a terminal wrapper mangles trailing argv.
+	if v, set := envTruthy(envAutoConnect); set {
+		cfg.autoConnect = v
+	}
+	if v, set := envTruthy(envDevMode); set {
+		cfg.devMode = v
+	}
+	if v := strings.TrimSpace(os.Getenv(envLRHost)); v != "" {
+		host = v
+	}
+	if v := strings.TrimSpace(os.Getenv(envLRPort)); v != "" {
+		if port, err = parseLRPort(v); err != nil {
+			return cfg, false, fmt.Errorf("%s: %w", envLRPort, err)
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv(envSession)); v != "" {
+		cfg.session = v
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--version" || arg == "-v":
+			fmt.Printf("federation-command %s\n", ufaversion.Version)
+			return cfg, true, nil
+		case arg == "--auto-connect" || arg == "-auto-connect":
+			cfg.autoConnect = true
+		case arg == "--dev-mode" || arg == "-dev-mode":
+			cfg.devMode = true
+		case arg == "--lr-host" || arg == "-lr-host":
+			if i+1 >= len(args) {
+				return cfg, false, fmt.Errorf("--lr-host requires a value")
+			}
+			i++
+			host = args[i]
+		case strings.HasPrefix(arg, "--lr-host="):
+			host = strings.TrimPrefix(arg, "--lr-host=")
+		case strings.HasPrefix(arg, "-lr-host="):
+			host = strings.TrimPrefix(arg, "-lr-host=")
+		case arg == "--lr-port" || arg == "-lr-port":
+			if i+1 >= len(args) {
+				return cfg, false, fmt.Errorf("--lr-port requires a value")
+			}
+			i++
+			if port, err = parseLRPort(args[i]); err != nil {
+				return cfg, false, err
+			}
+		case strings.HasPrefix(arg, "--lr-port="):
+			if port, err = parseLRPort(strings.TrimPrefix(arg, "--lr-port=")); err != nil {
+				return cfg, false, err
+			}
+		case strings.HasPrefix(arg, "-lr-port="):
+			if port, err = parseLRPort(strings.TrimPrefix(arg, "-lr-port=")); err != nil {
+				return cfg, false, err
+			}
+		case arg == "--session" || arg == "-session":
+			if i+1 >= len(args) {
+				return cfg, false, fmt.Errorf("--session requires a value")
+			}
+			i++
+			cfg.session = args[i]
+		case strings.HasPrefix(arg, "--session="):
+			cfg.session = strings.TrimPrefix(arg, "--session=")
+		case strings.HasPrefix(arg, "-session="):
+			cfg.session = strings.TrimPrefix(arg, "-session=")
+		}
+		// Unknown arguments are ignored for backward compatibility.
+	}
+	// Remote control is no longer a separate switch: auto-connect implies it.
+	// Whenever FC is told to dial local-representative in the background it is
+	// part of a machine-driven auto-launch/auto-connect chain, which must land in
+	// remote control so local-representative can drive it without a keystroke at
+	// the FC terminal.
+	cfg.remote = cfg.autoConnect
+	cfg.lrAddr = fmt.Sprintf("%s:%d", host, port)
+	return cfg, false, nil
+}
+
+// parseLRPort validates a --lr-port value.
+func parseLRPort(s string) (int, error) {
+	p, err := strconv.Atoi(s)
+	if err != nil || p <= 0 || p > 65535 {
+		return 0, fmt.Errorf("invalid --lr-port value %q (want 1-65535)", s)
+	}
+	return p, nil
+}
+
+func main() {
+	fcHeadID = "fc-" + fcRandomAlphanumeric(4)
+	fcHostID = ufahostid.GetHostID()
+	fcInstanceID = strings.TrimSpace(os.Getenv(envInstanceID))
+
+	cfg, handled, err := parseCLIArgs(os.Args[1:])
+	clearLaunchEnv()
+	if handled {
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	recordsPath := os.Getenv(EnvAgentRecordsPath)
 	if recordsPath == "" {
 		recordsPath = DefaultRecordsPath
 	}
-
-	// Create session directory
-	now := time.Now()
-	sessionID := os.Getenv(EnvAgentSession)
-	if sessionID == "" {
-		sessionID = fmt.Sprintf("%s_%d", now.Format("2006-01-02_15-04-05"), now.Unix())
+	// Sessions live under <records>/sessions/ now; move any still directly
+	// under the root before anything looks for one (best-effort -- see
+	// layout.go).
+	if _, err := migrateLegacySessions(recordsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "federation-command: warning: migrating legacy sessions: %v\n", err)
 	}
-	sessionDir := filepath.Join(recordsPath, sessionID)
+
+	// Resolve session: use today's default when AGENT_SESSION is unset or "default".
+	// --session / FC_SESSION (cfg.session) wins over AGENT_SESSION -- it's how
+	// local-representative hands a managed instance back its prior session on
+	// restart (see condocs/initialDistributedSessionsImpls/Step2Prompt.md
+	// Revision B and local-representative/procman.go's
+	// managedApps["federation-command"]).
+	now := time.Now()
+	sessionID := strings.TrimSpace(cfg.session)
+	if sessionID == "" {
+		sessionID = os.Getenv(EnvAgentSession)
+	}
+	// A daily default from an earlier day only ever arrives here because
+	// local-representative handed back the session a previous instance (or
+	// session-manager) last reported -- daily defaults can't be chosen
+	// explicitly -- so it means "the default", i.e. today's (see
+	// sessions_daily.go).
+	if sessionID == "" || sessionID == "default" || staleDailyDefault(sessionID, now) {
+		sessionID = resolveDefaultSessionID(recordsPath, now)
+	}
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), sessionID)
 
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "error creating session directory: %v\n", err)
@@ -2920,21 +5744,41 @@ func main() {
 	os.Setenv(EnvAgentRecordsPath, recordsPath)
 	os.Setenv(EnvAgentSession, sessionID)
 
-	logPath := filepath.Join(sessionDir, "session.jsonl")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating session log: %v\n", err)
-		os.Exit(1)
-	}
-	defer logFile.Close()
-
-	encoder := json.NewEncoder(logFile)
-
-	model := newAppModel(recordsPath, sessionID, sessionDir, logFile, encoder)
+	model := newAppModel(recordsPath, sessionID, sessionDir, cfg)
 
 	p := tea.NewProgram(model, tea.WithInput(os.Stdin))
+
+	restartReason := make(chan string, 1)
+	go watchRestartSignal(p, restartReason)
+
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	// If the TUI stopped because watchRestartSignal asked it to (rather than
+	// the user quitting normally), announce the restart now that the
+	// terminal has been restored — this must be the final act before exit,
+	// see ufa-loader/README.md and docs/DevMode.md's "Loader" section.
+	select {
+	case reason := <-restartReason:
+		if err := restartsignal.Announce(os.Stdout, "federation-command", reason); err != nil {
+			fmt.Fprintf(os.Stderr, "restartsignal.Announce: %v\n", err)
+		}
+	default:
+	}
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, tells p to
+// quit (so the terminal is restored before anything else is printed) and
+// sends the trigger reason on restartReason for main to announce and exit
+// with once p.Run() returns. The signal is sent directly to this process's
+// own pid (e.g. `kill -HUP <pid>`), not through ufa-loader itself. Run in
+// its own goroutine; returns once it has handled one signal.
+func watchRestartSignal(p *tea.Program, restartReason chan<- string) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	<-sigCh
+	restartReason <- "sighup"
+	p.Quit()
 }

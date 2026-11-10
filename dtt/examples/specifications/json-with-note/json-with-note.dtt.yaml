@@ -1,0 +1,40 @@
+# DTT example specification -- an included composition, called, and a note beside what it made (see ../../../README.md "Calls and phases").
+#
+# The directory is an in-place call whose .dtttc includes dtt's
+# filesystem-json composition (examples/compositions/filesystem-json.dtt.yaml),
+# so this document can call it (dtt.calls) though it isn't in the
+# directory. Phase json calls it -- asserting it writes /tmp/my-json.json --
+# and phase note writes /tmp/my-json.note.txt, saying which mode the call
+# ran in and when. The images its executions return are kept in images/
+# beside it (.gitignore keeps them out of git); the call's own image is
+# inside each, as the called-json object's state.
+#
+#   dtt read   examples/specifications/json-with-note
+#   dtt assert examples/specifications/json-with-note
+#   dtt delete examples/specifications/json-with-note --image <the assert's image, in images/>
+
+timestamp:
+  select: now
+
+dtt.calls:
+  select:
+    document: compositions/filesystem-json.dtt.yaml
+  alias: called-json
+  phase: json
+  assert:
+    variables:
+
+filesystem.items:
+  select:
+    abspath: /tmp/
+  alias: note-dir
+  phase: note
+
+note-dir:
+  assert:
+    items:
+      my-json.note.txt:
+        type: text
+        content: |
+          /tmp/my-json.json is dtt's filesystem-json composition, called (${{called-json.mode}}) by the json-with-note specification at ${{timestamp.iso}}.
+        from.content: "*"

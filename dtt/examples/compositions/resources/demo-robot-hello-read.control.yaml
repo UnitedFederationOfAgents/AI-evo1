@@ -1,0 +1,77 @@
+# local-representative control library: the robot's first hello world on a
+# node prepared by dtt-demo-prepare, for dtt's localrep-demo-robot-hello-read
+# example (../localrep-demo-robot-hello-read.dtt.yaml), which imports it into
+# the library of the node it targets and runs it there.
+#
+# The robot opens the demo page the preparation put on the desktop
+# (file: demo-<time>.html) in a browser of its own, waits to see the page's
+# heading, reads back off the screen when the page says the node was
+# prepared, has its screen captured into the files tab (a screenshot the
+# demo's record keeps as an artifact), and closes the page with ctrl+w --
+# leaving the demo's workspace empty for the shutdown. The node's screen is
+# recorded from the page opening to the end (steps 3-6). Every action is its
+# own (dtt-demo-rh-read-*), so importing this replaces none of the library's
+# other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-rh-read-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-rh-read-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-rh-read-open
+    name: Open the demo page with the robot
+    description: "robot: open the demo page in a new browser window of its own, on the demo's workspace, and wait for its heading to show on screen"
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+      - name: browser
+        label: Browser
+        default: "google-chrome --user-data-dir=/tmp/dtt-demo-rh-read-browser --no-first-run --no-default-browser-check --start-maximized --new-window"
+    do:
+      - {op: robot.open, path: "{{file}}", app: "{{browser}}"}
+      - {op: robot.wait-for-text, text: "Demo on {{this_node}}", exact: "false", timeout: 30s}
+  - id: dtt-demo-rh-read-read
+    name: Read the page back off the screen
+    description: "robot: read, off the screen, when the page says this node was prepared"
+    do:
+      - {op: robot.read-text, pattern: "demo at (.+)", near: "prepared for", save_as: prepared_at, report: "the page says it was prepared at"}
+  - id: dtt-demo-rh-read-capture
+    name: Capture the screen
+    description: "robot: screenshot this node's screen into the files tab, the page on it"
+    do:
+      - {op: node-capture, node: "{{this_node}}", name: robot-hello-read}
+  - id: dtt-demo-rh-read-close
+    name: Close the demo page
+    description: "robot: close the page's window, leaving the workspace empty again"
+    do:
+      - {op: robot.key, keys: ctrl+w}
+      - {op: robot.wait, duration: 1s}
+      - {op: output, label: hello, value: "hello world from {{this_node}}: the robot read its demo page back off the screen"}
+sequences:
+  - id: dtt-demo-rh-read
+    name: "Robot hello: read the demo page"
+    description: Start the robot if need be and wake the screen, then have the robot open the demo page on the desktop, read it back off the screen, capture the screen and close the page -- with this node's screen recorded while the robot works.
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+        help: the demo page dtt-demo-prepare put on the desktop (~ is the node user's home); dtt's examples name it demo-<unix seconds>.html
+    steps:
+      - action: dtt-demo-rh-read-robot
+      - action: dtt-demo-rh-read-wake
+      - action: dtt-demo-rh-read-open
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-rh-read-read
+      - action: dtt-demo-rh-read-capture
+      - action: dtt-demo-rh-read-close
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 6, label: "robot hello: read"}

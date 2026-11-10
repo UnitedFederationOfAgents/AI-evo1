@@ -1,0 +1,4 @@
+# An in-place tool call (../../../docs/terms.md, "In-place and pathless
+# calls"): this directory holds its document and everything it reads, and
+# the images its executions return are kept in images/ here.
+document: slopspace-cat-story.dtt.yaml

@@ -2,11 +2,15 @@
 
 BINARY_NAME=clauditable
 
+# Repo-level version, embedded into the binary below -- see docs/DevMode.md
+# "Versioning" and scripts/compute-version.sh.
+VERSION := $(shell bash ../scripts/compute-version.sh)
+
 all: build
 
 # Build the Go binary
 build:
-	go build -o $(BINARY_NAME) .
+	go build -ldflags "-X ufa-version.Version=$(VERSION)" -o $(BINARY_NAME) .
 
 # Build Docker image
 docker-build:

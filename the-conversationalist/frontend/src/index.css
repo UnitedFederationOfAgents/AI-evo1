@@ -1,0 +1,746 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Dev mode (--dev-mode, see docs/DevMode.md): matches the other sub-apps' green
+   outline + fixed "DEV MODE" tag so every sub-app in this repo discloses it
+   the same way. */
+.app-dev-mode {
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
+}
+
+.app-dev-mode::before {
+  content: 'DEV MODE';
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #6ec96e;
+  color: #0d1f0d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 10px;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
+.mode-mismatch-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---- Sidebar ---- */
+
+.sidebar-wrap {
+  display: contents;
+}
+
+.sidebar {
+  width: 260px;
+  min-width: 180px;
+  background: #252526;
+  border-right: 1px solid #3c3c3c;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+}
+
+.sidebar-header h1 {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cccccc;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-version-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: #666;
+}
+
+/* ---- Main content ---- */
+
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-size: 14px;
+  text-align: center;
+  padding: 0 24px;
+}
+
+/* ---- Transcription panel (Revision D) ---- */
+
+.transcribe-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 20px;
+  gap: 10px;
+}
+
+.transcribe-controls {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transcribe-recording-dot {
+  animation: transcribe-pulse 1s infinite;
+}
+
+@keyframes transcribe-pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+
+.transcribe-output {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: #d4d4d4;
+}
+
+.transcribe-partial {
+  color: #888;
+  font-style: italic;
+}
+
+.transcribe-placeholder {
+  color: #555;
+}
+
+.transcribe-save-status {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 3px;
+}
+
+.transcribe-save-pending { background: #3a3316; color: #d9a800; }
+.transcribe-save-success { background: #17301a; color: #4ec94e; }
+.transcribe-save-error   { background: #331a1a; color: #e07070; }
+
+/* Transcription-engine availability (Step5Prompt.md Revision A). */
+.transcribe-availability {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #888;
+}
+
+.transcribe-availability-unavailable {
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 3px;
+  background: #331a1a;
+  color: #e07070;
+}
+
+.transcribe-availability-warning {
+  padding: 8px 10px;
+  border-radius: 3px;
+  background: #2a1f14;
+  color: #d1a24e;
+  word-break: break-word;
+}
+
+.transcribe-availability-reason {
+  margin-top: 2px;
+  color: #c09090;
+  word-break: break-word;
+}
+
+/* ---- Notepad panel (initialRobotImpls/Step5Prompt.md) --
+   shared quick notes beneath the transcription panel; the transcription
+   panel keeps the larger share of the column. */
+
+.notepad-panel {
+  flex: 0 0 35%;
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+  padding: 0 20px 16px;
+  gap: 6px;
+}
+
+.notepad-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.notepad-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #bbb;
+}
+
+.notepad-hint {
+  font-size: 11px;
+  color: #666;
+}
+
+/* notepad-body puts SpeakButton beside the textarea, the same flex-sibling
+   layout as local-representative's field-with-mic. */
+.notepad-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.notepad-input {
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  resize: none;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #d4d4d4;
+  outline: none;
+}
+
+.notepad-input:focus {
+  border-color: #007acc;
+}
+
+.notepad-input[readonly] {
+  color: #777;
+}
+
+/* speak-btn mirrors local-representative's .mic-btn sizing and grey palette
+   (App.tsx's SpeakButton), lit blue while speaking. */
+.speak-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  padding: 3px;
+  background: #2d2d2d;
+  color: #999;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.speak-btn svg { width: 100%; height: 100%; display: block; }
+
+.speak-btn:hover:not(:disabled) { background: #333; color: #d4d4d4; border-color: #555; }
+
+.speak-btn:disabled { opacity: 0.4; cursor: default; }
+
+.speak-btn-active,
+.speak-btn-active:hover:not(:disabled) { color: #4fc1ff; border-color: #007acc; }
+
+/* ---- AWS Polly (Step5SubstepGPrompt.md Revision I) --
+   App.tsx's PollyButton stacks under SpeakButton; it pulses while waiting
+   for the server's audio, and a failure shows on a line under the notepad. */
+
+.notepad-speak-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.speak-btn-waiting { animation: speak-btn-wait 1s ease-in-out infinite alternate; }
+
+@keyframes speak-btn-wait { from { opacity: 1; } to { opacity: 0.4; } }
+
+.polly-error {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #e07070;
+}
+
+/* The Polly "save" toggle under its button, and where a saved clip went. */
+.polly-save-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: #999;
+  cursor: pointer;
+}
+
+.polly-saved {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #8a8a8a;
+}
+
+/* ---- Polly configuration (dTT-IntegrationImpls/Step3Prompt.md) --
+   App.tsx's small gear beside the Polly button, and the menu it opens in
+   place of the notepad: the configurations, an editor for one, and the
+   recent clips with their replay buttons. */
+
+.polly-buttons {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.polly-gear-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-top: 1px;
+  padding: 1px;
+  background: none;
+  color: #777;
+  border: none;
+  cursor: pointer;
+}
+
+.polly-gear-btn svg { width: 100%; height: 100%; display: block; }
+
+.polly-gear-btn:hover { color: #d4d4d4; }
+
+.polly-menu {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.polly-menu-header { align-items: center; }
+
+.polly-menu-up { padding: 2px 8px; }
+
+.polly-menu-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.polly-menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.polly-menu-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+}
+
+.polly-menu-hint {
+  font-size: 11px;
+  color: #777;
+}
+
+.polly-config-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.polly-config-row:hover { background: #2a2a2a; }
+
+.polly-config-row-selected { border-color: #007acc; background: #252526; }
+
+.polly-config-name { min-width: 80px; color: #d4d4d4; font-weight: 600; }
+
+.polly-config-voice { min-width: 130px; color: #bbb; }
+
+.polly-config-price { min-width: 44px; color: #8a8a8a; font-variant-numeric: tabular-nums; }
+
+.polly-config-desc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #777;
+}
+
+.polly-badge {
+  font-size: 10px;
+  padding: 0 5px;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  color: #888;
+}
+
+.polly-edit-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 360px);
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 12px;
+  color: #999;
+}
+
+.polly-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.polly-clip-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.polly-clip-main { flex: 1; min-width: 0; }
+
+.polly-clip-text {
+  font-size: 12px;
+  color: #d4d4d4;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.polly-clip-meta {
+  font-size: 10px;
+  color: #777;
+}
+
+/* ---- To Notes (Step5SubstepGPrompt.md Revision C) --
+   App.tsx's ToNotesButton, in the transcription controls row and at the
+   right end of the notepad header, with a one-line result beside it. */
+
+.to-notes {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.notepad-header .to-notes {
+  margin-left: auto;
+  align-self: center;
+}
+
+.to-notes-status {
+  font-size: 11px;
+  color: #4ec94e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.to-notes-error { color: #e07070; }
+
+/* ---- Capture mode (Step2Prompt.md) --
+   the whole UI shown inside condocv2's small floating iframe (App.tsx's
+   CaptureApp) -- no sidebar, no repr footer, just the live transcript and
+   the one action that hands it back. */
+
+.tc-capture-app {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  gap: 10px;
+}
+
+.tc-capture-status {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #999;
+}
+
+.tc-capture-error { color: #e07070; }
+
+.tc-capture-output {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: #d4d4d4;
+}
+
+.tc-capture-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- Buttons ---- */
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  border: none;
+  border-radius: 3px;
+  padding: 5px 12px;
+  transition: background 0.1s;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-secondary { background: #3c3c3c; color: #cccccc; }
+.btn-secondary:hover:not(:disabled) { background: #4a4a4a; }
+
+.btn-primary   { background: #0e639c; color: white; }
+.btn-primary:hover:not(:disabled)   { background: #1177bb; }
+
+/* ---- Connection status ---- */
+
+.conn-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+
+.conn-dot.connected    { background: #4ec94e; }
+.conn-dot.disconnected { background: #e07070; }
+.conn-dot.connecting   { background: #d9a800; }
+
+/* ---- Announcements (announce self, announce start) ---- */
+
+.announce-controls {
+  flex-shrink: 0;
+  border-top: 1px solid #3c3c3c;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Clips played for this host (pollyplay.go): what's playing, what's queued. */
+.host-playback {
+  flex-shrink: 0;
+  border-top: 1px solid #3c3c3c;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.host-playback-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.host-playback-how {
+  color: #999;
+}
+
+.host-playback-blocked {
+  color: #e5c07b;
+}
+
+.host-playback-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---- Representable connect/disconnect widget ---- */
+
+.repr-footer {
+  flex-shrink: 0;
+  border-top: 1px solid #3c3c3c;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.repr-footer-status {
+  display: flex;
+  align-items: center;
+}
+
+.repr-footer-label {
+  font-size: 11px;
+  color: #aaa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.repr-footer-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.repr-footer-input {
+  flex: 1;
+  min-width: 0;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 5px;
+  border-radius: 3px;
+}
+
+.repr-footer-input-port {
+  flex: 0 0 44px;
+}
+
+.repr-footer-addr {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repr-footer-form button {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.repr-footer-auto-connect {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #aaa;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ---- Mobile layout (Revision H) ----
+ *
+ * `.app`'s row layout (fixed 260px sidebar + flex:1 main-content) is fine
+ * at desktop widths, but an embedding iframe (local-representative's/
+ * agent-coordinator's embed-frame) takes on the real device viewport width
+ * on a phone, so the sidebar alone ate most of a narrow screen and the
+ * transcribe-controls button row (Start/Stop Transcription, Save to File)
+ * overflowed past `.app`'s `overflow: hidden` -- reachable only by scrolling
+ * a container that doesn't scroll. Kept to a CSS-only fix since the sidebar
+ * has no per-tab navigation to justify an off-canvas drawer. */
+@media (max-width: 760px) {
+  .app {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    min-width: 0;
+    border-right: none;
+    border-bottom: 1px solid #3c3c3c;
+  }
+
+  .transcribe-controls {
+    flex-wrap: wrap;
+  }
+}

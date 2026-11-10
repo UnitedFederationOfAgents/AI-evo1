@@ -1,0 +1,17 @@
+# Suite -- Robot hello world: three short robot demos, one after another.
+#
+# The demo tab's first suite (PrivateRepoOps Step 5). It runs the three
+# robot hello-world demos in turn on the same local system under test:
+# the robot reads its demo page back off the screen, writes a note and
+# reads that back, and zooms the page in and out. Each demo leads in and
+# tears down on its own, so one that fails leaves the node ready for the
+# next, and the suite carries on.
+#
+# Their variables are asked for once, up front: node (a pick-list of the
+# nodes connected to agent-coordinator) goes to all three, greeting to the
+# two that take one.
+demos:
+  - robot-hello-read
+  - robot-hello-note
+  - robot-hello-zoom
+on_failure: continue

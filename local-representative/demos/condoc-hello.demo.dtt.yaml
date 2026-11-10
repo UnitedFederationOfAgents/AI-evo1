@@ -1,0 +1,159 @@
+# Demo -- condocv2 hello world: propose a condoc in the browser, withdraw it from a terminal.
+#
+# The same lead-in / tear-down shape as session-hello, with condocv2 as the
+# subject area: a general lead-in, condocv2's lead-in, the subject,
+# condocv2's tear-down and the general tear-down. It is a DTT composition,
+# duplicated from dtt's localrep-demo-condoc example, and each phase calls
+# one of dtt's examples (found among dtt's own examples/):
+#
+#   lead-in           localrep-demo-prepare: wake the node, put the demo
+#                     page on its desktop and switch to an empty workspace.
+#   condoc-lead-in    localrep-demo-condoc-prepare: make sure condocv2 is
+#                     running, and open a terminal and, beside it, a Chrome
+#                     window on the node's condocv2 propose page.
+#   hello             localrep-demo-condoc-hello: the robot proposes
+#                     HelloWorld-<time> in condocv2, which the terminal finds
+#                     in the pointer repo; the terminal withdraws it, which
+#                     the robot sees in condocv2.
+#   condoc-tear-down  localrep-demo-condoc-shutdown: close that Chrome and
+#                     the terminal (condocv2 keeps running).
+#   tear-down         localrep-demo-shutdown: delete the page and switch
+#                     back to the first workspace.
+#   compose           composer puts the five renders together, with a
+#                     chapter card before each, into
+#                     demo-condoc-hello-<time>, a WebM in the files tab.
+#
+# Nothing runs an agent: the proposal is never accepted, so all it leaves is
+# two commits in condocv2's pointer repo. A phase that fails stops the ones
+# after it -- a failed hello leaves condocv2's windows open (and perhaps the
+# proposal, to withdraw in condocv2), for localrep-demo-condoc-shutdown on
+# its own (given at and the condoc lead-in's fc), then
+# localrep-demo-shutdown.
+#
+# It needs local-representative connected to agent-coordinator on the node,
+# with ianar, condocv2 and federation-command built beside it; condocv2's
+# pointer repo ready and pushable; GNOME with
+# dynamic workspaces and its default tiling keys; a terminal for
+# federation-command to open in; google-chrome; and, on the node running
+# the demo, compose launched and connected.
+#
+# On the demo tab's protosurf map, beside what its phases call, it is about
+# (focal) condocv2, and needs on the way (supporting) the robot and
+# federation-command's terminal:
+#
+#   focal: condocv2/
+#   supporting: ianar/ federation-command/
+#
+#   dtt assert condoc-hello.demo.dtt.yaml --var node=<node>
+
+variables:
+  node:
+    default: ""
+    help: the node to give the demo on, as agent-coordinator names it; empty for this node
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as the node's browser reaches it (http://host:port); empty to ask this node's local-representative
+  pointer_dir:
+    default: ""
+    help: where condocv2's pointer repo is checked out on the node; empty for condocv2's default (../sloppo beside the git repo it was started in)
+
+timestamp:
+  select: now
+  alias: the-time
+
+# ---- lead-in (general) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-prepare.dtt.yaml
+  alias: prep
+  phase: lead-in
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+# ---- lead-in (condocv2) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-prepare.dtt.yaml
+  alias: cprep
+  phase: condoc-lead-in
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      ac_url: ${{var.ac_url}}
+
+# ---- subject ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-hello.dtt.yaml
+  alias: chello
+  phase: hello
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{cprep.by_alias.cprep-run.output.fc}}
+      pointer_dir: ${{var.pointer_dir}}
+
+# ---- tear-down (condocv2) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-shutdown.dtt.yaml
+  alias: cshut
+  phase: condoc-tear-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{cprep.by_alias.cprep-run.output.fc}}
+
+# ---- tear-down (general) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-shutdown.dtt.yaml
+  alias: shut
+  phase: tear-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+# ---- compose ----
+
+localrep.compositions:
+  select:
+    id: demo-condoc-hello-${{the-time.unix}}
+  alias: demo-comp
+  phase: compose
+  assert:
+    composition: |
+      {
+        "name": "condocv2 demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 4, "text": "A condocv2 demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1a1a1a"},
+          {"kind": "title", "duration": 3, "text": "1 of 5 -- Lead-in: wake the node, put the demo page on its desktop, and switch to an empty workspace", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{prep.by_alias.prep-comp.render.file_id}}", "file_name": "${{prep.by_alias.prep-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "2 of 5 -- Open condocv2: a terminal on the left and condocv2 through agent-coordinator on the right", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{cprep.by_alias.cprep-comp.render.file_id}}", "file_name": "${{cprep.by_alias.cprep-comp.render.name}}"},
+          {"kind": "title", "duration": 4, "text": "3 of 5 -- Hello world: the robot proposes HelloWorld-${{the-time.unix}} in condocv2 and the terminal finds it in the pointer repo; the terminal withdraws it and condocv2 drops it", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{chello.by_alias.chello-comp.render.file_id}}", "file_name": "${{chello.by_alias.chello-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "4 of 5 -- Close condocv2's windows: the browser and the terminal (condocv2 keeps running)", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{cshut.by_alias.cshut-comp.render.file_id}}", "file_name": "${{cshut.by_alias.cshut-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "5 of 5 -- Tear-down: delete the demo page and go back to the first workspace", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{shut.by_alias.shut-comp.render.file_id}}", "file_name": "${{shut.by_alias.shut-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "Led in, proposed and withdrew a condoc from both sides, and torn down", "color": "#1a1a1a", "background": "#e0e0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

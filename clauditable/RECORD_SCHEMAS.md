@@ -1,6 +1,8 @@
 # Record Schemas
 
 This document describes the record and event schemas used by `clauditable` and related tools.
+For how these files move through the writing → raw/s-raw → processed → `session.jsonl`
+pipeline, see [`FILE_PROCESSING_SEQUENCE.md`](FILE_PROCESSING_SEQUENCE.md).
 
 ## Terminology
 
@@ -18,7 +20,7 @@ Each entry in the session log consists of:
 3. **Output preview** - Command output with `OUT>> ` prefix for stdout, `ERR>> ` prefix for stderr (up to 20 lines each)
 
 ```
-{"timestamp":"2026-04-24T10:30:00Z","event_type":"command_execution","agent":"claude","model":"opus-4","duration_ms":50,"exit_code":0,"record_path":"/path/to/1234567890"}
+{"timestamp":"2026-04-24T10:30:00Z","event_type":"command_execution","host":"myhost-a3b9","head":"fc-x7q2","agent":"claude","model":"opus-4","duration_ms":50,"exit_code":0,"record_path":"/path/to/1234567890"}
 IN>> echo hello
 OUT>> hello
 
@@ -59,24 +61,90 @@ The `Event` structure contains metadata about a command execution. The command i
 | Field | Type | Description |
 |-------|------|-------------|
 | `timestamp` | string | RFC3339 formatted timestamp of when the command started |
-| `event_type` | string | Type of event, typically `"command_execution"` |
+| `event_type` | string | Type of event -- see [Event Types](#event-types) |
+| `host` | string | Host identifier from `UFA_HOST` or `~/.ufa/host.yaml` (optional) |
+| `head` | string | Head identifier from `UFA_HEAD` — the application instance that triggered the session entry (optional) |
 | `agent` | string | Agent identifier from `UFA_AGENT` (optional) |
 | `model` | string | Model identifier from `UFA_MODEL` (optional) |
 | `duration_ms` | int64 | How long the command took in milliseconds |
 | `exit_code` | int | The exit code returned by the command |
 | `record_path` | string | Path to the record file (optional) |
 | `metadata` | object | Unstructured key-value pairs from `UFA_METADATA` (optional) |
+| `session` | string | The session the record belongs to -- set only on the `dtt-calls/` and `invocations/` copies (optional) |
+| `session_record` | string | That record's file in the session directory, e.g. `1793101234-raw.txt` -- set only on the copies (optional) |
+
+## Event Types
+
+| `event_type` | Written by | Meaning |
+|--------------|------------|---------|
+| `command_execution` | wrapped command | A plain command (`UFA_AGENT` unset or `none`) |
+| `ai_invocation` | wrapped command | An AI agent run (`UFA_AGENT` names an agent, as ambiguous-agent and federation-command's agent paths set it) |
+| `dtt_call` | wrapped command | A DTT tool call: `dtt run/execute/read/assert/delete` re-running itself under clauditable with `UFA_EVENT_TYPE=dtt_call` |
+| `note` | `clauditable add-note` | Text a person attached to the session; the note is the `IN>>` block |
+| `resource` | `clauditable add-resource` | A file attached to the session; its name is the `IN>>` block |
+
+`UFA_EVENT_TYPE`, when set, overrides the type a wrapped command gets.
+`dtt_call` and `ai_invocation` records are also copied outside their session
+(see [dtt-calls and invocations copies](#dtt-calls-and-invocations-copies)). Records
+written before `ai_invocation` existed carry `command_execution` for agent runs
+too; they are not rewritten.
+
+### Notes and resources
+
+```
+clauditable add-note [text...]                  # text from stdin when no args
+clauditable add-resource [-name <name>] <path>  # name defaults to path's base name
+```
+
+Both act on the current session (`AGENT_SESSION`/`AGENT_RECORDS_PATH`, as for
+a wrapped command) and print the new record ID. Each is written as an
+already-consolidated primary record: `<ts>-raw.txt`, `<ts>-processed.txt` and a
+`session.jsonl` entry. `<ts>` is the latest free second before now, so a
+command starting at the same moment can't take the same ID. A resource's
+content is copied to `<ts>-resource-<name>` (name reduced to
+`[A-Za-z0-9._-]`), and its event carries `resource_name`, `resource_file` and
+`resource_size` in `metadata`.
 
 ## Directory Structure
 
 ```
-<AGENT_RECORDS_PATH>/
-└── <session>/
-    ├── session.jsonl           # Consolidated JSONL with plaintext previews
-    ├── 1234567890-raw.txt    # Raw file (permanent, not consolidated)
-    ├── 1234567891-raw.txt    # Another raw file
-    └── ...
+<AGENT_RECORDS_PATH>/              # the records root
+├── sessions/
+│   └── <session>/
+│       ├── session.yaml           # Session identity (id, name, owner, created)
+│       ├── session.jsonl          # Consolidated JSONL with plaintext previews
+│       ├── 1234567890-raw.txt     # Raw file (permanent, not consolidated)
+│       ├── 1234567891-raw.txt     # Another raw file
+│       └── ...
+├── dtt-calls/
+│   └── 1793101234-k7q.txt         # Copy of each dtt_call record
+└── invocations/
+    └── 1793101300-a0z.txt         # Copy of each ai_invocation record
 ```
+
+`sessions`, `dtt-calls` and `invocations` are reserved names (see
+`layout.go`). Sessions used to live directly under the root
+(`<AGENT_RECORDS_PATH>/<session>/`). A directory there holding `session.jsonl`
+or `session.yaml` is a legacy session: every recording clauditable run (and
+`get-default-session`, `new-session`, `rename-session`, `add-note`,
+`add-resource`, `archive`) first moves such directories into `sessions/` with
+a rename, and `clauditable migrate-sessions` does it on demand, printing how
+many were moved. A legacy session whose name already exists under `sessions/`
+is left in place with a warning, never merged. `clauditable archive` moves
+the directories under `sessions/` to `<archive-base>/<datetime>/<session>`.
+
+### dtt-calls and invocations copies
+
+After writing a `dtt_call` or `ai_invocation` record into its session,
+clauditable also writes a copy to `dtt-calls/` or `invocations/` (no other
+event type is copied). The name is `<unix-ts>-<rrr>.txt`: the record's start
+time in unix seconds and three random `[a-z0-9]` characters (re-picked on a
+clash). The content is the same full written format as the session's
+`-raw.txt` (event JSON line, `IN>>`/`OUT>>`/`ERR>>` previews,
+`----------WRITTEN_RAW----------`, the command, `----------RESPONSE----------`,
+stdout, `[STDERR]` + stderr), with `session`, `session_record` (the session
+record's final `-raw.txt` name) and `record_path` (the copy's own path) set
+on its event. Failing to write a copy is only a warning.
 
 When `AGENT_CONSOLIDATE_RECORDS=true` (default), temporary `<timestamp>` files are appended to `session.jsonl` and deleted. The `-raw.txt` files are always preserved.
 
@@ -84,9 +152,10 @@ When `AGENT_CONSOLIDATE_RECORDS=true` (default), temporary `<timestamp>` files a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_RECORDS_PATH` | `/host-agent-files/agent-records` | Root directory for all records |
+| `AGENT_RECORDS_PATH` | `/host-agent-files/agent-records` | Records root; sessions live in its `sessions/` directory |
 | `AGENT_SESSION` | Current date (YYYY-MM-DD) | Session identifier, auto-updates daily |
 | `AGENT_CONSOLIDATE_RECORDS` | `true` | Whether to consolidate temporary files into session.jsonl |
+| `UFA_HEAD` | (none) | Head identifier (application instance) to include in events |
 | `UFA_AGENT` | (none) | Agent identifier to include in events |
 | `UFA_MODEL` | (none) | Model identifier to include in events |
 | `UFA_METADATA` | (none) | Key-value metadata, format: `key1=value1,key2=value2` |

@@ -1,0 +1,11 @@
+# Binary
+agent-coordinator
+
+# Test artifacts
+*.test
+
+# Frontend dependencies
+frontend/node_modules/
+
+# Frontend build output
+frontend/dist/

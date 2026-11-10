@@ -1,0 +1,99 @@
+# local-representative control library: the robot's hello world with a
+# zoom, on a node prepared by dtt-demo-prepare, for dtt's
+# localrep-demo-robot-hello-zoom example
+# (../localrep-demo-robot-hello-zoom.dtt.yaml), which imports it into the
+# library of the node it targets and runs it there.
+#
+# The robot opens the demo page the preparation put on the desktop in a
+# browser of its own, waits for its heading, clicks it and zooms the page in
+# three steps, has the screen captured zoomed in, zooms back out and has it
+# captured again (two screenshots in the files tab, artifacts of the demo's
+# record), prints the greeting with the run's results and closes the page.
+# The node's screen is recorded from the page opening to the end (steps
+# 3-6). Every action is its own (dtt-demo-rh-zoom-*), so importing this
+# replaces none of the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-rh-zoom-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-rh-zoom-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-rh-zoom-open
+    name: Open the demo page with the robot
+    description: "robot: open the demo page in a new browser window of its own, on the demo's workspace, and wait for its heading to show on screen"
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+      - name: browser
+        label: Browser
+        default: "google-chrome --user-data-dir=/tmp/dtt-demo-rh-zoom-browser --no-first-run --no-default-browser-check --start-maximized --new-window"
+    do:
+      - {op: robot.open, path: "{{file}}", app: "{{browser}}"}
+      - {op: robot.wait-for-text, text: "Demo on {{this_node}}", exact: "false", timeout: 30s}
+  - id: dtt-demo-rh-zoom-in
+    name: Zoom in and capture
+    description: "robot: click the page's heading, zoom in three steps and screenshot the screen into the files tab"
+    do:
+      - {op: robot.click-text, text: "Demo on {{this_node}}", exact: "false", timeout: 10s}
+      - {op: robot.key, keys: "ctrl+plus ctrl+plus ctrl+plus"}
+      - {op: robot.wait, duration: 1500ms}
+      - {op: node-capture, node: "{{this_node}}", name: robot-hello-zoomed-in}
+  - id: dtt-demo-rh-zoom-out
+    name: Zoom back out and capture
+    description: "robot: put the page back to its normal size and screenshot the screen again"
+    controls:
+      - name: greeting
+        label: Greeting
+        default: hello world
+    do:
+      - {op: robot.key, keys: ctrl+0}
+      - {op: robot.wait, duration: 1s}
+      - {op: node-capture, node: "{{this_node}}", name: robot-hello-zoomed-out}
+      - {op: robot.print, label: greeting, text: "{{greeting}} from {{this_node}}"}
+  - id: dtt-demo-rh-zoom-close
+    name: Close the demo page
+    description: "robot: close the page's window, leaving the workspace empty again"
+    controls:
+      - name: greeting
+        label: Greeting
+        default: hello world
+    do:
+      - {op: robot.key, keys: ctrl+w}
+      - {op: robot.wait, duration: 1s}
+      - {op: output, label: hello, value: "{{greeting}} from {{this_node}}: the robot zoomed its demo page in and back out"}
+sequences:
+  - id: dtt-demo-rh-zoom
+    name: "Robot hello: zoom the demo page"
+    description: Start the robot if need be and wake the screen, then have the robot open the demo page on the desktop, zoom it in, capture the screen, zoom it back out, capture it again and close the page -- with this node's screen recorded while the robot works.
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+        help: the demo page dtt-demo-prepare put on the desktop (~ is the node user's home); dtt's examples name it demo-<unix seconds>.html
+      - name: greeting
+        label: Greeting
+        default: hello world
+        help: what the robot prints with the run's results, before "from <node>"
+    steps:
+      - action: dtt-demo-rh-zoom-robot
+      - action: dtt-demo-rh-zoom-wake
+      - action: dtt-demo-rh-zoom-open
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-rh-zoom-in
+      - action: dtt-demo-rh-zoom-out
+        with:
+          greeting: "{{greeting}}"
+      - action: dtt-demo-rh-zoom-close
+        with:
+          greeting: "{{greeting}}"
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 6, label: "robot hello: zoom"}

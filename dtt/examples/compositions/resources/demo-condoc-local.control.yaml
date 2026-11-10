@@ -1,0 +1,192 @@
+# local-representative control library: a local-only condoc's whole
+# lifecycle in condocv2, through a condocv2 demo's windows (opened by
+# dtt-demo-condoc-prep), for dtt's localrep-demo-condoc-local example
+# (../localrep-demo-condoc-local.dtt.yaml), which imports it into the
+# library of the node it targets and runs it there.
+#
+# Its target and condoc repos are local/<name>: git repos with no remote,
+# under the local root on this node (made beforehand by dtt's git tool, see
+# ../git-repos-local.dtt.yaml). condocv2 clones them from that path, pushes
+# the condoc branch straight back into them, and in place of GitHub's PRs
+# merges the branch into each repo's main itself.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen, then
+# checks the condoc prep's federation-command terminal (fc) is still
+# connected; the terminal is on the left half of the screen and condocv2's
+# propose form, in the prep's browser, on the right. Then, by reading the
+# screen and clicking and typing in condocv2:
+#
+#   1. it proposes the condoc (name, description, the local target repo, the
+#      local condoc repo) and accepts it;
+#   2. it enters one cheap prompt (a haiku about a cat, one new file in the
+#      target), auto-submitted, and waits for the agent's response;
+#   3. it completes the condoc, and waits for the agent to draft its PRs;
+#   4. it raises them -- for local repos, a local merge each -- waits for
+#      them to be ready, merges them and archives the condoc;
+#   5. from the terminal, it shows the merge in the target repo's own
+#      history, and the haiku on its main branch.
+#
+# The node's screen is recorded in three blocks -- proposing (steps 4-6),
+# completing (step 8) and merging (steps 10-11) -- and not while the agent
+# works (steps 7 and 9), so the recordings stay short. The agent runs twice,
+# both times cheaply: the haiku, then the PR drafts. No name, description,
+# prompt or terminal command here holds the text the robot looks for on
+# condocv2's page. Every action is its own (dtt-demo-clocal-*), so importing
+# this replaces none of the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-clocal-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-clocal-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-clocal-check
+    name: Check the condoc prep's terminal is still there
+    description: wait for the condoc prep's federation-command to be connected in remote control
+    do:
+      - {op: fc-expect-state, fc: "{{fc}}", state: remote-control, timeout: 15s, hint: "the condoc prep's terminal isn't connected any more (closed, or a local-representative restart) -- close its browser and terminal by hand"}
+  - id: dtt-demo-clocal-propose
+    name: Propose the local condoc in condocv2
+    description: "robot: click the form's heading and tab into its first field, type the name, description, local target and local condoc repo, press Enter, and wait for condocv2 to open the new proposal"
+    controls:
+      - name: name
+        label: Condoc name
+      - name: target
+        label: Target repo
+        help: local/<name>
+      - name: condoc_repo
+        label: Condoc repo
+        help: local/<name>
+    do:
+      - {op: robot.click-text, text: "Propose a condoc", exact: "true", timeout: 10s}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{name}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "a local-only condoc on {{this_node}}: no remote, no GitHub"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{target}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.key, keys: ctrl+a}
+      - {op: robot.type, text: "{{condoc_repo}}"}
+      - {op: robot.key, keys: enter}
+      - {op: robot.wait-for-text, text: "Accept — begin the condoc", exact: "true", timeout: 90s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-clocal-accept
+    name: Accept the proposal
+    description: "robot: click the accept button, then wait for the prompt box's checkbox label (the local repos are cloned and the condoc branch pushed into them)"
+    do:
+      - {op: robot.click-text, text: "Accept — begin the condoc", exact: "true", timeout: 30s}
+      - {op: robot.wait-for-text, text: "submit once", exact: "false", timeout: 5m}
+  - id: dtt-demo-clocal-prompt
+    name: Enter the prompt
+    description: "robot: click the prompt box's heading and tab into the box, type the prompt and send it with ctrl+enter (auto-submitted); then wait for the agent's turn to start"
+    controls:
+      - name: prompt
+        label: Prompt
+    do:
+      - {op: robot.click-text, text: "Prompt 1", exact: "true", timeout: 30s}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{prompt}}"}
+      - {op: robot.key, keys: ctrl+enter}
+      - {op: robot.wait-for-text, text: "interaction 1", exact: "false", timeout: 60s}
+  - id: dtt-demo-clocal-wait-response
+    name: Wait for the agent's response
+    description: "robot: wait for the first response's heading, then for the button that finishes the condoc (the interaction recorded and unlocked)"
+    do:
+      - {op: robot.ensure-awake}
+      - {op: robot.wait-for-text, text: "Response 1", exact: "true", timeout: 20m}
+      - {op: robot.wait-for-text, text: "Complete the condoc", exact: "true", timeout: 10m}
+  - id: dtt-demo-clocal-complete
+    name: Finish the condoc
+    description: "robot: show the response a moment, click the button that finishes the condoc, then the one that asks for drafts; then wait for the drafting to start"
+    do:
+      - {op: robot.wait, duration: 4s}
+      - {op: robot.click-text, text: "Complete the condoc", exact: "true", timeout: 10s}
+      - {op: robot.click-text, text: "Draft PRs", exact: "false", timeout: 10s}
+      - {op: robot.wait-for-text, text: "the PRs", exact: "false", timeout: 30s}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-clocal-wait-drafts
+    name: Wait for the drafts
+    description: "robot: wait for the button that raises them (the agent has drafted them)"
+    do:
+      - {op: robot.ensure-awake}
+      - {op: robot.wait-for-text, text: "Raise PRs", exact: "true", timeout: 20m}
+  - id: dtt-demo-clocal-merge
+    name: Merge locally, then file the condoc away
+    description: "robot: raise the drafts -- for local repos, a local merge each -- wait until condocv2 says they're ready, merge them into each repo's main, file the condoc away, and wait for the page to say so"
+    do:
+      - {op: robot.wait, duration: 4s}
+      - {op: robot.click-text, text: "Raise PRs", exact: "true", timeout: 10s}
+      - {op: robot.wait-for-text, text: "local merge ready", exact: "false", more_than: "1", timeout: 2m}
+      - {op: robot.wait, duration: 2s}
+      - {op: robot.click-text, text: "Merge", exact: "true", timeout: 30s}
+      - {op: robot.click-text, text: "Archive", exact: "true", timeout: 2m}
+      - {op: robot.wait-for-text, text: "Merged and archived", exact: "false", timeout: 2m}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-clocal-show
+    name: Show the merge in the local target repo
+    description: "through the terminal: show the target repo's main -- its history, with the condoc branch merged in, and the files the condoc added -- then say so"
+    controls:
+      - name: target_dir
+        label: Target repo's directory
+    do:
+      - {op: random, save_as: shown_token, length: "6"}
+      - {op: set, save_as: shown, value: "merged locally - {{shown_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "d='{{target_dir}}'; git -C \"$d\" log --oneline --graph -n 8 main && git -C \"$d\" diff --stat main^1 main && for f in $(git -C \"$d\" diff --name-only main^1 main | head -n 3); do echo \"--- $f\"; git -C \"$d\" show \"main:$f\" | head -n 12; done && echo \"{{shown}}\"", expect: "{{shown}}", timeout: 30s}
+      - {op: robot.wait, duration: 5s}
+      - {op: output, label: demo, value: "{{this_node}}: a condoc on two local repos -- proposed, prompted, completed, merged locally and archived in condocv2"}
+sequences:
+  - id: dtt-demo-condoc-local
+    name: "Demo: a local-only condoc's lifecycle through a condocv2 demo's windows"
+    description: Start the robot if need be and wake the screen; then take a condoc on two local repos (no remote) from proposal through one cheap prompt to its local merges and archive in condocv2, and show the merge from the condoc prep's terminal -- with this node's screen recorded while it works, but not while the agent does.
+    controls:
+      - name: fc
+        label: Terminal
+        help: the condoc prep's federation-command instance (its run's fc output, e.g. federation-command#2)
+      - name: name
+        label: Condoc name
+        default: "LocalCondoc-{{timestamp}}"
+        help: letters, digits, - and _, starting with a letter
+      - name: target
+        label: Target repo
+        help: local/<name> -- where the agent's work goes
+      - name: condoc_repo
+        label: Condoc repo
+        help: local/<name> -- where the condoc's own files go
+      - name: target_dir
+        label: Target repo's directory
+        help: the target repo's path on this node (<local root>/<name>)
+      - name: prompt
+        label: Prompt
+        default: "Add one new file to the target repo, cat-haiku.md, holding a three-line haiku about a cat. Change nothing else, and reply in one sentence."
+    steps:
+      - action: dtt-demo-clocal-robot
+      - action: dtt-demo-clocal-wake
+      - action: dtt-demo-clocal-check
+      - action: dtt-demo-clocal-propose
+        label: 'Propose "{{name}}"'
+        with:
+          name: "{{name}}"
+          target: "{{target}}"
+          condoc_repo: "{{condoc_repo}}"
+      - action: dtt-demo-clocal-accept
+      - action: dtt-demo-clocal-prompt
+        with:
+          prompt: "{{prompt}}"
+      - action: dtt-demo-clocal-wait-response
+      - action: dtt-demo-clocal-complete
+      - action: dtt-demo-clocal-wait-drafts
+      - action: dtt-demo-clocal-merge
+      - action: dtt-demo-clocal-show
+        with:
+          target_dir: "{{target_dir}}"
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 6, label: proposing}
+      - {node: "{{this_node}}", from: 8, to: 8, label: completing}
+      - {node: "{{this_node}}", from: 10, to: 11, label: merging}

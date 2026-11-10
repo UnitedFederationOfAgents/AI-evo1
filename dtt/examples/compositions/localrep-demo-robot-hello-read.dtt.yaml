@@ -1,0 +1,81 @@
+# DTT example -- localrep, the robot's hello world: read the demo page, on a prepared node (see ../../README.md "The localrep tool").
+#
+# It takes node, the node to run on, as agent-coordinator names it ("" by
+# default, for this node), and at, the unix seconds the node was prepared at
+# (localrep-demo-prepare's time). It imports the control sequence in
+# resources/demo-robot-hello-read.control.yaml into that node's library and
+# runs it there: the robot opens the demo page the preparation made,
+# ~/Desktop/demo-<at>.html, in a Chrome window of its own, waits for its
+# heading, reads back off the screen when the page says the node was
+# prepared, has the screen captured into the files tab and closes the page.
+# The node's screen is recorded while the robot works. Then composer, on
+# this node, puts a title card, the recording and a closing card together
+# into a WebM in the files tab.
+#
+# The run and the composition are named by at (demo-rh-read-<at>), so one
+# preparation has one of these: asserting again does nothing. The local
+# representative's robot-hello-read demo calls it between
+# localrep-demo-prepare and localrep-demo-shutdown, with the same at.
+# Deleting, with the assert's image, removes the sequence and the
+# composition (the run has happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it, the demo page from
+# localrep-demo-prepare, and google-chrome. Here: compose launched and
+# connected.
+#
+#   dtt read examples/compositions/localrep-demo-robot-hello-read.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-robot-hello-read.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+
+variables:
+  node:
+    default: ""
+    help: the node to run on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the demo page, the run and the composition
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-rh-read
+    node: ${{var.node}}
+  alias: rh-read-seq
+  assert:
+    source_file: resources/demo-robot-hello-read.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-rh-read
+    key: demo-rh-read-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: rh-read-run
+  assert:
+    controls:
+      file: "~/Desktop/demo-${{the-time.unix}}.html"
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-rh-read-${{the-time.unix}}
+  alias: rh-read-comp
+  assert:
+    composition: |
+      {
+        "name": "Robot hello (read) on ${{rh-read-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Robot hello world on ${{rh-read-seq.node}}: reading the demo page", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "media", "file_id": "${{rh-read-run.recording.file_id}}", "file_name": "${{rh-read-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{rh-read-run.output.hello}}", "color": "#1a1a1a", "background": "#60c0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

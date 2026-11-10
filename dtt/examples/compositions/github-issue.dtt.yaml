@@ -1,0 +1,39 @@
+# DTT example -- github, an issue on a (private) repository (see ../../README.md "Declarative tools").
+#
+# Open today's check-in issue on user-1/AI-sandboxing if it isn't open
+# yet, labelled and assigned; run it in delete mode to close it again.
+# Point the path at whichever private repository you test with: the token
+# needs access to it (repo scope, or Issues: read and write).
+#
+# An issue is matched by its title among the open ones, so the title names
+# it. Its body is written when the issue is created; later asserts hold it
+# (it isn't empty) unless given the image or force. labels uses has:, so
+# labels someone else adds are left alone; a label the repository doesn't
+# have yet is created by GitHub.
+#
+# GitHub can't delete an issue, so delete mode (like exists: false) closes
+# it. That follows the from rule too: give the image the assert returned
+# (the runner fills from_image with it) or force. With the image, timestamp
+# is the moment the image saw, so the delete finds that day's issue.
+#
+#   dtt read examples/compositions/github-issue.dtt.yaml
+#   dtt run github --arg document_file=examples/compositions/github-issue.dtt.yaml --arg mode=assert
+#   dtt run github --arg document_file=examples/compositions/github-issue.dtt.yaml --arg mode=delete --arg from_image=<the assert run's image.json>
+
+timestamp:
+  select: now
+
+github.users.user-1.repos.AI-sandboxing:
+  alias: the-repo
+  assert:
+    issues:
+      select:
+        title: DTT check-in ${{timestamp.date}}
+      state:
+        exists: true
+        body: |
+          Opened by dtt on ${{timestamp.human-readable}}.
+          The more you know.
+        labels:
+          has: [dtt]
+        assignees: [user-1]

@@ -21,6 +21,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	cp "github.com/otiai10/copy"
+	ufaversion "ufa-version"
 )
 
 // Mode constants for agent permission levels
@@ -96,15 +97,16 @@ var agentConfigs = map[string]*AgentConfig{
 		},
 	},
 	"opencode": {
-		Command:    "opencode",
-		PromptFlag: "", // opencode uses positional prompt
-		ModelFlag:  "--model",
-		Models:     []string{"openai/gpt-4.1", "openai/gpt-4.1-mini", "openai/gpt-4.1-nano", "openai/o4-mini", "openai/o3", "openai/o3-mini", "anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-5-20251101", "google/gemini-2.5-pro", "google/gemini-2.5-flash"},
+		Command:     "opencode",
+		CommandArgs: []string{"run"},
+		PromptFlag:  "", // positional message to `opencode run`; bare `opencode <text>` is a project path
+		ModelFlag:   "--model",
+		Models:      []string{"xai/grok-4.7", "openai/gpt-4.1", "openai/gpt-4.1-mini", "openai/gpt-4.1-nano", "openai/o4-mini", "openai/o3", "openai/o3-mini", "anthropic/claude-sonnet-4-20250514", "anthropic/claude-opus-4-5-20251101", "google/gemini-2.5-pro", "google/gemini-2.5-flash"},
 		ModeArgs: map[string][]string{
-			ModePrompt:  {},
-			ModeRead:    {},
-			ModeWrite:   {},
-			ModeExecute: {},
+			ModePrompt:  {"--agent", "plan", "--auto"},
+			ModeRead:    {"--agent", "plan", "--auto"},
+			ModeWrite:   {"--agent", "build", "--auto"},
+			ModeExecute: {"--agent", "build", "--auto"},
 		},
 	},
 	"codex": {
@@ -120,6 +122,23 @@ var agentConfigs = map[string]*AgentConfig{
 			ModeRead:    {"--sandbox", "read-only"},
 			ModeWrite:   {"--sandbox", "workspace-write"},
 			ModeExecute: {"--sandbox", "danger-full-access", "--ask-for-approval", "never"},
+		},
+	},
+	// pi matches hello-pi: one-shot print, trust project .pi/, no persisted
+	// session. defaultThinkingLevel is low (.pi/settings.json). Tool sets
+	// follow that repo's Makefile (read-only / write) plus edit for write
+	// and bash for execute. -p is --print, so the prompt is positional.
+	"pi": {
+		Command:     "pi",
+		CommandArgs: []string{"--print", "--approve", "--no-session"},
+		PromptFlag:  "",
+		ModelFlag:   "--model",
+		Models:      []string{"anthropic/sonnet", "google/gemini", "xai/grok"},
+		ModeArgs: map[string][]string{
+			ModePrompt:  {"--no-tools"},
+			ModeRead:    {"--tools", piReadTools},
+			ModeWrite:   {"--tools", piWriteTools},
+			ModeExecute: {"--tools", piExecTools},
 		},
 	},
 	"grok": {
@@ -147,8 +166,17 @@ var agentConfigs = map[string]*AgentConfig{
 	},
 }
 
+// Pi tool allowlists. Read matches hello-pi's READONLY_TOOLS. Write adds
+// edit (surgical edits) to that repo's WRITE_TOOLS. Execute is pi's built-in
+// tool set, including bash.
+const (
+	piReadTools  = "read,grep,find,ls"
+	piWriteTools = "read,grep,find,ls,write,edit"
+	piExecTools  = "read,bash,edit,write,grep,find,ls"
+)
+
 // availableAgents is the list of supported agents (order matters for display)
-var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "grok", "clod"}
+var availableAgents = []string{"copilot", "gemini", "claude", "opencode", "codex", "pi", "grok", "clod"}
 
 // Agent colors for visual distinction (matching sandbox/AI-sandboxing/ambiguous-agent/main.go)
 var agentColors = map[string]lipgloss.Color{
@@ -157,6 +185,7 @@ var agentColors = map[string]lipgloss.Color{
 	"claude":   lipgloss.Color("208"), // Orange (Anthropic)
 	"opencode": lipgloss.Color("34"),  // Green
 	"codex":    lipgloss.Color("99"),  // Purple (OpenAI)
+	"pi":       lipgloss.Color("51"),  // Bright cyan (Pi)
 	"grok":     lipgloss.Color("196"), // Red (xAI)
 	"clod":     lipgloss.Color("141"), // Light purple (test agent)
 }
@@ -230,6 +259,10 @@ func modeDescription(mode string) string {
 }
 
 func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
 	// Define flags
 	var (
 		agent      string
@@ -240,6 +273,8 @@ func main() {
 		execMode   bool
 		listAgents bool
 		listModels bool
+		inspect    bool
+		showVer    bool
 		addDirs    string
 		prompt     string
 		session    string
@@ -256,6 +291,8 @@ func main() {
 	flag.BoolVar(&execMode, "x", false, "Execute mode: full access including command execution")
 	flag.BoolVar(&listAgents, "list-agents", false, "List available agents")
 	flag.BoolVar(&listModels, "list-models", false, "List available models for an agent (use -a to specify agent)")
+	flag.BoolVar(&inspect, "inspect", false, "Report every agent's availability and models as JSON (use -a to inspect one agent)")
+	flag.BoolVar(&showVer, "version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
 	flag.StringVar(&addDirs, "add-dirs", "", "Colon-separated list of directories to add (for agent records access)")
 	flag.StringVar(&prompt, "prompt", "", "Prompt to send to the agent (alternative to positional argument)")
 	flag.StringVar(&session, "session", "", "Session identifier (default: AGENT_SESSION env var or auto-generated)")
@@ -268,6 +305,7 @@ Usage:
   ambiguous-agent [options] <prompt>
   ambiguous-agent --list-agents
   ambiguous-agent --list-models [-a <agent>]
+  ambiguous-agent --inspect [-a <agent>]
 
 Modes (mutually exclusive, default is -r):
   -p    Prompt mode: chat only, no file access
@@ -285,12 +323,15 @@ Options:
                          Use 'default' for current session, copies to temp dir
   --list-agents         List available agents and exit
   --list-models         List available models for an agent (use -a to specify)
+  --inspect             Report agent availability and models as JSON (all
+                         agents, or just -a <agent>)
+  --version             Print version and exit
 
 Environment:
   AGENT_NAME          Default agent selection
   AGENT_MODEL         Default model selection
   AGENT_SESSION       Session identifier (used for records grouping)
-  AGENT_RECORDS_PATH  Directory for agent records (default: %s)
+  AGENT_RECORDS_PATH  Records root; sessions live in its sessions/<id>/ (default: %s)
   AGENT_ADD_DIRS      Colon-separated additional directories to add
 
 Examples:
@@ -310,6 +351,15 @@ Examples:
 	// Handle --list-agents
 	if listAgents {
 		printAgentList()
+		return
+	}
+
+	// Handle --inspect (machine-readable; see inspect.go)
+	if inspect {
+		if err := printInspection(os.Stdout, agent); err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -358,6 +408,24 @@ Examples:
 	// Determine model
 	if model == "" {
 		model = os.Getenv("AGENT_MODEL")
+	}
+	if agent == "opencode" && model != "" && !strings.Contains(model, "/") {
+		resolved, err := resolveOpenCodeModel(model)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			os.Exit(1)
+		}
+		model = resolved
+	}
+	if agent == "pi" && model != "" && !strings.Contains(model, "/") {
+		resolved, err := resolvePiModel(model)
+		if err != nil && strings.Contains(err.Error(), "ambiguous") {
+			fmt.Fprintln(os.Stderr, errorStyle.Render("Error: "+err.Error()))
+			os.Exit(1)
+		}
+		if err == nil {
+			model = resolved
+		}
 	}
 
 	// Determine mode (default to read, only one can be set)
@@ -410,11 +478,19 @@ Examples:
 		additionalDirs = append(additionalDirs, strings.Split(envAddDirs, ":")...)
 	}
 
+	// Sessions live under <records>/sessions/; move any an older version left
+	// directly under the root first (best-effort -- see layout.go).
+	if _, err := migrateLegacySessions(recordsPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: migrating legacy sessions: %v\n", err)
+	}
+
 	// Build session directory path
-	sessionDir := filepath.Join(recordsPath, session)
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), session)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to create session directory: %v\n", err)
 	}
+
+	quiet := os.Getenv("AA_QUIET") == "true"
 
 	// Handle record provision - copy session files to temp dir for agent context
 	var recordsTempDir string
@@ -429,50 +505,58 @@ Examples:
 		defer func() {
 			if recordsTempDir != "" {
 				os.RemoveAll(recordsTempDir)
-				fmt.Println(sessionStyle.Render(fmt.Sprintf("cleaned up records temp dir: %s", recordsTempDir)))
+				if !quiet {
+					fmt.Println(sessionStyle.Render(fmt.Sprintf("cleaned up records temp dir: %s", recordsTempDir)))
+				}
 			}
 		}()
 		// Add temp dir to additional dirs for the agent
 		additionalDirs = append(additionalDirs, recordsTempDir)
-		fmt.Println(sessionStyle.Render(fmt.Sprintf("● providing records from: %s", recordsTempDir)))
+		if !quiet {
+			fmt.Println(sessionStyle.Render(fmt.Sprintf("● providing records from: %s", recordsTempDir)))
+		}
 	}
 
-	// Print invocation info with visual flare
-	agentStyled := getAgentStyle(agent)
-	modeStyled := modeStyles[mode].Render(modeDescription(mode))
+	if !quiet {
+		// Print invocation info with visual flare
+		agentStyled := getAgentStyle(agent)
+		modeStyled := modeStyles[mode].Render(modeDescription(mode))
 
-	if model != "" {
-		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-			sessionStyle.Render("invoking "),
-			agentStyled.Render(agent),
-			sessionStyle.Render(" ("),
-			agentStyled.Render(model),
-			sessionStyle.Render(") in "),
-			modeStyled,
-			sessionStyle.Render(" mode..."),
-		))
-	} else {
-		fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
-			sessionStyle.Render("invoking "),
-			agentStyled.Render(agent),
-			sessionStyle.Render(" in "),
-			modeStyled,
-			sessionStyle.Render(" mode..."),
-		))
+		if model != "" {
+			fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
+				sessionStyle.Render("invoking "),
+				agentStyled.Render(agent),
+				sessionStyle.Render(" ("),
+				agentStyled.Render(model),
+				sessionStyle.Render(") in "),
+				modeStyled,
+				sessionStyle.Render(" mode..."),
+			))
+		} else {
+			fmt.Println(lipgloss.JoinHorizontal(lipgloss.Top,
+				sessionStyle.Render("invoking "),
+				agentStyled.Render(agent),
+				sessionStyle.Render(" in "),
+				modeStyled,
+				sessionStyle.Render(" mode..."),
+			))
+		}
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
 	}
-	fmt.Println(sessionStyle.Render(fmt.Sprintf("● session: %s", sessionDir)))
 
 	// Build the agent command
 	args := buildAgentArgs(config, mode, model, prompt, sessionDir, additionalDirs)
 
 	// Wrap with clauditable
-	exitCode := invokeWithClauditable(config, args, agent, model, sessionDir)
+	exitCode := invokeWithClauditable(config, args, agent, model, recordsPath, session)
 
 	// Print completion status
-	if exitCode == 0 {
-		fmt.Println(successStyle.Render("agent completed successfully"))
-	} else {
-		fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited with code %d", exitCode)))
+	if !quiet {
+		if exitCode == 0 {
+			fmt.Println(successStyle.Render("agent completed successfully"))
+		} else {
+			fmt.Println(errorStyle.Render(fmt.Sprintf("agent exited with code %d", exitCode)))
+		}
 	}
 
 	os.Exit(exitCode)
@@ -484,8 +568,16 @@ func buildAgentArgs(config *AgentConfig, mode, model, prompt, sessionDir string,
 
 	args = append(args, config.CommandArgs...)
 
-	// Add model flag if specified and supported
-	if model != "" && config.ModelFlag != "" {
+	// Pi takes --provider with --model (hello-pi). A provider/id selects that
+	// provider; a bare pattern uses the first exported provider key
+	// (ANTHROPIC_API_KEY, then GEMINI_API_KEY, then XAI_API_KEY). Thinking
+	// defaults to low unless the model already has a :level suffix.
+	if config.Command == "pi" {
+		args = append(args, piModelArgs(model)...)
+		if !strings.Contains(model, ":") {
+			args = append(args, "--thinking", "low")
+		}
+	} else if model != "" && config.ModelFlag != "" {
 		args = append(args, config.ModelFlag, model)
 	}
 
@@ -512,15 +604,20 @@ func buildAgentArgs(config *AgentConfig, mode, model, prompt, sessionDir string,
 	if config.PromptFlag != "" {
 		args = append(args, config.PromptFlag, prompt)
 	} else {
-		// For agents like opencode that use positional prompts
+		// Positional prompts. Pi's -- stops a prompt that starts with "-"
+		// from being parsed as a flag.
+		if config.Command == "pi" {
+			args = append(args, "--")
+		}
 		args = append(args, prompt)
 	}
 
 	return args
 }
 
-// invokeWithClauditable wraps the agent invocation with clauditable for record-keeping
-func invokeWithClauditable(config *AgentConfig, args []string, agent, model, sessionDir string) int {
+// invokeWithClauditable wraps the agent invocation with clauditable for record-keeping.
+// recordsPath is the records ROOT (clauditable finds session under its sessions/).
+func invokeWithClauditable(config *AgentConfig, args []string, agent, model, recordsPath, session string) int {
 	// Resolve clauditable: prefer PATH, fall back to colocated binary
 	clauditablePath, isLocal, err := resolveBinary("clauditable")
 	if err != nil {
@@ -553,8 +650,8 @@ func invokeWithClauditable(config *AgentConfig, args []string, agent, model, ses
 	// Set environment variables for clauditable
 	env := os.Environ()
 	env = append(env,
-		"AGENT_SESSION="+filepath.Base(sessionDir),
-		"AGENT_RECORDS_PATH="+filepath.Dir(sessionDir),
+		"AGENT_SESSION="+session,
+		"AGENT_RECORDS_PATH="+recordsPath,
 		"UFA_AGENT="+agent,
 		"UFA_VERBOSITY_MANAGEMENT="+verbosityManagement(config),
 	)
@@ -572,7 +669,7 @@ func invokeWithClauditable(config *AgentConfig, args []string, agent, model, ses
 	cmd.Stderr = os.Stderr
 
 	// Propagate working directory from parent process
-	// This is critical when invoked by heuristic-agent with a specific workdir
+	// This is critical when invoked by dungeon-keeper with a specific workdir
 	cwd, err := os.Getwd()
 	if err == nil {
 		cmd.Dir = cwd
@@ -611,7 +708,7 @@ func invokeAgent(agentCmd string, args []string) int {
 	cmd.Stderr = os.Stderr
 
 	// Propagate working directory from parent process
-	// This is critical when invoked by heuristic-agent with a specific workdir
+	// This is critical when invoked by dungeon-keeper with a specific workdir
 	cwd, cwdErr := os.Getwd()
 	if cwdErr == nil {
 		cmd.Dir = cwd
@@ -695,9 +792,193 @@ func printModelList(agent string) {
 // For agents that support dynamic listing (opencode, grok), runs the appropriate command
 // For agents without dynamic listing support, returns an error message
 func queryModelsForAgent(agent string, config *AgentConfig) []string {
+	models, err := listModelsForAgent(agent, config)
+	if err != nil {
+		fmt.Println(errorStyle.Render(err.Error()))
+		fmt.Println(sessionStyle.Render(fmt.Sprintf("ensure '%s' is installed and available on PATH", config.Command)))
+		return nil
+	}
+	if len(models) == 0 && config.ModelFlag != "" {
+		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
+	}
+	return models
+}
+
+// parseModelLines splits `opencode models` style output into non-empty lines.
+func parseModelLines(output string) []string {
+	var models []string
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			models = append(models, line)
+		}
+	}
+	return models
+}
+
+// isAgentChatModel reports whether a listed model can be used on opencode's
+// chat/agent endpoint. Image and video models fail there.
+func isAgentChatModel(model string) bool {
+	return !strings.Contains(strings.ToLower(model), "imagine")
+}
+
+// filterChatModels drops models that cannot serve an agent prompt.
+func filterChatModels(models []string) []string {
+	var out []string
+	for _, model := range models {
+		if isAgentChatModel(model) {
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
+// matchListedModel accepts an exact provider/model id or a unique model id
+// suffix (grok-4.7 -> xai/grok-4.7).
+func matchListedModel(models []string, model string) (string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", fmt.Errorf("empty model")
+	}
+	var suffix []string
+	for _, listed := range models {
+		if listed == model {
+			return listed, nil
+		}
+		if strings.HasSuffix(listed, "/"+model) {
+			suffix = append(suffix, listed)
+		}
+	}
+	switch len(suffix) {
+	case 1:
+		return suffix[0], nil
+	case 0:
+		return "", fmt.Errorf("model %q is not available", model)
+	default:
+		return "", fmt.Errorf("model %q is ambiguous: %s", model, strings.Join(suffix, ", "))
+	}
+}
+
+// piProviderFromEnv is hello-pi's provider selection: first exported key wins.
+func piProviderFromEnv() string {
+	switch {
+	case os.Getenv("ANTHROPIC_API_KEY") != "":
+		return "anthropic"
+	case os.Getenv("GEMINI_API_KEY") != "":
+		return "google"
+	case os.Getenv("XAI_API_KEY") != "":
+		return "xai"
+	default:
+		return ""
+	}
+}
+
+// piModelArgs is `--provider` plus `--model` for one pi invocation.
+// provider/id (id may contain slashes) selects that provider. A bare pattern
+// is restricted to the provider whose key is exported, when one is.
+func piModelArgs(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	if i := strings.Index(model, "/"); i > 0 {
+		prov, rest := model[:i], model[i+1:]
+		if rest != "" {
+			return []string{"--provider", prov, "--model", rest}
+		}
+	}
+	if prov := piProviderFromEnv(); prov != "" {
+		return []string{"--provider", prov, "--model", model}
+	}
+	return []string{"--model", model}
+}
+
+// parsePiModels reads `pi --list-models` table rows as provider/id.
+func parsePiModels(output string) []string {
+	var models []string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(stripAnsiCodes(line))
+		if line == "" || strings.HasPrefix(line, "Warning:") || strings.HasPrefix(line, "No models") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] == "provider" && fields[1] == "model" {
+			continue
+		}
+		models = append(models, fields[0]+"/"+fields[1])
+	}
+	return models
+}
+
+// matchPiModel accepts provider/id, a unique id suffix, or a unique fuzzy
+// substring (hello-pi's `sonnet` / `gemini` / `grok` patterns).
+func matchPiModel(models []string, model string) (string, error) {
+	if resolved, err := matchListedModel(models, model); err == nil {
+		return resolved, nil
+	}
+	needle := strings.ToLower(strings.TrimSpace(model))
+	if needle == "" {
+		return "", fmt.Errorf("empty model")
+	}
+	var hits []string
+	for _, listed := range models {
+		id := listed
+		if i := strings.LastIndex(listed, "/"); i >= 0 {
+			id = listed[i+1:]
+		}
+		lowID := strings.ToLower(id)
+		lowListed := strings.ToLower(listed)
+		if lowID == needle || strings.Contains(lowID, needle) || strings.Contains(lowListed, needle) {
+			hits = append(hits, listed)
+		}
+	}
+	switch len(hits) {
+	case 1:
+		return hits[0], nil
+	case 0:
+		return "", fmt.Errorf("model %q is not available", model)
+	default:
+		return "", fmt.Errorf("model %q is ambiguous: %s", model, strings.Join(hits, ", "))
+	}
+}
+
+func resolvePiModel(model string) (string, error) {
+	models, err := listModelsForAgent("pi", agentConfigs["pi"])
+	if err != nil {
+		return "", err
+	}
+	if len(models) == 0 {
+		return "", fmt.Errorf("no models available for agent pi")
+	}
+	resolved, err := matchPiModel(models, model)
+	if err != nil {
+		return "", fmt.Errorf("%w for agent pi", err)
+	}
+	return resolved, nil
+}
+
+func resolveOpenCodeModel(model string) (string, error) {
+	models, err := listModelsForAgent("opencode", agentConfigs["opencode"])
+	if err != nil {
+		return "", err
+	}
+	resolved, err := matchListedModel(models, model)
+	if err != nil {
+		return "", fmt.Errorf("%w for agent opencode", err)
+	}
+	return resolved, nil
+}
+
+// listModelsForAgent is queryModelsForAgent without the printing, shared with
+// --inspect (see inspect.go). Agents without model selection, or without a
+// known model list, yield no models and no error.
+func listModelsForAgent(agent string, config *AgentConfig) ([]string, error) {
 	// First check if agent has any model support
 	if config.ModelFlag == "" {
-		return nil
+		return nil, nil
 	}
 
 	// For agents that support dynamic model listing
@@ -706,38 +987,30 @@ func queryModelsForAgent(agent string, config *AgentConfig) []string {
 		cmd := exec.Command("opencode", "models")
 		output, err := cmd.Output()
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("failed to query models from opencode: %v", err)))
-			fmt.Println(sessionStyle.Render("ensure 'opencode' is installed and available on PATH"))
-			return nil
+			return nil, fmt.Errorf("failed to query models from opencode: %v", err)
 		}
 		// Parse output, one model per line
-		var models []string
-		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" {
-				models = append(models, line)
-			}
+		return filterChatModels(parseModelLines(string(output))), nil
+
+	case "pi":
+		cmd := exec.Command("pi", "--list-models")
+		output, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("failed to query models from pi: %v", err)
 		}
-		return models
+		return parsePiModels(string(output)), nil
 
 	case "grok":
 		cmd := exec.Command("grok", "models")
 		output, err := cmd.Output()
 		if err != nil {
-			fmt.Println(errorStyle.Render(fmt.Sprintf("failed to query models from grok: %v", err)))
-			fmt.Println(sessionStyle.Render("ensure 'grok' is installed and available on PATH"))
-			return nil
+			return nil, fmt.Errorf("failed to query models from grok: %v", err)
 		}
-		return parseGrokModels(string(output))
+		return parseGrokModels(string(output)), nil
 
 	default:
 		// For agents without dynamic model listing, use the static list from config
-		if len(config.Models) > 0 {
-			return config.Models
-		}
-		fmt.Println(sessionStyle.Render("consult the agent's documentation for available models"))
-		return nil
+		return config.Models, nil
 	}
 }
 
@@ -789,6 +1062,7 @@ func stripAnsiCodes(s string) string {
 // for agent access. The caller is responsible for cleaning up the temp directory.
 // Sessions are specified as a slice of IDs, with "default" meaning the
 // current session (determined by AGENT_SESSION or the current date).
+// recordsPath is the records root; sessions are read from sessionsRoot(recordsPath).
 func prepareRecordsForAgent(sessionIDs []string, recordsPath, currentSession string) (string, error) {
 	// Create temp directory
 	tempDir, err := os.MkdirTemp("", "agent-records-*")
@@ -808,7 +1082,7 @@ func prepareRecordsForAgent(sessionIDs []string, recordsPath, currentSession str
 		}
 
 		// Source session directory
-		srcDir := filepath.Join(recordsPath, id)
+		srcDir := filepath.Join(sessionsRoot(recordsPath), id)
 
 		// Check if source exists
 		info, err := os.Stat(srcDir)

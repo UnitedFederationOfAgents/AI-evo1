@@ -1,0 +1,40 @@
+# DTT example specification -- files, self-contained (see ../../../README.md "Declarative tools").
+#
+# A tool call specification whose definition is all in its directory: the
+# directory is an in-place call (its .dtttc names this document), and the
+# images its executions return are kept in images/ beside it (.gitignore
+# keeps them out of git). It writes two files under dir, made if it's
+# missing: hello.txt, rewritten with the time on each assert (from.content
+# "*": it's ours), and hello.json, written once. Deleting with the assert's
+# image removes them again.
+#
+#   dtt read   examples/specifications/hello-files
+#   dtt assert examples/specifications/hello-files
+#   dtt delete examples/specifications/hello-files --image <the assert's image, in images/>
+
+variables:
+  dir:
+    default: /tmp/dtt-specifications/hello-files/
+    help: the directory to write hello.txt and hello.json in (absolute)
+
+timestamp:
+  select: now
+
+filesystem.items:
+  select:
+    abspath: ${{var.dir}}
+  alias: hello-dir
+
+hello-dir:
+  assert:
+    items:
+      hello.txt:
+        type: text
+        content: |
+          Hello from dtt's hello-files specification. Last asserted ${{timestamp.iso}}.
+        from.content: "*"
+      hello.json:
+        type: json
+        content:
+          greeting: hello
+          from: examples/specifications/hello-files

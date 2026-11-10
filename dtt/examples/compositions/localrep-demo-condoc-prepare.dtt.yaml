@@ -1,0 +1,110 @@
+# DTT example -- localrep, open a condocv2 demo's windows on a prepared node (see ../../README.md "The localrep tool").
+#
+# It is localrep-demo-session-prepare with condocv2 in place of
+# session-manager. It takes node, the node to open them on, as
+# agent-coordinator names it ("" by default, for this node); at, the unix
+# seconds the node was prepared at (localrep-demo-prepare's time); and
+# ac_url, agent-coordinator's URL as the node's browser reaches it (""
+# by default: asked of this node's local-representative, as
+# localrep.coordinator finds it). It imports the control sequence in
+# resources/demo-condoc-prepare.control.yaml into that node's library and
+# runs it there: it starts the robot (ianar) if it isn't running, wakes the
+# screen and makes sure condocv2 is running; then, on the demo's workspace,
+# it opens a new federation-command terminal, which the robot tiles to the
+# left half of the screen (super+left), and, through it, a new Chrome window
+# of its own (a throwaway profile, /tmp/dtt-demo-condoc-<at>, zoomed to 1.5x
+# so the robot can read it) on agent-coordinator, which the robot tiles to
+# the right half (super+right). The robot waits for agent-coordinator's
+# page, types the node's condocv2 propose page through agent-coordinator
+# (<ac_url>/host/<node>/condocv2/#/propose) into the address bar and waits
+# for its form, leaving the terminal and condocv2 side by side. The node's
+# screen is recorded while it works. Then composer, on this node, puts a
+# title card, the recording and a closing card together into a WebM in the
+# files tab.
+#
+# The run's fc output (${{cprep-run.output.fc}}) names the terminal: the
+# condoc hello (localrep-demo-condoc-hello) works through it, and the condoc
+# shutdown (localrep-demo-condoc-shutdown) closes the browser through it,
+# then the terminal. The run and the composition are named by at
+# (demo-condoc-prep-<at>), so one preparation opens the windows once:
+# asserting again does nothing. at defaults to now; on its own, give the
+# preparation's time. The condocv2 demo (localrep-demo-condoc) gives it.
+# Deleting, with the assert's image, removes the sequence and the
+# composition (the run has happened, so it's kept); it doesn't close the
+# windows -- the condoc shutdown does.
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar, condocv2 and federation-command built
+# beside it; condocv2's pointer repo ready; a terminal for federation-command to open in;
+# google-chrome (browser says how to start another). Here: compose launched
+# and connected.
+#
+#   dtt read examples/compositions/localrep-demo-condoc-prepare.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-condoc-prepare.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt delete examples/compositions/localrep-demo-condoc-prepare.dtt.yaml --var node=<node> --var at=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to open the condocv2 demo's windows on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the browser's profile
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as the node's browser reaches it (http://host:port); empty to ask this node's local-representative
+  browser:
+    default: google-chrome
+    help: the browser command on the node (google-chrome, chromium, ...)
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.coordinator:
+  select:
+    url: ${{var.ac_url}}
+  alias: ac
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-condoc-prep
+    node: ${{var.node}}
+  alias: cprep-seq
+  assert:
+    source_file: resources/demo-condoc-prepare.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-condoc-prep
+    key: demo-condoc-prep-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: cprep-run
+  assert:
+    controls:
+      url: ${{ac.url}}
+      profile: /tmp/dtt-demo-condoc-${{the-time.unix}}
+      browser: ${{var.browser}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-condoc-prep-${{the-time.unix}}
+  alias: cprep-comp
+  assert:
+    composition: |
+      {
+        "name": "condocv2 demo prep on ${{cprep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Opening agent-coordinator, condocv2 and a terminal on ${{cprep-seq.node}}", "color": "#ffffff", "background": "#1e5f4a"},
+          {"kind": "media", "file_id": "${{cprep-run.recording.file_id}}", "file_name": "${{cprep-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{cprep-run.output.demo}}", "color": "#1a1a1a", "background": "#a0e0c0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

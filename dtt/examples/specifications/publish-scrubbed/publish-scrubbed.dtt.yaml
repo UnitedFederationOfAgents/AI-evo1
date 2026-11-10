@@ -1,0 +1,335 @@
+# DTT example specification -- publish scrubbed: two versions of a private repository copied into private working repositories, scrubbed of condocs and identifying information by an agent in a slopspace each, and published as two tags of a new private repository (see ../../../README.md "Git commits").
+#
+# Four phases, each once the one before it is done:
+#
+#   snapshot  github.repos finds the source repository and its clone_url;
+#             git.trees fetches its files at ref_1 and at ref_2 (with the
+#             github tool's token, as it's private); and the two working
+#             repositories are created, private and empty.
+#   seed      each working repository's main gets one commit, with no
+#             history, of the source's files at its ref (git.commits; a
+#             tree's files never include .git).
+#   scrub     for each working repository, a slopspace gets main's files in
+#             repo/ (slopspace.files' copy_from), an agent deletes the
+#             condocs and replaces identifying information there, and the
+#             result is committed back on top of main. The second agent
+#             starts from the first's scrub-map.md, so both versions use
+#             the same placeholders and the diff between the tags is real.
+#   publish   the published repository is created, private (make it public
+#             by hand once the image looks clean), and each working
+#             repository's main is pushed to it as a tag (ref_1, ref_2) --
+#             commits with no history but each other: ref_2's parent is
+#             ref_1's. git.files counts any condocs left (want file_count 0).
+#
+# Asserting again changes nothing once it's done: each commit already holds
+# its files, the scrubbed copies in the slopspaces are held (they differ
+# from what was copied in), and the work, done, is not run again. A run
+# stopped part way (an agent's wait running out, say) carries on from where
+# it got to. Every commit is by dtt <dtt@localhost>, so no one's name or
+# email is in the published history.
+#
+# It needs a GitHub token that can create the organization's repositories
+# and push to them, dungeon-keeper's worker (agent-worker) on this host,
+# and up to two agent runs' time (wait, each). Deleting with the assert's
+# image deletes the three repositories (approve_delete) and the two
+# slopspaces, and keeps the agent work and the commits (gone with their
+# repositories).
+#
+#   dtt read   examples/specifications/publish-scrubbed
+#   dtt assert examples/specifications/publish-scrubbed
+#   dtt assert examples/specifications/publish-scrubbed --var ref_1=<tag> --var ref_2=<tag>
+#   dtt delete examples/specifications/publish-scrubbed --image <the assert's image, in images/>
+
+variables:
+  source:
+    default: unitedfederationofagents/AI-evo1-spiral
+    help: the private source repository, <owner>/<name>
+  ref_1:
+    default: v0.0.1
+    help: the first version (a tag, branch or commit of source), and the first tag published
+  ref_2:
+    default: v0.0.2
+    help: the second version, and the second tag published
+  working_1:
+    default: AI-evo1-working-1
+    help: the private working repository for ref_1, in unitedfederationofagents
+  working_2:
+    default: AI-evo1-working-2
+    help: the private working repository for ref_2, in unitedfederationofagents
+  published:
+    default: AI-evo1
+    help: the repository the scrubbed versions are published to, in unitedfederationofagents
+  agent:
+    default: claude
+    help: the agent that scrubs each version
+  wait:
+    default: 3300
+    help: seconds to wait for each agent to finish (at most 55 minutes)
+
+github.repos:
+  phase: snapshot
+  select:
+    repo: ${{var.source}}
+  alias: source
+
+git.trees:
+  select:
+    url: ${{source.clone_url}}
+    ref: ${{var.ref_1}}
+  alias: tree-1
+
+git.trees:
+  select:
+    url: ${{source.clone_url}}
+    ref: ${{var.ref_2}}
+  alias: tree-2
+
+github.orgs.unitedfederationofagents.repos:
+  assert:
+    repos:
+      - select:
+          name: ${{var.working_1}}
+        state:
+          private: true
+          auto_init: false
+          approve_delete: unitedfederationofagents/${{var.working_1}}
+      - select:
+          name: ${{var.working_2}}
+        state:
+          private: true
+          auto_init: false
+          approve_delete: unitedfederationofagents/${{var.working_2}}
+
+---
+
+github.repos:
+  phase: seed
+  select:
+    repo: unitedfederationofagents/${{var.working_1}}
+  alias: working-1
+
+github.repos:
+  select:
+    repo: unitedfederationofagents/${{var.working_2}}
+  alias: working-2
+
+git.commits:
+  select:
+    url: ${{working-1.clone_url}}
+    ref: refs/heads/main
+  alias: seed-1
+  assert:
+    files_from: ${{tree-1.tree}}
+    parent: none
+    message: ${{var.source}} at ${{var.ref_1}} (${{tree-1.short_commit}})
+
+git.commits:
+  select:
+    url: ${{working-2.clone_url}}
+    ref: refs/heads/main
+  alias: seed-2
+  assert:
+    files_from: ${{tree-2.tree}}
+    parent: none
+    message: ${{var.source}} at ${{var.ref_2}} (${{tree-2.short_commit}})
+
+---
+
+slopspace.spaces:
+  phase: scrub
+  select:
+    key: publish-scrubbed-1
+  alias: space-1
+  assert:
+    exists: true
+
+slopspace.files:
+  select:
+    space: ${{space-1.key}}
+    path: repo
+  alias: repo-1
+  assert:
+    copy_from: ${{seed-1.tree}}
+
+slopspace.work.executions:
+  select:
+    space: ${{space-1.key}}
+    key: publish-scrubbed-1
+  alias: scrub-1
+  after: repo-1
+  assert:
+    agent: ${{var.agent}}
+    wait: ${{var.wait}}
+    timeout: 3600
+    prompt: |
+      writespaces/files/repo/, in your working directory, holds every file of
+      one version of a repository (with no .git). It is going to be published
+      publicly. Edit the files under writespaces/files/repo/ in place so that
+      they are safe to publish, and change nothing else:
+
+      1. Delete every condoc: each directory named condocs (the top-level
+         condocs/ and any nested one), with everything in it. Code and docs
+         that only mention condocs stay -- the condocv2 tool, its docs, demos
+         and examples are part of the project.
+      2. Replace identifying information everywhere it appears (code, docs,
+         configs, examples, tests, images' alt text) with consistent
+         placeholders, the same placeholder for the same original:
+         - personal usernames and account names (GitHub users, local user
+           names, home directories such as /home/<user>): user-1, user-2, ...
+         - email addresses: user-1@example.com, ...
+         - IP addresses other than loopback and 0.0.0.0: 10.0.0.1, 10.0.0.2, ...
+         - host and machine names, and private or internal URLs: host-1,
+           host-1.example.internal, ...
+         - tokens, keys and passwords: REDACTED
+         Leave the unitedfederationofagents organization and its repository
+         names as they are: they are the project's own.
+      3. Keep the code consistent: where a value you replace is also expected
+         somewhere else (a test's fixture, say), replace it the same way there.
+      4. Write writespaces/files/scrub-map.md (outside repo/), always, even if
+         you replaced nothing: one line per replacement, "original ->
+         placeholder", then the condocs directories you deleted.
+
+slopspace.files:
+  select:
+    space: ${{space-1.key}}
+    path: scrub-map.md
+  alias: map-1
+  after: scrub-1
+
+git.commits:
+  select:
+    url: ${{working-1.clone_url}}
+    ref: refs/heads/main
+  alias: scrubbed-1
+  after: scrub-1
+  assert:
+    files_from: ${{space-1.files}}/repo
+    parent: current
+    message: Remove condocs and identifying information
+
+slopspace.spaces:
+  select:
+    key: publish-scrubbed-2
+  alias: space-2
+  assert:
+    exists: true
+
+slopspace.files:
+  select:
+    space: ${{space-2.key}}
+    path: repo
+  alias: repo-2
+  assert:
+    copy_from: ${{seed-2.tree}}
+
+slopspace.files:
+  select:
+    space: ${{space-2.key}}
+    path: scrub-map.md
+  alias: map-2
+  assert:
+    content: ${{map-1.content}}
+
+slopspace.work.executions:
+  select:
+    space: ${{space-2.key}}
+    key: publish-scrubbed-2
+  alias: scrub-2
+  after: [repo-2, map-2]
+  assert:
+    agent: ${{var.agent}}
+    wait: ${{var.wait}}
+    timeout: 3600
+    prompt: |
+      writespaces/files/repo/, in your working directory, holds every file of
+      one version of a repository (with no .git). It is going to be published
+      publicly. Edit the files under writespaces/files/repo/ in place so that
+      they are safe to publish, and change nothing else.
+
+      writespaces/files/scrub-map.md already lists the replacements made in
+      the previous version: use the same placeholder for every original it
+      lists, and only make up new ones for originals it doesn't.
+
+      1. Delete every condoc: each directory named condocs (the top-level
+         condocs/ and any nested one), with everything in it. Code and docs
+         that only mention condocs stay -- the condocv2 tool, its docs, demos
+         and examples are part of the project.
+      2. Replace identifying information everywhere it appears (code, docs,
+         configs, examples, tests, images' alt text) with consistent
+         placeholders, the same placeholder for the same original:
+         - personal usernames and account names (GitHub users, local user
+           names, home directories such as /home/<user>): user-1, user-2, ...
+         - email addresses: user-1@example.com, ...
+         - IP addresses other than loopback and 0.0.0.0: 10.0.0.1, 10.0.0.2, ...
+         - host and machine names, and private or internal URLs: host-1,
+           host-1.example.internal, ...
+         - tokens, keys and passwords: REDACTED
+         Leave the unitedfederationofagents organization and its repository
+         names as they are: they are the project's own.
+      3. Keep the code consistent: where a value you replace is also expected
+         somewhere else (a test's fixture, say), replace it the same way there.
+      4. Rewrite writespaces/files/scrub-map.md (outside repo/): the previous
+         version's lines, then a line for each new replacement, "original ->
+         placeholder", then the condocs directories you deleted.
+
+git.commits:
+  select:
+    url: ${{working-2.clone_url}}
+    ref: refs/heads/main
+  alias: scrubbed-2
+  after: scrub-2
+  assert:
+    files_from: ${{space-2.files}}/repo
+    parent: current
+    message: Remove condocs and identifying information
+
+---
+
+github.orgs.unitedfederationofagents.repos:
+  phase: publish
+  assert:
+    repos:
+      select:
+        name: ${{var.published}}
+      state:
+        private: true
+        auto_init: false
+        approve_delete: unitedfederationofagents/${{var.published}}
+
+github.repos:
+  select:
+    repo: unitedfederationofagents/${{var.published}}
+  alias: published
+
+git.files:
+  select:
+    tree: ${{scrubbed-1.tree}}
+    filter: "**/condocs/**"
+  alias: condocs-left-1
+
+git.files:
+  select:
+    tree: ${{scrubbed-2.tree}}
+    filter: "**/condocs/**"
+  alias: condocs-left-2
+
+git.commits:
+  select:
+    url: ${{published.clone_url}}
+    ref: refs/tags/${{var.ref_1}}
+  alias: tag-1
+  assert:
+    files_from: ${{scrubbed-1.tree}}
+    parent: none
+    message: ${{var.ref_1}}
+
+git.commits:
+  select:
+    url: ${{published.clone_url}}
+    ref: refs/tags/${{var.ref_2}}
+  alias: tag-2
+  after: tag-1
+  assert:
+    files_from: ${{scrubbed-2.tree}}
+    parent: ${{tag-1.commit}}
+    message: ${{var.ref_2}}

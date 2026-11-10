@@ -1,0 +1,151 @@
+# DTT example -- localrep, a full condocv2 demo, hello world included, composed of five others (see ../../README.md "Calls and phases").
+#
+# It takes node, the node to give the demo on, as agent-coordinator names it
+# ("" by default, for this node), and ac_url, agent-coordinator's URL as
+# that node's browser reaches it ("" by default: asked of this node's
+# local-representative). It is laid out as localrep-demo-session-full is,
+# with condocv2 in place of session-manager: it calls five other examples
+# (dtt.calls), one after another, each in its own phase. Phase prepare calls
+# localrep-demo-prepare: wake the node, put the demo page on its desktop and
+# switch to an empty workspace. Phase condoc-prepare calls
+# localrep-demo-condoc-prepare: make sure condocv2 is running, and open a
+# new federation-command terminal and, beside it, a new Chrome window on the
+# node's condocv2. Phase hello calls localrep-demo-condoc-hello, given the
+# condoc prep's terminal (its run's fc output): the robot proposes a condoc,
+# HelloWorld-<time>, in condocv2, which the terminal finds in condocv2's
+# pointer repo; the terminal withdraws it, which the robot sees in
+# condocv2. Phase condoc-shut-down calls localrep-demo-condoc-shutdown,
+# given the same terminal: close that Chrome and the terminal. Phase
+# shut-down calls localrep-demo-shutdown: delete the page and switch back to
+# the first workspace, so GNOME removes the demo's. Each of the five makes
+# its own composer composition (demo-prep-<time>, demo-condoc-prep-<time>,
+# demo-condoc-hello-<time>, demo-condoc-shutdown-<time>,
+# demo-shutdown-<time>) of its own recording, between its own title and
+# closing cards. Then a sixth phase, compose, has composer put the five
+# renders together into one more composition, demo-condoc-<time>, rendered
+# into a WebM in the files tab -- annotated: a title card, a chapter card
+# before each part saying what it shows, and a closing card summing up.
+#
+# All five calls are given this document's time (at), so they share the
+# demo page, the browser's profile, the hello world condoc's name and the
+# names of their runs and compositions; each assert gives a new demo. The
+# image reports each phase (phases), and a phase that fails stops the ones
+# after it -- a failed hello leaves the condocv2 demo's windows open (and
+# perhaps the HelloWorld proposal, to withdraw in condocv2), for
+# localrep-demo-condoc-shutdown on its own (given at and the condoc prep's
+# fc), then localrep-demo-shutdown. Deleting, with the assert's image,
+# deletes through each call too: the five sequences and all six
+# compositions (the runs have happened, so they're kept; so are the pointer
+# repo's two commits).
+#
+# It needs what the five calls need: local-representative connected to
+# agent-coordinator on the node, with ianar, condocv2 and federation-command
+# built beside it; condocv2's pointer repo ready and pushable; GNOME with dynamic workspaces and its default tiling keys
+# (super+left, super+right); a terminal for federation-command to open in;
+# google-chrome. Here: compose launched and connected. pointer_dir (where
+# condocv2's pointer repo is checked out on the node) is passed to the
+# hello: leave it empty unless the pointer repo was moved in condocv2.
+#
+#   dtt read examples/compositions/localrep-demo-condoc.dtt.yaml --var node=<node>
+#   dtt assert examples/compositions/localrep-demo-condoc.dtt.yaml --var node=<node>
+#   dtt delete examples/compositions/localrep-demo-condoc.dtt.yaml --var node=<node> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to give the demo on, as agent-coordinator names it; empty for this node
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as the node's browser reaches it (http://host:port); empty to ask this node's local-representative
+  pointer_dir:
+    default: ""
+    help: where condocv2's pointer repo is checked out on the node; empty for condocv2's default (../sloppo beside the git repo it was started in)
+
+timestamp:
+  select: now
+  alias: the-time
+
+dtt.calls:
+  select:
+    document: localrep-demo-prepare.dtt.yaml
+  alias: prep
+  phase: prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-prepare.dtt.yaml
+  alias: cprep
+  phase: condoc-prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      ac_url: ${{var.ac_url}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-hello.dtt.yaml
+  alias: chello
+  phase: hello
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{cprep.by_alias.cprep-run.output.fc}}
+      pointer_dir: ${{var.pointer_dir}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-shutdown.dtt.yaml
+  alias: cshut
+  phase: condoc-shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{cprep.by_alias.cprep-run.output.fc}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-shutdown.dtt.yaml
+  alias: shut
+  phase: shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+localrep.compositions:
+  select:
+    id: demo-condoc-${{the-time.unix}}
+  alias: condoc-comp
+  phase: compose
+  assert:
+    composition: |
+      {
+        "name": "condocv2 demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 4, "text": "A condocv2 demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1a1a1a"},
+          {"kind": "title", "duration": 3, "text": "1 of 5 -- Prepare: wake the node, put the demo page on its desktop, and switch to an empty workspace", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{prep.by_alias.prep-comp.render.file_id}}", "file_name": "${{prep.by_alias.prep-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "2 of 5 -- Open condocv2: make sure it is running, then a terminal on the left and condocv2 through agent-coordinator on the right", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{cprep.by_alias.cprep-comp.render.file_id}}", "file_name": "${{cprep.by_alias.cprep-comp.render.name}}"},
+          {"kind": "title", "duration": 4, "text": "3 of 5 -- Hello world: the robot proposes HelloWorld-${{the-time.unix}} in condocv2 and the terminal finds it in the pointer repo; the terminal withdraws it and condocv2 drops it", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{chello.by_alias.chello-comp.render.file_id}}", "file_name": "${{chello.by_alias.chello-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "4 of 5 -- Close condocv2's windows: the browser and the terminal (condocv2 keeps running)", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{cshut.by_alias.cshut-comp.render.file_id}}", "file_name": "${{cshut.by_alias.cshut-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "5 of 5 -- Shut down: delete the demo page and go back to the first workspace", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{shut.by_alias.shut-comp.render.file_id}}", "file_name": "${{shut.by_alias.shut-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "Prepared, opened condocv2, proposed and withdrew a condoc from both sides, closed and shut down", "color": "#1a1a1a", "background": "#e0e0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

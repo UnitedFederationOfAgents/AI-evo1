@@ -11,14 +11,28 @@ import (
 type BlinkerState int
 
 const (
-	BlinkerIdle      BlinkerState = iota // Blinking with hollow grey circle (default)
-	BlinkerInactive                      // Blank, not blinking (user has typed)
-	BlinkerSelect                        // Blinking with solid grey circle (blinker select mode)
-	BlinkerRidealong                     // Blinking red/blue for ridealong mode (always on)
+	BlinkerIdle       BlinkerState = iota // Blinking with hollow grey circle (default)
+	BlinkerInactive                       // Blank, not blinking (user has typed)
+	BlinkerSelect                         // Blinking with solid grey circle (blinker select mode)
+	BlinkerRidealong                      // Blinking red/blue for ridealong mode (always on)
+	BlinkerConnecting                     // Fast blue blink while connecting to local-representative
+	BlinkerConnected                      // Slow blue blink when connected to local-representative (remote control)
+	BlinkerLocalControl                   // Slow orange blink when connected but FC has local control
 )
 
 // Standard cursor blink interval (typical terminal cursor blink rate)
 const BlinkInterval = 530 * time.Millisecond
+
+// ConnectingBlinkInterval is the fast blue flash rate while connecting to LR
+const ConnectingBlinkInterval = 100 * time.Millisecond
+
+// Accent blink: a brief blue pulse overlaid on whatever mode is active, used to
+// signal that a background auto-connect attempt is in progress. accentBlinkGap is
+// the quiet time between pulses; accentBlinkDur is how long each pulse shows.
+const (
+	accentBlinkGap = 3 * time.Second
+	accentBlinkDur = 130 * time.Millisecond
+)
 
 // Blinker manages the blinker slot state and rendering
 type Blinker struct {
@@ -28,13 +42,22 @@ type Blinker struct {
 	flashCount    int  // Number of remaining flash cycles
 	gen           int  // Generation counter; invalidates stale tick timers on state changes
 	ridealongBlue bool // For ridealong mode: toggles between red (false) and blue (true)
+	devMode       bool // This FC instance was launched with --dev-mode: brackets render green.
+
+	accentEnabled bool // When true, a brief blue accent pulse is overlaid on the current mode
+	accentOn      bool // Whether the accent pulse is currently showing
+	accentGen     int  // Generation counter for the independent accent tick chain
 }
 
-// NewBlinker creates a new blinker in the default idle (blinking) state
-func NewBlinker() Blinker {
+// NewBlinker creates a new blinker in the default idle (blinking) state.
+// devMode renders the enclosing brackets green for the lifetime of the
+// instance (see docs/DevMode.md) — dev mode is launch-time only, not
+// switchable at runtime.
+func NewBlinker(devMode bool) Blinker {
 	return Blinker{
 		state:   BlinkerIdle,
 		visible: true,
+		devMode: devMode,
 	}
 }
 
@@ -44,6 +67,13 @@ type BlinkerTickMsg struct{ gen int }
 
 // BlinkerFlashMsg is sent during flash animation
 type BlinkerFlashMsg struct{}
+
+// BlinkerConnectingTickMsg drives the fast blue flash during a connection attempt.
+type BlinkerConnectingTickMsg struct{}
+
+// AccentBlinkMsg drives the accent-blink chain; gen must match the blinker's
+// current accentGen or the tick is ignored (stale from a disabled chain).
+type AccentBlinkMsg struct{ gen int }
 
 // tickCmd schedules the next tick, capturing the current generation.
 func (b *Blinker) tickCmd() tea.Cmd {
@@ -58,6 +88,53 @@ func blinkerFlashCmd() tea.Cmd {
 	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
 		return BlinkerFlashMsg{}
 	})
+}
+
+// connectingTickCmd drives the fast blue pulse while a connection attempt is in flight.
+func connectingTickCmd() tea.Cmd {
+	return tea.Tick(ConnectingBlinkInterval, func(t time.Time) tea.Msg {
+		return BlinkerConnectingTickMsg{}
+	})
+}
+
+// accentTickCmd schedules the next accent-blink transition, capturing the current
+// accent generation so a disabled/re-enabled chain ignores stale ticks.
+func (b *Blinker) accentTickCmd() tea.Cmd {
+	gen := b.accentGen
+	d := accentBlinkGap
+	if b.accentOn {
+		d = accentBlinkDur
+	}
+	return tea.Tick(d, func(t time.Time) tea.Msg {
+		return AccentBlinkMsg{gen: gen}
+	})
+}
+
+// EnableAccent turns on the background accent blink. The caller is responsible for
+// emitting the initial tick (Init does this via accentTickCmd); a running program
+// should batch b.accentTickCmd() alongside enabling.
+func (b *Blinker) EnableAccent() {
+	b.accentEnabled = true
+	b.accentOn = false
+	b.accentGen++
+}
+
+// DisableAccent stops the accent blink and invalidates its tick chain.
+func (b *Blinker) DisableAccent() {
+	b.accentEnabled = false
+	b.accentOn = false
+	b.accentGen++
+}
+
+// AccentTick advances the accent-blink cycle: it flips accentOn and reschedules
+// itself. It returns nil once the accent blink has been disabled or the tick is
+// stale, ending the chain.
+func (b *Blinker) AccentTick(gen int) tea.Cmd {
+	if !b.accentEnabled || gen != b.accentGen {
+		return nil
+	}
+	b.accentOn = !b.accentOn
+	return b.accentTickCmd()
 }
 
 // ResetTick starts a fresh tick chain by incrementing the generation, which
@@ -77,6 +154,13 @@ var (
 	blinkerBracketStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("117"))
 
+	// Green brackets shown instead of blinkerBracketStyle when this FC instance
+	// was launched with --dev-mode (see docs/DevMode.md) — rendered in the same
+	// devGreen (main.go) as the prompt cursor and startup/mismatch banners, so
+	// the two can't drift apart (Revision B).
+	blinkerBracketDevStyle = lipgloss.NewStyle().
+				Foreground(devGreen)
+
 	// Grey indicator characters
 	blinkerBlockStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("243"))
@@ -91,6 +175,18 @@ var (
 
 	blinkerBlueStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("39"))
+
+	// Connected/connecting style - dark blue (connecting fast blink, local-control slow blink)
+	blinkerConnectedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("33"))
+
+	// Remote-control style - light blue, alternates with blinkerConnectedStyle for remote-control indication
+	blinkerConnectedLightStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("81"))
+
+	// Accent-blink style - vivid blue pulse overlaid on the current mode during background auto-connect
+	blinkerAccentStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("27"))
 )
 
 // Indicator characters — circles are reliably single-cell-wide in all terminals
@@ -106,8 +202,9 @@ func (b *Blinker) Tick() tea.Cmd {
 	if b.state == BlinkerInactive {
 		return nil
 	}
-	if b.state == BlinkerRidealong {
-		// In ridealong mode, toggle between red and blue (always visible)
+	if b.state == BlinkerRidealong || b.state == BlinkerConnected {
+		// Toggle colour each tick (always visible): ridealong alternates its colours;
+		// BlinkerConnected alternates dark-blue/light-blue for remote-control indication.
 		b.ridealongBlue = !b.ridealongBlue
 		b.visible = true
 	} else {
@@ -153,6 +250,25 @@ func (b *Blinker) SetState(state BlinkerState) {
 	}
 }
 
+// StartConnecting switches to BlinkerConnecting and returns the fast tick command.
+// It invalidates the normal tick chain so the two don't interfere.
+func (b *Blinker) StartConnecting() tea.Cmd {
+	b.state = BlinkerConnecting
+	b.visible = true
+	b.gen++ // invalidate any running normal tick chain
+	return connectingTickCmd()
+}
+
+// ConnectingTick toggles the connecting flash and reschedules itself.
+// Returns nil once the state is no longer BlinkerConnecting, ending the chain.
+func (b *Blinker) ConnectingTick() tea.Cmd {
+	if b.state != BlinkerConnecting {
+		return nil
+	}
+	b.visible = !b.visible
+	return connectingTickCmd()
+}
+
 // State returns the current blinker state
 func (b *Blinker) State() BlinkerState {
 	return b.state
@@ -168,10 +284,29 @@ func (b *Blinker) IsRidealongMode() bool {
 	return b.state == BlinkerRidealong
 }
 
+// IsConnecting returns true while a connection attempt to LR is in flight.
+func (b *Blinker) IsConnecting() bool {
+	return b.state == BlinkerConnecting
+}
+
+// IsConnected returns true when FC has an active connection to LR in remote control mode.
+func (b *Blinker) IsConnected() bool {
+	return b.state == BlinkerConnected
+}
+
+// IsLocalControl returns true when FC is connected to LR but has local control.
+func (b *Blinker) IsLocalControl() bool {
+	return b.state == BlinkerLocalControl
+}
+
 // View renders the blinker slot
 func (b *Blinker) View() string {
-	openBracket := blinkerBracketStyle.Render("[")
-	closeBracket := blinkerBracketStyle.Render("]")
+	bracketStyle := blinkerBracketStyle
+	if b.devMode {
+		bracketStyle = blinkerBracketDevStyle
+	}
+	openBracket := bracketStyle.Render("[")
+	closeBracket := bracketStyle.Render("]")
 
 	var content string
 	switch b.state {
@@ -204,9 +339,40 @@ func (b *Blinker) View() string {
 		} else {
 			content = blinkerRedStyle.Render(SolidBlock)
 		}
+	case BlinkerConnecting:
+		if b.visible {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = " "
+		}
+	case BlinkerConnected:
+		// Remote control: always visible, alternates dark-blue / light-blue.
+		if b.ridealongBlue {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = blinkerConnectedLightStyle.Render(SolidBlock)
+		}
+	case BlinkerLocalControl:
+		// Local control: slow on/off blue blink (user's blinking cursor already signals local mode).
+		if b.visible {
+			content = blinkerConnectedStyle.Render(SolidBlock)
+		} else {
+			content = " "
+		}
+	}
+
+	// Accent blink: brief vivid-blue pulse overlaid on whatever mode is active,
+	// signalling that a background auto-connect attempt is still in progress.
+	if b.accentOn {
+		content = blinkerAccentStyle.Render(SolidBlock)
 	}
 
 	return openBracket + content + closeBracket
+}
+
+// IsRemoteControlActive returns true when FC is connected to LR (remote or local control).
+func (b *Blinker) IsRemoteControlActive() bool {
+	return b.state == BlinkerConnected || b.state == BlinkerLocalControl
 }
 
 // ShouldBlink returns true if the blinker should be ticking

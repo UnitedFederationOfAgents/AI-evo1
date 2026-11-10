@@ -1,0 +1,75 @@
+# DTT example specification -- git md lines: count the lines of Markdown in a public GitHub repository at a ref, and upload a file saying how many to the preferred file cache (see ../../../README.md "Git trees").
+#
+# The github tool and the git tool work together. github.repos finds the
+# repository (repo, user-1/AI-sandboxing by default) and its
+# clone_url: GitHub knows which repository. git.trees fetches ref (main by
+# default) from that URL, one commit deep, into dtt's git cache and
+# resolves the files at it, and git.files filters them to **/*.md, a new
+# tree of file nodes with each file's lines counted: git knows the
+# repository's files. Then a file in a new directory in dir,
+# git-md-lines-<commit>/md-lines.txt, says how many lines of md there are,
+# and that file is uploaded to the preferred file cache (this host's own:
+# its local-representative's files tab) as md-lines-<commit>.txt.
+#
+# The names come from the commit, so asserting again at the same commit
+# changes nothing; once ref moves on, it writes and uploads a new count.
+# Reading fetches too (dtt's cache is all it touches), and needs
+# local-representative running on this host. No GitHub token is needed for
+# a public repository. A cached file is swept an hour after it's uploaded
+# unless it's held or persisted in the files tab. Deleting with the
+# assert's image removes the directory and the upload -- give the commit as
+# ref (--var ref=<commit>) if ref has moved on since.
+#
+#   dtt read   examples/specifications/git-md-lines
+#   dtt assert examples/specifications/git-md-lines
+#   dtt assert examples/specifications/git-md-lines --var repo=<owner>/<name> --var ref=<branch, tag or commit>
+#   dtt delete examples/specifications/git-md-lines --image <the assert's image, in images/>
+
+variables:
+  repo:
+    default: user-1/AI-sandboxing
+    help: the public GitHub repository, <owner>/<name>
+  ref:
+    default: main
+    help: the branch, tag or commit whose files are counted
+  dir:
+    default: /tmp/
+    help: the directory the count is written into a new directory in (absolute, ending in /)
+
+github.repos:
+  select:
+    repo: ${{var.repo}}
+  alias: repo
+
+git.trees:
+  select:
+    url: ${{repo.clone_url}}
+    ref: ${{var.ref}}
+  alias: source
+
+git.files:
+  select:
+    tree: ${{source.tree}}
+    filter: "**/*.md"
+  alias: md
+
+filesystem.items:
+  select:
+    abspath: ${{var.dir}}git-md-lines-${{source.short_commit}}/
+  alias: counted
+  assert:
+    exists: true
+    items:
+      md-lines.txt:
+        type: text
+        content: |
+          ${{repo.full_name}} at ${{var.ref}} (commit ${{source.commit}}) has ${{md.lines}} lines of md, in ${{md.file_count}} files matching **/*.md.
+
+localrep.files:
+  select:
+    name: md-lines-${{source.short_commit}}.txt
+    cache: preferred
+  alias: uploaded
+  after: counted
+  assert:
+    copy_of: ${{var.dir}}git-md-lines-${{source.short_commit}}/md-lines.txt

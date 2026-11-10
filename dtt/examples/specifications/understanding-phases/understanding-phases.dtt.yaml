@@ -1,0 +1,76 @@
+# DTT example specification -- understanding phases: three phases split by ---, with a delay in each (see ../../../README.md "Calls and phases").
+#
+# Each part between --- is a phase, and a phase begins only once everything
+# in the one before it is done. Each phase ends with a delay (wait, 30s by
+# default) that waits for its work (after:), so watching the calls tab's
+# visual you see one phase go green, a pause, then the next begin; each
+# delay's began and completed are in the image.
+#
+# Phase make-first makes a directory in dir named for the time,
+# understanding-phases-<unix>-first, with hello.txt in it. Phase copy makes
+# understanding-phases-<unix>-second beside it and copies every file in the
+# first into it (copy_from), a file object each. Phase clean-up removes the
+# first directory. Deleting with the assert's image removes the second.
+#
+#   dtt read   examples/specifications/understanding-phases
+#   dtt assert examples/specifications/understanding-phases
+#   dtt delete examples/specifications/understanding-phases --image <the assert's image, in images/>
+
+variables:
+  dir:
+    default: /tmp/
+    help: the directory the phases make their directories in (absolute, ending in /)
+  wait:
+    default: 30s
+    help: how long each phase's delay waits (a duration, 1m say, or seconds)
+
+timestamp:
+  select: now
+  alias: started
+  phase: make-first
+
+filesystem.items:
+  select:
+    abspath: ${{var.dir}}understanding-phases-${{started.unix}}-first/
+  alias: first-dir
+  assert:
+    exists: true
+    items:
+      hello.txt:
+        type: text
+        content: |
+          Made in phase make-first of dtt's understanding-phases specification, at ${{started.iso}}.
+
+delay:
+  select: ${{var.wait}}
+  alias: first-wait
+  after: first-dir
+
+---
+
+filesystem.items:
+  select:
+    abspath: ${{var.dir}}understanding-phases-${{started.unix}}-second/
+  alias: second-dir
+  phase: copy
+  assert:
+    exists: true
+    copy_from: ${{first-dir.abspath}}
+
+delay:
+  select: ${{var.wait}}
+  alias: second-wait
+  after: second-dir
+
+---
+
+first-dir:
+  phase: clean-up
+  assert:
+    exists: false
+    from.exists: true
+
+delay:
+  select: ${{var.wait}}
+  alias: third-wait
+  after: first-dir

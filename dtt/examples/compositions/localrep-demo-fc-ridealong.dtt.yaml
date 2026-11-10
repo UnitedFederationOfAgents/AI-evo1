@@ -1,0 +1,85 @@
+# DTT example -- localrep, bring up federation-command and ride along through a ridealong (see ../../README.md "The localrep tool").
+#
+# It goes between localrep-demo-prepare and localrep-demo-shutdown. It
+# takes node, the node to run it on, as agent-coordinator names it ("" by
+# default, for this node), and at, the unix seconds the node was prepared at
+# (localrep-demo-prepare's time). It imports the control sequence in
+# resources/demo-fc-ridealong.control.yaml into that node's library and runs
+# it there: it starts the robot (ianar) if it isn't running and wakes the
+# screen, then, on the demo's empty workspace, launches a new
+# federation-command terminal, which the robot maximizes. Through it, it
+# writes a three-step ridealong to /tmp/dtt-demo-fc-ridealong-<at>.md and
+# shows it, starts it (ridealong <file>) and steps through it as the
+# ridealong panel's "execute command" does, waiting for each step's output
+# before the next. Once the last step has ended the ridealong, it removes
+# the file and has the terminal exit, leaving the workspace empty again. The
+# node's screen is recorded while it works. Then composer, on this node,
+# puts a title card, the recording and a closing card together into a WebM
+# in the files tab.
+#
+# Nothing runs an AI: the ridealong's steps are echo, date and hostname.
+# The run and the composition are named by at (demo-fc-ridealong-<at>), so
+# asserting again does nothing. Deleting, with the assert's image, removes
+# the sequence and the composition (the run has happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar and federation-command built beside it, a
+# terminal for federation-command to open in, and GNOME's default keys
+# (super+up maximizes). Here: compose launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-fc-ridealong.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-fc-ridealong.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt delete examples/compositions/localrep-demo-fc-ridealong.dtt.yaml --var node=<node> --var at=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to bring federation-command up on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the ridealong file
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-fc-ridealong
+    node: ${{var.node}}
+  alias: fcride-seq
+  assert:
+    source_file: resources/demo-fc-ridealong.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-fc-ridealong
+    key: demo-fc-ridealong-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: fcride-run
+  assert:
+    controls:
+      file: /tmp/dtt-demo-fc-ridealong-${{the-time.unix}}.md
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-fc-ridealong-${{the-time.unix}}
+  alias: fcride-comp
+  assert:
+    composition: |
+      {
+        "name": "federation-command ridealong on ${{fcride-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "federation-command comes up on ${{fcride-seq.node}} and rides along", "color": "#ffffff", "background": "#5f3a1e"},
+          {"kind": "media", "file_id": "${{fcride-run.recording.file_id}}", "file_name": "${{fcride-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{fcride-run.output.demo}}", "color": "#1a1a1a", "background": "#e0c0a0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

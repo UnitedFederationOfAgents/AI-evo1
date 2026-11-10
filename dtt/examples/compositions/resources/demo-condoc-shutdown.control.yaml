@@ -1,0 +1,82 @@
+# local-representative control library: close a condocv2 demo's windows,
+# undoing dtt-demo-condoc-prep, for dtt's localrep-demo-condoc-shutdown
+# example (../localrep-demo-condoc-shutdown.dtt.yaml), which imports it
+# into the library of the node it targets and runs it there.
+#
+# It is the session shutdown (demo-session-shutdown.control.yaml) for the
+# condoc prep's windows. It starts the robot (ianar) if it isn't running and
+# wakes the screen, then checks the condoc prep's federation-command
+# terminal (fc, the prep run's fc output) is still connected. Through it, it
+# closes the prep's browser -- every process started with its profile
+# (profile), and no other browser -- and removes the profile, then has the
+# terminal exit, which closes its window. That leaves the demo's workspace
+# empty again, as the demo prep left it, for the shutdown. condocv2 is left
+# running. The node's screen is recorded from the browser closing to the end
+# (steps 4-6). Every action is its own (dtt-demo-cshut-*), so importing this
+# replaces none of the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-cshut-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-cshut-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-cshut-check
+    name: Check the condoc prep's terminal is still there
+    description: wait for the condoc prep's federation-command to be connected in remote control
+    do:
+      - {op: fc-expect-state, fc: "{{fc}}", state: remote-control, timeout: 15s, hint: "the condoc prep's terminal isn't connected any more (closed, or a local-representative restart) -- close its browser and terminal by hand"}
+  - id: dtt-demo-cshut-browser
+    name: Close the browser
+    description: "through the terminal, stop every process started with the browser's profile, and remove the profile"
+    controls:
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-condoc-{{timestamp}}"
+    do:
+      - {op: random, save_as: closed_token, length: "6"}
+      - {op: set, save_as: closed, value: "browser closed - {{closed_token}}"}
+      # [u]: the pattern doesn't match this command's own shell, only the browser.
+      - {op: fc-send, fc: "{{fc}}", command: "pkill -f '[u]ser-data-dir={{profile}}'; sleep 2; rm -rf -- '{{profile}}'; echo \"{{closed}}\"", expect: "{{closed}}", timeout: 30s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-cshut-terminal
+    name: Close the terminal
+    description: "have the condoc prep's federation-command exit, closing its window"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: exit}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-cshut-hold
+    name: Hold the empty workspace
+    description: "robot: hold the empty workspace for the recording"
+    do:
+      - {op: robot.wait, duration: 2s}
+      - {op: output, label: demo, value: "{{this_node}}: the condocv2 demo's browser and terminal are closed"}
+sequences:
+  - id: dtt-demo-condoc-shutdown
+    name: "Demo: close a condocv2 demo's windows"
+    description: Start the robot if need be and wake the screen; then, through the condoc prep's federation-command terminal, close the browser it opened and remove its profile, and have the terminal exit -- with this node's screen recorded while it works.
+    controls:
+      - name: fc
+        label: Terminal
+        help: the condoc prep's federation-command instance (its run's fc output, e.g. federation-command#2)
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-condoc-{{timestamp}}"
+        help: the profile the condoc prep started the browser with (its profile control)
+    steps:
+      - action: dtt-demo-cshut-robot
+      - action: dtt-demo-cshut-wake
+      - action: dtt-demo-cshut-check
+      - action: dtt-demo-cshut-browser
+        with:
+          profile: "{{profile}}"
+      - action: dtt-demo-cshut-terminal
+      - action: dtt-demo-cshut-hold
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 6, label: "condoc demo shutdown"}

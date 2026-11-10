@@ -1,0 +1,223 @@
+# Demo -- condocv2 on local repos: make two repos with no remote, take a condoc through its whole lifecycle on them, and remove them.
+#
+# The condoc-hello shape, with two more phases around the subject for the
+# repos it runs on, made and removed by dtt's git tool (git.repos, not the
+# github tool: nothing here is on GitHub but condocv2's pointer repo):
+#
+#   lead-in           localrep-demo-prepare: wake the node, put the demo
+#                     page on its desktop and switch to an empty workspace.
+#   repos-lead-in     git.repos: make example-content-<time> and
+#                     example-slopspace-<time> under the default local root
+#                     ($UFA_LOCAL_ROOT, ~/workspace/ufa-local by default),
+#                     each with a first commit on main -- the local/<name>
+#                     repos condocv2 clones from and merges into.
+#   condoc-lead-in    localrep-demo-condoc-prepare: make sure condocv2 is
+#                     running, and open a terminal and, beside it, a Chrome
+#                     window on the node's condocv2 propose page.
+#   lifecycle         localrep-demo-condoc-local: the robot proposes
+#                     LocalCondoc-<time> in condocv2 over the two repos
+#                     (target local/example-content-<time>, condoc repo
+#                     local/example-slopspace-<time>), accepts it, enters one
+#                     cheap prompt (a haiku about a cat), completes it, raises
+#                     the drafts as local merges, merges them and archives
+#                     it; the terminal shows the merge in the content repo.
+#   condoc-tear-down  localrep-demo-condoc-shutdown: close that Chrome and
+#                     the terminal (condocv2 keeps running).
+#   repos-tear-down   git.repos: remove the two repos again (approve_delete
+#                     names each; only git repos directly under the root
+#                     are ever removed).
+#   tear-down         localrep-demo-shutdown: delete the page and switch
+#                     back to the first workspace.
+#   compose           composer puts the four renders together, with a
+#                     chapter card before each and cards for the repos
+#                     made and removed, into demo-condoc-local-<time>, a
+#                     WebM in the files tab.
+#
+# The agent runs twice, both cheaply: the haiku, then the merge drafts.
+#
+# It is a same-system-under-test (SSUT) demo, not a local one (LSUT): there
+# is no node to pick, as every phase runs on the node running the demo. The
+# git tool makes the repos where dtt runs, and condocv2 there must find them
+# under the same local root, so the system under test can only be that node.
+# Nor is there a root to give: the repos are the ones the demo makes from
+# scratch, named by its time, directly under the default local root
+# ($UFA_LOCAL_ROOT, else ~/workspace/ufa-local) -- the root condocv2 reads
+# local/<name> from. A phase that fails stops the ones after it -- a failed
+# lifecycle leaves the repos (remove them with git-repos-local's delete, or
+# by hand) and condocv2's windows open, for localrep-demo-condoc-shutdown on
+# its own (given at and the condoc lead-in's fc), then localrep-demo-shutdown.
+#
+# It needs local-representative connected to agent-coordinator, with ianar,
+# condocv2, federation-command and a worker (dungeon-keeper) built beside
+# it; git; condocv2's pointer repo ready and pushable; GNOME with dynamic workspaces and its default tiling keys; a
+# terminal for federation-command to open in; google-chrome; and compose
+# launched and connected.
+#
+# On the demo tab's protosurf map, beside what its phases call, it is about
+# (focal) condocv2 and dtt's git tool, and needs on the way (supporting)
+# dungeon-keeper's local repo handling and slopspaces, the robot and
+# federation-command's terminal:
+#
+#   focal: condocv2/ dtt/declare_git.go dtt/builtin/git/
+#   supporting: dungeon-keeper/pkg/gitauth/ dungeon-keeper/pkg/slopspace/ ianar/ federation-command/
+#   sut: same
+#
+#   dtt assert condoc-local.demo.dtt.yaml
+
+variables:
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as this node's browser reaches it (http://host:port); empty to ask this node's local-representative
+
+timestamp:
+  select: now
+  alias: the-time
+
+# ---- lead-in (general) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-prepare.dtt.yaml
+  alias: prep
+  phase: lead-in
+  assert:
+    variables:
+      node: ""
+      at: ${{the-time.unix}}
+
+# ---- lead-in (the local repos) ----
+
+git.repos:
+  alias: local                      # the default root: $UFA_LOCAL_ROOT, else ~/workspace/ufa-local, as condocv2 has it
+  phase: repos-lead-in
+  assert:
+    repos:
+      - select:
+          name: example-content-${{the-time.unix}}
+        state:
+          exists: true
+          default_branch: main
+          initial_commit: true
+          description: |
+            # example-content-${{the-time.unix}}
+
+            The condoc-local demo's content repo, made ${{the-time.human-readable}}: a local repo with no remote, which the demo's condoc writes a haiku into.
+          approve_delete: local/example-content-${{the-time.unix}}
+      - select:
+          name: example-slopspace-${{the-time.unix}}
+        state:
+          exists: true
+          default_branch: main
+          initial_commit: true
+          description: |
+            # example-slopspace-${{the-time.unix}}
+
+            The condoc-local demo's slopspace repo, made ${{the-time.human-readable}}: a local repo with no remote, which holds the demo's condoc files.
+          approve_delete: local/example-slopspace-${{the-time.unix}}
+
+# ---- lead-in (condocv2) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-prepare.dtt.yaml
+  alias: cprep
+  phase: condoc-lead-in
+  assert:
+    variables:
+      node: ""
+      at: ${{the-time.unix}}
+      ac_url: ${{var.ac_url}}
+
+# ---- subject ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-local.dtt.yaml
+  alias: clocal
+  phase: lifecycle
+  assert:
+    variables:
+      node: ""
+      at: ${{the-time.unix}}
+      fc: ${{cprep.by_alias.cprep-run.output.fc}}
+      target: local/example-content-${{the-time.unix}}
+      condoc_repo: local/example-slopspace-${{the-time.unix}}
+      target_dir: ${{local.root}}/example-content-${{the-time.unix}}
+
+# ---- tear-down (condocv2) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-condoc-shutdown.dtt.yaml
+  alias: cshut
+  phase: condoc-tear-down
+  assert:
+    variables:
+      node: ""
+      at: ${{the-time.unix}}
+      fc: ${{cprep.by_alias.cprep-run.output.fc}}
+
+# ---- tear-down (the local repos) ----
+
+local:
+  phase: repos-tear-down
+  assert:
+    repos:
+      - select:
+          name: example-content-${{the-time.unix}}
+        state:
+          exists: false
+          from.exists: "true"          # the demo made it: remove it
+          approve_delete: local/example-content-${{the-time.unix}}
+      - select:
+          name: example-slopspace-${{the-time.unix}}
+        state:
+          exists: false
+          from.exists: "true"
+          approve_delete: local/example-slopspace-${{the-time.unix}}
+
+# ---- tear-down (general) ----
+
+dtt.calls:
+  select:
+    document: localrep-demo-shutdown.dtt.yaml
+  alias: shut
+  phase: tear-down
+  assert:
+    variables:
+      node: ""
+      at: ${{the-time.unix}}
+
+# ---- compose ----
+
+localrep.compositions:
+  select:
+    id: demo-condoc-local-${{the-time.unix}}
+  alias: demo-comp
+  phase: compose
+  assert:
+    composition: |
+      {
+        "name": "condocv2 on local repos, on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 4, "text": "condocv2 on local repos -- no remote, no GitHub -- on ${{prep.by_alias.prep-seq.node}}, ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1a1a1a"},
+          {"kind": "title", "duration": 3, "text": "1 of 6 -- Lead-in: wake the node, put the demo page on its desktop, and switch to an empty workspace", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{prep.by_alias.prep-comp.render.file_id}}", "file_name": "${{prep.by_alias.prep-comp.render.name}}"},
+          {"kind": "title", "duration": 4, "text": "2 of 6 -- dtt's git tool made two local repos under ${{local.root}}: example-content-${{the-time.unix}} and example-slopspace-${{the-time.unix}}, each with a first commit on main", "color": "#ffffff", "background": "#333333"},
+          {"kind": "title", "duration": 3, "text": "3 of 6 -- Open condocv2: a terminal on the left and condocv2 through agent-coordinator on the right", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{cprep.by_alias.cprep-comp.render.file_id}}", "file_name": "${{cprep.by_alias.cprep-comp.render.name}}"},
+          {"kind": "title", "duration": 4, "text": "4 of 6 -- The lifecycle: propose LocalCondoc-${{the-time.unix}} on the local repos, prompt once, complete, merge locally and archive", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{clocal.by_alias.clocal-comp.render.file_id}}", "file_name": "${{clocal.by_alias.clocal-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "5 of 6 -- Close condocv2's windows, then remove the two local repos with the git tool", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{cshut.by_alias.cshut-comp.render.file_id}}", "file_name": "${{cshut.by_alias.cshut-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "6 of 6 -- Tear-down: delete the demo page and go back to the first workspace", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{shut.by_alias.shut-comp.render.file_id}}", "file_name": "${{shut.by_alias.shut-comp.render.name}}"},
+          {"kind": "title", "duration": 3, "text": "Made two local repos, ran a condoc's whole lifecycle on them, and removed them", "color": "#1a1a1a", "background": "#e0e0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

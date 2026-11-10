@@ -126,12 +126,12 @@ Cleanup:
 rm -f /tmp/tour-test.txt
 ```
 
-## Chapter 5: heuristic-agent – Async Orchestration
+## Chapter 5: dungeon-keeper – Async Orchestration
 
-heuristic-agent manages long-running, background AI work through slopspaces and work signals. Where federation-command is interactive, heuristic-agent handles tasks that run unattended.
+dungeon-keeper manages long-running, background AI work through slopspaces and work signals. Where federation-command is interactive, dungeon-keeper handles tasks that run unattended.
 
-<!-- ridealong waypoint heuristic-agent -->
-[heuristic-agent brief tour](../../heuristic-agent/docs/brief-tour.md) <!-- ridealong continues -->
+<!-- ridealong waypoint dungeon-keeper -->
+[dungeon-keeper brief tour](../../dungeon-keeper/docs/brief-tour.md) <!-- ridealong continues -->
 
 ```ridealong
 cd $(git rev-parse --show-toplevel)
@@ -145,7 +145,7 @@ The AI-evo1 suite layers cleanly:
 2. **clauditable** – Wraps any command with transparent recording.
 3. **ambiguous-agent** – Single interface across all supported agents.
 4. **federation-command** – Interactive shell tying the three together with session management.
-5. **heuristic-agent** – Async orchestration for background agent work via slopspaces and work signals.
+5. **dungeon-keeper** – Async orchestration for background agent work via slopspaces and work signals.
 
 ## Next Steps
 

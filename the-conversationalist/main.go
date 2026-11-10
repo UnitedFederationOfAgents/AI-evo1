@@ -1,0 +1,510 @@
+package main
+
+import (
+	"context"
+	"embed"
+	"encoding/json"
+	"flag"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"representable"
+	"ufa-loader/restartsignal"
+	ufaversion "ufa-version"
+)
+
+//go:embed frontend/dist
+var embeddedFrontend embed.FS
+
+// wsMsg is the wire format for WebSocket messages.
+type wsMsg struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// ---- WebSocket server ----
+
+type wsClient struct {
+	conn *websocket.Conn
+	send chan []byte
+	done chan struct{}
+
+	// transcribe holds this browser tab's in-progress AWS Transcribe
+	// streaming session, if any -- see transcribe.go. nil while idle.
+	//
+	// finalText accumulates the final results from that session (and any
+	// prior one) across stop/start cycles, guarded by the same mutex --
+	// it lives here on the client rather than on transcribeSession because
+	// stopTranscription clears transcribe entirely, and saveTranscript (sent
+	// after the frontend's Stop button, see App.tsx) must still find the
+	// transcript once that happens.
+	transcribeMu sync.Mutex
+	transcribe   *transcribeSession
+	finalText    strings.Builder
+
+	// notepadSeq is the highest "set-notepad" seq accepted from this tab,
+	// guarded by Server.notepadMu -- see notepad.go.
+	notepadSeq uint64
+
+	// local is whether this tab's browser is on this host; presence is
+	// what the tab has said about itself, guarded by Server.mu. Together
+	// they decide which tab plays clips made with play (see pollyplay.go).
+	local    bool
+	presence tabPresence
+}
+
+// Server manages WebSocket clients and this the-conversationalist's
+// representable link to local-representative. This is a minimal application
+// shell (see condocs/InitialShellsSessionManagerAndTheConversationalist.md)
+// -- domain functionality for conversing lands in a later step.
+type Server struct {
+	httpPort string // HTTP port this instance serves on (reported to local-representative)
+	name     string // identifier reported to local-representative -- "convo" by default
+	devMode  bool   // --dev-mode: this instance -- see docs/DevMode.md
+	upgrader websocket.Upgrader
+	mu       sync.RWMutex
+	clients  map[*wsClient]bool
+
+	// representable link to local-representative (see repr.go). nil until connected.
+	reprMu           sync.Mutex
+	reprClient       *representable.Client
+	reprStatus       string        // "disconnected" | "connecting" | "connected"
+	reprHost         string        // host of the current/last connect attempt (widget default)
+	reprPort         string        // port of the current/last connect attempt (widget default)
+	reprStop         chan struct{} // non-nil while a connectLoop is running; closing it stops retries
+	reprAutoConnect  bool          // persistent auto-connect toggle -- see repr.go's setAutoConnect
+	modeMismatch     bool          // true while local-representative discloses a dev/ops mode mismatch -- see docs/DevMode.md
+	modeMismatchPeer string        // the mismatched LR's disclosed mode ("dev" or "ops")
+
+	// awsRegion is the AWS region AWS Transcribe streaming sessions are
+	// started in (see transcribe.go). Empty defers to the AWS SDK's own
+	// default region resolution (env/shared config/instance role), then to
+	// defaultAWSRegion with a warning -- see Revision D's note that we lean on
+	// host-level AWS credentials/config rather than anything app-managed.
+	awsRegion string
+
+	// Transcription-engine availability (see transcribe_status.go).
+	// transcribeProbe is nil in production (checkTranscribeAccess is used);
+	// tests swap in a stub so they don't depend on real AWS access.
+	transcribeStatusMu sync.Mutex
+	transcribeStatus   TranscribeStatusMsg
+	transcribeChecking bool
+	transcribeProbe    func(ctx context.Context) TranscribeStatusMsg
+
+	// Shared notepad text and its revision counter (see notepad.go).
+	notepadMu   sync.Mutex
+	notepadText string
+	notepadRev  uint64
+
+	// notesFile is where the "To Notes" buttons append (see notes.go);
+	// notesMu serializes those appends.
+	notesMu   sync.Mutex
+	notesFile string
+
+	// Polly voice and engine for the notepad's Polly button (see polly.go).
+	// pollyURL overrides Polly's regional endpoint; only tests set it.
+	pollyVoice  string
+	pollyEngine string
+	pollyURL    string
+
+	// Polly configurations, the active one, and the recent clips (see
+	// pollyconfig.go). pollyConfigFile keeps the configurations; "" keeps
+	// them in memory only.
+	pollyMu         sync.Mutex
+	pollyConfigFile string
+	pollyConfigs    []PollyConfig
+	pollyActive     string
+	pollyClips      []*pollyClip // newest first
+	pollyClipSeq    uint64
+
+	// startedAt is when this process started. Reported (as started_at) in
+	// self-info and convo-state so every UI down the chain -- TC's own, LR's
+	// and AC's -- can tell a fresh start or restart apart from a reconnect to
+	// the same process, and speak "application running" once per start
+	// (condocs/initialRobotImpls/Step5Prompt.md, Revision D) -- only while
+	// announceStart is on (announce.go).
+	startedAt time.Time
+
+	// announceStart is the "announce start" toggle, off by default and kept
+	// in settingsFile ("" keeps it in memory only); see announce.go.
+	settingsMu    sync.Mutex
+	settingsFile  string
+	announceStart bool
+}
+
+func newServer() *Server {
+	s := &Server{
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+		clients:     make(map[*wsClient]bool),
+		reprStatus:  "disconnected",
+		notesFile:   defaultNotesFile(),
+		pollyVoice:  defaultPollyVoice,
+		pollyEngine: defaultPollyEngine,
+		startedAt:   time.Now(),
+	}
+	s.initPollyConfigs()
+	return s
+}
+
+func (s *Server) marshalMsg(typ string, payload interface{}) []byte {
+	p, _ := json.Marshal(payload)
+	m := wsMsg{Type: typ, Payload: p}
+	b, _ := json.Marshal(m)
+	return b
+}
+
+func (s *Server) sendToClient(c *wsClient, typ string, payload interface{}) {
+	select {
+	case c.send <- s.marshalMsg(typ, payload):
+	default:
+	}
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("ws upgrade:", err)
+		return
+	}
+
+	c := &wsClient{
+		conn: conn,
+		send: make(chan []byte, 64),
+		done: make(chan struct{}),
+
+		local:    onThisHost(browserAddr(r)),
+		presence: tabPresence{shownAt: time.Now()},
+	}
+
+	s.mu.Lock()
+	s.clients[c] = true
+	s.mu.Unlock()
+
+	// Send initial representable connection status and self-info.
+	go s.sendReprStatus(c)
+	go s.sendToClient(c, "self-info", s.selfInfo())
+	go s.sendModeMismatch(c)
+	go s.sendNotepad(c)
+	go s.sendTranscribeStatus(c)
+	go s.sendPollyState(c)
+
+	// Write pump.
+	go func() {
+		defer conn.Close()
+		for {
+			select {
+			case msg, ok := <-c.send:
+				if !ok {
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+					return
+				}
+			case <-c.done:
+				return
+			}
+		}
+	}()
+
+	// Read pump (blocks until client disconnects).
+	defer func() {
+		close(c.done)
+		s.mu.Lock()
+		delete(s.clients, c)
+		s.mu.Unlock()
+		// A dropped tab shouldn't leave AWS Transcribe billing for a
+		// session nobody's listening to anymore.
+		s.stopTranscription(c)
+	}()
+
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var m wsMsg
+		if err := json.Unmarshal(raw, &m); err != nil {
+			continue
+		}
+		go s.handleClientMsg(c, m)
+	}
+}
+
+func (s *Server) handleClientMsg(c *wsClient, m wsMsg) {
+	switch m.Type {
+	case "connect":
+		// Manual connect: the widget lets an instance started without
+		// --auto-connect (or one whose auto-connect gave up) link up to
+		// local-representative on demand.
+		var p struct {
+			Host string `json:"host"`
+			Port string `json:"port"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		host := strings.TrimSpace(p.Host)
+		if host == "" {
+			host = "localhost"
+		}
+		port := strings.TrimSpace(p.Port)
+		if port == "" {
+			port = "8082"
+		}
+		s.startConnectLoop(host, port)
+
+	case "disconnect":
+		s.disconnectRepr()
+
+	case "set-auto-connect":
+		var p struct {
+			Enabled bool   `json:"enabled"`
+			Host    string `json:"host"`
+			Port    string `json:"port"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setAutoConnect(p.Enabled, strings.TrimSpace(p.Host), strings.TrimSpace(p.Port))
+
+	// Transcription: see transcribe.go. Mirrors agent-scribe's
+	// startTranscription/audioData/stopTranscription/saveTranscription
+	// socket.io events (ignored-scratch/AI-sandboxing/agent-scribe), but
+	// over this app's own typed WebSocket protocol and writing into
+	// local-representative's files area instead of a HEURISTIC.md intake.
+	case "start-transcription":
+		s.startTranscription(c)
+
+	case "audio-chunk":
+		var p struct {
+			Data string `json:"data"` // base64-encoded 16-bit PCM audio chunk
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.sendAudioChunk(c, p.Data)
+
+	case "stop-transcription":
+		s.stopTranscription(c)
+
+	case "save-transcript":
+		s.saveTranscript(c)
+
+	case "clear-transcript":
+		s.clearTranscript(c)
+
+	// Manual "Recheck" of transcription-engine availability: see
+	// transcribe_status.go.
+	case "recheck-transcribe":
+		s.refreshTranscribeStatus()
+
+	// Shared notepad: see notepad.go.
+	case "set-notepad":
+		var p struct {
+			Text string `json:"text"`
+			Seq  uint64 `json:"seq"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setNotepad(c, p.Text, p.Seq)
+
+	// "To Notes" buttons: see notes.go.
+	case "append-notes":
+		var p struct {
+			Source string `json:"source"`
+			Text   string `json:"text"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handleAppendNotes(c, p.Source, p.Text)
+
+	// The sidebar's "announce start" toggle: see announce.go.
+	case "set-announce-start":
+		var p struct {
+			Enabled bool `json:"enabled"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setAnnounceStart(p.Enabled)
+
+	// A tab saying it plays clips made with play, and whether it's
+	// visible: see pollyplay.go.
+	case "tab-presence":
+		var p struct {
+			Visible bool `json:"visible"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.setTabPresence(c, p.Visible)
+
+	// Notepad's Polly button: see polly.go.
+	case "polly-speak":
+		var p struct {
+			ID     uint64 `json:"id"`
+			Text   string `json:"text"`
+			Config string `json:"config"` // a Polly configuration; "" for the active one
+			Save   bool   `json:"save"`   // also keep the clip in LR's files area
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handlePollySpeak(c, p.ID, p.Text, p.Config, p.Save)
+
+	// The Polly configuration menu: see pollyconfig.go. A change refused
+	// is reported to the tab that asked, in its polly-state.
+	case "polly-replay":
+		var p struct {
+			ID   uint64 `json:"id"`
+			Clip uint64 `json:"clip"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		s.handlePollyReplay(c, p.ID, p.Clip)
+
+	case "polly-set-active", "polly-save-config", "polly-remove-config":
+		var p struct {
+			Name     string      `json:"name"`
+			Config   PollyConfig `json:"config"`
+			Previous string      `json:"previous"`
+		}
+		json.Unmarshal(m.Payload, &p)
+		var err error
+		switch m.Type {
+		case "polly-set-active":
+			err = s.setPollyActive(p.Name)
+		case "polly-save-config":
+			err = s.savePollyConfig(p.Config, p.Previous)
+		default:
+			err = s.removePollyConfig(p.Name)
+		}
+		if err != nil {
+			st := s.pollyState()
+			st.Error = err.Error()
+			s.sendToClient(c, "polly-state", st)
+		}
+	}
+}
+
+// ---- HTTP ----
+
+func (s *Server) setupRoutes(devMode bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc(representable.UIManifestPath, representable.ServeUIManifest(s.uiManifest)) // see plugin.go
+	mux.HandleFunc(representable.PluginIconPath, representable.ServeSVG(pluginIconSVG))
+	mux.HandleFunc("/api/polly", s.handlePollyAPI) // see pollyapi.go
+	mux.HandleFunc("/api/polly/configs", s.handlePollyConfigsAPI)
+	mux.HandleFunc("/api/polly/clips", s.handlePollyClipsAPI)
+
+	if devMode {
+		// In dev mode, don't serve static files — Vite dev server handles the frontend.
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "dev mode: serve frontend via 'make dev-frontend'", http.StatusServiceUnavailable)
+		})
+		return mux
+	}
+
+	distFS, err := fs.Sub(embeddedFrontend, "frontend/dist")
+	if err != nil {
+		log.Fatal("embed sub FS:", err)
+	}
+	fileServer := http.FileServer(http.FS(distFS))
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" {
+			path = "index.html"
+		}
+		// Check if the file exists in the embedded FS.
+		if _, err := fs.Stat(distFS, path); err == nil && path != "index.html" {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// SPA fallback to index.html.
+		idx, err := fs.ReadFile(distFS, "index.html")
+		if err != nil {
+			http.Error(w, "frontend not built — run 'make build'", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(idx)
+	})
+
+	return mux
+}
+
+// watchRestartSignal blocks waiting for SIGHUP and, on receipt, announces a
+// restart (see ufa-loader/README.md and docs/DevMode.md's "Loader" section)
+// as this process's final act before exiting 0. The signal is sent directly
+// to this process's own pid (e.g. `kill -HUP <pid>`), not through
+// ufa-loader itself. Run in its own goroutine; never returns.
+func watchRestartSignal() {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	for range sigCh {
+		log.Printf("received SIGHUP: announcing a restart and exiting")
+		if err := restartsignal.Announce(os.Stdout, "the-conversationalist", "sighup"); err != nil {
+			log.Printf("restartsignal.Announce: %v", err)
+		}
+		os.Exit(0)
+	}
+}
+
+func main() {
+	if ufaversion.HandleVersionFlag() {
+		return
+	}
+
+	flag.Bool("version", false, "print version and exit (checked ahead of every other flag; see the HandleVersionFlag call above)")
+	port := flag.String("port", "8086", "HTTP port to listen on")
+	dev := flag.Bool("dev", false, "dev mode: skip serving frontend static files")
+	devMode := flag.Bool("dev-mode", false, "dev mode (SDLC sense, see docs/DevMode.md): this instance is running from an in-progress branch. Unrelated to --dev.")
+	name := flag.String("name", "convo", "identifier reported to local-representative")
+	autoConnect := flag.Bool("auto-connect", false, "dial local-representative in the background on startup, retrying every 10s for up to 10m")
+	lrHost := flag.String("lr-host", "localhost", "local-representative host/IP for --auto-connect")
+	lrPort := flag.String("lr-port", "8082", "local-representative representable port for --auto-connect")
+	awsRegion := flag.String("aws-region", "", "AWS region for Transcribe streaming (default: the AWS SDK's own region resolution -- env/shared config/instance role -- else "+defaultAWSRegion+")")
+	notesFile := flag.String("notes-file", "", "file the \"To Notes\" buttons append to (default ~/notes-input.txt)")
+	pollyVoice := flag.String("polly-voice", defaultPollyVoice, "AWS Polly voice for the notepad's Polly button")
+	pollyEngine := flag.String("polly-engine", defaultPollyEngine, "AWS Polly engine (standard, neural, ...); the voice must support it")
+	pollyConfigFile := flag.String("polly-config-file", defaultPollyConfigFile(), "where the Polly configuration menu keeps its configurations; empty keeps them in memory only")
+	settingsFile := flag.String("settings-file", defaultSettingsFile(), "where the sidebar's settings (announce start) are kept; empty keeps them in memory only")
+	flag.Parse()
+
+	s := newServer()
+	s.settingsFile = *settingsFile
+	s.loadSettings()
+	s.pollyVoice = *pollyVoice
+	s.pollyEngine = *pollyEngine
+	s.pollyConfigFile = *pollyConfigFile
+	s.initPollyConfigs() // again: the default preset follows the flags, and the file is read
+	s.httpPort = *port
+	s.name = *name
+	s.devMode = *devMode
+	s.awsRegion = *awsRegion
+	if *notesFile != "" {
+		s.notesFile = *notesFile
+	}
+	go watchRestartSignal()
+	go s.watchTranscribeStatus()
+
+	if *autoConnect {
+		log.Printf("auto-connect enabled: dialing local-representative at %s:%s every %s for up to %s (runs in background)",
+			*lrHost, *lrPort, autoConnectInterval, autoConnectWindow)
+		s.setAutoConnect(true, *lrHost, *lrPort)
+	} else {
+		// No --auto-connect: still record the configured target as the manual
+		// widget's default so a "Connect" click dials the same place
+		// --auto-connect would have.
+		s.reprMu.Lock()
+		s.reprHost, s.reprPort = *lrHost, *lrPort
+		s.reprMu.Unlock()
+	}
+
+	addr := ":" + *port
+	log.Printf("the-conversationalist listening on http://localhost%s", addr)
+	if *dev {
+		log.Printf("dev mode: connect frontend to ws://localhost%s/ws", addr)
+	}
+
+	if err := http.ListenAndServe(addr, s.setupRoutes(*dev)); err != nil {
+		log.Fatal(err)
+	}
+}

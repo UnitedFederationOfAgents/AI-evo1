@@ -1,0 +1,111 @@
+# DTT example -- localrep, hello world through a condocv2 demo's windows (see ../../README.md "The localrep tool").
+#
+# It goes between localrep-demo-condoc-prepare and
+# localrep-demo-condoc-shutdown. It takes node, the node the windows are
+# on, as agent-coordinator names it ("" by default, for this node); at, the
+# unix seconds the node was prepared at (the preparation's time); and fc,
+# the condoc prep's federation-command terminal (its run's fc output, e.g.
+# federation-command#2). It imports the control sequence in
+# resources/demo-condoc-hello.control.yaml into that node's library and
+# runs it there: it starts the robot (ianar) if it isn't running, wakes the
+# screen and checks the terminal is still connected. Then, with the
+# terminal and condocv2 side by side, the robot proposes a condoc in
+# condocv2, HelloWorld-<at>, described "hello world from <node>, from
+# condocv2"; the terminal finds condocv2's pointer repo checkout and waits
+# there for the proposal's pointer file and condocv2's commit of it. Back
+# the other way, the terminal withdraws the proposal as condocv2's Withdraw
+# does (removes the pointer file and commits that alone), and the robot
+# waits for the proposal to leave condocv2's page; the terminal waits for
+# condocv2 to push the withdrawal and says hello world. The node's screen
+# is recorded while it works. Then composer, on this node, puts a title
+# card, the recording and a closing card together into a WebM in the files
+# tab.
+#
+# Nothing runs an agent. The proposal is never accepted, so its target and
+# condoc repos (target, condoc_repo) are only names -- they needn't exist --
+# and all it leaves is two commits in condocv2's pointer repo. pointer_dir
+# is where that repo is checked out on the node: empty (the default) for
+# condocv2's default, ../sloppo beside the git repo it was started in, read
+# from its process; give it if the pointer repo was set elsewhere in
+# condocv2. The run is named by at (demo-condoc-hello-<at>), so asserting
+# again doesn't run it again. A run whose terminal has gone fails at once,
+# saying so. The condocv2 demo (localrep-demo-condoc) gives at and fc.
+# Deleting, with the assert's image, removes the sequence and the
+# composition (the run has happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar, condocv2 and federation-command built
+# beside it, condocv2's pointer repo ready (and pushable), and the condoc
+# prep's windows still open. Here: compose launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-condoc-hello.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the condoc prep's fc>
+#   dtt assert examples/compositions/localrep-demo-condoc-hello.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the condoc prep's fc>
+#   dtt delete examples/compositions/localrep-demo-condoc-hello.dtt.yaml --var node=<node> --var at=<the same> --var fc=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node the condocv2 demo's windows are on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the condoc
+  fc:
+    help: the condoc prep's federation-command terminal, as its run's fc output names it (federation-command#2, say)
+  target:
+    default: user-1/hello-world-target
+    help: the target repo (owner/name) the hello world proposal names; never touched, as it is never accepted
+  condoc_repo:
+    default: user-1/hello-world-condoc
+    help: the condoc repo (owner/name) the hello world proposal names; never touched either
+  pointer_dir:
+    default: ""
+    help: where condocv2's pointer repo is checked out on the node; empty for condocv2's default (../sloppo beside the git repo it was started in)
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-condoc-hello
+    node: ${{var.node}}
+  alias: chello-seq
+  assert:
+    source_file: resources/demo-condoc-hello.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-condoc-hello
+    key: demo-condoc-hello-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: chello-run
+  assert:
+    controls:
+      fc: ${{var.fc}}
+      name: HelloWorld-${{the-time.unix}}
+      target: ${{var.target}}
+      condoc_repo: ${{var.condoc_repo}}
+      pointer_dir: ${{var.pointer_dir}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-condoc-hello-${{the-time.unix}}
+  alias: chello-comp
+  assert:
+    composition: |
+      {
+        "name": "condocv2 demo hello world on ${{chello-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Hello world, from condocv2 to the terminal and back, on ${{chello-seq.node}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "media", "file_id": "${{chello-run.recording.file_id}}", "file_name": "${{chello-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{chello-run.output.demo}}", "color": "#1a1a1a", "background": "#a0c0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

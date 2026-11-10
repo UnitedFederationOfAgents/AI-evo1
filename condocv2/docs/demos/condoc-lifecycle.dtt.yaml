@@ -1,0 +1,149 @@
+# condocv2 demo -- a condoc's whole lifecycle, driven by the robot on another
+# node and composed into a narrated video (see README.md beside this).
+#
+# A DTT document for dtt's declare tool, which reads every provider's
+# statements (github and localrep here). Run it on the client node -- the one
+# you sit at -- with node set to the node to demonstrate on:
+#
+#   1. github: two new private repositories for user-1, named by the
+#      date and take -- condoc-demo-<date>-<take>, the condoc repo, and
+#      cat-stories-<date>-<take>, the content repo the agent writes into.
+#   2. localrep.coordinator: the URL this client node's local-representative
+#      reaches agent-coordinator at (this host's LAN address in place of a
+#      loopback one), or coordinator_url if you give it.
+#   3. The control sequence in condoc-lifecycle.control.yaml is imported
+#      into the target node's library and run there: the robot opens a
+#      browser on <coordinator>/host/<node>/condocv2/, proposes the condoc
+#      (the two repos), accepts it, prompts the agent once for a story about
+#      cats, completes the condoc, raises and merges its PRs and archives it,
+#      while the node's screen is recorded (three blocks, not while the
+#      agent works). The recordings are copied into this node's files tab.
+#   4. Polly says a short narration, and composer puts title cards, the
+#      three recordings and the narration together into a WebM in the files
+#      tab (and so in the compose tab, as condoc-lifecycle-<date>-<take>).
+#
+# Everything is named by the date and take, so asserting again the same day
+# changes nothing; give a new take for a new run. The sequence is the one
+# thing not named by take: each assert replaces whatever version of it the
+# node holds (from.source_file "*"), so a take always runs this file's
+# steps. Reading measures only.
+# Asserting takes 10-30 minutes, mostly the agent's two turns (the story and
+# the PR drafts). Deleting, with the assert's image, deletes both
+# repositories, the sequence, the clip and the composition (the run, the
+# recordings and the archived condoc's pointer file are kept).
+#
+#   dtt read condoc-lifecycle.dtt.yaml --var node=<node>
+#   dtt assert condoc-lifecycle.dtt.yaml --var node=<node> --var take=1
+#   dtt delete condoc-lifecycle.dtt.yaml --var node=<node> --var take=1 --image <the assert's image>
+#
+# or, from the tools tab's runner: the declare tool, document_file set to
+# this file's absolute path, variables node=<node> (and take=1), mode assert.
+
+variables:
+  node:
+    help: the node to demonstrate on, as agent-coordinator names it (not this one)
+  take:
+    default: "1"
+    help: names this take (its repositories, run, clip and composition) -- lower-case letters, digits and '-'; change it to run again the same day
+  coordinator_url:
+    default: ""
+    help: agent-coordinator's URL as the target node's browser should reach it (http://host:port); empty to use the one this node is connected to
+  browser:
+    default: google-chrome
+    help: the browser command on the target node (google-chrome, chromium, ...)
+
+timestamp:
+  select: now
+  alias: the-time
+
+github.users.user-1.repos:
+  assert:
+    repos:
+      - select:
+          name: condoc-demo-${{the-time.date}}-${{var.take}}
+        state:
+          exists: true
+          private: true
+          description: The condoc repo for a condocv2 lifecycle demo (${{the-time.date}}, take ${{var.take}}).
+          default_branch: main
+          auto_init: true
+          approve_delete: user-1/condoc-demo-${{the-time.date}}-${{var.take}}
+      - select:
+          name: cat-stories-${{the-time.date}}-${{var.take}}
+        state:
+          exists: true
+          private: true
+          description: The content repo for a condocv2 lifecycle demo (${{the-time.date}}, take ${{var.take}}).
+          default_branch: main
+          auto_init: true
+          approve_delete: user-1/cat-stories-${{the-time.date}}-${{var.take}}
+
+localrep.coordinator:
+  select:
+    url: ${{var.coordinator_url}}
+  alias: ac
+
+localrep.control.sequences:
+  select:
+    id: dtt-condoc-lifecycle
+    node: ${{var.node}}
+  alias: lifecycle-seq
+  assert:
+    source_file: condoc-lifecycle.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-condoc-lifecycle
+    key: condoc-lifecycle-${{the-time.date}}-${{var.take}}
+    node: ${{var.node}}
+  alias: lifecycle
+  assert:
+    controls:
+      url: "${{ac.url}}/host/${{var.node}}/condocv2/#/propose"
+      name: CatStory-${{the-time.date}}-${{var.take}}
+      description: A demo condoc driven by dtt and the robot on ${{var.node}} -- one story about cats
+      target: user-1/cat-stories-${{the-time.date}}-${{var.take}}
+      condoc_repo: user-1/condoc-demo-${{the-time.date}}-${{var.take}}
+      prompt: Write a short story about cats, about 150 words, as stories/cats.md in the target repository. Don't propose any DTT tool calls.
+      browser: ${{var.browser}}
+    wait: 3300
+
+localrep.polly.clips:
+  select:
+    name: condoc-lifecycle-${{the-time.date}}-${{var.take}}
+  alias: narration
+  assert:
+    text: |
+      This is ${{var.node}}, driven through agent-coordinator by one DTT
+      document. Its robot proposes the condoc ${{lifecycle.output.condoc}}
+      over two new private repositories, and asks the agent for a story
+      about cats. Then it completes the condoc, raises and merges its pull
+      requests, and archives it.
+
+localrep.compositions:
+  select:
+    id: condoc-lifecycle-${{the-time.date}}-${{var.take}}
+  assert:
+    composition: |
+      {
+        "name": "A condoc's lifecycle on ${{var.node}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 4, "text": "A condoc, start to finish -- on ${{var.node}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "title", "duration": 2, "text": "1. propose, accept and prompt", "color": "#1a1a1a", "background": "#e0c060"},
+          {"kind": "media", "file_id": "${{lifecycle.by_label.proposing.file_id}}", "file_name": "${{lifecycle.by_label.proposing.name}}"},
+          {"kind": "title", "duration": 2, "text": "2. the agent writes a story about cats -- complete", "color": "#1a1a1a", "background": "#e0c060"},
+          {"kind": "media", "file_id": "${{lifecycle.by_label.completing.file_id}}", "file_name": "${{lifecycle.by_label.completing.name}}"},
+          {"kind": "title", "duration": 2, "text": "3. raise the PRs, merge, archive", "color": "#1a1a1a", "background": "#e0c060"},
+          {"kind": "media", "file_id": "${{lifecycle.by_label.merging.file_id}}", "file_name": "${{lifecycle.by_label.merging.name}}"},
+          {"kind": "title", "duration": 3, "text": "declared with dtt: two GitHub repos, a control sequence, Polly and composer", "color": "#ffffff", "background": "#3a1e5f"}
+        ],
+        "audio": [
+          {"kind": "media", "file_id": "${{narration.file_id}}", "file_name": "${{narration.file_name}}"}
+        ]
+      }
+    rendered: true
+    renderer: auto
+    wait: 1200

@@ -1,0 +1,49 @@
+# A built-in go tool (see ../../README.md "Runtimes" and "composer"): dtt
+# builds main.go and runs it. It drives composer's HTTP API
+# (composer/api.go): it saves a composition under its id and renders it
+# into local-representative's files area.
+format: dtt-v1
+name: composer
+description: Save a composition in composer -- title cards, images and videos on a video track, audio files, beeps and silence on an audio track -- and render it into a WebM in local-representative's files area. composer must be running; it renders with ffmpeg when that's installed, otherwise an open compose tab renders it.
+describe: "composer: {id}"
+inputs:
+  - name: composition
+    type: text
+    help: "the composition as JSON: {name, width, height, video: [clips], audio: [clips]}, clips as composer saves them (kind title/media/tone/silence, duration, text, color, background, frequency, file_id, file_name); empty for a hello-world"
+  - name: id
+    help: the id to save it under, replacing what's there (lower-case letters, digits and -); empty makes one from its name
+  - name: render
+    type: bool
+    default: "true"
+    help: true to render it into local-representative's files once saved
+  - name: renderer
+    choices: [auto, ffmpeg, browser]
+    default: auto
+    help: auto uses ffmpeg when composer finds it, else an open compose tab; browser waits for a compose tab to render it (keep it visible)
+  - name: wait
+    type: int
+    default: "600"
+    help: how many seconds to wait for the render to finish (at most 840, inside the tool's 15m timeout)
+  - name: composer_url
+    default: http://localhost:8089
+    help: where composer serves (its --port)
+outputs:
+  values:
+    - name: composition_id
+      help: the id it was saved under
+    - name: created
+      help: true when no composition had that id before
+    - name: rendered_by
+      help: what rendered it (ffmpeg or browser)
+    - name: file_id
+      help: the render's id in local-representative's files area
+    - name: file_name
+      help: the render's name there, composer-<id>-<stamp>.webm
+    - name: size
+      help: the render's size in bytes
+    - name: composition_json
+      help: the composition as composer saved it, defaults filled in
+entrypoint:
+  runtime: go
+  script: main.go
+  timeout: 15m

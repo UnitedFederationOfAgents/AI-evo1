@@ -1,0 +1,90 @@
+# DTT example -- localrep, a recorded robot hello world, narrated and composed (see ../../README.md "The localrep tool").
+#
+# It takes a variable, node: the node to run on, as agent-coordinator names
+# it ("" by default, for this node). It imports the control sequence in
+# resources/robot-hello.control.yaml into that node's control library and
+# runs it there: the robot echoes a hello world into a new
+# federation-command while the node's screen is recorded. Then Polly says a
+# line naming the node and what the robot echoed, and composer puts a title
+# card, the recording and the clip together into a WebM in the files tab.
+#
+# The run, the clip and the composition are named by the date and a second
+# variable, take, so asserting again the same day changes nothing; give a
+# new take to record again. Reading measures only; asserting does it all,
+# which takes a minute or two. Deleting, with the assert's image, removes
+# the sequence, the clip and the composition (the run has happened, so it's
+# kept; the render stays in the files tab until it's swept).
+#
+# It needs, on the node: the robot (ianar) running and federation-command
+# able to launch. Here: The Conversationalist connected to
+# local-representative, with AWS credentials allowed polly:SynthesizeSpeech,
+# and compose launched and connected (it renders on its own with ffmpeg;
+# otherwise keep the compose tab open and visible). Another node has to be
+# connected to agent-coordinator, as this one does; its recording is copied
+# here.
+#
+#   dtt read examples/compositions/localrep-robot-hello.dtt.yaml
+#   dtt assert examples/compositions/localrep-robot-hello.dtt.yaml --var node=<node> --var take=1
+#   dtt delete examples/compositions/localrep-robot-hello.dtt.yaml --var node=<node> --var take=1 --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to run the sequence on, as agent-coordinator names it; empty for this node
+  take:
+    default: "1"
+    help: names this take (its run, clip and composition) -- lower-case letters, digits and '-'; change it to record again the same day
+
+timestamp:
+  select: now
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-robot-hello
+    node: ${{var.node}}
+  alias: hello-seq
+  assert:
+    source_file: resources/robot-hello.control.yaml
+
+localrep.control.runs:
+  select:
+    sequence: dtt-robot-hello
+    key: robot-hello-${{the-time.date}}-${{var.take}}
+    node: ${{var.node}}
+  alias: hello-run
+  assert:
+    controls:
+      message: hello world from ${{hello-seq.node}}!
+    wait: 600
+
+localrep.polly.clips:
+  select:
+    name: robot-hello-${{the-time.date}}-${{var.take}}
+  alias: narration
+  assert:
+    text: |
+      This is ${{hello-seq.node}}. On ${{the-time.date}}, its robot opened a
+      terminal and typed: ${{hello-run.output.echoed}}
+
+localrep.compositions:
+  select:
+    id: robot-hello-${{the-time.date}}-${{var.take}}
+  assert:
+    composition: |
+      {
+        "name": "Robot hello world on ${{hello-seq.node}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Robot hello world -- ${{hello-seq.node}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "media", "file_id": "${{hello-run.recording.file_id}}", "file_name": "${{hello-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "declared with dtt: a control sequence, Polly and composer", "color": "#1a1a1a", "background": "#e0c060"}
+        ],
+        "audio": [
+          {"kind": "media", "file_id": "${{narration.file_id}}", "file_name": "${{narration.file_name}}"}
+        ]
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

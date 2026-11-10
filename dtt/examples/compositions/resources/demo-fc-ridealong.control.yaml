@@ -1,0 +1,144 @@
+# local-representative control library: bring up federation-command and
+# ride along through a short ridealong in it, on a node prepared by
+# dtt-demo-prepare, for dtt's localrep-demo-fc-ridealong example
+# (../localrep-demo-fc-ridealong.dtt.yaml), which imports it into the
+# library of the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen,
+# then, on the demo's empty workspace, launches a new federation-command
+# terminal (connected in remote control), which the robot maximizes
+# (super+up). Through the terminal it writes a three-step ridealong to file
+# (/tmp/dtt-demo-fc-ridealong-<at>.md by default), one ```ridealong block of
+# echo commands each ending in a random token, and shows it (cat). Then it
+# starts the ridealong (ridealong <file>), and steps through it as the
+# ridealong panel's "execute command" does, over the remote interface
+# (__ridealong:execute): after each step it waits for that step's token, so
+# the next isn't sent while the step still runs, and holds the panel on
+# screen for a moment. The last step ends the ridealong; the terminal then
+# takes ordinary commands again (it drops them while a ridealong is active,
+# and its control state doesn't change), so an echo coming back is how the
+# run knows it ended. Last,
+# it removes the file and has the terminal exit, leaving the workspace empty
+# for the shutdown.
+#
+# Nothing runs an AI: the steps are echo, date and hostname. The node's
+# screen is recorded from the terminal's launch to the end (steps 3-10).
+# Every action is its own (dtt-demo-fcride-*), so importing this replaces
+# none of the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-fcride-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-fcride-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-fcride-terminal
+    name: Bring up federation-command
+    description: "launch a new federation-command, on the demo's workspace, and wait for it to connect in remote control; robot: click its title bar and maximize it (super+up)"
+    do:
+      - {op: launch-fc, save_as: fc}
+      - {op: robot.wait, duration: 1s}
+      - {op: robot.focus-window, title: federation-command}
+      - {op: robot.key, keys: super+up}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-fcride-write
+    name: Write the ridealong
+    description: "through the terminal: write a three-step ridealong to the file, and show it"
+    controls:
+      - name: file
+        label: Ridealong file
+        default: "/tmp/dtt-demo-fc-ridealong-{{timestamp}}.md"
+    do:
+      - {op: random, save_as: t1, length: "6"}
+      - {op: random, save_as: t2, length: "6"}
+      - {op: random, save_as: t3, length: "6"}
+      - {op: random, save_as: written_token, length: "6"}
+      - {op: set, save_as: written, value: "ridealong written - {{written_token}}"}
+      - op: fc-send
+        fc: "{{fc}}"
+        command: "printf '%s\\n' 'A ridealong for the federation-command demo on {{this_node}}.' '' '```ridealong' 'echo \"ridealong step 1 of 3 - {{t1}}\"' 'date; echo \"ridealong step 2 of 3 - {{t2}}\"' 'echo \"riding along on $(hostname)\"; echo \"ridealong step 3 of 3 - {{t3}}\"' '```' > '{{file}}' && cat '{{file}}' && echo \"{{written}}\""
+        expect: "{{written}}"
+        timeout: 20s
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-fcride-start
+    name: Start the ridealong
+    description: "through the terminal: ridealong <file>, which opens the ridealong panel on its first step"
+    controls:
+      - name: file
+        label: Ridealong file
+        default: "/tmp/dtt-demo-fc-ridealong-{{timestamp}}.md"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: "ridealong {{file}}"}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-fcride-step1
+    name: "Ride along: step 1"
+    description: "execute the ridealong's current step (the panel's execute command) and wait for it to print its token"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: "__ridealong:execute", expect: "ridealong step 1 of 3 - {{t1}}", timeout: 20s}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-fcride-step2
+    name: "Ride along: step 2"
+    description: "execute the ridealong's current step (the panel's execute command) and wait for it to print its token"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: "__ridealong:execute", expect: "ridealong step 2 of 3 - {{t2}}", timeout: 20s}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-fcride-step3
+    name: "Ride along: step 3"
+    description: "execute the ridealong's last step (the panel's execute command), which ends the ridealong, and wait for it to print its token"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: "__ridealong:execute", expect: "ridealong step 3 of 3 - {{t3}}", timeout: 20s}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-fcride-ended
+    name: Check the ridealong ended
+    description: "through the terminal: an ordinary command, which federation-command only takes once the ridealong has ended; then remove the file"
+    controls:
+      - name: file
+        label: Ridealong file
+        default: "/tmp/dtt-demo-fc-ridealong-{{timestamp}}.md"
+    do:
+      - {op: random, save_as: done_token, length: "6"}
+      - {op: set, save_as: done, value: "ridealong complete on {{this_node}} - {{done_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "rm -f -- '{{file}}'; echo \"{{done}}\"", expect: "{{done}}", timeout: 20s}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-demo-fcride-close
+    name: Close federation-command
+    description: "have the terminal exit, closing its window, and hold the empty workspace for the recording"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: exit}
+      - {op: robot.wait, duration: 3s}
+      - {op: output, label: fc, value: "{{fc}}"}
+      - {op: output, label: demo, value: "{{this_node}}: federation-command came up and rode along through a three-step ridealong"}
+sequences:
+  - id: dtt-demo-fc-ridealong
+    name: "Demo: a federation-command ridealong"
+    description: Start the robot if need be and wake the screen; then bring up a new federation-command terminal, write a three-step ridealong through it, ride along through every step, and close the terminal -- with this node's screen recorded while it works.
+    controls:
+      - name: file
+        label: Ridealong file
+        default: "/tmp/dtt-demo-fc-ridealong-{{timestamp}}.md"
+        help: where the terminal writes the ridealong it rides along through; it is removed at the end
+    steps:
+      - action: dtt-demo-fcride-robot
+      - action: dtt-demo-fcride-wake
+      - action: dtt-demo-fcride-terminal
+      - action: dtt-demo-fcride-write
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-fcride-start
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-fcride-step1
+      - action: dtt-demo-fcride-step2
+      - action: dtt-demo-fcride-step3
+      - action: dtt-demo-fcride-ended
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-fcride-close
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 10, label: "federation-command ridealong"}

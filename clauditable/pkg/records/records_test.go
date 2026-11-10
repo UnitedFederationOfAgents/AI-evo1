@@ -286,3 +286,205 @@ func TestNewEvent(t *testing.T) {
 		t.Error("expected non-empty timestamp")
 	}
 }
+
+func TestFormatWrittenFile(t *testing.T) {
+	record := Record{
+		Event: Event{
+			Timestamp:  "2026-04-24T10:30:00Z",
+			EventType:  "command_execution",
+			Agent:      "claude",
+			DurationMs: 100,
+			ExitCode:   0,
+		},
+		Command: "echo hello",
+		Stdout:  "hello\n",
+	}
+
+	result := record.FormatWrittenFile()
+
+	// Should start with JSON (session log portion)
+	if !strings.HasPrefix(result, "{") {
+		t.Error("written file should start with JSON")
+	}
+	// Should contain the written file separator
+	if !strings.Contains(result, WrittenFileSeparator) {
+		t.Error("written file should contain WrittenFileSeparator")
+	}
+	// Should contain session log preview
+	if !strings.Contains(result, "IN>> echo hello") {
+		t.Error("written file should contain IN>> prefixed command")
+	}
+	// Should contain raw response separator after the written file separator
+	if !strings.Contains(result, ResponseSeparator) {
+		t.Error("written file should contain ResponseSeparator in raw section")
+	}
+	// Session log portion should come before the raw portion
+	sepIdx := strings.Index(result, WrittenFileSeparator)
+	rawIdx := strings.Index(result, ResponseSeparator)
+	if sepIdx >= rawIdx {
+		t.Error("written file separator should appear before raw response separator")
+	}
+}
+
+func TestApplyAutoMaintenance(t *testing.T) {
+	t.Run("no-op header on first file when no processing needed", func(t *testing.T) {
+		content := "some plain content without any secrets or loading bars"
+		processed, headers := ApplyAutoMaintenance(content, true)
+		if processed != content {
+			t.Error("content should be unchanged when no processing applies")
+		}
+		if len(headers) != 1 || headers[0].ProcessingType != "no_op" {
+			t.Errorf("expected single no_op header, got %v", headers)
+		}
+	})
+
+	t.Run("no headers on subsequent file with no processing", func(t *testing.T) {
+		content := "some plain content without any secrets or loading bars"
+		_, headers := ApplyAutoMaintenance(content, false)
+		if len(headers) != 0 {
+			t.Errorf("expected no headers when emitNoOp=false and nothing to process, got %v", headers)
+		}
+	})
+
+	t.Run("loading bar stripping", func(t *testing.T) {
+		content := "Progress: ##########\nmore content\n"
+		processed, headers := ApplyAutoMaintenance(content, false)
+		if strings.Contains(processed, "##########") {
+			t.Error("loading bar should be stripped from processed content")
+		}
+		if !strings.Contains(processed, "<STRIPPED>") {
+			t.Error("loading bar should be replaced with <STRIPPED>")
+		}
+		found := false
+		for _, h := range headers {
+			if h.ProcessingType == "strip_loading_bars" {
+				found = true
+				if h.Count != 1 {
+					t.Errorf("expected count 1, got %d", h.Count)
+				}
+			}
+		}
+		if !found {
+			t.Error("expected strip_loading_bars header")
+		}
+	})
+
+	t.Run("secret redaction for sk- key", func(t *testing.T) {
+		content := "using key sk-abc123456789012345678901234567890 for auth"
+		processed, headers := ApplyAutoMaintenance(content, false)
+		if strings.Contains(processed, "sk-abc123456789012345678901234567890") {
+			t.Error("sk- key should be redacted")
+		}
+		if !strings.Contains(processed, "<REDACTED-1>") {
+			t.Error("redacted key should appear as <REDACTED-1>")
+		}
+		found := false
+		for _, h := range headers {
+			if h.ProcessingType == "redact_secrets" {
+				found = true
+				if h.Count != 1 {
+					t.Errorf("expected count 1, got %d", h.Count)
+				}
+			}
+		}
+		if !found {
+			t.Error("expected redact_secrets header")
+		}
+	})
+
+	t.Run("long response truncation", func(t *testing.T) {
+		var sb strings.Builder
+		sb.WriteString("header\n")
+		sb.WriteString(WrittenFileSeparator)
+		for i := 0; i < 1200; i++ {
+			sb.WriteString("line\n")
+		}
+		content := sb.String()
+		processed, headers := ApplyAutoMaintenance(content, false)
+		if !strings.Contains(processed, "...<CONTINUES>...") {
+			t.Error("long response should contain ...<CONTINUES>... marker")
+		}
+		found := false
+		for _, h := range headers {
+			if h.ProcessingType == "truncate_long_response" {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("expected truncate_long_response header")
+		}
+	})
+}
+
+func TestFormatProcessedFile(t *testing.T) {
+	record := Record{
+		Event: Event{
+			Timestamp: "2026-04-24T10:30:00Z",
+			EventType: "command_execution",
+		},
+		Command: "echo hello",
+		Stdout:  "hello\n",
+	}
+	content := record.FormatWrittenFile()
+
+	t.Run("empty headers returns content unchanged", func(t *testing.T) {
+		result := FormatProcessedFile(content, nil)
+		if result != content {
+			t.Error("empty headers should return content unchanged")
+		}
+	})
+
+	t.Run("processing headers inserted after first JSON line", func(t *testing.T) {
+		headers := []ProcessingHeader{
+			{ProcessingType: "no_op", AppliedAt: "2026-04-24T10:30:00Z"},
+		}
+		result := FormatProcessedFile(content, headers)
+
+		if !strings.HasPrefix(result, "{") {
+			t.Error("processed file should still start with JSON")
+		}
+		if !strings.Contains(result, `"processing_type":"no_op"`) {
+			t.Error("processed file should contain the no_op processing header")
+		}
+		// Header should appear before IN>> lines
+		headerIdx := strings.Index(result, `"processing_type"`)
+		inIdx := strings.Index(result, "IN>> ")
+		if headerIdx < 0 || inIdx < 0 || headerIdx > inIdx {
+			t.Errorf("processing header (at %d) should appear before IN>> (at %d)", headerIdx, inIdx)
+		}
+		// Raw section should still be present
+		if !strings.Contains(result, WrittenFileSeparator) {
+			t.Error("processed file should retain WrittenFileSeparator")
+		}
+	})
+}
+
+func TestExtractSessionLogFromWrittenFile(t *testing.T) {
+	record := Record{
+		Event: Event{
+			Timestamp: "2026-04-24T10:30:00Z",
+			EventType: "command_execution",
+		},
+		Command: "echo test",
+		Stdout:  "test\n",
+	}
+	content := record.FormatWrittenFile()
+
+	extracted := ExtractSessionLogFromWrittenFile(content)
+
+	// Should match FormatSessionLog output
+	expected := record.FormatSessionLog()
+	if extracted != expected {
+		t.Errorf("extracted session log does not match FormatSessionLog output\ngot:  %q\nwant: %q", extracted, expected)
+	}
+	// Should not contain the raw portion
+	if strings.Contains(extracted, ResponseSeparator) {
+		t.Error("extracted session log should not contain ResponseSeparator")
+	}
+
+	// Fallback: content without separator returns as-is
+	plain := "some plain content"
+	if ExtractSessionLogFromWrittenFile(plain) != plain {
+		t.Error("content without separator should be returned unchanged")
+	}
+}

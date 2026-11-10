@@ -1,0 +1,168 @@
+# local-representative control library: say hello world through a condocv2
+# demo's windows, opened by dtt-demo-condoc-prep, for dtt's
+# localrep-demo-condoc-hello example (../localrep-demo-condoc-hello.dtt.yaml),
+# which imports it into the library of the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen, then
+# checks the condoc prep's federation-command terminal (fc, the prep run's
+# fc output) is still connected; the terminal is on the left half of the
+# screen and condocv2's propose form, in the prep's browser, on the right.
+# Then, in turn:
+#
+#   1. From condocv2: the robot proposes a condoc, HelloWorld-<the prep's
+#      time>, described "hello world from <this node>, from condocv2", over
+#      target and condoc_repo, and waits for condocv2 to open the proposal.
+#   2. Seen from the terminal: it finds condocv2's pointer repo checkout
+#      (pointer_dir; empty by default: condocv2's own default, ../sloppo
+#      beside the git repo it was started in, read from its process), and
+#      waits there for the proposal's pointer file and condocv2's commit of
+#      it (condocv2: HelloWorld-<time> propose).
+#   3. From the terminal: it withdraws the proposal the way condocv2's
+#      Withdraw does -- removes the pointer file and commits that alone
+#      (condocv2: HelloWorld-<time> withdraw). condocv2's next pull (every
+#      15s) pushes the commit.
+#   4. Seen in condocv2: the proposal leaves the page -- the robot waits for
+#      its empty view (Select a condoc, or propose one) -- and the terminal
+#      waits for the withdrawal to be pushed and says hello world, both
+#      windows in view for the recording.
+#
+# Nothing here runs an agent, and nothing is made on GitHub but the pointer
+# repo's two commits: a proposal is only a pointer file, and its target and
+# condoc repos aren't touched until it is accepted, which it never is (they
+# needn't exist). No name or description here, and no terminal command,
+# holds the text the robot looks for on condocv2's page. The node's screen
+# is recorded from the proposal to the end (steps 4-7). Every action is its
+# own (dtt-demo-chello-*), so importing this replaces none of the library's
+# other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-chello-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-chello-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-chello-check
+    name: Check the condoc prep's terminal is still there
+    description: wait for the condoc prep's federation-command to be connected in remote control
+    do:
+      - {op: fc-expect-state, fc: "{{fc}}", state: remote-control, timeout: 15s, hint: "the condoc prep's terminal isn't connected any more (closed, or a local-representative restart) -- close its browser and terminal by hand"}
+  - id: dtt-demo-chello-propose
+    name: Propose a hello world condoc in condocv2
+    description: "robot: click the form's heading and tab into its first field, type the name, description, target and condoc repo, press Enter, and wait for condocv2 to open the new proposal"
+    controls:
+      - name: name
+        label: Condoc name
+        default: "HelloWorld-{{timestamp}}"
+      - name: target
+        label: Target repo
+      - name: condoc_repo
+        label: Condoc repo
+    do:
+      - {op: robot.click-text, text: "Propose a condoc", exact: "true", timeout: 10s}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{name}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "hello world from {{this_node}}, from condocv2"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{target}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.key, keys: ctrl+a}
+      - {op: robot.type, text: "{{condoc_repo}}"}
+      - {op: robot.key, keys: enter}
+      - {op: robot.wait-for-text, text: "Accept — begin the condoc", exact: "true", timeout: 90s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-chello-find
+    name: Find the proposal from the terminal
+    description: "through the terminal: find condocv2's pointer repo checkout, and wait there for the proposal's pointer file and condocv2's commit of it"
+    controls:
+      - name: name
+        label: Condoc name
+        default: "HelloWorld-{{timestamp}}"
+      - name: pointer_dir
+        label: Pointer repo checkout
+        default: ""
+    do:
+      - {op: random, save_as: dir_token, length: "6"}
+      - {op: set, save_as: dir_found, value: "pointer repo found - {{dir_token}}"}
+      # Each terminal command is a shell of its own: the checkout (line 1) and the pointer file (line 2) are kept in /tmp/dtt-demo-condoc-<name>.pointer between them.
+      # condocv2 resolves a relative --pointer-path (../sloppo by default) against the git repo holding --root (else its working directory).
+      - {op: fc-send, fc: "{{fc}}", command: "d='{{pointer_dir}}'; if [ -z \"$d\" ]; then p=$(pgrep -xo condocv2); r=$(tr '\\0' '\\n' </proc/$p/cmdline | grep -A1 -x -- --root | tail -n1); [ \"$r\" = --root ] && r=; [ -n \"$r\" ] || r=$(readlink /proc/$p/cwd); d=$(cd \"$r\" && (git rev-parse --show-toplevel 2>/dev/null || pwd))/../sloppo; fi; d=$(readlink -f \"$d\"); git -C \"$d\" rev-parse --git-dir >/dev/null && echo \"$d\" >/tmp/dtt-demo-condoc-{{name}}.pointer && echo \"{{dir_found}}: $d\"", expect: "{{dir_found}}", timeout: 20s}
+      - {op: random, save_as: found_token, length: "6"}
+      - {op: set, save_as: found, value: "the proposal is in the pointer repo - {{found_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "s=/tmp/dtt-demo-condoc-{{name}}.pointer; d=$(head -n1 $s); for i in $(seq 60); do f=$(cd \"$d\" && ls pointers/{{name}}-*.yaml 2>/dev/null | head -n1); [ -n \"$f\" ] && [ \"$(git -C \"$d\" log -1 --format=%s -- \"$f\")\" = 'condocv2: {{name}} propose' ] && break; f=; sleep 1; done; [ -n \"$f\" ] && echo \"$f\" >>$s && grep -E '^ *(name|phase|description):' \"$d/$f\" && echo \"{{found}}\" || echo \"no proposal {{name}} committed in $d\"", expect: "{{found}}", timeout: 75s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-chello-withdraw
+    name: Withdraw the proposal from the terminal
+    description: "through the terminal: remove the proposal's pointer file and commit that alone, as condocv2's own withdraw does"
+    controls:
+      - name: name
+        label: Condoc name
+        default: "HelloWorld-{{timestamp}}"
+    do:
+      - {op: random, save_as: gone_token, length: "6"}
+      - {op: set, save_as: gone, value: "proposal withdrawn - {{gone_token}}"}
+      # condocv2 may be pulling the checkout just then (its index lock): try again.
+      - {op: fc-send, fc: "{{fc}}", command: "s=/tmp/dtt-demo-condoc-{{name}}.pointer; d=$(sed -n 1p $s); f=$(sed -n 2p $s); for i in $(seq 10); do { [ ! -e \"$d/$f\" ] || git -C \"$d\" rm -q -- \"$f\"; } && git -C \"$d\" commit -q -m 'condocv2: {{name}} withdraw' -- \"$f\" && break; sleep 1; done; [ \"$(git -C \"$d\" log -1 --format=%s -- \"$f\")\" = 'condocv2: {{name}} withdraw' ] && echo \"{{gone}}\" || echo \"could not withdraw {{name}} in $d\"", expect: "{{gone}}", timeout: 30s}
+  - id: dtt-demo-chello-see
+    name: See the withdrawal in condocv2, then say hello world
+    description: "robot: wait for condocv2 to drop the proposal from its page; then through the terminal, wait for condocv2 to push the withdrawal and say hello world"
+    do:
+      - {op: robot.wait-for-text, text: "Select a condoc, or propose one", exact: "false", timeout: 30s}
+      - {op: random, save_as: pushed_token, length: "6"}
+      - {op: set, save_as: pushed, value: "the withdrawal is pushed - {{pushed_token}}"}
+      # Nothing left between the checkout and its upstream: condocv2's pull has pushed the withdrawal.
+      - {op: fc-send, fc: "{{fc}}", command: "s=/tmp/dtt-demo-condoc-{{name}}.pointer; d=$(head -n1 $s); for i in $(seq 60); do [ -z \"$(git -C \"$d\" log --oneline '@{u}..' 2>&1)\" ] && break; sleep 1; done; if [ -z \"$(git -C \"$d\" log --oneline '@{u}..' 2>&1)\" ]; then rm -f $s; echo \"{{pushed}}\"; else git -C \"$d\" log --oneline '@{u}..' 2>&1; fi", expect: "{{pushed}}", timeout: 75s}
+      - {op: random, save_as: done_token, length: "6"}
+      - {op: set, save_as: said, value: "hello world from {{this_node}} - {{done_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "echo \"{{said}}\"", expect: "{{said}}", timeout: 20s}
+      - {op: robot.wait, duration: 3s}
+      - {op: output, label: demo, value: "{{this_node}}: a condoc proposed in condocv2, found from the terminal, and withdrawn from the terminal, seen in condocv2"}
+sequences:
+  - id: dtt-demo-condoc-hello
+    name: "Demo: hello world through a condocv2 demo's windows"
+    description: Start the robot if need be and wake the screen; then propose a condoc in condocv2 and find it from the condoc prep's federation-command terminal beside it, and withdraw it from the terminal and see it leave condocv2 -- with this node's screen recorded while it works.
+    controls:
+      - name: fc
+        label: Terminal
+        help: the condoc prep's federation-command instance (its run's fc output, e.g. federation-command#2)
+      - name: name
+        label: Condoc name
+        default: "HelloWorld-{{timestamp}}"
+        help: the condoc to propose and withdraw (letters, digits, - and _, starting with a letter)
+      - name: target
+        label: Target repo
+        default: user-1/hello-world-target
+        help: owner/repo the proposal names as its target; never touched, as the proposal is never accepted
+      - name: condoc_repo
+        label: Condoc repo
+        default: user-1/hello-world-condoc
+        help: owner/repo the proposal names as its condoc repo; never touched either
+      - name: pointer_dir
+        label: Pointer repo checkout
+        default: ""
+        help: where condocv2's pointer repo is checked out on this node; empty for condocv2's default (../sloppo beside the git repo it was started in)
+    steps:
+      - action: dtt-demo-chello-robot
+      - action: dtt-demo-chello-wake
+      - action: dtt-demo-chello-check
+      - action: dtt-demo-chello-propose
+        with:
+          name: "{{name}}"
+          target: "{{target}}"
+          condoc_repo: "{{condoc_repo}}"
+      - action: dtt-demo-chello-find
+        with:
+          name: "{{name}}"
+          pointer_dir: "{{pointer_dir}}"
+      - action: dtt-demo-chello-withdraw
+        with:
+          name: "{{name}}"
+      - action: dtt-demo-chello-see
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 7, label: "condoc demo hello world"}

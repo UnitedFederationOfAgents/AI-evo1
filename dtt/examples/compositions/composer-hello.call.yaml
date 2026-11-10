@@ -1,0 +1,41 @@
+# DTT example -- composer, a composition rendered into the files area (see ../../README.md "composer").
+#
+# A tool call rather than a document: the composer tool's inputs. It saves
+# the composition below in composer as dtt-hello (replacing it on later
+# runs) and renders it into a WebM in local-representative's files area,
+# as composer-dtt-hello-<stamp>.webm. It needs no source files: three
+# title cards over three beeps, about 6 seconds.
+#
+# composer must be running (launch compose from local-representative) and
+# connected to local-representative. It renders on its own when ffmpeg is
+# installed; otherwise open the compose tab, click in it once (or press
+# "render now" on its banner) and keep it visible while it records.
+#
+# To use a recording or a Polly clip, add a media clip with its file_id and
+# file_name from the files tab, e.g. {"kind": "media", "file_id": "...",
+# "file_name": "polly-Joanna-hello.mp3"} on the audio track.
+#
+#   dtt run composer --input examples/compositions/composer-hello.call.yaml
+#   dtt run composer --input examples/compositions/composer-hello.call.yaml --arg renderer=browser
+
+id: dtt-hello
+composition: |
+  {
+    "name": "Hello from dtt",
+    "width": 1280,
+    "height": 720,
+    "video": [
+      {"kind": "title", "duration": 2, "text": "Hello from dtt", "color": "#ffffff", "background": "#1e3a5f"},
+      {"kind": "title", "duration": 2, "text": "a tool call, built from Go and run by dtt", "color": "#1a1a1a", "background": "#e0c060"},
+      {"kind": "title", "duration": 2, "text": "composed by composer", "color": "#ffffff", "background": "#3a1e5f"}
+    ],
+    "audio": [
+      {"kind": "tone", "duration": 0.4, "frequency": 440},
+      {"kind": "silence", "duration": 1.6},
+      {"kind": "tone", "duration": 0.4, "frequency": 550},
+      {"kind": "silence", "duration": 1.6},
+      {"kind": "tone", "duration": 0.4, "frequency": 660}
+    ]
+  }
+render: "true"
+renderer: auto

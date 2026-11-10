@@ -1,0 +1,87 @@
+# DTT example -- localrep, a short robot demo on a prepared node (see ../../README.md "The localrep tool").
+#
+# It takes node, the node to run the demo on, as agent-coordinator names it
+# ("" by default, for this node), and at, the unix seconds the node was
+# prepared at (localrep-demo-prepare's time). It imports the control
+# sequence in resources/demo-cool.control.yaml into that node's library and
+# runs it there: it starts the robot (ianar) if it isn't running and wakes
+# the screen, then the robot opens the demo page the preparation made,
+# ~/Desktop/demo-<at>.html, in a new Chrome window of its own (a throwaway
+# profile, so it opens on the demo's workspace whatever browser is already
+# open), waits for its heading ("Demo on <node>") to show,
+# reads back off the screen when the page says the node was prepared, zooms
+# the page in three steps and back out, and closes it with ctrl+w, leaving
+# the demo's workspace empty again. The node's screen is recorded while the
+# robot works. Then composer, on this node, puts a title card, the recording
+# and a closing card together into a WebM in the files tab.
+#
+# The run and the composition are named by at (demo-cool-<at>), so one
+# preparation has one cool demo: asserting again does nothing. at defaults
+# to now, which only finds a page a preparation made in the same second; on
+# its own, give the preparation's time. The complete demo
+# (localrep-demo-complete) gives it. Deleting, with the assert's image,
+# removes the sequence and the composition (the run has happened, so it's
+# kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it (one whose open takes app),
+# the demo page from localrep-demo-prepare, and google-chrome (the
+# sequence's browser control says how to start another). Here: compose
+# launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-cool.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-cool.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt delete examples/compositions/localrep-demo-cool.dtt.yaml --var node=<node> --var at=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to run the demo on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the demo page, the run and the composition
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-cool
+    node: ${{var.node}}
+  alias: cool-seq
+  assert:
+    source_file: resources/demo-cool.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-cool
+    key: demo-cool-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: cool-run
+  assert:
+    controls:
+      file: "~/Desktop/demo-${{the-time.unix}}.html"
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-cool-${{the-time.unix}}
+  alias: cool-comp
+  assert:
+    composition: |
+      {
+        "name": "Cool demo on ${{cool-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "The robot's demo on ${{cool-seq.node}}", "color": "#ffffff", "background": "#3b1e5f"},
+          {"kind": "media", "file_id": "${{cool-run.recording.file_id}}", "file_name": "${{cool-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{cool-run.output.demo}}", "color": "#1a1a1a", "background": "#60c0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

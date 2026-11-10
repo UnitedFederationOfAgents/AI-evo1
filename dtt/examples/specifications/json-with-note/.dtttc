@@ -1,0 +1,7 @@
+# An in-place tool call (../../../docs/terms.md, "In-place and pathless
+# calls"): this directory holds its document, and the images its executions
+# return are kept in images/ here. It includes one of dtt's example
+# compositions, which its document calls though it isn't in the directory.
+document: json-with-note.dtt.yaml
+include:
+  - compositions/filesystem-json.dtt.yaml

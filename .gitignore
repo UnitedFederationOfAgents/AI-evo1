@@ -33,3 +33,15 @@ go.work.sum
 
 ignored-scratch/
 ignored-scratch/**
+!ignored-scratch/.gitkeep
+
+# 'make deploy-dev-binaries' lock file (see
+# condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision I) --
+# a purely local, ephemeral marker with nothing for other nodes following
+# the branch to learn from, so it stays gitignored.
+/.building
+
+# local-representative's dev-repo watcher's build request (see
+# docs/DevMode.md and local-representative/ufabuild.go): written locally
+# when a [condocv2-xxxx]-tagged commit is pulled in, never committed.
+/.ufabuild

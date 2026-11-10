@@ -1,0 +1,81 @@
+# local-representative control library: close a session demo's windows,
+# undoing dtt-demo-session-prep, for dtt's localrep-demo-session-shutdown
+# example (../localrep-demo-session-shutdown.dtt.yaml), which imports it
+# into the library of the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen, then
+# checks the session prep's federation-command terminal (fc, the prep run's
+# fc output) is still connected. Through it, it closes the prep's browser --
+# every process started with its profile (profile), and no other browser --
+# and removes the profile, then has the terminal exit, which closes its
+# window. That leaves the demo's workspace empty again, as the demo prep
+# left it, for the shutdown. The node's screen is recorded from the browser
+# closing to the end (steps 4-6). Every action is its own
+# (dtt-demo-sshut-*), so importing this replaces none of the library's other
+# actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-sshut-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-sshut-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-sshut-check
+    name: Check the session prep's terminal is still there
+    description: wait for the session prep's federation-command to be connected in remote control
+    do:
+      - {op: fc-expect-state, fc: "{{fc}}", state: remote-control, timeout: 15s, hint: "the session prep's terminal isn't connected any more (closed, or a local-representative restart) -- close its browser and terminal by hand"}
+  - id: dtt-demo-sshut-browser
+    name: Close the browser
+    description: "through the terminal, stop every process started with the browser's profile, and remove the profile"
+    controls:
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-session-{{timestamp}}"
+    do:
+      - {op: random, save_as: closed_token, length: "6"}
+      - {op: set, save_as: closed, value: "browser closed - {{closed_token}}"}
+      # [u]: the pattern doesn't match this command's own shell, only the browser.
+      - {op: fc-send, fc: "{{fc}}", command: "pkill -f '[u]ser-data-dir={{profile}}'; sleep 2; rm -rf -- '{{profile}}'; echo \"{{closed}}\"", expect: "{{closed}}", timeout: 30s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-sshut-terminal
+    name: Close the terminal
+    description: "have the session prep's federation-command exit, closing its window"
+    do:
+      - {op: fc-send, fc: "{{fc}}", command: exit}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-sshut-hold
+    name: Hold the empty workspace
+    description: "robot: hold the empty workspace for the recording"
+    do:
+      - {op: robot.wait, duration: 2s}
+      - {op: output, label: demo, value: "{{this_node}}: the session demo's browser and terminal are closed"}
+sequences:
+  - id: dtt-demo-session-shutdown
+    name: "Demo: close a session demo's windows"
+    description: Start the robot if need be and wake the screen; then, through the session prep's federation-command terminal, close the browser it opened and remove its profile, and have the terminal exit -- with this node's screen recorded while it works.
+    controls:
+      - name: fc
+        label: Terminal
+        help: the session prep's federation-command instance (its run's fc output, e.g. federation-command#2)
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-session-{{timestamp}}"
+        help: the profile the session prep started the browser with (its profile control)
+    steps:
+      - action: dtt-demo-sshut-robot
+      - action: dtt-demo-sshut-wake
+      - action: dtt-demo-sshut-check
+      - action: dtt-demo-sshut-browser
+        with:
+          profile: "{{profile}}"
+      - action: dtt-demo-sshut-terminal
+      - action: dtt-demo-sshut-hold
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 6, label: "session demo shutdown"}

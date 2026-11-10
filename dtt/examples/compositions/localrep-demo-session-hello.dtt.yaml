@@ -1,0 +1,95 @@
+# DTT example -- localrep, hello world through a session demo's windows (see ../../README.md "The localrep tool").
+#
+# It goes between localrep-demo-session-prepare and
+# localrep-demo-session-shutdown. It takes node, the node the windows are
+# on, as agent-coordinator names it ("" by default, for this node); at, the
+# unix seconds the node was prepared at (the preparation's time); and fc,
+# the session prep's federation-command terminal (its run's fc output, e.g.
+# federation-command#2). It imports the control sequence in
+# resources/demo-session-hello.control.yaml into that node's library and
+# runs it there: it starts the robot (ianar) if it isn't running, wakes the
+# screen and checks the terminal is still connected. Then, with the
+# terminal and session-manager side by side, the terminal makes a session,
+# hello-world-<at> (ufa session new), and adds a note to it, "hello world
+# from <node>, from its terminal" (ufa session note); the robot reloads
+# session-manager, clicks the new session and waits for the terminal's note
+# in its transcript. Back the other way, the robot adds a note in
+# session-manager, "hello back from the browser on <node>", and the
+# terminal finds it in the session's records and says hello world. The
+# node's screen is recorded while it works. Then composer, on this node,
+# puts a title card, the recording and a closing card together into a WebM
+# in the files tab.
+#
+# Nothing runs an AI: a session and its notes are only records. The
+# session is kept (session-manager's Archive All would take every session);
+# its name carries at, so each demo makes a new one. The run is named by at
+# too (demo-session-hello-<at>), so asserting again doesn't run it again.
+# A run whose terminal has gone fails at once, saying so. The full session
+# demo (localrep-demo-session-full) gives at and fc. Deleting, with the
+# assert's image, removes the sequence and the composition (the run has
+# happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar, session-manager, federation-command and
+# clauditable built beside it, and the session prep's windows still open.
+# Here: compose launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-session-hello.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the session prep's fc>
+#   dtt assert examples/compositions/localrep-demo-session-hello.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the session prep's fc>
+#   dtt delete examples/compositions/localrep-demo-session-hello.dtt.yaml --var node=<node> --var at=<the same> --var fc=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node the session demo's windows are on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the session
+  fc:
+    help: the session prep's federation-command terminal, as its run's fc output names it (federation-command#2, say)
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-session-hello
+    node: ${{var.node}}
+  alias: shello-seq
+  assert:
+    source_file: resources/demo-session-hello.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-session-hello
+    key: demo-session-hello-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: shello-run
+  assert:
+    controls:
+      fc: ${{var.fc}}
+      name: hello-world-${{the-time.unix}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-session-hello-${{the-time.unix}}
+  alias: shello-comp
+  assert:
+    composition: |
+      {
+        "name": "Session demo hello world on ${{shello-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Hello world, from the terminal to session-manager and back, on ${{shello-seq.node}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "media", "file_id": "${{shello-run.recording.file_id}}", "file_name": "${{shello-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{shello-run.output.demo}}", "color": "#1a1a1a", "background": "#a0c0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

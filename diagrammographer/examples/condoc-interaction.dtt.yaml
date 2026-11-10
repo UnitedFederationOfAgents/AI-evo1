@@ -1,0 +1,59 @@
+# Diagram -- one condoc interaction (dynamic, 4 steps).
+
+diagrammographer.diagrams:
+  select:
+    name: condoc-interaction
+  assert:
+    title: A condoc interaction
+    description: From the human's prompt to the pushed commit.
+    size: [930, 440]
+    nodes:
+      human:
+        shape: circle
+        at: [40, 180]
+        size: [96, 96]
+      stepfile:
+        label: step file
+        shape: cylinder
+        at: [230, 50]
+        size: [160, 70]
+      handler:
+        label: condoc handler
+        at: [230, 320]
+        size: [160, 56]
+      agent:
+        shape: round
+        color: "#2d4a6b"
+        at: [520, 180]
+      repos:
+        shape: cylinder
+        at: [760, 320]
+        size: [130, 70]
+    edges:
+      - from: human
+        to: stepfile
+        label: Prompt N
+      - from: stepfile
+        to: handler
+        label: picks up
+      - from: handler
+        to: agent
+        label: runs
+      - from: agent
+        to: repos
+        label: edits
+      - from: handler
+        to: stepfile
+        label: Response N
+      - from: handler
+        to: repos
+        label: commit + push
+    steps:
+      - caption: The human writes Prompt N in the step file.
+        highlight: [human, human->stepfile, stepfile]
+      - caption: The handler picks it up and runs the agent.
+        highlight: [stepfile, stepfile->handler, handler, handler->agent, agent]
+      - caption: The agent changes the repos it may change.
+        highlight: [agent, agent->repos, repos]
+      - caption: The handler records Response N, then commits and pushes.
+        highlight: [handler, handler->stepfile, stepfile, handler->repos, repos]

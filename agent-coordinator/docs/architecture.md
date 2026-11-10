@@ -1,0 +1,365 @@
+# Agent Coordinator — Architecture
+
+## Overview
+
+Agent Coordinator is a hierarchically organized network coordination service. It aggregates visibility and control across multiple hosts, each running a `local-representative` instance. Conventionally organized into two roles:
+
+- **Net coordinator** — coordinates agents across a network segment
+- **Web coordinator** — provides browser-accessible UI aggregating multiple net coordinators
+
+## Ports
+
+| Service            | Port | Protocol |
+|--------------------|------|----------|
+| agent-coordinator  | 8083 | HTTP/WebSocket (browser) |
+| agent-coordinator  | 8084 | TCP (local-representative connections) |
+| local-representative | 8081 | HTTP/WebSocket (browser) |
+| local-representative | 8082 | TCP (sub-application connections) |
+| session-manager (tab: "sessions") | 8085 | HTTP/WebSocket |
+| the-conversationalist (tab: "convo") | 8086 | HTTP/WebSocket |
+| ianar (tab: "robot") | 8087 | HTTP/WebSocket |
+| condocv2           | 8088 | HTTP/WebSocket |
+| composer (tab: "compose") | 8089 | HTTP/WebSocket |
+
+## Component Relationships
+
+```
+Browser
+  └── WebSocket ──> agent-coordinator (:8083)
+                         │
+                         │ representable TCP (:8084)
+                         ├── local-representative on host-A (:8081)
+                         │        └── federation-command (representable :8082)
+                         └── local-representative on host-B (:8081)
+                                  └── federation-command (representable :8082)
+```
+
+LR is always the TCP client; AC is always the TCP server on 8084.
+One connection per LR name is tracked. LR identifies itself by the `-name` flag (default: system hostname).
+
+## LR → AC TCP Protocol (representable)
+
+Local-representative connects to AC using `representable.Client`. Messages:
+
+| Direction | Type | Content |
+|---|---|---|
+| LR → AC | `heartbeat` | keepalive |
+| LR → AC | `data` / `"services"` | `StatusMsg` — service health |
+| LR → AC | `data` / `"fc-state"` | `FCStateMsg` — FC control mode |
+| LR → AC | `data` / `"ridealong-state"` | `RidealongStateMsg` |
+| LR → AC | `data` / `"system-state"` | `SystemStateMsg` — LR's system tab (self + managed apps); `ProcInfo` carries each process's `version`, `update_available` (self and managed both drive a restart control; self's is additionally gated on `loader_managed`) |
+| LR → AC | `data` / `"repo-state"` | `RepoStateMsg` — LR's dev-repo watcher (`--dev-repo`, see [DevMode.md](../../docs/DevMode.md)); `watched: false` when that LR wasn't launched with `--dev-repo` |
+| LR → AC | `data` / `"sessions-state"` | `SessionsStateMsg` — session-manager's HTTP port, relayed from a managed session-manager (tab: "sessions"); minimal shell for now — see [InitialShellsSessionManagerAndTheConversationalist.md](../../condocs/InitialShellsSessionManagerAndTheConversationalist.md) |
+| LR → AC | `data` / `"convo-state"` | `ConvoStateMsg` — the-conversationalist's HTTP port, relayed from a managed the-conversationalist (tab: "convo"); mirrors `sessions-state`, minimal shell for now |
+| LR → AC | `data` / `"robot-state"` | `RobotStateMsg` — ianar's HTTP port, relayed from a managed ianar (tab: "robot"); mirrors `sessions-state` — see [InitialRobot.md](../../condocs/InitialRobot.md) |
+| LR → AC | `data` / `"compose-state"` | `ComposeStateMsg` — composer's HTTP port and composition count, relayed from a managed composer (tab: "compose") — see [composer/README.md](../../composer/README.md) |
+| LR → AC | `data` / `"lr-http"` | `LRHTTPMsg` — LR's dashboard HTTP port, so AC can reverse-proxy `/host/<id>/…` back to it |
+| LR → AC | `data` / `"files-state"` | `FilesStateMsg` — host-cache listing for the files tab; upload is relayed back down through AC's own `POST /host/<id>/api/files` route rather than this channel (see [DistributedExchange.md](../../docs/DistributedExchange.md)) |
+| LR → AC | `log` (cmd/output) | FC command echo / output forwarded upstream |
+| AC → LR | `command` | plain cmd or `__ridealong:action` → forwarded to FC; `__system:launch <app>` / `__system:terminate <id>` / `__system:restart-managed <id>` → LR's process manager; `__system:restart` / `__system:rebuild` / `__system:auto-rebuild <on\|off>` → LR's own restart control and dev-repo watcher (see [DevMode.md](../../docs/DevMode.md)) |
+
+### Reaching a NAT'd LR: the tunnel connection
+
+Every `GET /host/<id>/*` an AC browser (or AC itself, serving a session pull,
+discovery fan-out, or upload relay) issues used to make AC **dial out fresh**
+to that LR's own HTTP port, resolved from the host's representable `RemoteAddr`
+plus the `lr-http` port it discloses. That assumes the LR→AC direction is
+reachable both ways, which doesn't hold for an LR sitting behind NAT or on a
+private network segment that can only reach *out* to AC, never be dialed back
+into.
+
+Fixed by giving each LR a second, plain TCP connection in addition to its
+control connection: right after connecting, LR also dials AC again via
+`representable.DialTunnel`, tagging the raw socket with a one-line
+`TUNNEL <name>` handshake (not the `Msg`/`ServerMsg` JSON framing the control
+connection uses) and then serving its own HTTP mux straight over it
+(`http.Serve` against a single-connection listener). AC's `representable.Server`
+parks that socket in a per-host pool (`ClaimTunnel`); `proxyToHost` and
+`handleFileUploadRelay`'s shared `http.Transport` now dials by first trying to
+claim that host's pooled tunnel conn and only falling back to a real `net.Dial`
+if none is parked (e.g. a host with no tunnel yet, or in tests) — `net/http`'s
+own client/server machinery doesn't care whether the conn it's handed came
+from a real dial or a pre-existing stream. This iteration keeps it to exactly
+one standing tunnel per LR (`N == 1`), but LR redials its replacement as soon
+as the standing tunnel is actually claimed and used — not only once it drops —
+so a long-lived claim (notably the dashboard's own `/host/<id>/ws`
+connection) can't starve every other proxied request for the rest of its
+lifetime; a request that still beats the replacement into existence falls
+back to a direct dial like before, which only resolves if that LR also
+happens to be reachable that way (see Revision J). NAT-idle-reaping a
+connection no one is actively using is a known gap left for a follow-up (see
+`condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md`, Revisions
+H/I/J).
+
+Revision C of `condocs/initialDistributedSessionsImpls/Step1Prompt.md`
+attempted to fix a consequence of that gap: a tunnel that dies (reaped, or
+the registration simply got evicted) before carrying any real traffic still
+looked "used" and redialed its replacement with no delay at all -- if
+whatever killed it keeps killing each replacement just as fast, that's a
+busy loop logging "tunnel: opened"/"tunnel: closed" many times a second.
+Revision C added `firstByteConn`, which only fires once a Read off the
+tunnel actually returns data, but still triggered the *next tunnel's* dial
+from the older "first Read attempt" signal (`firstUseConn`) -- which fires
+instantly whether or not that Read ever succeeds. So the dead tunnel's
+doomed first Read still spawned its replacement immediately, with zero
+delay, same as before; the busy loop was unaffected in practice. Revision D
+removed `firstUseConn` and wired both "open the next tunnel concurrently"
+and "this tunnel was used for real, skip the backoff" off `firstByteConn`
+alone, so a tunnel that never carries real traffic can no longer bypass the
+2s backoff. This bounds the symptom but isn't a fix for NAT-idle-reaping
+itself, which remains the open gap above.
+
+### Embedded sub-app UIs in the chain
+
+Sub-apps' browser UIs (condocv2, sessions, convo, robot, compose) are
+**forwarded, not re-implemented**: LR reverse-proxies each one's path (e.g.
+`/condocv2/*`, or its plug-in route) → that app's loopback port, and AC
+reverse-proxies `/host/<id>/*` → that host's LR. A browser on AC — including
+one arriving through the Tailscale + oauth2-proxy web-exposure path —
+therefore drives them on any connected box over a single origin. The
+condocv2 tab is gated on condocv2's service health in that host's
+`lr-state`; the others on their `lr-*-state` availability below.
+
+### files tab
+
+Each LR exposes a `/api/files` REST surface (`GET` lists, `POST` uploads a
+multipart `file` into `local-representative`'s host-cache directory —
+`/host-agent-files/exchange/host-cache` by default; entries are swept an hour
+after upload). LR pushes the listing up as `data` / `"files-state"`, which AC
+relays to browsers as `lr-files-state`.
+
+Viewing and downloading a file's bytes (`GET
+/host/<id>/api/files/<file-id>`, `?download=1` for an attachment) go through
+AC's ordinary `proxyToHost` transparent reverse proxy — a read isn't the
+arbitrary-filesystem-write upload is, so it isn't gated on the header below,
+and AC's files tab reuses LR's raw-serving route unmodified for its own
+viewer page and download button. The same is true of the file-details
+dialog's hold/persist/highlight actions and the markup dialog's
+`GET`/`POST /host/<id>/api/files/<file-id>/markup[/commit|/cancel|/copy]`
+routes -- none of these act on arbitrary new content the way upload does, so
+none are gated either; AC's markup dialog is a verbatim copy of LR's own.
+
+Upload (`POST /host/<id>/api/files`) is **relayed, not proxied**: `proxyToHost`
+recognizes that path+method and hands it to a dedicated `handleFileUploadRelay`
+route instead of the transparent passthrough. That route builds a fresh
+outbound request to the target LR — never buffering the file to AC's own
+filesystem, or looking at LR's — stamped with both `X-UFA-Proxied-By:
+agent-coordinator` and `X-UFA-Relayed-Upload-By: agent-coordinator`. LR's
+upload handler refuses any request carrying the first header unless the
+second is also present with that exact value; a request arriving through the
+transparent passthrough can never carry the second header, since its
+`Director` strips any client-supplied copy before forwarding. This is Path 1
+of [`docs/DistributedExchange.md`](../../docs/DistributedExchange.md), which
+also covers the still-open Path 2 (LR-to-LR transfer brokered through AC).
+
+## WebSocket Protocol (AC ↔ Browser)
+
+### Server → Client
+
+| Message type | Payload | Description |
+|---|---|---|
+| `hosts` | `{ hosts: Host[] }` | List of known hosts with connection status |
+| `lr-state` | `{ host_id, active, services? }` | Service health for a host |
+| `lr-fc-state` | `{ host_id, state }` | FC control mode for a host |
+| `lr-fc-log` | `{ host_id, line, kind }` | FC log entry for a host |
+| `lr-ridealong-state` | `{ host_id, active, ...fields }` | Ridealong state for a host |
+| `lr-system-state` | `{ host_id, active, self, managed[] }` | Host's system tab (LR process + managed apps) |
+| `lr-repo-state` | `{ host_id, watched, dirty, rebuild_ready, building, auto_rebuild, ...fields }` | Host's dev-repo watcher state (`--dev-repo`); `watched: false` when not watching a repo or not connected |
+| `lr-sessions-state` | `{ host_id, available }` | Host's session-manager availability; gates the forwarded `/host/<id>/sessions/` iframe (tab: "sessions") |
+| `lr-convo-state` | `{ host_id, available }` | Host's the-conversationalist availability; gates the forwarded `/host/<id>/convo/` iframe (tab: "convo") |
+| `lr-robot-state` | `{ host_id, available }` | Host's ianar availability; gates the forwarded `/host/<id>/robot/` iframe (tab: "robot") |
+| `lr-compose-state` | `{ host_id, available }` | Host's composer availability; gates the forwarded `/host/<id>/compose/` iframe (tab: "compose") |
+| `lr-files-state` | `{ host_id, active, files[]? }` | Host's files tab listing; upload goes over `POST /host/<id>/api/files`, not this channel |
+
+### Client → Server
+
+| Message type | Payload | Description |
+|---|---|---|
+| `select-host` | `{ host_id }` | Request snapshot for a host |
+| `lr-command` | `{ host_id, cmd }` | Run command on host's FC |
+| `lr-ridealong-command` | `{ host_id, action }` | Ridealong action on host's FC |
+| `lr-launch-app` | `{ host_id, name }` | Launch a managed app on the host's LR |
+| `lr-terminate-app` | `{ host_id, id }` | Terminate/dismiss a managed instance on the host's LR |
+| `lr-restart-managed-app` | `{ host_id, id }` | Restart one managed instance on the host's LR: terminate it, then launch a fresh instance of the same app (see Step4Prompt.md Revision H) |
+| `lr-restart-app` | `{ host_id }` | Restart the host's LR itself (only takes effect if it's loader-managed) |
+| `lr-rebuild-app` | `{ host_id }` | Run `make deploy-dev-binaries` on the host's watched dev-repo |
+| `lr-set-auto-rebuild` | `{ host_id, enabled }` | Toggle the host's dev-repo watcher auto-rebuild flag |
+| `ac-restart-app` | `{}` | Restart agent-coordinator itself (only takes effect if it's loader-managed) — no host to target, unlike `lr-restart-app` |
+
+## WebSocket Protocol (LR ↔ Browser) — additions
+
+| Message type | Direction | Payload | Description |
+|---|---|---|---|
+| `ac-state` | LR → Browser | `{ connected, host?, port?, connecting?, auto_connect? }` | AC connection status; `auto_connect` is the persistent toggle (Revision I), independent of `connecting`/`connected` |
+| `connect-ac` | Browser → LR | `{ host, port }` | Initiate connection to AC |
+| `disconnect-ac` | Browser → LR | `{}` | Close AC connection — also disarms auto-connect |
+| `set-auto-connect-ac` | Browser → LR | `{ enabled, host?, port? }` | Arm/disarm the persistent auto-connect toggle |
+
+## Host States
+
+- `connected` — LR is heartbeating within the stale threshold
+- `disconnected` — LR dropped or was never connected
+
+Hosts appear dynamically in the sidebar as LRs connect; they remain visible (as disconnected) after dropping.
+
+## Global view
+
+The sidebar's "global" entry sits above the per-host list and is mutually
+exclusive with selecting a particular host (`selectedHostId === null` in
+`App.tsx`); it's the default view on first load. It presents the same set of
+tabs a host's dashboard has, but from a net-wide vantage point instead of one
+host's — only the `system` tab has a global view implemented so far, with
+nested `topology`/`timeline` tabs of its own (see "Timeline" below); the
+rest render a "not yet implemented" placeholder. `topology` (see
+`condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg`) is a
+main pane of host cards plus a details-and-control pane on the right:
+
+- agent-coordinator's own card always leads its own row above the per-host
+  cards, mirroring the sketch's `(self)` node, with a faint divider line
+  separating it from the hosts below. `self-info` now discloses AC's own
+  `host_id` (`ufahostid.GetHostID()`, the same value a co-located LR defaults
+  its `-name` to) alongside `dev_mode`; when that id matches a connected
+  host, the AC box collapses into that host's own LR/sub-app card -- one
+  panel, keeping the host's real name -- and it's selectable like any other
+  host card. Without a match (no co-located LR connected), a static,
+  unselectable "agent-coordinator" placeholder card is shown instead.
+- Each host card's sub-application boxes (FC/TC/SM/RB/CM/W) turn green once that host's
+  `lr-state` reports that service healthy (the same `services` list
+  `LRView`'s health indicator reads); the LR/AC boxes keep their static
+  colors. A healthy box's border also turns green, matching the LR box,
+  *only* if that host's LR actually launched the application (it appears in
+  `system.managed`, per `subAppManaged` in `App.tsx`) -- a sub-application
+  that's merely connected without LR managing it (e.g. run manually and
+  pointed at LR's address) instead gets a green abbreviation with the border
+  left the same grey as an unlit box (Revision K).
+- Clicking a host card selects it (mutually exclusive, click again to
+  deselect), which drives the details pane's Host/status/version/uptime
+  readouts (version/uptime come from that host's `lr-system-state`, same as
+  the per-host system tab) and its controls. The details pane's "update"
+  placeholder button is gone -- in its place, when AC's own `dev_mode` is on,
+  sits the same `lr-repo-state`-driven rebuild/auto-rebuild widget the
+  per-host system tab shows (sends `lr-rebuild-app` / `lr-set-auto-rebuild`
+  for the selected host), plus the restart button, enabled once that host's
+  LR is loader-managed -- it sends `lr-restart-app` for that host, same as
+  the per-host system tab's self-restart control, and reads "restart and
+  update LR" instead of "restart LR" whenever that host's self `ProcInfo`
+  reports `update_available` (labeled "...LR" rather than the per-host tab's
+  bare "restart" now that it sits alongside the agent-coordinator section's
+  own restart controls below).
+- Still in dev mode only: a host card gets a faint orange halo -- distinct
+  from, and layered outside, the grey-vs-blue selected ring -- whenever that
+  host is out of date with the dev branch its LR tracks: its dev-repo watcher
+  has a rebuild ready (`lr-repo-state.rebuild_ready`, not currently building)
+  and/or its self `ProcInfo` has `update_available` set (`hostOutOfDate` in
+  `App.tsx`). Outside dev mode neither the halo nor the rebuild widget
+  appears, and the restart button never reads "update".
+- Also dev mode only, and independent of the card-level halo above: an
+  individual sub-application box gets that same orange halo drawn around its own
+  green border once it's connected *and* out of date -- that managed
+  instance's `ProcInfo.update_available` is set, meaning the application's
+  on-disk binary (see local-representative's `pollManagedVersions`) now
+  differs from the version it last reported over representable (`system.
+  managed`, matched by app name against `services`, in `subAppOutOfDate` in
+  `App.tsx`). The green border itself is unaffected -- it's kept as a future
+  health indication independent of update state (dev or ops mode). LR is
+  deliberately excluded: the host card's own halo already covers it.
+- In any mode, a host card gets a green halo (same shape as the orange one)
+  while its LR uptime -- the readout in the card's top-right -- is under 10
+  minutes (`FRESH_UPTIME_SECS` in `App.tsx`). If the card is also out of
+  date, the green ring sits inside the orange one.
+- The active tab (e.g. `system`) is shared between the global view and a
+  host's view (lifted to `App`), so selecting or deselecting a host keeps
+  whichever tab was active instead of resetting it.
+- When the selected card is the one agent-coordinator itself runs on (i.e.
+  `selectedHostId === selfHostId`), the details pane grows a small
+  "agent-coordinator" section below the rebuild/restart controls, with its
+  own restart button that sends `ac-restart-app` — distinct from the control
+  above it, which always targets that host's *LR*. It follows the same
+  paradigm as every other restart control here: always enabled once
+  loader-managed (never gated on dev mode), turning orange and reading
+  "restart and update" instead of "restart" only when both dev mode is on
+  and AC's own on-disk binary has drifted from what's running. Since it's a
+  legitimate deployment to run agent-coordinator alone on a box with only
+  off-node LRs, AC can't lean on any LR's `pollManagedVersions` for this —
+  it runs its own duplicate of local-representative's `selfVersionWatch`
+  (`agent-coordinator/selfversion.go`, polling its own executable's
+  `--version` every 5s) and discloses the verdict via `self-info`'s new
+  `loader_managed`/`update_available` fields, re-broadcasting that message
+  whenever the verdict changes rather than only once per connection.
+- That same "agent-coordinator" section also gets a "host update all" button,
+  next to the AC restart button, enabled only once at least one connected
+  sub-application on this host has `update_available` set (the same
+  per-app check that drives that box's own halo above --
+  `anySubAppUpdateAvailable` in `App.tsx`) and both this host's LR and AC
+  itself are loader-managed. Clicking it only sends a restart to whichever of
+  the two is actually running a stale binary -- `lr-restart-app` for this
+  host when its LR's own `update_available` is set, `ac-restart-app` when
+  AC's is (both, one after the other, when both are stale; neither when the
+  pending update is limited to a sub-application instance) -- so it never restarts a
+  process that's already current.
+- The "agent-coordinator" section has two further controls (Revision J). A
+  "rebuild all" button sits at the top: green when one or more connected hosts'
+  LRs have a rebuild ready (`hostRebuildReady` in `App.tsx`, the same condition
+  RepoWatchPanel uses per host), or neutral/grey when selecting it manually
+  across clean dev-repos; clicking it sends `lr-rebuild-app` to those hosts (or
+  all clean watched hosts when run manually). Its accompanying auto-rebuild
+  toggle-selector sends `lr-set-auto-rebuild` to every connected host with a
+  watched dev-repo at once (not just the ones currently rebuild-ready, since
+  auto-rebuild is a standing setting), reading checked only once every
+  watched repo already has it on. A blue-or-orange "network update all"
+  button sits at the bottom, generalizing "host update all" to the whole
+  network: enabled once any connected host's own LR (`system.self.
+  update_available`, not its sub-apps') is stale, or AC itself is; clicking
+  it sends `lr-restart-app` to each stale, loader-managed host and
+  `ac-restart-app` once more if AC itself is both stale and loader-managed.
+- That section's own AC restart button was also relabeled from "restart
+  agent-coordinator"/"restart and update" to "restart AC"/"restart and update
+  AC", for consistency with "restart LR"/"restart and update LR" on the
+  control above it.
+
+### Timeline
+
+The global system tab's `timeline` sub-tab (`frontend/src/Timeline.tsx`,
+`condocs/privateRepoOpsImpls/Step6Prompt.md` Revision J and its swimlanes
+sketch) shows each host active during the chosen window (15m, 1h, 6h or 24h)
+as a host lane, AC's own host first. A lane has up to three faintly divided
+sections: **global** (agent-coordinator itself, on the host it runs on),
+**LR apps** (local-representative and its internal sub-apps) and **external**
+(managed external apps and plug-ins: anything in that host's plug-in registry
+or config, and every plug-in dev repo's app id). Each component is a laser
+across the time axis, fat for AC and LR and slim for the rest:
+
+- blue while up, green marching ants while building (LR's dev repo, or a
+  plug-in dev repo), red while the last build has failed;
+- the topology view's green "fresh" halo for 10 minutes after each start or
+  restart, ringing the laser so the line keeps its own colour (not shown
+  while building, where the marching ants replace it);
+- on LR's laser only, its repo watcher's signals: an orange "dirty" halo,
+  the fresh halo in orange, for as long as its watched repo has uncommitted
+  changes (outranking the fresh halo), and the building ants in orange for
+  as long as a `.ufabuild` request waits for its rebuild (`rebuild_ready`,
+  which already excludes dirty, but not while a build runs nor once the
+  request's own build failed), plus a tick where each request arrived;
+- a faint pale notch across the laser where its reported build version
+  changed (hover it for old → new);
+- a gap while it wasn't running or its host wasn't connected;
+- a vertical bar at each restart. LR's runs through every row of the LR and
+  external sections, since LR manages them; a sub-app or plug-in's own
+  restart (one not within 30s of an LR restart) gets a bar in its own row,
+  and AC's in the global section.
+
+Nothing upstream keeps history, so AC records it (`timeline.go`): every 5s it
+samples what it already holds for each host -- `system.self`/`managed`
+(started_at, version, running), `services` health, `repo` (building, build_failed,
+externals) and `plugins` -- into one track per component of spans (runs of
+the same state) and marks (a started_at that moved is a restart; a reported
+version that moved is a version change, placed at the restart when one came
+with it, and an empty version never counts). A component
+seen for the first time is backfilled to its started_at, and one whose
+started_at hasn't changed is treated as having run throughout, even across a
+gap in sampling such as AC's own restart. Twenty-four hours are kept, saved
+every minute (and just before AC announces a restart) to `--timeline-file`,
+by default `<user config dir>/agent-coordinator/timeline.json`; an empty value
+keeps it in memory only. The view polls `GET /api/timeline?since=<unix
+seconds>` every 5s. Double-clicking a lane's header opens that host's system
+tab.

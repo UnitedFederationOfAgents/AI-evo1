@@ -264,22 +264,164 @@ func TestClodAgentConfig(t *testing.T) {
 }
 
 func TestOpenCodePromptHandling(t *testing.T) {
-	// OpenCode uses positional prompts (no -p flag)
+	// OpenCode's default command treats a positional as a project directory.
+	// Non-interactive prompts must go through `opencode run`.
 	config := agentConfigs["opencode"]
+	if len(config.CommandArgs) != 1 || config.CommandArgs[0] != "run" {
+		t.Fatalf("opencode CommandArgs = %v, want [run]", config.CommandArgs)
+	}
 	if config.PromptFlag != "" {
 		t.Errorf("opencode should have empty PromptFlag, got %q", config.PromptFlag)
 	}
 
-	// Verify prompt is passed as last argument
-	args := buildAgentArgs(config, ModeRead, "", "test prompt", "/tmp/session", nil)
-	if len(args) == 0 {
-		t.Fatal("buildAgentArgs returned empty args")
+	args := buildAgentArgs(config, ModeRead, "xai/grok-4.7", "test prompt", "/tmp/session", nil)
+	if len(args) == 0 || args[0] != "run" {
+		t.Fatalf("opencode args should start with run, got: %v", args)
+	}
+	if args[len(args)-1] != "test prompt" {
+		t.Errorf("Last arg = %q, want %q", args[len(args)-1], "test prompt")
+	}
+	want := []string{"run", "--model", "xai/grok-4.7", "--agent", "plan", "--auto", "test prompt"}
+	for _, w := range want {
+		found := false
+		for _, arg := range args {
+			if arg == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected opencode args to contain %q, got: %v", w, args)
+		}
 	}
 
-	// Last arg should be the prompt
-	lastArg := args[len(args)-1]
-	if lastArg != "test prompt" {
-		t.Errorf("Last arg = %q, want %q", lastArg, "test prompt")
+	execArgs := buildAgentArgs(config, ModeExecute, "xai/grok-4.7", "run tests", "/tmp/session", nil)
+	if !strings.Contains(strings.Join(execArgs, " "), "build") {
+		t.Fatalf("execute mode should select the build agent, got: %v", execArgs)
+	}
+}
+
+func TestMatchListedModel(t *testing.T) {
+	models := []string{"xai/grok-4.7", "xai/grok-4.6", "opencode/big-pickle"}
+	got, err := matchListedModel(models, "xai/grok-4.7")
+	if err != nil || got != "xai/grok-4.7" {
+		t.Fatalf("exact match = %q, %v", got, err)
+	}
+	got, err = matchListedModel(models, "grok-4.7")
+	if err != nil || got != "xai/grok-4.7" {
+		t.Fatalf("suffix match = %q, %v", got, err)
+	}
+	if _, err := matchListedModel(models, "missing"); err == nil {
+		t.Fatal("expected error for unknown model")
+	}
+	ambiguous := []string{"xai/grok-4.7", "other/grok-4.7"}
+	if _, err := matchListedModel(ambiguous, "grok-4.7"); err == nil {
+		t.Fatal("expected error for ambiguous suffix")
+	}
+}
+
+func TestFilterChatModels(t *testing.T) {
+	got := filterChatModels([]string{"xai/grok-4.7", "xai/grok-imagine-video-1.5-lite", "xai/grok-imagine-image"})
+	if len(got) != 1 || got[0] != "xai/grok-4.7" {
+		t.Fatalf("filterChatModels = %v", got)
+	}
+}
+
+func TestPiPromptHandling(t *testing.T) {
+	config := agentConfigs["pi"]
+	if config.Command != "pi" {
+		t.Fatalf("pi Command = %q", config.Command)
+	}
+	if config.PromptFlag != "" {
+		t.Errorf("pi PromptFlag = %q, want empty (positional; -p is --print)", config.PromptFlag)
+	}
+	wantPrefix := []string{"--print", "--approve", "--no-session"}
+	if strings.Join(config.CommandArgs, " ") != strings.Join(wantPrefix, " ") {
+		t.Fatalf("pi CommandArgs = %v, want %v", config.CommandArgs, wantPrefix)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "test-key")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("XAI_API_KEY", "")
+
+	args := buildAgentArgs(config, ModeRead, "sonnet", "identify yourself", "/tmp/session", []string{"/extra"})
+	for _, want := range []string{"--print", "--approve", "--no-session", "--provider", "anthropic", "--model", "sonnet", "--thinking", "low", "--tools", piReadTools, "--", "identify yourself"} {
+		if !containsArg(args, want) {
+			t.Errorf("read args missing %q: %v", want, args)
+		}
+	}
+	if strings.Contains(strings.Join(args, " "), "--add-dir") {
+		t.Errorf("pi has no add-dir flag, got %v", args)
+	}
+	if !containsSequence(args, "--model", "sonnet") || !containsSequence(args, "--provider", "anthropic") {
+		t.Errorf("read args = %v", args)
+	}
+
+	promptArgs := buildAgentArgs(config, ModePrompt, "", "hi", "/tmp/session", nil)
+	if !containsArg(promptArgs, "--no-tools") {
+		t.Errorf("prompt mode should pass --no-tools, got %v", promptArgs)
+	}
+
+	writeArgs := buildAgentArgs(config, ModeWrite, "google/gemini", "write cats.md", "/tmp/session", nil)
+	if !containsArg(writeArgs, piWriteTools) || !containsSequence(writeArgs, "--provider", "google") || !containsSequence(writeArgs, "--model", "gemini") || !containsSequence(writeArgs, "--thinking", "low") {
+		t.Errorf("write args = %v", writeArgs)
+	}
+
+	execArgs := buildAgentArgs(config, ModeExecute, "xai/grok-4:high", "run tests", "/tmp/session", nil)
+	if !containsArg(execArgs, piExecTools) || !containsSequence(execArgs, "--provider", "xai") || !containsSequence(execArgs, "--model", "grok-4:high") || containsArg(execArgs, "--thinking") {
+		t.Errorf("execute args should keep the :thinking suffix and not pass --thinking, got %v", execArgs)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSequence(args []string, a, b string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == a && args[i+1] == b {
+			return true
+		}
+	}
+	return false
+}
+
+func TestParsePiModels(t *testing.T) {
+	out := "Warning: stale catalog\n" +
+		"provider  model                 context  max-out  thinking  images\n" +
+		"anthropic  claude-sonnet-4-5     200K     64K      yes       yes\n" +
+		"google     gemini-2.5-pro        1M       64K      yes       yes\n" +
+		"xai        grok-4                256K     32K      yes       no\n"
+	got := parsePiModels(out)
+	want := []string{"anthropic/claude-sonnet-4-5", "google/gemini-2.5-pro", "xai/grok-4"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("parsePiModels = %v", got)
+	}
+	resolved, err := matchPiModel(got, "sonnet")
+	if err != nil || resolved != "anthropic/claude-sonnet-4-5" {
+		t.Fatalf("fuzzy sonnet = %q, %v", resolved, err)
+	}
+	resolved, err = matchPiModel(got, "grok")
+	if err != nil || resolved != "xai/grok-4" {
+		t.Fatalf("fuzzy grok = %q, %v", resolved, err)
+	}
+	ambiguous := append(got, "xai/grok-4-fast")
+	if _, err := matchPiModel(ambiguous, "grok"); err == nil {
+		t.Fatal("expected ambiguous grok match")
+	}
+}
+
+func TestPiProviderFromEnv(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "g")
+	t.Setenv("XAI_API_KEY", "x")
+	if got := piProviderFromEnv(); got != "google" {
+		t.Fatalf("provider = %q, want google (first non-empty after anthropic)", got)
 	}
 }
 

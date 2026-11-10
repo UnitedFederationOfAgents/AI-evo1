@@ -1,0 +1,156 @@
+# DTT example -- localrep, Polly clips in several configurations, each saying what it cost, put together into one audio track (see ../../README.md "The localrep tool").
+#
+# It uses the selected node: run it from that node's tools tab (in
+# agent-coordinator, the host picked in the sidebar; or that node's own
+# local-representative), and its clips are made by that node's The
+# Conversationalist, into that node's files tab. localrep.coordinator names
+# the node, so every clip says where it was made -- the node has to be
+# connected to agent-coordinator.
+#
+# One clip is made in each of three Polly configurations -- default, neural
+# and british, presets in The Conversationalist's Polly configuration menu
+# (the gear beside the notepad's Polly button). Each is in its own voice and
+# engine and explains its own cost: The Conversationalist fills in
+# [[config]], [[voice]], [[engine]], [[region]], [[price]], [[characters]]
+# and [[cost]] before it asks Polly. A last clip says the default clip's
+# text again, word for word and in the same configuration, so The
+# Conversationalist reuses that clip from its recent clips rather than
+# asking Polly again: it's saved under its own name at no cost. All four
+# then show in the menu's recent clips, to replay.
+#
+# Each configuration names the AWS region it asks Polly in, and each clip
+# says it. The default asks in the node's own AWS region; neural and
+# british, on Polly's neural engine, ask in us-east-1, because Polly doesn't
+# offer that engine in every region (Revision A: us-east-2 refused it).
+#
+# Each clip is also played out loud on the node as it's made (Revision B),
+# one after another: The Conversationalist sends it to one of its tabs open
+# in a browser on that node -- TC's own page, or LR's convo tab (once
+# opened, LR keeps it playing while you're on its other tabs, the tools tab
+# included) -- which plays it once the one before has finished. All four
+# are also saved, so the composition below gets them too. That tab may be hidden, but
+# it has to be open, and clicked in at least once since it loaded (the
+# browser's autoplay rule; until then a clip waits, and the tab says so).
+# With no such tab the clips are still made, and the log says they weren't
+# played. --var play=false makes them quietly.
+#
+# Then composer puts the four clips together, a beep first and a short
+# pause between them, into one composition whose output is audio: rendered,
+# it's a pure audio track -- an audio-only WebM,
+# composer-configs-<date>-<take>-<stamp>.weba -- in the files tab.
+#
+# The clips and the composition are named by the date and the variable
+# take, so asserting again the same day changes nothing; give a new take to
+# make them again. Reading measures only. Deleting, with the assert's image,
+# removes the clips from the files tab and the composition from composer
+# (the recent clips stay in The Conversationalist's memory, and the render
+# stays in the files tab until it's swept). The generative and long-form
+# presets are left out to keep it cheap: long-form is $100 per million
+# characters.
+#
+# It needs, on the node: The Conversationalist connected to
+# local-representative, with AWS credentials allowed polly:SynthesizeSpeech;
+# to hear the clips, a TC tab open in a browser there; compose launched and connected (it renders on its own with ffmpeg;
+# otherwise keep the compose tab open and visible); and
+# local-representative connected to agent-coordinator.
+#
+#   dtt read examples/compositions/localrep-polly-configs.dtt.yaml
+#   dtt assert examples/compositions/localrep-polly-configs.dtt.yaml --var take=1
+#   dtt assert examples/compositions/localrep-polly-configs.dtt.yaml --var take=2 --var play=false
+#   dtt delete examples/compositions/localrep-polly-configs.dtt.yaml --var take=1 --image <the assert's image>
+
+variables:
+  take:
+    default: "1"
+    help: names this take's clips and composition -- lower-case letters, digits and '-'; change it to make them again the same day
+  play:
+    default: "true"
+    help: play each clip out loud on the node as it's made, one after another (false makes them quietly)
+
+timestamp:
+  select: now
+  alias: the-time
+
+localrep.coordinator:
+  select:
+    url: ""
+  alias: here
+
+localrep.polly.clips:
+  select:
+    name: configs-${{the-time.date}}-${{var.take}}-default
+  alias: default-clip
+  assert:
+    config: default
+    play: ${{var.play}}
+    text: |
+      This is ${{here.node}}, speaking in the [[config]] configuration: the
+      voice [[voice]], on Polly's [[engine]] engine, asked for in
+      [[region]]. That engine costs [[price]], so these [[characters]]
+      characters cost about [[cost]].
+
+localrep.polly.clips:
+  select:
+    name: configs-${{the-time.date}}-${{var.take}}-neural
+  alias: neural-clip
+  assert:
+    config: neural
+    play: ${{var.play}}
+    text: |
+      This is ${{here.node}} again, now in the [[config]] configuration:
+      [[voice]] once more, on the [[engine]] engine, asked for in [[region]],
+      where Polly offers it. It sounds more natural and costs [[price]], four
+      times the standard engine. These [[characters]] characters cost about
+      [[cost]].
+
+localrep.polly.clips:
+  select:
+    name: configs-${{the-time.date}}-${{var.take}}-british
+  alias: british-clip
+  assert:
+    config: british
+    play: ${{var.play}}
+    text: |
+      And this is the [[config]] configuration on ${{here.node}}: the voice
+      [[voice]], in British English, on the [[engine]] engine in [[region]],
+      at [[price]]. Saying these [[characters]] characters cost about
+      [[cost]].
+
+localrep.polly.clips:
+  select:
+    name: configs-${{the-time.date}}-${{var.take}}-default-again
+  alias: default-again
+  assert:
+    config: default
+    play: ${{var.play}}
+    text: |
+      This is ${{here.node}}, speaking in the [[config]] configuration: the
+      voice [[voice]], on Polly's [[engine]] engine, asked for in
+      [[region]]. That engine costs [[price]], so these [[characters]]
+      characters cost about [[cost]].
+
+localrep.compositions:
+  select:
+    id: configs-${{the-time.date}}-${{var.take}}
+  alias: track
+  assert:
+    composition: |
+      {
+        "name": "Polly configurations on ${{here.node}}, ${{the-time.date}}",
+        "output": "audio",
+        "video": [],
+        "audio": [
+          {"kind": "tone", "duration": 0.3, "frequency": 660},
+          {"kind": "silence", "duration": 0.5},
+          {"kind": "media", "file_id": "${{default-clip.file_id}}", "file_name": "${{default-clip.file_name}}"},
+          {"kind": "silence", "duration": 0.8},
+          {"kind": "media", "file_id": "${{neural-clip.file_id}}", "file_name": "${{neural-clip.file_name}}"},
+          {"kind": "silence", "duration": 0.8},
+          {"kind": "media", "file_id": "${{british-clip.file_id}}", "file_name": "${{british-clip.file_name}}"},
+          {"kind": "silence", "duration": 0.8},
+          {"kind": "media", "file_id": "${{default-again.file_id}}", "file_name": "${{default-again.file_name}}"}
+        ]
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

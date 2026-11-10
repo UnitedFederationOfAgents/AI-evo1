@@ -1,0 +1,42 @@
+# DTT example -- github, a new repository named by the date (see ../../README.md "Declarative tools").
+#
+# Create today's scratch repository, scratch-<date>, if it doesn't exist;
+# run it in delete mode to delete the repository again.
+# The path is the owner's set of repositories and the name is in select, so
+# each day's run makes (or finds) that day's repository; yesterday's is
+# never selected again. exists: true is the default and could be left out.
+#
+# auto_init only means something when the repository is created (a first
+# commit, so main exists); it reads back false afterwards and isn't
+# asserted on a repository that exists.
+#
+# Delete mode asserts exists: false instead, which deletes the repository.
+# That can't be undone, so it needs approve_delete naming the repository
+# (asserting ignores it). The from rule still decides: give the image the
+# assert returned (the runner fills from_image with it) or force. With the
+# image, timestamp is the moment the image saw, so the delete finds the
+# repository that assert made even on a later day.
+#
+# user-1 is a GitHub user, so the path is github.users.<owner>.repos
+# and the repository is made through /user/repos, which needs a token of
+# user-1's own. For an organization the path is github.orgs.<owner>.repos.
+#
+#   dtt read examples/compositions/github-repo-dated.dtt.yaml
+#   dtt run github --arg document_file=examples/compositions/github-repo-dated.dtt.yaml --arg mode=assert
+#   dtt run github --arg document_file=examples/compositions/github-repo-dated.dtt.yaml --arg mode=delete --arg from_image=<the assert run's image.json>
+
+timestamp:
+  select: now
+
+github.users.user-1.repos:
+  assert:
+    repos:
+      select:
+        name: scratch-${{timestamp.date}}     # scratch-2026-10-24
+      state:
+        exists: true
+        private: true
+        description: Scratch space for ${{timestamp.date}}.
+        default_branch: main
+        auto_init: true                       # a first commit, so main exists
+        approve_delete: user-1/scratch-${{timestamp.date}}   # lets delete mode delete it

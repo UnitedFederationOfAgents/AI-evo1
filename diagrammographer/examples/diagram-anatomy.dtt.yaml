@@ -1,0 +1,62 @@
+# Diagram -- what a diagram's DTT document holds (static).
+#
+# A diagrammographer.diagrams statement asserts nodes, edges and, for a
+# dynamic diagram, steps. The canvas draws all three; the D2 export turns
+# the edges into connections and the steps into scenarios.
+
+diagrammographer.diagrams:
+  select:
+    name: diagram-anatomy
+  assert:
+    title: Inside a diagram document
+    description: What a diagrammographer.diagrams statement holds, and where each part goes.
+    size: [820, 400]
+    nodes:
+      dtt:
+        label: DTT document
+        shape: cylinder
+        at: [40, 165]
+        size: [160, 70]
+      node-list:
+        label: "nodes:"
+        at: [320, 50]
+      edge-list:
+        label: "edges:"
+        at: [320, 172]
+      step-list:
+        label: "steps:"
+        shape: round
+        at: [320, 294]
+      canvas:
+        label: canvas SVG
+        shape: round
+        color: "#2d4a6b"
+        at: [600, 110]
+        size: [170, 56]
+      d2:
+        label: D2 file
+        shape: cylinder
+        at: [600, 250]
+        size: [170, 70]
+    edges:
+      - from: dtt
+        to: node-list
+        label: boxes
+      - from: dtt
+        to: edge-list
+        label: arrows
+      - from: dtt
+        to: step-list
+        label: optional
+      - from: node-list
+        to: canvas
+      - from: edge-list
+        to: canvas
+      - from: step-list
+        to: canvas
+        label: highlights
+      - from: edge-list
+        to: d2
+      - from: step-list
+        to: d2
+        label: scenarios

@@ -1,0 +1,98 @@
+# DTT example -- localrep, a complete local-system-under-test demo, composed of three others (see ../../README.md "Calls and phases").
+#
+# It takes node, the node to give the demo on, as agent-coordinator names it
+# ("" by default, for this node). It is a composition: it calls three other
+# examples (dtt.calls), one after another, each in its own phase. Phase
+# prepare calls localrep-demo-prepare: wake the node, put the demo page on
+# its desktop and switch to an empty workspace. Phase cool calls
+# localrep-demo-cool: the robot opens the page, reads it back off the
+# screen, zooms it and closes it. Phase shut-down calls
+# localrep-demo-shutdown: delete the page and switch back to the first
+# workspace, so GNOME removes the demo's. Each of the three makes its own
+# composer composition (demo-prep-<time>,
+# demo-cool-<time>, demo-shutdown-<time>) of its own recording. Then a
+# fourth phase, compose, has composer put the three renders together, between
+# a title card and a closing card, into one more composition,
+# demo-complete-<time>, rendered into a WebM in the files tab.
+#
+# All three calls are given this document's time (at), so they name the same
+# demo page and their runs and compositions share it; each assert gives a new
+# demo. The image reports each phase (phases): its objects, its outcomes and
+# how it ended, and a phase that fails stops the ones after it -- a failed
+# cool demo still leaves the node prepared, for another assert or a
+# shutdown on its own. Each call's own image is its object's state. Deleting,
+# with the assert's image, deletes through each call too: the three
+# sequences and all four compositions (the runs have happened, so they're
+# kept).
+#
+# It needs what the three calls need: local-representative connected to
+# agent-coordinator on the node, with ianar built beside it; GNOME with
+# dynamic workspaces; a browser as the default app for .html. Here: compose
+# launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-complete.dtt.yaml --var node=<node>
+#   dtt assert examples/compositions/localrep-demo-complete.dtt.yaml --var node=<node>
+#   dtt delete examples/compositions/localrep-demo-complete.dtt.yaml --var node=<node> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to give the demo on, as agent-coordinator names it; empty for this node
+
+timestamp:
+  select: now
+  alias: the-time
+
+dtt.calls:
+  select:
+    document: localrep-demo-prepare.dtt.yaml
+  alias: prep
+  phase: prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-cool.dtt.yaml
+  alias: cool
+  phase: cool
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-shutdown.dtt.yaml
+  alias: shut
+  phase: shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+localrep.compositions:
+  select:
+    id: demo-complete-${{the-time.unix}}
+  alias: complete-comp
+  phase: compose
+  assert:
+    composition: |
+      {
+        "name": "Complete demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "A complete demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1a1a1a"},
+          {"kind": "media", "file_id": "${{prep.by_alias.prep-comp.render.file_id}}", "file_name": "${{prep.by_alias.prep-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{cool.by_alias.cool-comp.render.file_id}}", "file_name": "${{cool.by_alias.cool-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{shut.by_alias.shut-comp.render.file_id}}", "file_name": "${{shut.by_alias.shut-comp.render.name}}"},
+          {"kind": "title", "duration": 2, "text": "Prepared, demonstrated and shut down", "color": "#1a1a1a", "background": "#e0e0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

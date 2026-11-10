@@ -1,0 +1,33 @@
+# DTT example -- files, text from a template (see ../../README.md "Declarative tools").
+#
+# Several text items under /etc/ufa/, one of them removed. motd.txt is ours:
+# from.content "*" lets it be rewritten whatever it holds, with the time it
+# was last asserted, and its mode is asserted too (mode, owner and group are
+# optional fields, each with its own from rule). Removing old-settings.ini
+# passes the from rule only when we hold an image of the file as it was (or
+# with force).
+#
+# Writing under /etc/ needs root; reading doesn't.
+#
+#   dtt read examples/compositions/filesystem-text-template.dtt.yaml
+#   sudo dtt run filesystem --arg document_file=examples/compositions/filesystem-text-template.dtt.yaml --arg mode=assert
+
+timestamp:
+  select: now
+
+filesystem.items:
+  select:
+    abspath: /etc/ufa/
+  alias: ufa-etc
+
+ufa-etc:
+  assert:
+    items:
+      motd.txt:
+        type: text
+        content: |
+          Managed by dtt. Last asserted ${{timestamp.iso}}.
+        from.content: "*"           # this file is ours: always rewrite it
+        mode: "0644"
+      old-settings.ini:
+        exists: false               # held unless the image saw it, or --force

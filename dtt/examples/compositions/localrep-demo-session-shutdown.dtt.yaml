@@ -1,0 +1,89 @@
+# DTT example -- localrep, close a session demo's windows (see ../../README.md "The localrep tool").
+#
+# It undoes localrep-demo-session-prepare. It takes node, the node the
+# windows are on, as agent-coordinator names it ("" by default, for this
+# node); at, the unix seconds the node was prepared at (the preparation's
+# time); and fc, the session prep's federation-command terminal (its run's
+# fc output, e.g. federation-command#2). It imports the control sequence in
+# resources/demo-session-shutdown.control.yaml into that node's library and
+# runs it there: it starts the robot (ianar) if it isn't running, wakes the
+# screen and checks the terminal is still connected; then, through the
+# terminal, it closes the session prep's Chrome (every process started with
+# its profile, /tmp/dtt-demo-session-<at>, and no other browser) and
+# removes the profile, and has the terminal exit, closing its window. That
+# leaves the demo's workspace empty again, for the shutdown
+# (localrep-demo-shutdown) to leave. The node's screen is recorded while it
+# works. Then composer, on this node, puts a title card, the recording and a
+# closing card together into a WebM in the files tab.
+#
+# The run is named by at (demo-session-shutdown-<at>), so once one
+# preparation's session shutdown has succeeded, asserting it again doesn't
+# run it again. A run whose terminal has gone (closed by hand, or after
+# local-representative restarted) fails at once, saying so: close the
+# browser and terminal by hand. The session demo (localrep-demo-session)
+# gives at and fc. Deleting, with the assert's image, removes the sequence
+# and the composition (the run has happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it, and the session prep's
+# terminal still open. Here: compose launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-session-shutdown.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the session prep's fc>
+#   dtt assert examples/compositions/localrep-demo-session-shutdown.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the session prep's fc>
+#   dtt delete examples/compositions/localrep-demo-session-shutdown.dtt.yaml --var node=<node> --var at=<the same> --var fc=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node the session demo's windows are on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the browser's profile
+  fc:
+    help: the session prep's federation-command terminal, as its run's fc output names it (federation-command#2, say)
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-session-shutdown
+    node: ${{var.node}}
+  alias: sshut-seq
+  assert:
+    source_file: resources/demo-session-shutdown.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-session-shutdown
+    key: demo-session-shutdown-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: sshut-run
+  assert:
+    controls:
+      fc: ${{var.fc}}
+      profile: /tmp/dtt-demo-session-${{the-time.unix}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-session-shutdown-${{the-time.unix}}
+  alias: sshut-comp
+  assert:
+    composition: |
+      {
+        "name": "Session demo shutdown on ${{sshut-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Closing the session demo's windows on ${{sshut-seq.node}}", "color": "#ffffff", "background": "#5f4a1e"},
+          {"kind": "media", "file_id": "${{sshut-run.recording.file_id}}", "file_name": "${{sshut-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{sshut-run.output.demo}}", "color": "#1a1a1a", "background": "#e0c0a0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

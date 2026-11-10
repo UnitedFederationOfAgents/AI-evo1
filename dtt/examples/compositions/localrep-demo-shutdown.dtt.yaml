@@ -1,0 +1,93 @@
+# DTT example -- localrep, shut a local-system-under-test demo down (see ../../README.md "The localrep tool").
+#
+# It undoes localrep-demo-prepare. It takes node, the node the demo was on,
+# as agent-coordinator names it ("" by default, for this node), and at, the
+# unix seconds the node was prepared at (the preparation's time). It imports
+# the control sequence in resources/demo-shutdown.control.yaml into that
+# node's library and runs it there: it starts the robot (ianar) if it isn't
+# running and wakes the screen, has the robot delete the demo page,
+# ~/Desktop/demo-<at>.html, if it's still there, and switch back to the first
+# workspace (super+home, GNOME's "switch to first workspace"). GNOME removes
+# an empty workspace once it's left, so the demo's workspace goes then, if
+# it's still there and empty; nothing has to find it. The node's screen is
+# recorded while the robot works. Then composer, on this node, puts a title
+# card, the recording and a closing card together into a WebM in the files
+# tab.
+#
+# It's idempotent. The run is named by at (demo-shutdown-<at>), so once one
+# preparation's shutdown has succeeded, asserting it again doesn't run it
+# again. And a run that does go again, after an earlier one failed part way,
+# is safe: a page already gone counts as deleted (the robot's delete-file
+# with missing_ok), and super+home on the first workspace does nothing. A
+# window the demo left open on its workspace keeps that workspace; the cool
+# demo closes its page itself. at defaults to now, which only finds a page
+# a preparation made in the same second; on its own, give the preparation's
+# time. The complete demo (localrep-demo-complete) gives it. Deleting, with
+# the assert's image, removes the sequence and the composition (the run has
+# happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it (one with delete-file's
+# missing_ok), and GNOME with dynamic workspaces (its default). Here: compose
+# launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-shutdown.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-shutdown.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt delete examples/compositions/localrep-demo-shutdown.dtt.yaml --var node=<node> --var at=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node the demo was on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the demo page, the run and the composition
+  keys:
+    default: super+home
+    help: the keys that switch back to the first workspace (GNOME's "switch to first workspace")
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-shutdown
+    node: ${{var.node}}
+  alias: shut-seq
+  assert:
+    source_file: resources/demo-shutdown.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-shutdown
+    key: demo-shutdown-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: shut-run
+  assert:
+    controls:
+      keys: ${{var.keys}}
+      file: "~/Desktop/demo-${{the-time.unix}}.html"
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-shutdown-${{the-time.unix}}
+  alias: shut-comp
+  assert:
+    composition: |
+      {
+        "name": "Demo shutdown on ${{shut-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Shutting the demo on ${{shut-seq.node}} down", "color": "#ffffff", "background": "#5f1e2a"},
+          {"kind": "media", "file_id": "${{shut-run.recording.file_id}}", "file_name": "${{shut-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{shut-run.output.demo}}", "color": "#1a1a1a", "background": "#a0e0a0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

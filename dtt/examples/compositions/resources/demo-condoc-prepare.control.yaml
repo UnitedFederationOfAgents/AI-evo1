@@ -1,0 +1,136 @@
+# local-representative control library: open a condocv2 demo's windows on a
+# node prepared by dtt-demo-prepare, for dtt's localrep-demo-condoc-prepare
+# example (../localrep-demo-condoc-prepare.dtt.yaml), which imports it into
+# the library of the node it targets and runs it there.
+#
+# It is the session prep (demo-session-prepare.control.yaml) with condocv2
+# in place of session-manager. It starts the robot (ianar) if it isn't
+# running, wakes the screen, and makes sure condocv2 (the system tab's
+# condocv2) is running and connected. Then, on the demo's empty workspace,
+# it launches a new federation-command terminal (the run's fc), which the
+# robot tiles to the left half of the screen, and through it starts a
+# browser of its own (browser, with a throwaway profile at profile, zoomed,
+# in a new window) on agent-coordinator (url), which the robot tiles to the
+# right half. The robot waits for agent-coordinator's page, types this
+# node's condocv2 propose page through agent-coordinator into the address
+# bar (<url>/host/<this node>/condocv2/#/propose) and waits for its form's
+# heading, then has the terminal say the demo is ready. The run's fc output
+# names the terminal: the condoc hello (dtt-demo-condoc-hello) works in both
+# windows, and the condoc shutdown (dtt-demo-condoc-shutdown) closes the
+# browser through it, then the terminal itself.
+#
+# The terminal and condocv2 are side by side, as in the session demo: on
+# GNOME Wayland the robot has no window-manager path to focus a window, so
+# neither may cover the other. The node's screen is recorded from the terminal's launch to the end (steps
+# 4-7). Every action is its own (dtt-demo-cprep-*), so importing this
+# replaces none of the library's other actions. No name or description here
+# holds the text the robot looks for on condocv2's page, so the control tab
+# can't be read as condocv2.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-cprep-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-cprep-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-cprep-condocv2
+    name: Make sure condocv2 is running
+    description: launch condocv2 (the system tab's condocv2) if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: condocv2}
+  - id: dtt-demo-cprep-terminal
+    name: Open a new federation-command terminal
+    description: "launch a new federation-command, on the demo's workspace, and wait for it to connect in remote control; robot: click its title bar and tile it to the left half of the screen (super+left)"
+    do:
+      - {op: launch-fc, save_as: fc}
+      - {op: robot.wait, duration: 1s}
+      - {op: robot.focus-window, title: federation-command}
+      - {op: robot.key, keys: super+left}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-cprep-browser
+    name: Open agent-coordinator in a browser of its own
+    description: "through the terminal, start the browser, zoomed, with its own profile in a new window on agent-coordinator; robot: wait for agent-coordinator's page, then tile the browser to the right half of the screen (super+right)"
+    controls:
+      - name: url
+        label: agent-coordinator URL
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-condoc-{{timestamp}}"
+      - name: browser
+        label: Browser
+        default: google-chrome
+      - name: zoom
+        label: Browser zoom
+        default: "1.5"
+    do:
+      - {op: random, save_as: open_token, length: "6"}
+      - {op: set, save_as: opened, value: "browser started - {{open_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "setsid {{browser}} --user-data-dir='{{profile}}' --force-device-scale-factor={{zoom}} --no-first-run --no-default-browser-check --new-window '{{url}}/' >/dev/null 2>&1 </dev/null & echo \"{{opened}}\"", expect: "{{opened}}", timeout: 20s}
+      - {op: robot.wait-for-text, text: "Agent Coordinator", exact: "false", timeout: 60s}
+      - {op: robot.key, keys: super+right}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-cprep-page
+    name: Go to this node's condocv2
+    description: "robot: type this node's condocv2 page for a new proposal, through agent-coordinator, into the browser's address bar, and wait for its form (condocv2 connected, its pointer repo ready)"
+    controls:
+      - name: url
+        label: agent-coordinator URL
+    do:
+      - {op: robot.key, keys: ctrl+l}
+      - {op: robot.type, text: "{{url}}/host/{{this_node}}/condocv2/#/propose"}
+      - {op: robot.key, keys: enter}
+      - {op: robot.wait-for-text, text: "Propose a condoc", exact: "true", timeout: 90s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-cprep-ready
+    name: Say the demo is ready
+    description: "have the federation-command terminal, beside condocv2, say the demo is ready"
+    do:
+      - {op: random, save_as: ready_token, length: "6"}
+      - {op: set, save_as: ready, value: "condocv2 demo ready on {{this_node}} - {{ready_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "echo \"{{ready}}\"", expect: "{{ready}}", timeout: 20s}
+      - {op: robot.wait, duration: 2s}
+      - {op: output, label: fc, value: "{{fc}}"}
+      - {op: output, label: demo, value: "{{this_node}}: a federation-command terminal, and condocv2 through agent-coordinator beside it"}
+sequences:
+  - id: dtt-demo-condoc-prep
+    name: "Demo: open a condocv2 demo's windows"
+    description: Start the robot if need be, wake the screen and make sure condocv2 is running; then open a new federation-command terminal on the left half of the screen and, through it, a browser on agent-coordinator on the right half, which the robot takes to this node's condocv2 -- with this node's screen recorded while it works.
+    controls:
+      - name: url
+        label: agent-coordinator URL
+        help: agent-coordinator's URL as this node's browser reaches it (http://host:port, no trailing /)
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-condoc-{{timestamp}}"
+        help: the browser's own throwaway profile directory; the condoc shutdown closes the browser using it, and removes it
+      - name: browser
+        label: Browser
+        default: google-chrome
+        help: the browser command (google-chrome, chromium, ...)
+      - name: zoom
+        label: Browser zoom
+        default: "1.5"
+        help: how much bigger the browser draws everything (Chrome's --force-device-scale-factor), so the robot can read agent-coordinator and condocv2 off the screen
+    steps:
+      - action: dtt-demo-cprep-robot
+      - action: dtt-demo-cprep-wake
+      - action: dtt-demo-cprep-condocv2
+      - action: dtt-demo-cprep-terminal
+      - action: dtt-demo-cprep-browser
+        with:
+          url: "{{url}}"
+          profile: "{{profile}}"
+          browser: "{{browser}}"
+          zoom: "{{zoom}}"
+      - action: dtt-demo-cprep-page
+        with:
+          url: "{{url}}"
+      - action: dtt-demo-cprep-ready
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 7, label: "condoc demo prep"}

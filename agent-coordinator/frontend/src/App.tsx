@@ -1,0 +1,7485 @@
+import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
+import type {
+  Host, HostsMsg, LRStateMsg, LRFCStateMsg, LRFCLogMsg, LRFCInstancesMsg, FCInstanceInfo,
+  LRControlMsg, LRControlLibraryMsg, LRControlReplyMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest,
+  LRRidealongMsg, LRSystemStateMsg, LRRepoStateMsg, LRSessionsMsg, LRConvoMsg, LRRobotMsg, LRComposeMsg, LRFilesMsg, LRDebugLogMsg, DebugLogEntry, LRChainCallMsg, ChainCallEntry, LRStateboardMsg, StateboardEntry, LRPluginsMsg, PluginsState, PluginInfo, UIManifest, FileInfo, ProcInfo, ServiceStatus, ConnectionInfo, AgentsState, AgentInfo,
+  SelfInfoMsg, ModeMismatchMsg, TCAvailabilityMsg, LRWorkerMsg, LRWorkerReplyMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo,
+  WorkerSlopspaceRequest, WorkerSlopspaceReply, LRWorkerSlopspaceReplyMsg, LRToolsMsg, LRToolsReplyMsg,
+} from './types'
+import { ControlV1 } from './ControlV1'
+import { ToolsPanel } from './Tools'
+import type { ToolsStateMsg, ToolsReply, ToolsRequest } from './Tools'
+import { DemoPanel } from './Demo'
+import type { DemoAppStatus } from './Demo'
+import { HostFilePicker } from './HostFilePicker'
+import { detectTextFormat } from './textformat'
+import { WorkerVisual } from './WorkerVisual'
+import type { WorkFocus } from './WorkerVisual'
+import { ProposalReview, SlopspaceFiles } from './SlopspaceDTT'
+import { AgentOps } from './AgentOps'
+import { GlobalTimelinePanel } from './Timeline'
+import { noteTCStart } from './tcannounce'
+import type { ControlV1Props } from './ControlV1'
+
+// Applications the system tab offers a launch button for. `multi` apps are
+// N-per-host (launch stays enabled while instances run); others are singletons.
+// `excludes` mirrors local-representative's launchSpec.excludes (procman.go):
+// launch is disabled while any of those apps is running on that host.
+const LAUNCHABLE_APPS: { name: string; multi: boolean; excludes?: string[] }[] = [
+  { name: 'federation-command', multi: true },
+  { name: 'condocv2', multi: false },
+  { name: 'sessions', multi: false },
+  { name: 'convo', multi: false },
+  { name: 'robot', multi: false },
+  { name: 'compose', multi: false },
+  { name: 'dg', multi: false },
+  { name: 'worker', multi: false },
+]
+
+interface LogEntry {
+  kind: 'cmd' | 'output' | 'state'
+  text: string
+}
+
+interface HostClientState {
+  lrState?: LRStateMsg
+  // fcState/fcLog are for an older LR that doesn't tell its FC instances
+  // apart; fcInstances/fcLogs (keyed by instance) for a current one -- see
+  // local-representative/fcinstances.go.
+  fcState: string
+  fcLog: LogEntry[]
+  fcInstances: FCInstanceInfo[]
+  fcLogs: Record<string, LogEntry[]>
+  control?: ControlStateMsg
+  // The host's control library, and its replies to requests sent from here
+  // (by request id; a run that couldn't start is under "run").
+  controlLib?: ControlLibraryMsg
+  controlReplies?: Record<string, ControlLibReply>
+  ridealong?: LRRidealongMsg
+  system?: LRSystemStateMsg
+  repo?: LRRepoStateMsg
+  sessions?: LRSessionsMsg
+  convo?: LRConvoMsg
+  robot?: LRRobotMsg
+  compose?: LRComposeMsg
+  // The host's worker tab: what its dungeon-keeper last reported, and the
+  // answer to the last prompt submitted from here -- see worker.go.
+  worker?: WorkerStateMsg
+  workerReply?: WorkerReplyMsg
+  // ...and how the slopspace sub-tab's last manual control op went.
+  slopspaceReply?: WorkerSlopspaceReply
+  // The host's tools tab, and its replies to requests sent from here (by
+  // request id) -- see tools.go.
+  tools?: ToolsStateMsg
+  toolsReplies?: Record<string, ToolsReply>
+  files?: LRFilesMsg
+  debugLog?: LRDebugLogMsg
+  chainCall?: LRChainCallMsg
+  stateboard?: LRStateboardMsg
+  plugins?: PluginsState
+}
+
+function emptyHostState(): HostClientState {
+  return { fcState: '', fcLog: [], fcInstances: [], fcLogs: {} }
+}
+
+function fcStateLabel(state: string): string {
+  return state === '' ? '-- disconnected --'
+    : state === 'remote-control' ? '-- remote control --'
+    : state === 'local-control' ? '-- local control --'
+    : `-- ${state} --`
+}
+
+function useCoordinatorWS() {
+  const [connected, setConnected] = useState(false)
+  const [hosts, setHosts] = useState<Host[]>([])
+  const [hostData, setHostData] = useState<Record<string, HostClientState>>({})
+  const [devMode, setDevMode] = useState(false)
+  // The connected host (if any) that agent-coordinator itself runs on -- see
+  // GlobalTopologyPanel's self-card collapsing. null until self-info arrives
+  // or when it discloses no id.
+  const [selfHostId, setSelfHostId] = useState<string | null>(null)
+  // agent-coordinator's own restart-ability -- mirrors a local-representative
+  // self row's loader_managed/update_available, but for AC itself (see
+  // types.ts SelfInfoMsg and Step4Prompt.md Revision E).
+  const [acLoaderManaged, setACLoaderManaged] = useState(false)
+  const [acUpdateAvailable, setACUpdateAvailable] = useState(false)
+  const [acAutoUpdate, setACAutoUpdate] = useState(false)
+  const [acStartedAt, setACStartedAt] = useState(0)
+  // LR host id -> current mismatch disclosure -- see docs/DevMode.md.
+  const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
+  // Aggregate "is a the-conversationalist instance available on any host" --
+  // see tcavailability.go and Step2Prompt.md. Drives the mic icon beside the
+  // camera/screenshot icon in the header.
+  const [tcAvailable, setTCAvailable] = useState(false)
+  const wsRef = useRef<WebSocket | null>(null)
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcStateRefs = useRef<Record<string, string>>({})
+
+  // fc names the FC instance on that host; without it the host's LR picks.
+  const sendLRCommand = useCallback((hostId: string, cmd: string, fc?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-command', payload: { host_id: hostId, cmd, fc } }))
+  }, [])
+
+  const sendLRRidealongCommand = useCallback((hostId: string, action: string, fc?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-ridealong-command', payload: { host_id: hostId, action, fc } }))
+  }, [])
+
+  // A host's control tab -- see local-representative/control.go.
+  const sendLRControlRun = useCallback((hostId: string, sequence: string, controls: Record<string, string>, recordOverride?: string) => {
+    setHostData(prev => {
+      const hs = prev[hostId] ?? emptyHostState()
+      const replies = { ...(hs.controlReplies ?? {}) }
+      delete replies.run
+      return { ...prev, [hostId]: { ...hs, controlReplies: replies } }
+    })
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-run', payload: { host_id: hostId, sequence, controls, record_override: recordOverride } }))
+  }, [])
+
+  // requestLRControl sends a host's definer/composer request and returns the
+  // id its reply will carry. Replies go to every browser, so ids carry this
+  // page's own prefix.
+  const controlReqPrefix = useRef(Math.random().toString(36).slice(2, 8))
+  const controlReqSeq = useRef(0)
+  const requestLRControl = useCallback((hostId: string, r: ControlLibRequest): string => {
+    const req = `${controlReqPrefix.current}-${++controlReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'lr-control-lib', payload: { host_id: hostId, request: { ...r, req } } }))
+    } else {
+      const reply: ControlLibReply = { req, op: r.op, success: false, error: 'not connected' }
+      setHostData(prev => {
+        const hs = prev[hostId] ?? emptyHostState()
+        return { ...prev, [hostId]: { ...hs, controlReplies: { ...(hs.controlReplies ?? {}), [req]: reply } } }
+      })
+    }
+    return req
+  }, [])
+
+  const sendLRControlCancel = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-cancel', payload: { host_id: hostId } }))
+  }, [])
+
+  const sendLRControlContinue = useCallback((hostId: string, run: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-control-continue', payload: { host_id: hostId, run } }))
+  }, [])
+
+  // A host's worker tab prompt box -- see worker.go. Its answer comes back as
+  // lr-worker-reply.
+  const sendLRWorkerSubmit = useCallback((hostId: string, prompt: string) => {
+    const setReply = (workerReply: WorkerReplyMsg | undefined) => setHostData(prev => ({
+      ...prev,
+      [hostId]: { ...(prev[hostId] ?? emptyHostState()), workerReply },
+    }))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setReply(undefined)
+      wsRef.current.send(JSON.stringify({ type: 'lr-worker-submit', payload: { host_id: hostId, prompt } }))
+    } else {
+      setReply({ ok: false, error: 'not connected' })
+    }
+  }, [])
+
+  // A host's slopspace sub-tab manual control panel -- see worker.go. Its
+  // answer comes back as lr-worker-slopspace-reply.
+  const sendLRWorkerSlopspace = useCallback((hostId: string, req: WorkerSlopspaceRequest) => {
+    const setReply = (slopspaceReply: WorkerSlopspaceReply | undefined) => setHostData(prev => ({
+      ...prev,
+      [hostId]: { ...(prev[hostId] ?? emptyHostState()), slopspaceReply },
+    }))
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setReply(undefined)
+      wsRef.current.send(JSON.stringify({ type: 'lr-worker-slopspace', payload: { host_id: hostId, request: req } }))
+    } else {
+      setReply({ op: req.op, id: req.id, ok: false, error: 'not connected' })
+    }
+  }, [])
+
+  // A host's tools tab -- see tools.go. Returns the id its lr-tools-reply
+  // will carry; replies go to every browser, so ids carry this page's own
+  // prefix.
+  const toolsReqSeq = useRef(0)
+  const requestLRTools = useCallback((hostId: string, r: ToolsRequest): string => {
+    const req = `${controlReqPrefix.current}-t${++toolsReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'lr-tools-request', payload: { host_id: hostId, request: { ...r, req } } }))
+    } else {
+      const reply: ToolsReply = { req, op: r.op, ok: false, error: 'not connected' }
+      setHostData(prev => {
+        const hs = prev[hostId] ?? emptyHostState()
+        return { ...prev, [hostId]: { ...hs, toolsReplies: { ...(hs.toolsReplies ?? {}), [req]: reply } } }
+      })
+    }
+    return req
+  }, [])
+
+  const sendLRLaunchApp = useCallback((hostId: string, name: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-launch-app', payload: { host_id: hostId, name } }))
+  }, [])
+
+  const sendLRTerminateApp = useCallback((hostId: string, id: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-terminate-app', payload: { host_id: hostId, id } }))
+  }, [])
+
+  // Restarts one managed sub-application instance on the given host's LR
+  // (terminate the running instance, then launch a fresh one of the same
+  // app) -- distinct from sendLRRestartApp, which restarts LR itself. See
+  // Step4Prompt.md Revision H.
+  const sendLRRestartManagedApp = useCallback((hostId: string, id: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-restart-managed-app', payload: { host_id: hostId, id } }))
+  }, [])
+
+  // Restarts the selected host's local-representative itself (not
+  // agent-coordinator) -- only expected to come back up when it's
+  // loader-managed; see docs/DevMode.md "Loader".
+  const sendLRRestartApp = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-restart-app', payload: { host_id: hostId } }))
+  }, [])
+
+  // Dev-repo watcher controls for the selected host's LR (--dev-repo, see
+  // docs/DevMode.md): sendLRRebuildApp builds the changed sub-apps ('make
+  // update-dev-binaries') at the watched repo's root; sendLRSetAutoRebuild
+  // toggles the auto-rebuild flag.
+  const sendLRRebuildApp = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-rebuild-app', payload: { host_id: hostId } }))
+  }, [])
+
+  const sendLRSetAutoRebuild = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-rebuild', payload: { host_id: hostId, enabled } }))
+  }, [])
+
+  // Checks out a different branch in the host's watched dev-repo -- the
+  // "dev branch" switch control (Step1SubstepCPrompt.md Revision B).
+  const sendLRSwitchBranch = useCallback((hostId: string, branch: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-switch-branch', payload: { host_id: hostId, branch } }))
+  }, [])
+
+  // The host's external paths beside its watched dev-repo -- "watch",
+  // "plugin dev repo" (plugin set), "unwatch" and a plug-in dev repo's
+  // "build" (privateRepoOpsImpls Step6Prompt.md Revision E), mirroring
+  // local-representative's own system tab.
+  const sendLRWatchExternal = useCallback((hostId: string, path: string, watch: boolean, plugin = false, appId = '') => {
+    wsRef.current?.send(JSON.stringify(watch
+      ? { type: 'lr-watch-external', payload: { host_id: hostId, path, plugin, app_id: appId } }
+      : { type: 'lr-unwatch-external', payload: { host_id: hostId, path } }))
+  }, [])
+
+  const sendLRBuildExternal = useCallback((hostId: string, path: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-build-external', payload: { host_id: hostId, path } }))
+  }, [])
+
+  // The per-host "providers" section's "connect"/"disconnect" controls
+  // (Step1SubstepEPrompt.md): hand the host's LR a credential to use -- only
+  // a GitHub PAT so far -- or have it forget one it was handed.
+  const sendLRConnectProvider = useCallback((hostId: string, provider: string, token: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-connect-provider', payload: { host_id: hostId, provider, token } }))
+  }, [])
+  const sendLRDisconnectProvider = useCallback((hostId: string, provider: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-disconnect-provider', payload: { host_id: hostId, provider } }))
+  }, [])
+
+  // The per-host "agents & models" section's "re-inspect" control
+  // (Step1SubstepEPrompt.md Revision B).
+  const sendLRInspectAgents = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-inspect-agents', payload: { host_id: hostId } }))
+  }, [])
+
+  // The debug view's "install" tab: runs the given host's install script
+  // for an agent it's missing (local-representative/agentinstall.go).
+  const sendLRInstallAgent = useCallback((hostId: string, agent: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-install-agent', payload: { host_id: hostId, agent } }))
+  }, [])
+
+  // Toggles whether the given host's LR restarts itself the instant an
+  // update becomes available, instead of waiting for the "restart and
+  // update LR" control -- see docs/DevMode.md "Loader".
+  const sendLRSetAutoUpdate = useCallback((hostId: string, enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'lr-set-auto-update', payload: { host_id: hostId, enabled } }))
+  }, [])
+
+  // Restarts agent-coordinator itself (not any host's LR) -- only expected to
+  // come back up when it's loader-managed; mirrors sendLRRestartApp but for
+  // AC's own process, with no host to target (see Step4Prompt.md Revision E).
+  const sendACRestartApp = useCallback(() => {
+    wsRef.current?.send(JSON.stringify({ type: 'ac-restart-app', payload: {} }))
+  }, [])
+
+  // Toggles whether agent-coordinator restarts itself the instant an update
+  // becomes available, instead of waiting for the "restart and update AC"
+  // control -- mirrors sendLRSetAutoUpdate but for AC's own process, with no
+  // host to target (see Step1SubstepCPrompt.md Revision D).
+  const sendACSetAutoUpdate = useCallback((enabled: boolean) => {
+    wsRef.current?.send(JSON.stringify({ type: 'ac-set-auto-update', payload: { enabled } }))
+  }, [])
+
+  const selectHost = useCallback((hostId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'select-host', payload: { host_id: hostId } }))
+  }, [])
+
+  // File upload is a plain HTTP POST to AC's dedicated upload-relay route
+  // (not a websocket command), which streams the multipart body straight
+  // through to the selected host's local-representative -- AC never keeps its
+  // own copy. See handleFileUploadRelay / docs/DistributedExchange.md, Path 1.
+  const uploadFiles = useCallback(async (hostId: string, fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    if (files.length === 0) return
+    const form = new FormData()
+    for (const f of files) form.append('file', f)
+    try {
+      const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/files`, { method: 'POST', body: form })
+      if (!resp.ok) {
+        console.error('file upload failed:', resp.status, await resp.text())
+      }
+    } catch (err) {
+      console.error('file upload failed:', err)
+    }
+  }, [])
+
+  // "select from host": a JSON body on the same upload-relay route asks the
+  // host's local-representative to copy files already on that host into its
+  // host-cache (local-representative/hostfiles.go); folders are zipped into
+  // it. Returns the error to show, if any.
+  const importHostFiles = useCallback(async (hostId: string, paths: string[], folders: string[] = []): Promise<string | null> => {
+    try {
+      const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_paths: paths, host_folders: folders }),
+      })
+      return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
+    } catch (err) {
+      return String(err)
+    }
+  }, [])
+
+  const connect = useCallback(() => {
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws`)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setConnected(true)
+      // The server resends a full mode-mismatch snapshot on connect; drop any
+      // stale entries from a mismatch that cleared while we were offline.
+      setModeMismatches({})
+    }
+
+    ws.onclose = () => {
+      setConnected(false)
+      retryRef.current = setTimeout(connect, 2000)
+    }
+
+    ws.onerror = () => ws.close()
+
+    ws.onmessage = (ev: MessageEvent) => {
+      try {
+        const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown }
+        switch (msg.type) {
+          case 'self-info': {
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setSelfHostId(p.host_id || null)
+            setACLoaderManaged(p.loader_managed)
+            setACUpdateAvailable(p.update_available)
+            setACAutoUpdate(p.auto_update)
+            setACStartedAt(p.started_at)
+            // A rebuild+restart is invisible to an already-open tab -- the
+            // reconnect above is the only signal it gets. Compare the
+            // server's own reported version against this bundle's
+            // build-time version and reload if they differ; skip under the
+            // Vite dev server, where HMR already keeps the tab current and
+            // the two are never expected to match (see
+            // condocs/initialDistributedDevelopmentImpls/BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+            break
+          }
+          case 'mode-mismatch': {
+            const payload = msg.payload as ModeMismatchMsg
+            setModeMismatches(prev => {
+              const next = { ...prev }
+              if (payload.mismatched) next[payload.host_id] = payload
+              else delete next[payload.host_id]
+              return next
+            })
+            break
+          }
+          case 'hosts':
+            setHosts((msg.payload as HostsMsg).hosts)
+            break
+          case 'lr-state': {
+            const p = msg.payload as LRStateMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), lrState: p },
+            }))
+            break
+          }
+          case 'lr-fc-state': {
+            const p = msg.payload as LRFCStateMsg
+            const newSt = p.state === 'disconnected' ? '' : p.state
+            const refKey = p.fc ? `${p.host_id}\n${p.fc}` : p.host_id
+            const prevSt = fcStateRefs.current[refKey] ?? ''
+            fcStateRefs.current[refKey] = newSt
+            const stateEntry: LogEntry | null = prevSt !== newSt ? { kind: 'state', text: fcStateLabel(newSt) } : null
+            setHostData(prev => {
+              const cur = prev[p.host_id] ?? emptyHostState()
+              if (p.fc) {
+                // One instance's transition -- its current state comes with
+                // lr-fc-instances.
+                const fc = p.fc
+                if (!stateEntry) return prev
+                return {
+                  ...prev,
+                  [p.host_id]: { ...cur, fcLogs: { ...cur.fcLogs, [fc]: [...(cur.fcLogs[fc] ?? []), stateEntry] } },
+                }
+              }
+              return {
+                ...prev,
+                [p.host_id]: {
+                  ...cur,
+                  fcState: newSt,
+                  fcLog: stateEntry ? [...cur.fcLog, stateEntry] : cur.fcLog,
+                },
+              }
+            })
+            break
+          }
+          case 'lr-fc-log': {
+            const p = msg.payload as LRFCLogMsg
+            const entry: LogEntry = {
+              kind: p.kind === 'output' ? 'output' : 'cmd',
+              text: p.line,
+            }
+            setHostData(prev => {
+              const cur = prev[p.host_id] ?? emptyHostState()
+              if (p.fc) {
+                const fc = p.fc
+                return {
+                  ...prev,
+                  [p.host_id]: { ...cur, fcLogs: { ...cur.fcLogs, [fc]: [...(cur.fcLogs[fc] ?? []).slice(-199), entry] } },
+                }
+              }
+              return {
+                ...prev,
+                [p.host_id]: {
+                  ...cur,
+                  fcLog: [...cur.fcLog.slice(-199), entry],
+                },
+              }
+            })
+            break
+          }
+          case 'lr-fc-instances': {
+            const p = msg.payload as LRFCInstancesMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), fcInstances: p.instances ?? [] },
+            }))
+            break
+          }
+          case 'lr-control-state': {
+            const p = msg.payload as LRControlMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), control: p.control ?? undefined },
+            }))
+            break
+          }
+          case 'lr-control-library': {
+            const p = msg.payload as LRControlLibraryMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), controlLib: p.library ?? undefined },
+            }))
+            break
+          }
+          case 'lr-control-reply': {
+            // Every browser gets every reply: keep this page's own, and runs
+            // that couldn't start.
+            const p = msg.payload as LRControlReplyMsg
+            const key = p.reply.req || p.reply.op
+            if (p.reply.req && !p.reply.req.startsWith(`${controlReqPrefix.current}-`)) break
+            setHostData(prev => {
+              const hs = prev[p.host_id] ?? emptyHostState()
+              return { ...prev, [p.host_id]: { ...hs, controlReplies: { ...(hs.controlReplies ?? {}), [key]: p.reply } } }
+            })
+            break
+          }
+          case 'lr-ridealong-state': {
+            const p = msg.payload as LRRidealongMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), ridealong: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-system-state': {
+            const p = msg.payload as LRSystemStateMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), system: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-repo-state': {
+            const p = msg.payload as LRRepoStateMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), repo: p.watched ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-sessions-state': {
+            const p = msg.payload as LRSessionsMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), sessions: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-convo-state': {
+            const p = msg.payload as LRConvoMsg
+            // Speak "application running" when any host's TC starts or
+            // restarts -- see tcannounce.ts.
+            noteTCStart(p.host_id, p.started_at)
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), convo: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-robot-state': {
+            const p = msg.payload as LRRobotMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), robot: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-compose-state': {
+            const p = msg.payload as LRComposeMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), compose: p.available ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-worker-state': {
+            const p = msg.payload as LRWorkerMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), worker: p.worker ?? undefined },
+            }))
+            break
+          }
+          case 'lr-worker-reply': {
+            const p = msg.payload as LRWorkerReplyMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), workerReply: p.reply },
+            }))
+            break
+          }
+          case 'lr-worker-slopspace-reply': {
+            const p = msg.payload as LRWorkerSlopspaceReplyMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), slopspaceReply: p.reply },
+            }))
+            break
+          }
+          case 'lr-tools-state': {
+            const p = msg.payload as LRToolsMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), tools: p.tools ?? undefined },
+            }))
+            break
+          }
+          case 'lr-tools-reply': {
+            const p = msg.payload as LRToolsReplyMsg
+            const key = p.reply.req || p.reply.op
+            setHostData(prev => {
+              const hs = prev[p.host_id] ?? emptyHostState()
+              return { ...prev, [p.host_id]: { ...hs, toolsReplies: { ...(hs.toolsReplies ?? {}), [key]: p.reply } } }
+            })
+            break
+          }
+          case 'lr-files-state': {
+            const p = msg.payload as LRFilesMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), files: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-debug-log-state': {
+            const p = msg.payload as LRDebugLogMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), debugLog: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-chain-call-state': {
+            const p = msg.payload as LRChainCallMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), chainCall: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-stateboard-state': {
+            const p = msg.payload as LRStateboardMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), stateboard: p.active ? p : undefined },
+            }))
+            break
+          }
+          case 'lr-plugins-state': {
+            const p = msg.payload as LRPluginsMsg
+            setHostData(prev => ({
+              ...prev,
+              [p.host_id]: { ...(prev[p.host_id] ?? emptyHostState()), plugins: p.active ? p.state : undefined },
+            }))
+            break
+          }
+          case 'tc-availability': {
+            const p = msg.payload as TCAvailabilityMsg
+            setTCAvailable(p.available)
+            break
+          }
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    connect()
+    return () => {
+      if (retryRef.current) clearTimeout(retryRef.current)
+      wsRef.current?.close()
+    }
+  }, [connect])
+
+  return {
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRWatchExternal, sendLRBuildExternal, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendLRInstallAgent, sendACRestartApp, sendACSetAutoUpdate,
+    requestLRTools,
+  }
+}
+
+function hostDotClass(status: string): string {
+  return status === 'connected' ? 'host-dot-connected' : 'host-dot-disconnected'
+}
+
+function HostSidebar({
+  hosts, hostData, selectedHostId, onSelect, onSelectGlobal,
+}: {
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selectedHostId: string | null
+  onSelect: (id: string) => void
+  onSelectGlobal: () => void
+}) {
+  return (
+    <div className="sidebar">
+      <div className="sidebar-header">hosts</div>
+      {/* The global selection sits above the per-host list and is mutually
+          exclusive with picking a particular host -- selectedHostId === null
+          means global, which is also the default on first load. */}
+      <div
+        className={`host-item global-item${selectedHostId === null ? ' host-item-active' : ''}`}
+        onClick={onSelectGlobal}
+      >
+        <span className="global-icon">◎</span>
+        <span className="host-label">global</span>
+      </div>
+      {hosts.length === 0 ? (
+        <div className="sidebar-empty">no hosts connected</div>
+      ) : (
+        hosts.map(host => (
+          <div
+            key={host.id}
+            className={`host-item${selectedHostId === host.id ? ' host-item-active' : ''}`}
+            onClick={() => onSelect(host.id)}
+          >
+            <span className={`host-dot ${hostDotClass(host.status)}`} />
+            <span className="host-label">{host.label}</span>
+            {hostData[host.id]?.repo?.build_failed && <BuildFailedDot />}
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
+
+// BuildFailedDot is the small red dot a host's sidebar row and topology card
+// carry from a failed rebuild until its next successful one -- see
+// LRRepoStateMsg.build_failed (Step1SubstepEPrompt.md Revision D).
+function BuildFailedDot() {
+  return <span className="host-build-failed" title="last rebuild failed — clears on the next successful rebuild" />
+}
+
+const LR_SERVICES = ['federation-command', 'condocv2', 'convo', 'sessions', 'robot', 'compose', 'dg', 'worker'] as const
+// "system" and "files" sit to the right of the service tabs, mirroring
+// local-representative's own dashboard: they drive/view that LR's process
+// management and host-cache from the coordinator. Upload on this files tab is
+// relayed through AC's dedicated upload-relay route rather than AC keeping
+// its own copy of the file (see docs/DistributedExchange.md, Path 1).
+// "control" sequences actions across a host's sub-apps (see
+// local-representative/control.go); it sits between the services and system,
+// with "tools" (the host's T3s, run through dtt -- see tools.go) beside it.
+// "plugins" holds external plug-ins behind its own tab bar (see
+// PluginsShell); the first-party sub-apps keep their own service tabs.
+// "demo" is no sub-app either: it puts several of them together (see
+// DemoPanel), on one host or, from the global view, across them all.
+const LR_TABS = [...LR_SERVICES, 'demo', 'plugins', 'control', 'tools', 'system', 'files'] as const
+type LRTab = typeof LR_TABS[number]
+
+// Tab text, where it differs from the tab's (app) name: diagrammographer's
+// app id is dg, but its tab reads "diagram" (as on local-representative).
+const LR_TAB_LABELS: Partial<Record<LRTab, string>> = { dg: 'diagram' }
+
+// Tabs whose content is another app's own UI, embedded via same-origin
+// iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1Prompt.md Revision A: "nested UI" tabs; Revision B: bring this host
+// view up to the same full-pane treatment local-representative already got).
+// These skip the service-name heading and health-indicator every other tab
+// gets and instead get a full tab pane for the iframe plus a slim status bar
+// under the tab bar, so the embedded app's own UI (including its own
+// "DEV MODE" border, when that sub-app runs in dev mode) fills the space
+// instead of floating in a padded, header-topped box.
+const EMBED_TABS: ReadonlySet<LRTab> = new Set(['condocv2', 'sessions', 'convo', 'robot', 'compose', 'dg'])
+
+// pluginRelPath is a UIManifest URL (entry, icon) as a path under the
+// plug-in's own base path: "./" and "" both mean its root. Anything that
+// could leave the plug-in's tree (absolute, scheme, "..") is ignored.
+function pluginRelPath(u?: string): string {
+  const e = (u ?? '').replace(/^\.\//, '')
+  return e.startsWith('/') || e.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(e) ? '' : e
+}
+
+function manifestEntry(m?: UIManifest): string {
+  return pluginRelPath(m?.entry)
+}
+
+// pluginIconSrc is where a plug-in's manifest icon loads from on one host,
+// or '' when there is none to load: no manifest icon, or the plug-in isn't
+// routed (only online plug-ins are).
+function pluginIconSrc(hostId: string, p: PluginInfo): string {
+  const icon = pluginRelPath(p.manifest?.icon)
+  return icon && p.status === 'online' ? `/host/${encodeURIComponent(hostId)}${p.base_path}${icon}` : ''
+}
+
+// pluginIconMask says whether a plug-in's icon is monochrome, to be drawn in
+// the surrounding text colour: only a version 2 manifest can say so
+// (Step3Prompt.md Revision E). Older manifests' icons sit on a light chip,
+// so hosts on either version show side by side.
+function pluginIconMask(p: PluginInfo): boolean {
+  return (p.manifest?.manifest_version ?? 0) >= 2 && Boolean(p.manifest?.icon_mask)
+}
+
+// PluginIcon shows a plug-in's manifest icon, or its initials when there is
+// no icon to load or it fails to. An <img> never runs an SVG's script, so
+// even a sandboxed plug-in's icon is safe to show here; nor does a CSS mask,
+// used instead when mask is set -- see pluginIconMask. Mirrors
+// local-representative's copy.
+function PluginIcon({ src, label, size = 16, mask = false }: { src: string; label: string; size?: number; mask?: boolean }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    setFailed(false)
+    if (!src || !mask) return
+    // A mask has no onError of its own: probe the URL to fall back the same way.
+    const probe = new Image()
+    probe.onerror = () => setFailed(true)
+    probe.src = src
+    return () => { probe.onerror = null }
+  }, [src, mask])
+  if (!src || failed) {
+    return (
+      <span className="plugin-icon plugin-icon-none" style={{ width: size, height: size, fontSize: Math.max(8, size * 0.45) }} title={src ? `icon failed to load: ${src}` : 'no icon to load'}>
+        {label.slice(0, 2).toUpperCase()}
+      </span>
+    )
+  }
+  if (mask) {
+    const url = `url("${src.replace(/"/g, '%22')}")`
+    return <span className="plugin-icon-mask" style={{ width: size, height: size, WebkitMaskImage: url, maskImage: url }} />
+  }
+  return <img className="plugin-icon" src={src} alt="" width={size} height={size} onError={() => setFailed(true)} />
+}
+
+// AppTabIcon is a hosted-UI sub-app's manifest icon on its service tab
+// (Revision E): from the first of hosts where that app is online -- one
+// host in a host view, every host in the global view. Nothing until then,
+// as for an older LR or a sub-app build that sends no hello.
+function AppTabIcon({ appId, hosts }: { appId: string; hosts: PluginsHostState[] }) {
+  for (const h of hosts) {
+    const p = h.state?.plugins?.find(p => p.app_id === appId && p.status === 'online')
+    const src = p ? pluginIconSrc(h.hostId, p) : ''
+    if (p && src) return <PluginIcon src={src} label={appId} size={14} mask={pluginIconMask(p)} />
+  }
+  return null
+}
+
+// appTabTitle is a hosted-UI sub-app's service tab tooltip: the first
+// version 2 manifest description among hosts.
+function appTabTitle(appId: string, hosts: PluginsHostState[]): string | undefined {
+  for (const h of hosts) {
+    const m = h.state?.plugins?.find(p => p.app_id === appId)?.manifest
+    if (m && m.manifest_version >= 2 && m.description) return m.description
+  }
+  return undefined
+}
+
+// pluginVersionLabel is how one host's copy of a plug-in reads in a version
+// skew tooltip: its manifest version, its own version (UIManifest.version,
+// Step3Prompt.md Revision G) and the manifest's ETag.
+function pluginVersionLabel(p: PluginInfo): string {
+  const m = p.manifest
+  return [
+    `manifest v${m?.manifest_version ?? p.hello.manifest_version ?? '?'}`,
+    m?.version ? `version ${m.version}` : 'no version',
+    p.etag ? `etag ${p.etag}` : '',
+  ].filter(Boolean).join(', ')
+}
+
+// pluginVersionSkew compares appId across hosts (Revision G): one line per
+// host when its copies aren't all the same -- manifest version, plug-in
+// version or manifest ETag -- else null. Only hosts holding a manifest for
+// it count: a pending plug-in has none yet, and a host without the plug-in
+// at all isn't a different version of it.
+function pluginVersionSkew(appId: string, hosts: PluginsHostState[]): string[] | null {
+  const seen = hosts.flatMap(h => {
+    const p = h.state?.plugins?.find(p => p.app_id === appId)
+    return p?.manifest ? [{ h, p, m: p.manifest }] : []
+  })
+  const keys = new Set(seen.map(({ p, m }) => `${m.manifest_version}\x00${m.version ?? ''}\x00${p.etag ?? ''}`))
+  if (keys.size < 2) return null
+  return seen.map(({ h, p }) => `${h.hostLabel ?? h.hostId}: ${pluginVersionLabel(p)}`)
+}
+
+// VersionSkewMark is the bright orange "!" on a global tab whose plug-in
+// isn't the same version on every host (see pluginVersionSkew); the
+// tooltip lists each host's. Nothing when lines is null.
+function VersionSkewMark({ lines, what }: { lines: string[] | null; what?: string }) {
+  if (!lines) return null
+  return (
+    <span className="tab-version-skew" title={`${what ? `${what}: ` : ''}not the same version on every host\n${lines.join('\n')}`}>
+      !
+    </span>
+  )
+}
+
+// ScrollTabs is a tab bar's row of tabs that scrolls sideways when it
+// doesn't fit (Revision E): the mouse wheel scrolls it, and a fade on either
+// edge shows there is more that way. The wheel listener is registered by
+// hand because React's onWheel is passive and couldn't stop the page from
+// scrolling too. When activeKey changes (a tab picked some other way, such
+// as the nav arrows) the active tab is scrolled into view. Mirrors
+// local-representative's copy.
+function ScrollTabs({ children, className = '', activeKey }: { children: React.ReactNode; className?: string; activeKey?: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [edges, setEdges] = useState({ left: false, right: false })
+  useEffect(() => {
+    const el = ref.current
+    const tab = el?.querySelector<HTMLElement>('.tab-active')
+    if (!el || !tab) return
+    if (tab.offsetLeft < el.scrollLeft) el.scrollLeft = tab.offsetLeft
+    else if (tab.offsetLeft + tab.offsetWidth > el.scrollLeft + el.clientWidth) el.scrollLeft = tab.offsetLeft + tab.offsetWidth - el.clientWidth
+  }, [activeKey])
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => setEdges(prev => {
+      const left = el.scrollLeft > 1
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+      return prev.left === left && prev.right === right ? prev : { left, right }
+    })
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+      if (delta === 0) return
+      e.preventDefault()
+      el.scrollLeft += e.deltaMode === 1 ? delta * 16 : delta // lines -> pixels
+    }
+    update()
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('scroll', update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('scroll', update)
+      ro.disconnect()
+    }
+  }, [])
+  return (
+    <div
+      ref={ref}
+      className={`tabs tabs-scroll${edges.left ? ' tabs-more-left' : ''}${edges.right ? ' tabs-more-right' : ''}${className ? ` ${className}` : ''}`}
+    >
+      {children}
+    </div>
+  )
+}
+
+// hostFrameSrc is where an embedded sub-app tab's iframe points on one host
+// (condocs/privateRepoOpsImpls/Step3Prompt.md Revision B): through that
+// host's local-representative, at the generic /apps/<appId>/ route plus the
+// manifest's entry once the app is online in that LR's plug-in registry
+// (relayed as lr-plugins-state), else at its legacy hand-written /<appId>/
+// proxy -- an older LR, or a sub-app build that doesn't say hello yet.
+// Mirrors local-representative's appFrameSrc.
+function hostFrameSrc(hostId: string, appId: string, plugins: PluginsState | undefined): string {
+  const p = plugins?.plugins?.find(p => p.app_id === appId && p.status === 'online')
+  return `/host/${encodeURIComponent(hostId)}` + (p ? p.base_path + manifestEntry(p.manifest) : `/${appId}/`)
+}
+
+// PLUGIN_IFRAME_SANDBOX is the sandboxed tier's iframe flags --
+// representable.IframeSandbox, and see docs/PluginTrust.md. Never add
+// allow-same-origin: with it the frame could lift its own sandbox.
+const PLUGIN_IFRAME_SANDBOX = 'allow-scripts allow-forms'
+
+// ExternalPluginTab is one tab in the plugins tab's own bar: a plug-in on
+// one host that isn't one of the first-party sub-apps with a service tab of
+// their own.
+interface ExternalPluginTab {
+  key: string // host id + app id: the same plug-in on two hosts is two tabs
+  appId: string
+  hostLabel?: string // global perspective only
+  label: string
+  status: string // as PluginInfo.status
+  since?: number // unix seconds: disconnect time when offline, else hello time
+  frameSrc: string // '' unless online
+  iconSrc: string
+  iconMask: boolean
+  manual: boolean // manually registered on its host (Revision E)
+}
+
+// isExternalPlugin reports whether p belongs in the plugins tab rather than
+// a service tab. An LR older than Revision C sends no trust: there, anything
+// outside its first-party list is external.
+function isExternalPlugin(p: PluginInfo, st: PluginsState | undefined): boolean {
+  if (p.trust) return p.trust !== 'first-party'
+  return !(st?.config.first_party ?? st?.config.approved ?? []).includes(p.app_id)
+}
+
+// externalPluginTabs builds the plugins tab's bar from each host's relayed
+// registry (lr-plugins-state).
+function externalPluginTabs(hosts: PluginsHostState[]): ExternalPluginTab[] {
+  return hosts.flatMap(h => (h.state?.plugins ?? []).filter(p => isExternalPlugin(p, h.state)).map(p => ({
+    key: `${h.hostId}\x00${p.app_id}`,
+    appId: p.app_id,
+    hostLabel: h.hostLabel,
+    label: p.manifest?.short_name || p.manifest?.display_name || p.hello.display_name || p.app_id,
+    status: p.status,
+    since: p.status === 'offline' ? p.disconnect_at : p.hello_at,
+    frameSrc: p.status === 'online' ? `/host/${encodeURIComponent(h.hostId)}${p.base_path}${manifestEntry(p.manifest)}` : '',
+    iconSrc: pluginIconSrc(h.hostId, p),
+    iconMask: pluginIconMask(p),
+    manual: p.source === 'manual',
+  })))
+}
+
+// GlobalPluginTab is one tab in the global view's plugins tab bar
+// (Step3Prompt.md Revision G): an external plug-in registered on at least
+// one host, once however many hosts have it. Selecting it shows where it is
+// registered; framing it globally isn't implemented yet.
+interface GlobalPluginTab {
+  key: string // the app id
+  appId: string
+  label: string
+  iconSrc: string // from the first host where it's online
+  iconMask: boolean
+  online: boolean // on any host
+  hosts: { hostId: string; hostLabel?: string; p: PluginInfo }[]
+  skew: string[] | null // see pluginVersionSkew
+}
+
+// globalPluginTabs builds the global plugins tab's bar: each host's
+// external plug-ins (as externalPluginTabs), grouped by app id, in manifest
+// order then label.
+function globalPluginTabs(hosts: PluginsHostState[]): GlobalPluginTab[] {
+  const byApp = new Map<string, GlobalPluginTab['hosts']>()
+  for (const h of hosts) {
+    for (const p of h.state?.plugins ?? []) {
+      if (!isExternalPlugin(p, h.state)) continue
+      byApp.set(p.app_id, [...(byApp.get(p.app_id) ?? []), { hostId: h.hostId, hostLabel: h.hostLabel, p }])
+    }
+  }
+  const tabs = [...byApp.entries()].map(([appId, entries]) => {
+    const m = entries.find(e => e.p.manifest)?.p.manifest
+    const online = entries.find(e => e.p.status === 'online' && pluginIconSrc(e.hostId, e.p))
+    return {
+      key: appId,
+      appId,
+      label: m?.short_name || m?.display_name || entries[0].p.hello.display_name || appId,
+      order: m?.order ?? Number.MAX_SAFE_INTEGER,
+      iconSrc: online ? pluginIconSrc(online.hostId, online.p) : '',
+      iconMask: online ? pluginIconMask(online.p) : false,
+      online: entries.some(e => e.p.status === 'online'),
+      hosts: entries,
+      skew: pluginVersionSkew(appId, hosts),
+    }
+  })
+  return tabs.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))
+}
+
+// GlobalPluginPane is the global plugins tab's pane for one plug-in: that it
+// is registered, on which hosts and how each one reads, and that a global
+// view of it isn't implemented yet.
+function GlobalPluginPane({ tab }: { tab: GlobalPluginTab }) {
+  const registered = tab.hosts.filter(e => e.p.status !== 'pending')
+  return (
+    <div className="plugins-reg">
+      <p className="plugins-reg-intro">
+        <strong>{tab.label}</strong> (<code>{tab.appId}</code>) is registered on {registered.length} of {tab.hosts.length} host
+        {tab.hosts.length === 1 ? '' : 's'} that have seen it. Its global view is <strong>not yet implemented</strong>: open it from
+        a host's own plugins tab.
+      </p>
+      {tab.skew && (
+        <div className="plugins-global-skew">
+          <span className="tab-version-skew">!</span> not the same version on every host — the hosts below differ in manifest
+          version, plug-in version or manifest ETag.
+        </div>
+      )}
+      <table className="plugins-reg-table">
+        <thead>
+          <tr><th>host</th><th>status</th><th>trust</th><th>version</th><th>since</th></tr>
+        </thead>
+        <tbody>
+          {tab.hosts.map(({ hostId, hostLabel, p }) => (
+            <tr key={hostId}>
+              <td>{hostLabel ?? hostId}</td>
+              <td className={`plugins-reg-st-${p.status}`} title={p.manifest_error || undefined}>
+                {p.status === 'pending' ? 'pending (not approved on this host)' : `registered — ${pluginStatusText(p)}`}
+                {p.manifest_error ? ' ⚠' : ''}
+              </td>
+              <td>{p.trust ?? '?'}</td>
+              <td>{p.manifest ? pluginVersionLabel(p) : '—'}</td>
+              <td>{pluginTime(p.status === 'offline' ? p.disconnect_at : p.hello_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// PLUGINS_REGISTRATION is the plugins tab's registration sub-tab's key: it
+// can't collide with a host id + app id key.
+const PLUGINS_REGISTRATION = '\x00registration'
+
+const pluginTime = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleString() : '?')
+
+// pluginStatusText is one registry entry's status as the registration
+// sub-tab shows it. Mirrors local-representative's copy.
+function pluginStatusText(p: PluginInfo | undefined): string {
+  if (!p) return 'not seen yet'
+  const via = p.source === 'manual' ? 'polled' : 'connected'
+  switch (p.status) {
+    case 'online':
+      return `online (${via})`
+    case 'offline':
+      return p.disconnect_at ? `offline since ${pluginTime(p.disconnect_at)}` : 'not answering yet'
+    default:
+      return p.status
+  }
+}
+
+// registerExampleOnHost presses "register example" on one host's
+// local-representative through the /host/<id>/ proxy -- the one plug-in
+// decision LR accepts relayed (Step3Prompt.md Revision F; see plugins.go's
+// handlePluginExample). Returns the error text, or null; the new state
+// arrives as an ordinary lr-plugins-state relay.
+async function registerExampleOnHost(hostId: string): Promise<string | null> {
+  try {
+    const resp = await fetch(`/host/${encodeURIComponent(hostId)}/api/plugins/example`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    return resp.ok ? null : `${resp.status}: ${(await resp.text()).trim()}`
+  } catch (err) {
+    return String(err)
+  }
+}
+
+// PluginRegistration is the plugins tab's registration sub-tab
+// (Step3Prompt.md Revision E), one section per host: its "register example"
+// control and outcome, and its manual registrations with their status.
+// "register example" works from here too (Revision F) -- it only ever
+// approves the compiled-in example, on the one host it's pressed for.
+// Manual registration stays read-only here: it approves an app id the
+// operator names, and that is made on the host's own local-representative
+// dashboard, never through agent-coordinator (see docs/PluginTrust.md).
+//
+// global (Revision G) adds, beside a registered example, that it is
+// registered there but has no global view yet.
+//
+// Where a host's repo is given, its plug-in dev repos follow (privateRepoOps
+// Step6Prompt.md Revision E): registering one as a watched path approved its
+// app id on that host, and each row shows that approval and the plug-in's
+// registry status. focus scrolls to (and briefly lights) one of those rows.
+function PluginRegistration({ hosts, global, focus }: { hosts: PluginsHostState[]; global?: boolean; focus?: PluginRegistrationFocus | null }) {
+  const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const [errors, setErrors] = useState<Record<string, string | null>>({})
+  const focusRef = useRef<HTMLTableRowElement>(null)
+  useEffect(() => {
+    focusRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [focus?.seq])
+  const registerExample = async (hostId: string) => {
+    setBusy(b => ({ ...b, [hostId]: true }))
+    const text = await registerExampleOnHost(hostId)
+    setErrors(e => ({ ...e, [hostId]: text }))
+    setBusy(b => ({ ...b, [hostId]: false }))
+  }
+  return (
+    <div className="plugins-reg">
+      <p className="plugins-reg-intro">
+        "register example" approves cats-ufa-plugin on that host only and launches it there. Manual registration adds a
+        plug-in that doesn't say hello; it approves whatever app id is entered, so it's made on each host's own
+        local-representative dashboard (its plugins tab's registration sub-tab) and only shown here.
+      </p>
+      {hosts.map(h => {
+        const st = h.state
+        const cfg = st?.config
+        const plugins = st?.plugins ?? []
+        const exampleId = cfg?.example_app_id || 'cats-ufa-plugin'
+        const manual = cfg?.manual ?? []
+        const devRepos = (h.repo?.externals ?? []).filter(e => e.plugin && e.app_id)
+        const error = errors[h.hostId]
+        return (
+          <section key={h.hostId} className="plugins-reg-section">
+            {h.hostLabel && <h4 className="plugins-reg-host">{h.hostLabel}</h4>}
+            {!st ? (
+              <div className="plugins-reg-none">no plug-in state from this host yet</div>
+            ) : cfg?.manual === undefined ? (
+              <div className="plugins-reg-none">this host's local-representative predates registration</div>
+            ) : (
+              <>
+                {error && <div className="plugins-shell-error">{error}</div>}
+                <div className="plugins-reg-row">
+                  <button
+                    className="sys-btn plugins-shell-btn plugins-shell-btn-approve"
+                    disabled={!!busy[h.hostId]}
+                    onClick={() => registerExample(h.hostId)}
+                    title={`approve ${exampleId} on ${h.hostLabel ?? 'this host'} and launch it there on port ${cfg?.example_port || '?'}`}
+                  >
+                    register example
+                  </button>
+                  <span className="plugins-reg-status">
+                    {exampleId}: {pluginStatusText(plugins.find(p => p.app_id === exampleId))}
+                  </span>
+                  {global && (() => {
+                    const p = plugins.find(p => p.app_id === exampleId)
+                    return p && p.status !== 'pending' ? (
+                      <span className="plugins-reg-global-note" title="open this host's own plugins tab to use it">
+                        registered — global view not yet implemented
+                      </span>
+                    ) : null
+                  })()}
+                </div>
+                {st.example?.at ? (
+                  <div className={`plugins-reg-last${st.example.error ? ' plugins-reg-last-error' : ''}`}>
+                    last pressed {pluginTime(st.example.at)}: {st.example.result ?? ''}
+                    {st.example.error ? ` — ${st.example.error}` : ''}
+                  </div>
+                ) : null}
+                {manual.length === 0 ? (
+                  <div className="plugins-reg-none">no manual registrations</div>
+                ) : (
+                  <table className="plugins-reg-table">
+                    <thead>
+                      <tr><th>app id</th><th>port</th><th>name</th><th>registered</th><th>status</th></tr>
+                    </thead>
+                    <tbody>
+                      {manual.map(m => {
+                        const p = plugins.find(p => p.app_id === m.app_id)
+                        return (
+                          <tr key={m.app_id}>
+                            <td><code>{m.app_id}</code></td>
+                            <td>{m.http_port}</td>
+                            <td>{m.display_name || '—'}</td>
+                            <td>{pluginTime(m.registered_at)}</td>
+                            <td className={`plugins-reg-st-${p?.status ?? 'none'}`} title={p?.manifest_error || undefined}>
+                              {pluginStatusText(p)}{p?.manifest_error ? ' ⚠' : ''}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )}
+                {devRepos.length > 0 && (
+                  <table className="plugins-reg-table plugins-reg-devrepos">
+                    <thead>
+                      <tr><th>plug-in dev repo</th><th>path</th><th>approved</th><th>status</th><th>last build</th></tr>
+                    </thead>
+                    <tbody>
+                      {devRepos.map(e => {
+                        const p = plugins.find(p => p.app_id === e.app_id)
+                        const approved = (cfg?.external_approved ?? []).includes(e.app_id ?? '')
+                        const focusSeq = focus && focus.hostId === h.hostId && focus.appId === e.app_id ? focus.seq : null
+                        return (
+                          <tr
+                            // Keyed by seq too, so a repeat press replays the highlight.
+                            key={focusSeq === null ? e.abs : `${e.abs}:${focusSeq}`}
+                            ref={focusSeq === null ? undefined : focusRef}
+                            className={focusSeq === null ? undefined : 'plugins-reg-focused'}
+                          >
+                            <td><code>{e.app_id}</code></td>
+                            <td title={e.abs}>{e.path}</td>
+                            <td className={approved ? 'plugins-reg-st-online' : 'plugins-reg-st-pending'} title={e.plugin_note || undefined}>
+                              {approved ? 'approved' : 'not approved'}
+                            </td>
+                            <td className={`plugins-reg-st-${p?.status ?? 'none'}`} title={p?.manifest_error || undefined}>
+                              {pluginStatusText(p)}{p?.manifest_error ? ' ⚠' : ''}
+                            </td>
+                            <td title={e.build_error || undefined}>
+                              {e.building ? 'building…' : e.build_error ? 'failed' : e.built_head ? `${e.built_head}${e.build_at ? ` at ${pluginTime(e.build_at)}` : ''}` : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            )}
+          </section>
+        )
+      })}
+    </div>
+  )
+}
+
+// PluginsShell is a host's (or the global view's) plugins tab (Step3Prompt.md
+// Revisions B, C and E): a tab bar like the service tab bar above it. Its far
+// left is always the registration sub-tab (PluginRegistration); past a
+// divider, one tab per external plug-in registered on a host. An online one
+// is framed in the sandboxed tier (docs/PluginTrust.md). A pending one is
+// only described: approval is per host, made on that host's own
+// local-representative dashboard, so agent-coordinator shows the decision
+// but can't make it. Mirrors local-representative's copy.
+//
+// global (the global perspective, Revisions F and G) keeps the registration
+// sub-tab -- one section per host -- and lists each registered external
+// plug-in once (globalPluginTabs), with an orange "!" when it isn't the same
+// version on every host. A global view of a plug-in isn't implemented yet,
+// so its tab only says where it is registered (GlobalPluginPane); a host's
+// plug-ins are opened from that host's own plugins tab.
+//
+// focus (Step6Prompt.md Revision E) switches to the registration sub-tab
+// each time a new one arrives, for PluginRegistration to scroll to. open
+// (Revision G: a plug-in tile double-clicked on the global topology view)
+// switches to that one plug-in's tab the same way.
+function PluginsShell({ hosts, global, focus, open }: { hosts: PluginsHostState[]; global?: boolean; focus?: PluginRegistrationFocus | null; open?: PluginTabOpen | null }) {
+  const plugins = global ? [] : externalPluginTabs(hosts)
+  const globalTabs = global ? globalPluginTabs(hosts) : []
+  const [selected, setSelected] = useState<string | null>(null)
+  useEffect(() => {
+    if (focus) setSelected(PLUGINS_REGISTRATION)
+  }, [focus?.seq])
+  useEffect(() => {
+    if (open) setSelected(`${open.hostId}\x00${open.appId}`)
+  }, [open?.seq])
+  // With no external plug-in to show, registration is the only pane.
+  const registration = selected === PLUGINS_REGISTRATION || (global ? globalTabs.length === 0 : plugins.length === 0)
+  const current = registration ? null : plugins.find(p => p.key === selected) ?? plugins[0] ?? null
+  const currentGlobal = registration ? null : globalTabs.find(t => t.key === selected) ?? globalTabs[0] ?? null
+  const at = pluginTime
+  return (
+    <div className="plugins-shell">
+      <div className="tab-bar tab-bar-nested">
+        <button
+          className={`tab plugins-shell-tab plugins-shell-reg-tab${registration ? ' tab-active' : ''}`}
+          onClick={() => setSelected(PLUGINS_REGISTRATION)}
+          title="plug-in registration on each host"
+        >
+          registration
+        </button>
+        <span className="plugins-shell-divider" />
+        <ScrollTabs>
+          {global ? (
+            globalTabs.length === 0 ? (
+              <span className="plugins-shell-none">no external plug-ins registered on any host</span>
+            ) : globalTabs.map(t => (
+              <button
+                key={t.key}
+                className={`tab plugins-shell-tab${currentGlobal?.key === t.key ? ' tab-active' : ''}${t.online ? '' : ' tab-dim'}`}
+                onClick={() => setSelected(t.key)}
+                title={`${t.appId} — registered on ${t.hosts.filter(e => e.p.status !== 'pending').length} of ${t.hosts.length} host(s); global view not yet implemented`}
+              >
+                <PluginIcon src={t.iconSrc} label={t.appId} size={14} mask={t.iconMask} />
+                {t.label}
+                <VersionSkewMark lines={t.skew} what={t.appId} />
+              </button>
+            ))
+          ) : plugins.length === 0 ? (
+            <span className="plugins-shell-none">no external plug-ins</span>
+          ) : plugins.map(p => (
+            <button
+              key={p.key}
+              className={`tab plugins-shell-tab${current?.key === p.key ? ' tab-active' : ''}${p.status !== 'online' ? ' tab-dim' : ''}`}
+              onClick={() => setSelected(p.key)}
+              title={`${p.appId}${p.hostLabel ? ` on ${p.hostLabel}` : ''} — ${p.status}${p.manual ? ' (manually registered)' : ''}`}
+            >
+              <PluginIcon src={p.iconSrc} label={p.appId} size={14} mask={p.iconMask} />
+              {p.hostLabel ? `${p.label} @ ${p.hostLabel}` : p.label}
+            </button>
+          ))}
+        </ScrollTabs>
+      </div>
+      <div className="plugins-shell-pane">
+        {registration ? (
+          <PluginRegistration hosts={hosts} global={global} focus={focus} />
+        ) : global ? (
+          currentGlobal && <GlobalPluginPane tab={currentGlobal} />
+        ) : !current ? (
+          <div className="service-empty service-empty-embed">
+            External plug-ins appear here, one tab each, once they say hello to a host's local-representative.
+          </div>
+        ) : current.frameSrc ? (
+          <iframe key={current.key} className="embed-frame" sandbox={PLUGIN_IFRAME_SANDBOX} src={current.frameSrc} title={current.appId} />
+        ) : current.status === 'pending' ? (
+          <div className="service-empty service-empty-embed">
+            {current.label} ({current.appId}) asked to be shown{current.hostLabel ? ` on ${current.hostLabel}` : ''} but isn't approved there.
+            Approve it in the plugins tab of that host's own local-representative dashboard — approvals are made per host,
+            and not through agent-coordinator.
+          </div>
+        ) : (
+          <div className="service-empty service-empty-embed">
+            {current.label} ({current.appId}) is {current.status}{current.status === 'offline' ? ` since ${at(current.since)}` : ''}.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
+// stays scoped per-tab, and clears when the tab actually closes rather than
+// pinning stale state forever -- the right lifetime for "resume where I was".
+function initialACTab(): LRTab {
+  const stored = sessionStorage.getItem('ac-active-tab')
+  return (LR_TABS as readonly string[]).includes(stored ?? '') ? (stored as LRTab) : 'system'
+}
+
+// Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
+// Step5Prompt.md Revision M): how many recently-visited (host, tab) screens
+// we keep around for back/forward. A pragmatic starting value -- see
+// useScreenHistory below.
+const NAV_HISTORY_MAX = 20
+
+// Small forward/back stack over the app's top-level navigation state
+// (Step5Prompt.md Revision M). Deliberately independent of the real browser
+// history -- this app never calls pushState (see BrowserPickupStrategy.md on
+// why nav already relies on replaceState/sessionStorage instead), so this is
+// purely an in-app "last N screens" stack, not a wrapper around back/forward
+// button clicks. `max` caps how many screens are remembered.
+function useScreenHistory<T>(
+  screen: T,
+  isEqual: (a: T, b: T) => boolean,
+  applyScreen: (screen: T) => void,
+  max: number,
+) {
+  const [hist, setHist] = useState(() => ({ stack: [screen], index: 0 }))
+
+  useEffect(() => {
+    setHist(prev => {
+      if (isEqual(prev.stack[prev.index], screen)) return prev // e.g. applyScreen just navigated us here
+      let stack = [...prev.stack.slice(0, prev.index + 1), screen]
+      let index = stack.length - 1
+      if (stack.length > max) {
+        const drop = stack.length - max
+        stack = stack.slice(drop)
+        index -= drop
+      }
+      return { stack, index }
+    })
+  }, [screen])
+
+  const canBack = hist.index > 0
+  const canForward = hist.index < hist.stack.length - 1
+
+  const back = () => {
+    if (!canBack) return
+    applyScreen(hist.stack[hist.index - 1])
+    setHist(prev => (prev.index <= 0 ? prev : { ...prev, index: prev.index - 1 }))
+  }
+
+  const forward = () => {
+    if (!canForward) return
+    applyScreen(hist.stack[hist.index + 1])
+    setHist(prev => (prev.index >= prev.stack.length - 1 ? prev : { ...prev, index: prev.index + 1 }))
+  }
+
+  return { canBack, canForward, back, forward }
+}
+
+// ConnDot is the header's top-right connection dot. For the first
+// FRESH_UPTIME_SECS after AC launched (startedAt, AC's start in unix seconds)
+// it wears the topology card's green freshness halo (privateRepoOpsImpls
+// Step5Prompt.md Revision F) -- only while connected, since a disconnected
+// tab's startedAt may belong to a process that's gone. A timer clears the
+// halo when the window ends, so nothing has to tick every second.
+function ConnDot({ connected, startedAt }: { connected: boolean; startedAt: number }) {
+  const freshUntilMs = startedAt ? (startedAt + FRESH_UPTIME_SECS) * 1000 : 0
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    setNowMs(Date.now())
+    const remaining = freshUntilMs - Date.now()
+    if (remaining <= 0) return
+    const id = setTimeout(() => setNowMs(Date.now()), remaining + 50)
+    return () => clearTimeout(id)
+  }, [freshUntilMs])
+  const fresh = connected && nowMs < freshUntilMs
+  return (
+    <span
+      className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}${fresh ? ' conn-dot-fresh' : ''}`}
+      title={connected ? (fresh ? 'connected — agent-coordinator started less than 10 minutes ago' : 'connected') : 'disconnected'}
+    />
+  )
+}
+
+function NavArrows({ canBack, canForward, onBack, onForward }: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <span className="nav-arrows">
+      <button
+        className={`nav-arrow-btn${canBack ? ' nav-arrow-active' : ''}`}
+        onClick={onBack}
+        disabled={!canBack}
+        title={canBack ? 'back' : 'no earlier screen'}
+      >
+        ←
+      </button>
+      <button
+        className={`nav-arrow-btn${canForward ? ' nav-arrow-active' : ''}`}
+        onClick={onForward}
+        disabled={!canForward}
+        title={canForward ? 'forward' : 'no later screen'}
+      >
+        →
+      </button>
+    </span>
+  )
+}
+
+function FCCommandPanel({
+  hostId, fcState, fcLog, sendLRCommand,
+}: {
+  hostId: string
+  fcState: string
+  fcLog: LogEntry[]
+  sendLRCommand: (hostId: string, cmd: string) => void
+}) {
+  const [input, setInput] = useState('')
+  const logEndRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [fcLog])
+
+  const submit = () => {
+    const cmd = input.trim()
+    if (!cmd) return
+    sendLRCommand(hostId, cmd)
+    setInput('')
+  }
+
+  if (fcState === '') {
+    return <div className="fc-status fc-status-disconnected">not connected</div>
+  }
+
+  return (
+    <div className="fc-panel">
+      <div className="fc-output">
+        {fcLog.length === 0
+          ? <span className="fc-log-empty">waiting for activity…</span>
+          : fcLog.map((entry, i) =>
+              entry.kind === 'state'
+                ? <div key={i} className="fc-log-state">{entry.text}</div>
+                : entry.kind === 'output'
+                ? <div key={i} className="fc-log-output">{entry.text}</div>
+                : <div key={i} className="fc-log-line">
+                    <span className="fc-log-prompt">$</span> {entry.text}
+                  </div>
+            )
+        }
+        <div ref={logEndRef} />
+      </div>
+      {fcState === 'remote-control' && (
+        <div className="fc-command-area">
+          <span className="fc-cmd-prompt">$</span>
+          <input
+            className="fc-cmd-input"
+            type="text"
+            value={input}
+            placeholder="enter command to run on federation-command…"
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submit() }}
+            autoFocus
+          />
+          <button className="fc-cmd-send" onClick={submit}>run</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RidealongPanel({
+  hostId, state, fcState, sendLRRidealongCommand,
+}: {
+  hostId: string
+  state: LRRidealongMsg
+  fcState: string
+  sendLRRidealongCommand: (hostId: string, action: string) => void
+}) {
+  const [customCmd, setCustomCmd] = useState('')
+  const canControl = fcState === 'remote-control'
+
+  const totalSteps = state.total_steps ?? 0
+  const currentIndex = state.current_index ?? 0
+  const stepLabel = totalSteps > 0 ? `${currentIndex + 1} / ${totalSteps}` : ''
+
+  const submitCustom = () => {
+    const text = customCmd.trim()
+    if (!text) return
+    sendLRRidealongCommand(hostId, `custom:${text}`)
+    setCustomCmd('')
+  }
+
+  return (
+    <div className="ra-panel">
+      <div className="ra-header">
+        <span className="ra-icon">🚔</span>
+        <span className="ra-title">ridealong</span>
+        <span className="ra-file">{state.title}</span>
+        {stepLabel && <span className="ra-progress">{stepLabel}</span>}
+      </div>
+      <div className="ra-steps">
+        {state.prev_cmd ? (
+          <div className="ra-step ra-step-prev">
+            <span className="ra-step-marker ra-step-marker-prev">▸</span>
+            <span className="ra-step-text">{state.prev_cmd}</span>
+            {(state.prev_exit_code ?? 0) !== 0 && (
+              <span className="ra-exit-code">[{state.prev_exit_code}]</span>
+            )}
+          </div>
+        ) : (
+          <div className="ra-step ra-step-prev">
+            <span className="ra-step-text ra-step-empty">(no previous step)</span>
+          </div>
+        )}
+        <div className="ra-step ra-step-current">
+          <span className="ra-step-marker ra-step-marker-current">✦</span>
+          <span className="ra-step-text">{state.current_cmd}</span>
+          {state.autoplay && state.countdown && (
+            <span className="ra-countdown">{state.countdown}</span>
+          )}
+        </div>
+        <div className="ra-step ra-step-next">
+          <span className="ra-step-marker ra-step-marker-next">▸</span>
+          <span className="ra-step-text">{state.next_cmd}</span>
+        </div>
+      </div>
+      {canControl && (
+        <div className="ra-controls">
+          <div className="ra-actions">
+            <button className="ra-btn ra-btn-primary" onClick={() => sendLRRidealongCommand(hostId, 'execute')}>
+              execute
+            </button>
+            <button
+              className={`ra-btn ${state.autoplay ? 'ra-btn-active' : ''}`}
+              onClick={() => sendLRRidealongCommand(hostId, 'autoplay')}
+            >
+              {state.autoplay ? 'stop autoplay' : 'autoplay'}
+            </button>
+            <button className="ra-btn ra-btn-danger" onClick={() => sendLRRidealongCommand(hostId, 'exit')}>
+              exit
+            </button>
+          </div>
+          {state.waypoints && state.waypoints.length > 0 && (
+            <div className="ra-waypoints">
+              <span className="ra-waypoints-label">waypoints:</span>
+              {state.waypoints.map(wp => (
+                <button key={wp} className="ra-btn ra-btn-waypoint" onClick={() => sendLRRidealongCommand(hostId, `waypoint:${wp}`)}>
+                  {wp}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="ra-custom">
+            <span className="ra-cmd-prompt">$</span>
+            <input
+              className="ra-cmd-input"
+              type="text"
+              value={customCmd}
+              placeholder="insert custom command…"
+              onChange={e => setCustomCmd(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') submitCustom() }}
+            />
+            <button className="ra-btn" onClick={submitCustom}>run</button>
+          </div>
+        </div>
+      )}
+      {!canControl && (
+        <div className="ra-observe-hint">observing — switch to remote control to drive</div>
+      )}
+    </div>
+  )
+}
+
+// FCInstancePicker lists every federation-command instance connected to the
+// host's LR; the federation-command tab's panels follow the selected one.
+// Mirrors local-representative/frontend/src/App.tsx's own copy.
+function FCInstancePicker({
+  instances, selected, onSelect,
+}: {
+  instances: FCInstanceInfo[]
+  selected: string | null
+  onSelect: (key: string) => void
+}) {
+  if (instances.length === 0) return null
+  return (
+    <div className="fc-instances">
+      <span className="fc-instances-label">
+        {instances.length} instance{instances.length === 1 ? '' : 's'}
+      </span>
+      {instances.map(inst => (
+        <button
+          key={inst.key}
+          className={`fc-instance fc-instance-${inst.state || 'none'}${inst.key === selected ? ' fc-instance-active' : ''}`}
+          onClick={() => onSelect(inst.key)}
+          title={`${inst.key}${inst.head ? ` (head ${inst.head})` : ''} — ${inst.state || 'no state yet'}`}
+        >
+          <span className="fc-instance-dot" />
+          {inst.label}
+          {inst.session && <span className="fc-instance-session">{inst.session}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Control tab (local-representative/control.go) ----
+// Runs on the selected host's LR; mirrors local-representative's own copy.
+
+const CONTROL_SUBTABS = ['v1'] as const
+type ControlSubTab = typeof CONTROL_SUBTABS[number]
+
+// ControlPanel is a host's control tab: its v1 sub-tab is ControlV1 (shared
+// with local-representative's frontend), over that host's library, with
+// recordings played back through the host's /host/<id>/* proxy.
+function ControlPanel({ hostId, ...props }: Omit<ControlV1Props, 'fileUrl' | 'node' | 'hostApi'> & { hostId: string }) {
+  const [sub, setSub] = useState<ControlSubTab>('v1')
+  return (
+    <div className="ctl-panel">
+      <div className="ctl-subtabs">
+        {CONTROL_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'v1' && (
+        <>
+          <div className="ctl-hint">
+            The robot finds a terminal by reading that host's screen: its window has to be visible,
+            not behind another, and no other view of federation-command's output (its tab here or in
+            local-representative) should be showing on that desktop.
+          </div>
+          <ControlV1 {...props} fileUrl={id => fileRawUrl(hostId, id)} node="this host" hostApi={`/host/${encodeURIComponent(hostId)}`} />
+        </>
+      )}
+    </div>
+  )
+}
+
+function formatUptime(startedAt: number, nowSec: number): string {
+  if (!startedAt) return '—'
+  const secs = Math.max(0, nowSec - startedAt)
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
+}
+
+// formatShortUptime is the topology card's corner readout: only the most
+// significant unit -- 5s, 6m, 3h, 2d, 4w, 7mo, 3y.
+function formatShortUptime(startedAt: number, nowSec: number): string {
+  const secs = Math.max(0, nowSec - startedAt)
+  const units: [string, number][] = [
+    ['y', 365 * 86400], ['mo', 30 * 86400], ['w', 7 * 86400], ['d', 86400], ['h', 3600], ['m', 60],
+  ]
+  for (const [unit, size] of units) {
+    if (secs >= size) return `${Math.floor(secs / size)}${unit}`
+  }
+  return `${secs}s`
+}
+
+// procRowKey identifies a system-tab row for selection/drill-down purposes:
+// managed instances are unique by instance_id, but self has none (it's a
+// singleton row), so it gets a fixed sentinel instead.
+function procRowKey(proc: ProcInfo): string {
+  return proc.managed ? proc.instance_id : '__self__'
+}
+
+function SystemProcRow({
+  proc, nowSec, selected, onSelect, onOpen, onTerminate, onRestart, onRestartManaged, onSetAutoUpdate,
+}: {
+  proc: ProcInfo
+  nowSec: number
+  selected?: boolean
+  onSelect?: () => void
+  onOpen?: () => void // double-click: go to this app's own tab (Step1SubstepCPrompt.md)
+  onTerminate?: (id: string) => void
+  onRestart?: () => void
+  onRestartManaged?: (id: string) => void
+  onSetAutoUpdate?: (enabled: boolean) => void
+}) {
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  const label = proc.managed && proc.instance > 0
+    ? `${proc.name} #${proc.instance}`
+    : proc.name
+
+  return (
+    <div
+      className={`sys-row sys-row-${proc.status}${onSelect ? ' sys-row-clickable' : ''}${selected ? ' sys-row-selected' : ''}`}
+      onClick={onSelect}
+      onDoubleClick={onOpen}
+      title={onSelect
+        ? (onOpen ? 'click for version details, double-click to open its tab' : 'click for version details')
+        : undefined}
+    >
+      <span className="sys-col sys-col-name">
+        <span className="sys-col-name-main">
+          {label}
+          {!proc.managed && <span className="sys-self-tag">this LR</span>}
+          {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        </span>
+        {proc.version && (
+          <span className="sys-version-tag" title="build version">{proc.version}</span>
+        )}
+        {proc.session && (
+          <span className="sys-session-tag" title="active session">{proc.session}</span>
+        )}
+      </span>
+      <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
+      <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
+      <span className="sys-col sys-col-detail" title={proc.detail}>{detail}</span>
+      <span className="sys-col sys-col-actions">
+        {proc.managed && onRestartManaged && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            title={proc.update_available
+              ? 'a newer build has landed on disk — terminate this instance and launch a new one with it'
+              : 'terminate this instance and launch a fresh one of the same application'}
+            onClick={e => { e.stopPropagation(); onRestartManaged(proc.instance_id) }}
+          >
+            {proc.update_available ? 'restart and update' : 'restart'}
+          </button>
+        )}
+        {proc.managed && onTerminate && (
+          <button
+            className="sys-btn sys-btn-terminate"
+            onClick={e => { e.stopPropagation(); onTerminate(proc.instance_id) }}
+          >
+            {proc.status === 'running' ? 'terminate' : 'dismiss'}
+          </button>
+        )}
+        {!proc.managed && onRestart && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            disabled={!proc.loader_managed}
+            title={proc.loader_managed
+              ? (proc.update_available
+                ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
+                : 'terminate this LR so ufa-loader relaunches it with the identical config')
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={e => { e.stopPropagation(); onRestart() }}
+          >
+            {proc.update_available ? 'update and restart' : 'restart'}
+          </button>
+        )}
+        {!proc.managed && onSetAutoUpdate && (
+          <label
+            className="sys-auto-rebuild"
+            title={proc.loader_managed
+              ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={e => e.stopPropagation()}
+          >
+            <input
+              type="checkbox"
+              disabled={!proc.loader_managed}
+              checked={!!proc.auto_update}
+              onChange={e => onSetAutoUpdate(e.target.checked)}
+            />
+            auto-update
+          </label>
+        )}
+      </span>
+    </div>
+  )
+}
+
+// SystemProcDetails is the drill-down shown below the table when a process
+// row is clicked (see procRowKey/SystemPanel) -- Step5Prompt.md Revision J.
+// Mirrors the topology view's .topo-details readout-row convention
+// (App.tsx's per-host "Details & Control" pane).
+function SystemProcDetails({ proc, nowSec }: { proc: ProcInfo; nowSec: number }) {
+  const label = proc.managed && proc.instance > 0 ? `${proc.name} #${proc.instance}` : proc.name
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  return (
+    <div className="sys-details">
+      <div className="sys-details-header">{label}</div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">status</span>
+        <span className="sys-readout-value">
+          {proc.status}{proc.status === 'running' ? ` (${detail} uptime)` : ` (${detail})`}
+          {proc.detail && ` — ${proc.detail}`}
+        </span>
+      </div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">current version</span>
+        <span className="sys-readout-value">
+          {proc.version || <span className="sys-readout-placeholder">not yet reported</span>}
+        </span>
+      </div>
+      <div className="sys-readout-row">
+        <span className="sys-readout-label">pending version</span>
+        <span className="sys-readout-value">
+          {!proc.update_available
+            ? <span className="sys-readout-placeholder">up to date</span>
+            : proc.pending_version || <span className="sys-readout-placeholder">update available (version unknown)</span>}
+        </span>
+      </div>
+      {proc.name === 'federation-command' && (
+        <div className="sys-readout-row">
+          <span className="sys-readout-label">session</span>
+          <span className="sys-readout-value">
+            {proc.session || <span className="sys-readout-placeholder">not yet reported</span>}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// TroughEntry is one line in a system tab's "trough" (see Trough below) --
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision L.
+interface TroughEntry {
+  id: number
+  ts: number // Date.now(), when the notification was recorded
+  text: string
+}
+
+// TROUGH_MAX_ENTRIES caps how much history a trough keeps -- it's a live,
+// session-scoped notification log (not persisted; a refresh starts it fresh),
+// not an audit trail, so old entries are simply dropped off the front.
+const TROUGH_MAX_ENTRIES = 50
+
+let troughIdSeq = 0
+
+// useTrough appends a new trough entry each time `error` changes to a new,
+// non-empty value -- right now that's only ever LRRepoStateMsg.last_error
+// after a failed rebuild, per the prompt's "print errors or notifications
+// when things happen like a failure during rebuild", but the trough itself
+// is generic (any future error/notification source can feed it the same
+// way). Used by the per-host system tab; see useAggregateTrough for the
+// global system tab's multi-host equivalent.
+function useTrough(error: string | undefined): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (error && error !== lastSeen.current) {
+      setEntries(prev => [
+        ...prev.slice(-(TROUGH_MAX_ENTRIES - 1)),
+        { id: ++troughIdSeq, ts: Date.now(), text: `rebuild failed — ${error}` },
+      ])
+    }
+    lastSeen.current = error
+  }, [error])
+
+  return entries
+}
+
+// useAggregateTrough is useTrough generalized across every connected host, for
+// the global system tab: each host's own rebuild failure is recorded once,
+// tagged with that host's label, keyed independently so one host's repeated
+// failures don't mask another's.
+function useAggregateTrough(hosts: Host[], hostData: Record<string, HostClientState>): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<Record<string, string | undefined>>({})
+
+  useEffect(() => {
+    setEntries(prev => {
+      let next = prev
+      for (const h of hosts) {
+        const error = hostData[h.id]?.repo?.last_error
+        if (error && error !== lastSeen.current[h.id]) {
+          next = [
+            ...next.slice(-(TROUGH_MAX_ENTRIES - 1)),
+            { id: ++troughIdSeq, ts: Date.now(), text: `${h.label}: rebuild failed — ${error}` },
+          ]
+        }
+        lastSeen.current[h.id] = error
+      }
+      return next
+    })
+  }, [hosts, hostData])
+
+  return entries
+}
+
+// Trough is "an expandable-and-then-scrollable single line at the bottom of
+// the main pane where we can print errors or notifications when things
+// happen" (Step5Prompt.md Revision L). Collapsed, it's just the most recent
+// entry on one line; clicking it expands into a scrollable list of
+// everything recorded this session, newest first.
+function Trough({ entries }: { entries: TroughEntry[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const latest = entries[entries.length - 1]
+
+  return (
+    <div className={`sys-trough${expanded ? ' sys-trough-expanded' : ''}`}>
+      <button
+        className="sys-trough-line"
+        onClick={() => setExpanded(e => !e)}
+        disabled={entries.length === 0}
+        title={entries.length === 0 ? 'no notifications yet' : expanded ? 'collapse' : 'expand for full history'}
+      >
+        <span className="sys-trough-chevron">{expanded ? '▾' : '▸'}</span>
+        {latest ? (
+          <>
+            <span className="sys-trough-ts">{new Date(latest.ts).toLocaleTimeString()}</span>
+            <span className="sys-trough-text">{latest.text}</span>
+          </>
+        ) : (
+          <span className="sys-trough-empty">no notifications</span>
+        )}
+        {entries.length > 1 && <span className="sys-trough-count">{entries.length}</span>}
+      </button>
+      {expanded && (
+        <div className="sys-trough-list">
+          {entries.slice().reverse().map(e => (
+            <div key={e.id} className="sys-trough-entry">
+              <span className="sys-trough-ts">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className="sys-trough-text">{e.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// RepoWatchPanel mirrors local-representative's own dev-repo watcher widget
+// (--dev-repo, see docs/DevMode.md): the rebuild button turns orange and
+// reads "dirty" while the watched repo has uncommitted changes -- but stays
+// disabled, since rebuilding a dirty tree would silently bake in unreviewed
+// changes. It's selectable, plain, and reads "rebuild" only once HEAD has
+// moved since the last build with the repo clean; otherwise it's disabled.
+// Rendered only when that host's LR was actually launched with --dev-repo.
+//
+// onSwitchBranch, when given, adds the "dev branch" row (Step1SubstepCPrompt.md
+// Revision B) -- the per-host system tab passes it; the global view's
+// details pane deliberately doesn't, since its own "switch all" control
+// under "rebuild all" covers every host at once.
+//
+// onWatchExternal/onBuildExternal, likewise per-host only, add the external
+// paths section (ExternalWatches, privateRepoOpsImpls Step6Prompt.md
+// Revision E); onShowPluginRegistration gives each plug-in dev repo there a
+// link to its registration in the plugins tab, and managed/onLaunch its
+// "launch" (Revision F).
+function RepoWatchPanel({
+  repoState, onRebuild, onSetAutoRebuild, onSwitchBranch, onWatchExternal, onBuildExternal, onShowPluginRegistration,
+  managed, onLaunch,
+}: {
+  repoState: LRRepoStateMsg | undefined
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch?: (branch: string) => void
+  onWatchExternal?: (path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  onBuildExternal?: (path: string) => void
+  onShowPluginRegistration?: (appId: string) => void
+  managed?: LRSystemStateMsg['managed']
+  onLaunch?: (name: string) => void
+}) {
+  if (!repoState?.watched) return null
+
+  const isDirty = !!repoState.dirty
+  const isBuilding = !!repoState.building
+  const isReady = !!repoState.rebuild_ready
+  const disabled = isBuilding || isDirty
+  const label = isBuilding ? 'building…' : isDirty ? 'dirty' : 'rebuild'
+  const btnClass = `sys-btn sys-btn-rebuild${
+    isDirty
+      ? ' sys-btn-rebuild-dirty'
+      : !isReady && !isBuilding
+      ? ' sys-btn-rebuild-manual'
+      : ''
+  }`
+  const title = isDirty
+    ? 'uncommitted changes — commit or revert to enable rebuilding'
+    : isBuilding
+    ? 'a rebuild is running'
+    : isReady
+    ? `a .ufabuild request (${repoState.ufabuild_request}) — ${coreBuildPlanText(repoState)}`
+    : 'no .ufabuild request since the last successful build — click to rebuild manually'
+
+  return (
+    <div className="sys-repo-panel">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-repo</span>
+        <span className="sys-repo-root" title={repoState.root}>{repoState.root}</span>
+        {repoState.head && <span className="sys-repo-head">{repoState.head}</span>}
+      </div>
+      <div className="sys-repo-controls">
+        <button
+          className={btnClass}
+          disabled={disabled}
+          onClick={onRebuild}
+          title={title}
+        >
+          {label}
+        </button>
+        <label
+          className="sys-auto-rebuild"
+          title="build a .ufabuild request automatically -- waits 90s after the last request lands to avoid rebuilding on every commit in a burst"
+        >
+          <input
+            type="checkbox"
+            checked={repoState.auto_rebuild}
+            onChange={e => onSetAutoRebuild(e.target.checked)}
+          />
+          auto-rebuild
+        </label>
+        {repoState.auto_rebuild_pending && (
+          <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time a new request lands">
+            rebuilding in {repoState.auto_rebuild_seconds ?? 0}s
+          </span>
+        )}
+      </div>
+      {repoState.last_error && (
+        <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see that host's LR log</div>
+      )}
+      <div className="sys-repo-ufabuild" title="the dev branch is pulled every 5s; a pulled commit carrying a [condocv2-xxxx] tag writes a gitignored .ufabuild request, and only a request builds">
+        .ufabuild: {repoState.ufabuild_request ? `request for ${repoState.ufabuild_request}` : repoState.ufabuild_note || 'no request'}
+      </div>
+      <CoreBuildLines repoState={repoState} />
+      {onSwitchBranch && (
+        <BranchSwitcher
+          branch={repoState.branch || '(detached)'}
+          branches={repoState.branches ?? []}
+          current={repoState.branch}
+          disabledReason={branchSwitchBlocker([repoState])}
+          error={repoState.switch_error}
+          onSwitch={onSwitchBranch}
+        />
+      )}
+      {onWatchExternal && onBuildExternal && (
+        <ExternalWatches
+          repoState={repoState}
+          onWatch={onWatchExternal}
+          onBuild={onBuildExternal}
+          onShowRegistration={onShowPluginRegistration}
+          managed={managed ?? []}
+          onLaunch={onLaunch}
+        />
+      )}
+    </div>
+  )
+}
+
+// coreBuildPlanText says what building the pending .ufabuild request would
+// do: the core repo rebuilds only the sub-apps its commits changed, with
+// make update-dev-binaries (local-representative/ufaplan.go).
+function coreBuildPlanText(repoState: LRRepoStateMsg): string {
+  if (repoState.build_plan_note) return repoState.build_plan_note
+  if (repoState.build_plan?.length) return `runs make update-dev-binaries for ${repoState.build_plan.join(', ')}, then restarts just those`
+  return 'runs make update-dev-binaries for the sub-apps it changed'
+}
+
+// CoreBuildLines mirror local-representative's dev-repo panel lines under
+// ".ufabuild:": "next build:" what the pending request would rebuild,
+// "building:" what the running build covers (also drawn building on the
+// timeline), and "last build:" what the last one built and restarted.
+function CoreBuildLines({ repoState }: { repoState: LRRepoStateMsg }) {
+  const covers = repoState.build_full ? 'every sub-app (full deploy-dev-binaries)' : repoState.build_apps?.join(', ')
+  return (
+    <>
+      {repoState.ufabuild_request && (
+        <div className="sys-repo-ufabuild" title="the sub-apps whose inputs (own dir, local go.mod replaces) changed since each was last built">
+          next build: {repoState.build_plan_note || repoState.build_plan?.join(', ') || '…'}
+        </div>
+      )}
+      {repoState.building && covers && (
+        <div className="sys-repo-ufabuild" title="the sub-apps this build covers -- also shown building on the timeline">
+          building: {covers}
+        </div>
+      )}
+      {!repoState.building && (covers || repoState.restart_note) && (
+        <div className="sys-repo-ufabuild" title={repoState.restart_note}>
+          last build: {covers || 'nothing'}{repoState.restart_note ? ` — ${repoState.restart_note}` : ''}
+        </div>
+      )}
+    </>
+  )
+}
+
+// ExternalWatches is the dev-repo panel's "external" section, mirroring
+// local-representative's own (privateRepoOpsImpls Step6Prompt.md Revisions C
+// and D, brought here by Revision E): the directories beside the watched
+// repo registered for watching, each with its git state and an "unwatch",
+// then a path box (relative to the dev-repo's root, or absolute) and
+// "watch". "plugin dev repo" registers the path -- ../HyenaExternalUfaPlugin
+// when the box is empty -- as a plug-in dev repo: pulled, built by 'make
+// deploy-dev-binaries' whenever condoc-tagged commits come in ("build"
+// asks for one by hand), and its plug-in approved on that host. Each plug-in
+// dev repo's "registration" link (onShowRegistration) opens the plugins tab
+// at the registration made for it. Its plug-in is a managed app on that host
+// under its app id (Revision F): "launch" (onLaunch) starts it from the build
+// deployed to /AI-evo1-dev/plugin, offered while no instance runs, and each
+// build restarts a running one.
+const defaultPluginDevRepo = '../HyenaExternalUfaPlugin'
+
+function ExternalWatches({ repoState, managed, onWatch, onBuild, onLaunch, onShowRegistration }: {
+  repoState: LRRepoStateMsg
+  managed: LRSystemStateMsg['managed']
+  onWatch: (path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  onBuild: (path: string) => void
+  onLaunch?: (name: string) => void
+  onShowRegistration?: (appId: string) => void
+}) {
+  const [path, setPath] = useState('')
+  const [appId, setAppId] = useState('')
+  const externals = repoState.externals ?? []
+  const runningInstance = (app?: string) =>
+    app ? (managed ?? []).find(p => p.name === app && p.status === 'running') : undefined
+  // A plug-in dev repo's command splits its path from the app id at the
+  // first space, so agent-coordinator can't relay one with a space in either.
+  const pluginBlocked = /\s/.test(path.trim()) || /\s/.test(appId.trim())
+  const submit = (plugin: boolean) => {
+    const p = path.trim() || (plugin ? defaultPluginDevRepo : '')
+    if (!p || (plugin && pluginBlocked)) return
+    onWatch(p, true, plugin, plugin ? appId.trim() : '')
+    setPath('')
+    setAppId('')
+  }
+
+  return (
+    <div className="sys-ext">
+      {externals.map(e => (
+        <div key={e.abs}>
+          <div className="sys-repo-info sys-ext-row">
+            <span className="sys-repo-label">{e.plugin ? 'plug-in' : 'external'}</span>
+            <span className="sys-repo-root" title={e.abs}>{e.path}</span>
+            <span className="sys-ext-state" title={e.note || (e.changed_at ? `last changed ${new Date(e.changed_at * 1000).toLocaleString()}` : 'unchanged since LR began watching it')}>
+              {e.note ? (
+                <span className="sys-ext-note">{e.note}</span>
+              ) : (
+                <>
+                  {e.branch || '(detached)'} {e.head}
+                  {e.dirty && <span className="sys-ext-dirty"> dirty</span>}
+                  {e.changed_at ? ` · changed ${new Date(e.changed_at * 1000).toLocaleTimeString()}` : ''}
+                </>
+              )}
+            </span>
+            {e.plugin && (
+              <button
+                className="sys-btn sys-btn-branch"
+                disabled={!!e.building || !e.git}
+                onClick={() => onBuild(e.path)}
+                title="write a .ufabuild request for the current HEAD, which runs make deploy-dev-binaries there"
+              >
+                {e.building ? 'building…' : 'build'}
+              </button>
+            )}
+            {onLaunch && e.plugin && e.app_id && !runningInstance(e.app_id) && (
+              <button
+                className="sys-btn sys-btn-launch"
+                disabled={!e.deployed || !!e.building}
+                onClick={() => onLaunch(e.app_id!)}
+                title={e.deployed
+                  ? `launch ${e.app_id} from ${e.bin} as a managed app on that host; each build restarts it`
+                  : `nothing deployed at ${e.bin ?? 'the plug-in dir'} yet: build it first`}
+              >
+                launch
+              </button>
+            )}
+            <button className="sys-btn sys-btn-neutral" onClick={() => onWatch(e.path, false)} title="stop watching this path">
+              unwatch
+            </button>
+          </div>
+          {e.plugin && (
+            <div className="sys-repo-ufabuild" title={[e.plugin_note, e.pull_note, e.launch_note].filter(Boolean).join(' · ')}>
+              {onShowRegistration && e.app_id ? (
+                <button
+                  className="sys-ext-reg-link"
+                  onClick={() => onShowRegistration(e.app_id!)}
+                  title={`open the plugins tab at ${e.app_id}'s registration on this host${e.plugin_note ? ` (${e.plugin_note})` : ''}`}
+                >
+                  {e.app_id} — registration ↗
+                </button>
+              ) : e.app_id}
+              {' · '}
+              {e.building
+                ? 'building'
+                : e.ufabuild
+                ? `.ufabuild: ${e.ufabuild}`
+                : e.built_head
+                ? `built ${e.built_head}${e.build_at ? ` at ${new Date(e.build_at * 1000).toLocaleTimeString()}` : ''}`
+                : 'waiting for a condoc-tagged commit'}
+              {' · '}
+              {runningInstance(e.app_id)
+                ? `running as ${runningInstance(e.app_id)!.instance_id}`
+                : e.deployed ? 'not launched' : 'not deployed'}
+              {e.pull_note && <span className="sys-ext-note"> · {e.pull_note}</span>}
+            </div>
+          )}
+          {e.plugin && e.build_error && (
+            <div className="sys-repo-error" title={e.build_error}>last build failed: {e.build_error}</div>
+          )}
+        </div>
+      ))}
+      <div className="sys-repo-controls">
+        <input
+          className="sys-ext-input"
+          value={path}
+          placeholder={defaultPluginDevRepo}
+          onChange={e => setPath(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit(false) }}
+        />
+        <input
+          className="sys-ext-input"
+          value={appId}
+          placeholder="app id (plug-in dev repo; optional)"
+          onChange={e => setAppId(e.target.value)}
+        />
+        <button
+          className="sys-btn sys-btn-branch"
+          disabled={!path.trim()}
+          onClick={() => submit(false)}
+          title="register this directory (relative to the dev-repo's root, or absolute) as an external path to watch -- watched only, never pulled or built"
+        >
+          watch
+        </button>
+        <button
+          className="sys-btn sys-btn-branch"
+          disabled={pluginBlocked}
+          onClick={() => submit(true)}
+          title={pluginBlocked
+            ? "a plug-in dev repo's path and app id can't contain spaces when registered through agent-coordinator"
+            : `register this directory (${defaultPluginDevRepo} if the box is empty) as a plug-in dev repo: its upstream is pulled, condoc-tagged commits write a gitignored .ufabuild request that runs make deploy-dev-binaries there, and its plug-in's app id is approved on that host`}
+        >
+          plugin dev repo
+        </button>
+      </div>
+      {repoState.external_error && (
+        <div className="sys-repo-error" title={repoState.external_error}>last external path change failed: {repoState.external_error}</div>
+      )}
+    </div>
+  )
+}
+
+// branchSwitchBlocker returns why a dev-branch switch can't happen right now
+// on any of the given watched repos, or null if it can -- the same refusals
+// local-representative's switchBranch enforces server-side (dirty,
+// building), surfaced up front so the switch button disables itself.
+function branchSwitchBlocker(repos: LRRepoStateMsg[]): string | null {
+  if (repos.some(r => r.dirty)) return 'uncommitted changes — commit or revert to enable switching'
+  if (repos.some(r => r.building)) return 'a rebuild is running'
+  return null
+}
+
+// BranchSwitcher is the "dev branch" readout plus its "switch" control
+// (Step1SubstepCPrompt.md Revision B): shows the branch being watched and,
+// once "switch" is pressed, a picker over the available branches with a
+// confirming "switch" and a "cancel". Used both per-host (inside
+// RepoWatchPanel) and in the global view under "rebuild all", where branch
+// reads "<differs>" when the hosts disagree and a switch goes to every host.
+function BranchSwitcher({
+  branch, branches, current, disabledReason, error, onSwitch,
+}: {
+  branch: string
+  branches: string[]
+  current?: string
+  disabledReason: string | null
+  error?: string
+  onSwitch: (branch: string) => void
+}) {
+  const [picking, setPicking] = useState(false)
+  const [choice, setChoice] = useState('')
+  const disabled = !!disabledReason || branches.length === 0
+
+  const open = () => {
+    setChoice(current && branches.includes(current) ? current : branches[0] ?? '')
+    setPicking(true)
+  }
+  const confirm = () => {
+    if (choice) onSwitch(choice)
+    setPicking(false)
+  }
+
+  return (
+    <div className="sys-branch">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-branch</span>
+        {picking ? (
+          <select className="sys-branch-select" value={choice} onChange={e => setChoice(e.target.value)}>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <span className="sys-branch-name" title={branch}>{branch}</span>
+        )}
+      </div>
+      <div className="sys-repo-controls">
+        {picking ? (
+          <>
+            <button className="sys-btn sys-btn-branch" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+              switch
+            </button>
+            <button className="sys-btn sys-btn-neutral" onClick={() => setPicking(false)}>cancel</button>
+          </>
+        ) : (
+          <button
+            className="sys-btn sys-btn-branch"
+            disabled={disabled}
+            onClick={open}
+            title={disabledReason ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}
+          >
+            switch
+          </button>
+        )}
+      </div>
+      {error && <div className="sys-repo-error" title={error}>last branch switch failed: {error}</div>}
+    </div>
+  )
+}
+
+/* ---- Debug view (system tab, Step1SubstepBPrompt.md Revision E) ----
+ *
+ * A first, deliberately simple pass: a "debug" button in the system tab
+ * (both per-host and global) swaps that tab's main pane for a two-tab
+ * viewer -- "network" and "logs" -- each just a plain scrolling list of
+ * captured lines, plus a "to file" button that drops the current contents
+ * into the preferred file store the same way ScreenshotButton already does.
+ */
+
+// NetworkLogEntry is one captured request this agent-coordinator frontend
+// itself made -- method/URL/status/duration. Since every interaction with
+// every sub-app (uploads, hold/persist/delete, markup, screenshots, launch/
+// terminate commands that ride the WebSocket, etc.) is issued as a fetch
+// from this one page, wrapping window.fetch once (see installNetworkCapture)
+// covers all of them without needing each sub-app's own embedded iframe to
+// cooperate. It doesn't yet see network activity that happens entirely
+// inside an embedded iframe's own document (condocv2/sessions/convo/robot's
+// own UI) -- a later increment could thread that through postMessage if needed.
+interface NetworkLogEntry {
+  id: number
+  time: number // unix ms
+  method: string
+  url: string
+  status: number | null // null while in flight or on a network-level failure
+  duration_ms: number | null
+  error?: string
+}
+
+const MAX_NETWORK_LOG_ENTRIES = 300
+let networkLog: NetworkLogEntry[] = []
+let networkLogSeq = 0
+const networkLogListeners = new Set<() => void>()
+
+function pushNetworkLogEntry(entry: NetworkLogEntry) {
+  networkLog = [...networkLog.slice(-(MAX_NETWORK_LOG_ENTRIES - 1)), entry]
+  networkLogListeners.forEach(fn => fn())
+}
+
+// installNetworkCapture wraps window.fetch exactly once per page load.
+let networkCaptureInstalled = false
+function installNetworkCapture() {
+  if (networkCaptureInstalled) return
+  networkCaptureInstalled = true
+  const realFetch = window.fetch.bind(window)
+  window.fetch = (...args: Parameters<typeof fetch>) => {
+    const method = (args[1]?.method ?? 'GET').toUpperCase()
+    const first = args[0]
+    const url = typeof first === 'string' ? first : first instanceof Request ? first.url : String(first)
+    const id = ++networkLogSeq
+    const start = Date.now()
+    return realFetch(...args).then(
+      resp => {
+        pushNetworkLogEntry({ id, time: start, method, url, status: resp.status, duration_ms: Date.now() - start })
+        return resp
+      },
+      err => {
+        pushNetworkLogEntry({ id, time: start, method, url, status: null, duration_ms: Date.now() - start, error: String(err) })
+        throw err
+      },
+    )
+  }
+}
+
+// useNetworkLog subscribes this component to the shared capture buffer above.
+function useNetworkLog(): NetworkLogEntry[] {
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    installNetworkCapture()
+    const listener = () => forceRender(n => n + 1)
+    networkLogListeners.add(listener)
+    return () => { networkLogListeners.delete(listener) }
+  }, [])
+  return networkLog
+}
+
+function formatNetworkLogLine(e: NetworkLogEntry): string {
+  const status = e.status != null ? String(e.status) : e.error ? 'error' : '…'
+  const duration = e.duration_ms != null ? `${e.duration_ms}ms` : ''
+  return `${new Date(e.time).toLocaleTimeString()}  ${e.method}  ${status}  ${duration}  ${e.url}`
+}
+
+// TimedLine is a pre-formatted debug-pane line plus its original timestamp
+// (ms since epoch), letting DebugView merge chain-call lines (ts in unix
+// seconds, formatted by the caller -- see formatChainCallLine) into the
+// same chronological list as this frontend's own browser-fetch captures
+// (ts in unix ms, formatted by formatNetworkLogLine) without losing the
+// ordering either source needs its raw timestamp for.
+interface TimedLine {
+  ts: number // ms since epoch
+  line: string
+}
+
+// formatChainCallLine renders one captured backend-to-backend HTTP call
+// from the SM<->LR<->AC chain (Step1SubstepBPrompt.md Revision F) -- the
+// half of the "network" tab a browser fetch wrapper can't see, since it
+// never touches session-manager's or local-representative's own HTTP
+// clients. hostLabel is only passed in the global perspective, same as
+// formatDebugLogLine.
+function formatChainCallLine(e: ChainCallEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel} ` : ''
+  const status = e.status ? String(e.status) : e.error ? 'error' : '…'
+  return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.hop}] ${e.method}  ${status}  ${e.duration_ms}ms  ${e.url}`
+}
+
+// formatDebugLogLine renders one captured LR-managed-sub-app stdout/stderr
+// line. hostLabel is only passed in the global perspective, where lines from
+// every host are merged into one list and need tagging to tell them apart.
+function formatDebugLogLine(e: DebugLogEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel} ` : ''
+  const marker = e.stream === 'stderr' ? '!' : ' '
+  return `${new Date(e.ts * 1000).toLocaleTimeString()}  ${host}[${e.app}]${marker} ${e.line}`
+}
+
+// formatStateboardLine renders one stateboard key/value row (see
+// StateboardEntry) for the debug view's "stateboard" tab
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision E).
+// hostLabel is only passed in the global perspective, same as
+// formatDebugLogLine/formatChainCallLine -- a stateboard entry has no
+// timestamp of its own (it's a live snapshot, not a log), so unlike those
+// two this is plain text with no time prefix. Entries nest two levels deep
+// under their owning sub-app (Revision F), so this renders "app: key =
+// value" rather than a single flattened key.
+function formatStateboardLine(e: StateboardEntry, hostLabel?: string): string {
+  const host = hostLabel ? `${hostLabel}  ` : ''
+  return `${host}${e.app}: ${e.key} = ${e.value || '(empty)'}`
+}
+
+// formatPluginsLines renders one host's plug-in configuration, live registry
+// and recently refused hellos (see PluginsState) for the debug view's
+// "plugins" tab (condocs/privateRepoOpsImpls/Step3Prompt.md Revision A).
+// hostLabel is only passed in the global perspective -- unlike the
+// stateboard, plug-in approval is per host, so lines stay attributed rather
+// than merged.
+function formatPluginsLines(st: PluginsState | undefined, hostLabel?: string): string[] {
+  if (!st) return []
+  const host = hostLabel ? `${hostLabel}  ` : ''
+  const at = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleTimeString() : '-')
+  const c = st.config
+  const lines = [
+    `${host}config: first-party = ${(c.first_party ?? c.approved ?? []).join(', ') || '(none)'}`,
+    `${host}config: external approved here = ${(c.external_approved ?? []).join(', ') || '(none)'}${c.approvals_path ? ` (kept in ${c.approvals_path})` : ' (in memory only)'}`,
+    ...(c.approvals_error ? [`${host}config: approvals error = ${c.approvals_error}`] : []),
+    `${host}config: sandboxed tier = CSP "${c.sandbox_csp ?? '-'}", iframe sandbox "${c.iframe_sandbox ?? '-'}"`,
+    `${host}config: admission = ${[c.loopback_only && 'loopback only', c.require_name_match && 'app id must match connection name'].filter(Boolean).join(', ') || 'open'}`,
+    `${host}config: route = ${c.route_prefix}<appId>/, manifest = ${c.manifest_path} (reads v${c.manifest_version}, hello v${c.hello_version}, timeout ${c.manifest_timeout_secs}s)`,
+    ...(c.manual === undefined ? [] : [
+      `${host}config: manual registrations = ${(c.manual ?? []).map(m => `${m.app_id}@${m.http_port}`).join(', ') || '(none)'} (polled every ${c.manual_poll_secs ?? '?'}s)`,
+      `${host}config: register example = ${c.example_app_id ?? '-'} on port ${c.example_port || '-'}${st.example?.at ? `; last ${at(st.example.at)}: ${st.example.result ?? ''}${st.example.error ? ` (${st.example.error})` : ''}` : ''}`,
+    ]),
+  ]
+  const plugins = st.plugins ?? []
+  if (plugins.length === 0) lines.push(`${host}plugins: (none registered)`)
+  for (const p of plugins) {
+    const h = p.hello
+    const since = p.status === 'offline' ? `offline since ${at(p.disconnect_at)}` : `hello at ${at(p.hello_at)}`
+    const via = p.source === 'manual' ? 'manually registered (polled)' : `peer ${p.peer_host || '?'}`
+    lines.push(`${host}${p.app_id}: ${p.status}, ${p.trust ?? 'first-party'}, ${since}, port ${h.http_port}, ${via}, base ${p.base_path}`)
+    lines.push(`${host}${p.app_id}:   hello = "${h.display_name}", hello v${h.hello_version}, manifest v${h.manifest_version}, dev mode ${h.dev_mode}`)
+    const m = p.manifest
+    if (m) {
+      lines.push(`${host}${p.app_id}:   manifest v${m.manifest_version} = "${m.display_name}"${m.short_name ? ` (${m.short_name})` : ''}, entry ${m.entry || './'}, icon ${m.icon || '-'}${m.manifest_version >= 2 && m.icon_mask ? ' (mask)' : ''}, order ${m.order ?? 0}, health key ${m.health_key || p.app_id}, etag ${p.etag || '-'}, fetched ${at(p.manifest_at)}`)
+    } else if (p.status !== 'pending') {
+      lines.push(`${host}${p.app_id}:   manifest = (not fetched yet)`)
+    }
+    if (p.manifest_error) lines.push(`${host}${p.app_id}:   manifest error = ${p.manifest_error}`)
+  }
+  for (const r of st.rejected ?? []) {
+    lines.push(`${host}refused ${at(r.ts)}: ${r.name}${r.app_id && r.app_id !== r.name ? ` (app id ${r.app_id})` : ''}: ${r.reason}`)
+  }
+  return lines
+}
+
+// mergeGlobalStateboard combines every host's locally-reported stateboard
+// into one process-wide view (Revision G): each LR only *presents* its own
+// local view (what's connected to it), but the global perspective needs to
+// show what's reachable across every host -- the same way an LR recognizes
+// a capability like transcription is usable from another node once *any*
+// host reports it present, rather than only its own. Flat-mapping per-host
+// entries with a host label (the old behaviour, still used for logs/chain
+// calls where per-host attribution is the point) just produced a repeated
+// per-host breakdown here instead of a merged summary. "present" rows OR
+// together across hosts; every other row (the "hosts"/"instances" list rows
+// and any custom key a sub-app posts, e.g. "current-session") unions the
+// distinct non-empty values reported by each host, sorted, so e.g. a
+// "hosts" row ends up listing every host where that app is present instead
+// of just whichever single host happened to report it.
+function mergeGlobalStateboard(hosts: Host[], hostData: Record<string, HostClientState>): StateboardEntry[] {
+  const present = new Map<string, boolean>()
+  const values = new Map<string, Set<string>>()
+  const idOf = (app: string, key: string) => `${app}\x00${key}`
+  for (const h of hosts) {
+    for (const e of hostData[h.id]?.stateboard?.entries ?? []) {
+      const id = idOf(e.app, e.key)
+      if (e.key === 'present') {
+        present.set(id, (present.get(id) ?? false) || e.value === 'true')
+      } else {
+        const set = values.get(id) ?? new Set<string>()
+        for (const part of e.value.split(',').map(v => v.trim())) {
+          if (part) set.add(part)
+        }
+        values.set(id, set)
+      }
+    }
+  }
+  const entries: StateboardEntry[] = []
+  for (const [id, isPresent] of present) {
+    const [app, key] = id.split('\x00')
+    entries.push({ app, key, value: String(isPresent) })
+  }
+  for (const [id, set] of values) {
+    const [app, key] = id.split('\x00')
+    entries.push({ app, key, value: [...set].sort().join(', ') })
+  }
+  entries.sort((a, b) => (a.app !== b.app ? a.app.localeCompare(b.app) : a.key.localeCompare(b.key)))
+  return entries
+}
+
+// resolveGlobalDebugUploadHost picks the "preferred file store" to save a
+// global-perspective debug capture to, where there's no single selected host
+// to fall back on the way ScreenshotButton's per-host case does: this
+// agent-coordinator's own co-located host if it's connected, else the first
+// connected host, else null (disables the "to file" button).
+function resolveGlobalDebugUploadHost(hosts: Host[], selfHostId: string | null): string | null {
+  if (selfHostId && hosts.some(h => h.id === selfHostId && h.status === 'connected')) return selfHostId
+  return hosts.find(h => h.status === 'connected')?.id ?? null
+}
+
+// DebugLogPane is the "very simple viewer" shared by both the network and
+// logs tabs: a plain scrolling list of pre-formatted lines, plus a "to file"
+// button that uploads them as one text file through the normal upload path
+// (so it lands in the files tab cache like any other upload).
+function DebugLogPane({
+  lines, toFileName, uploadHostId, uploadFiles, emptyMessage,
+}: {
+  lines: string[]
+  toFileName: string
+  uploadHostId: string | null
+  uploadFiles: (hostId: string, files: File[]) => void
+  emptyMessage: string
+}) {
+  const [busy, setBusy] = useState(false)
+
+  const handleToFile = async () => {
+    if (!uploadHostId || lines.length === 0 || busy) return
+    setBusy(true)
+    try {
+      await uploadFiles(uploadHostId, [new File([lines.join('\n') + '\n'], toFileName, { type: 'text/plain' })])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="debug-pane">
+      <div className="debug-pane-toolbar">
+        <span className="debug-pane-count">{lines.length} line(s) captured this session</span>
+        <button
+          className="sys-btn sys-btn-neutral"
+          disabled={!uploadHostId || lines.length === 0 || busy}
+          onClick={handleToFile}
+          title={uploadHostId ? 'save these lines to the preferred file store' : 'no file store available -- select a connected host first'}
+        >
+          {busy ? 'saving…' : 'to file'}
+        </button>
+      </div>
+      <div className="debug-pane-lines">
+        {lines.length === 0 ? (
+          <div className="debug-pane-empty">{emptyMessage}</div>
+        ) : (
+          lines.map((line, i) => <div className="debug-pane-line" key={i}>{line}</div>)
+        )}
+      </div>
+    </div>
+  )
+}
+
+// PluginsHostState is one host's plug-in snapshot, for the plugins tab's
+// manifest viewer. hostLabel is only set in the global perspective.
+interface PluginsHostState {
+  hostId: string
+  hostLabel?: string
+  state?: PluginsState
+  // That host's dev-repo watcher, for the registration sub-tab's plug-in dev
+  // repos (Step6Prompt.md Revision E); unset where it isn't needed.
+  repo?: LRRepoStateMsg
+}
+
+// PluginRegistrationFocus is a request to open the plugins tab's
+// registration sub-tab at one host's registration of appId -- a plug-in dev
+// repo's "registration" link. seq tells a repeat press from the last one.
+interface PluginRegistrationFocus {
+  hostId: string
+  appId: string
+  seq: number
+}
+
+// PluginTabOpen is a request to open the plugins tab at one host's
+// external plug-in's own tab (Step6Prompt.md Revision G) -- a plug-in tile
+// double-clicked on the global topology view. seq as PluginRegistrationFocus.
+interface PluginTabOpen {
+  hostId: string
+  appId: string
+  seq: number
+}
+
+// LiveManifest is one fetch of a plug-in's manifest file as it is served
+// right now, through agent-coordinator -> local-representative -> plug-in.
+interface LiveManifest {
+  key: string
+  url: string
+  status: number // 0: the fetch itself failed
+  etag: string
+  body: string
+  error?: string
+  at: number
+}
+
+// PluginManifestViewer is the debug view's plugins tab's "manifests" mode
+// (condocs/privateRepoOpsImpls/Step3Prompt.md Revision B): pick a plug-in on
+// a host, see the manifest that host's local-representative holds (what it
+// builds routes and, later, tabs from) beside its hello, and fetch the
+// manifest file as the plug-in serves it now -- through
+// /host/<id>/apps/<appId>/ui-manifest.json -- to compare the two by ETag.
+function PluginManifestViewer({ hosts }: { hosts: PluginsHostState[] }) {
+  const entries: { key: string; host: PluginsHostState; p: PluginInfo }[] = hosts.flatMap(h =>
+    (h.state?.plugins ?? []).map(p => ({ key: `${h.hostId}\x00${p.app_id}`, host: h, p })),
+  )
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const sel = entries.find(e => e.key === selectedKey) ?? entries[0] ?? null
+  const [live, setLive] = useState<LiveManifest | null>(null)
+  const [busy, setBusy] = useState(false)
+  const at = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleTimeString() : '-')
+
+  if (!sel) return <div className="debug-pane-empty">no plug-ins registered</div>
+
+  const manifestPath = (sel.host.state?.config.manifest_path ?? '/ui-manifest.json').replace(/^\//, '')
+  const url = `/host/${encodeURIComponent(sel.host.hostId)}${sel.p.base_path}${manifestPath}`
+  const iconSrc = pluginIconSrc(sel.host.hostId, sel.p)
+  const shownLive = live && live.key === sel.key ? live : null
+
+  const fetchLive = async () => {
+    const key = sel.key
+    setBusy(true)
+    try {
+      const res = await fetch(url, { cache: 'no-store' })
+      const text = await res.text()
+      let body = text
+      try {
+        body = JSON.stringify(JSON.parse(text), null, 2)
+      } catch {
+        // not JSON (an error page): show it as served
+      }
+      setLive({ key, url, status: res.status, etag: res.headers.get('ETag') ?? '', body, at: Date.now() })
+    } catch (err) {
+      setLive({ key, url, status: 0, etag: '', body: '', error: String(err), at: Date.now() })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const comparison = !shownLive || shownLive.status !== 200 ? null
+    : !sel.p.etag ? 'local-representative holds no manifest to compare with'
+    : shownLive.etag === sel.p.etag ? 'same ETag as the held manifest'
+    : 'differs from the held manifest -- local-representative re-fetches on manifest-changed or the next hello'
+
+  return (
+    <div className="plugin-manifests">
+      <div className="plugin-manifests-list">
+        {entries.map(e => (
+          <button
+            key={e.key}
+            className={`plugin-manifests-item${e.key === sel.key ? ' plugin-manifests-item-active' : ''}`}
+            onClick={() => setSelectedKey(e.key)}
+          >
+            <PluginIcon src={pluginIconSrc(e.host.hostId, e.p)} label={e.p.app_id} mask={pluginIconMask(e.p)} />
+            {e.host.hostLabel && <span className="plugin-manifests-host">{e.host.hostLabel}</span>}
+            <span className="plugin-manifests-app">{e.p.app_id}</span>
+            {e.p.manifest && (
+              <span className="plugin-manifests-version" title="manifest version, then the plug-in's own version (Revision G)">
+                v{e.p.manifest.manifest_version}{e.p.manifest.version ? ` · ${e.p.manifest.version}` : ''}
+              </span>
+            )}
+            <span className={`plugin-status plugin-status-${e.p.status}`}>{e.p.status}</span>
+          </button>
+        ))}
+      </div>
+      <div className="plugin-manifests-detail">
+        <div className="plugin-manifests-section">
+          <div className="plugin-manifests-head">
+            <span>held by local-representative</span>
+            <span className="plugin-manifests-meta">
+              {sel.p.manifest ? `version ${sel.p.manifest.manifest_version} (host reads ≤ ${sel.host.state?.config.manifest_version ?? '?'}) · ` : ''}
+              etag {sel.p.etag || '-'} · fetched {at(sel.p.manifest_at)}
+            </span>
+          </div>
+          {sel.p.manifest_error && <div className="plugin-manifests-error">{sel.p.manifest_error}</div>}
+          <div className="plugin-manifests-with-icon">
+            <div className="plugin-manifests-icon">
+              <PluginIcon src={iconSrc} label={sel.p.app_id} size={48} mask={pluginIconMask(sel.p)} />
+              <div className="plugin-manifests-meta">
+                {pluginIconMask(sel.p) && <div>drawn as a mask (icon_mask)</div>}
+                {iconSrc ? <a className="plugin-manifests-link" href={iconSrc} target="_blank" rel="noreferrer">{sel.p.manifest?.icon}</a>
+                  : !sel.p.manifest?.icon ? 'no icon in manifest'
+                  : `icon not routed (${sel.p.status})`}
+              </div>
+            </div>
+            <pre className="plugin-manifests-json">
+              {sel.p.manifest ? JSON.stringify(sel.p.manifest, null, 2)
+                : sel.p.status === 'pending' ? '(not fetched: pending plug-ins are never fetched)' : '(not fetched yet)'}
+            </pre>
+          </div>
+        </div>
+        <div className="plugin-manifests-section">
+          <div className="plugin-manifests-head">
+            <span>served now</span>
+            <span className="plugin-manifests-actions">
+              <a className="plugin-manifests-link" href={url} target="_blank" rel="noreferrer">{url}</a>
+              <button
+                className="sys-btn sys-btn-neutral"
+                disabled={busy || sel.p.status !== 'online'}
+                onClick={fetchLive}
+                title={sel.p.status === 'online' ? 'fetch the manifest file through this host' : `only online plug-ins are routed (this one is ${sel.p.status})`}
+              >
+                {busy ? 'fetching…' : 'fetch'}
+              </button>
+            </span>
+          </div>
+          {shownLive ? (
+            <>
+              <div className="plugin-manifests-meta">
+                {shownLive.status ? `HTTP ${shownLive.status}` : 'request failed'} · etag {shownLive.etag || '-'} · at {new Date(shownLive.at).toLocaleTimeString()}
+                {comparison && ` · ${comparison}`}
+              </div>
+              {shownLive.error && <div className="plugin-manifests-error">{shownLive.error}</div>}
+              {shownLive.body && <pre className="plugin-manifests-json">{shownLive.body}</pre>}
+            </>
+          ) : (
+            <div className="debug-pane-empty">not fetched in this view yet</div>
+          )}
+        </div>
+        <div className="plugin-manifests-section">
+          <div className="plugin-manifests-head">
+            <span>{sel.p.source === 'manual' ? 'manual registration (no hello: this is what was entered)' : 'hello'}</span>
+            <span className="plugin-manifests-meta">
+              at {at(sel.p.hello_at)} · {sel.p.source === 'manual' ? 'polled, no connection' : `peer ${sel.p.peer_host || '?'}`}
+            </span>
+          </div>
+          <pre className="plugin-manifests-json">{JSON.stringify(sel.p.hello, null, 2)}</pre>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// InstallHostState is one host as the debug view's "install" tab sees it:
+// its agents inspection, which also carries the agents it can install.
+interface InstallHostState {
+  hostId: string
+  hostLabel?: string
+  connected: boolean
+  agents?: AgentsState | null
+}
+
+// AgentInstallPane is the debug view's "install" tab
+// (condocs/switchToUfabuildImpls/Step1.md Prompt 9): for each host, every
+// agent its ambiguous-agent knows (DEV_AGENTS aside) and whether it's
+// present there, with an "install" control for a missing one that host's
+// LR has an install script for -- pi and opencode so far, the core repo's
+// scripts/install-<agent>.sh (local-representative/agentinstall.go) -- and
+// the output of its latest install. LR re-inspects the agents once an
+// install finishes, so a successful one shows up as present.
+function AgentInstallPane({ hosts, onInstall, onInspect }: {
+  hosts: InstallHostState[]
+  onInstall: (hostId: string, agent: string) => void
+  onInspect: (hostId: string) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 5000)
+    return () => clearInterval(t)
+  }, [])
+  // Which agent's install log is shown, as "<hostId>/<agent>".
+  const [openLog, setOpenLog] = useState<string | null>(null)
+
+  if (hosts.length === 0) return <div className="debug-pane-empty">no hosts</div>
+  return (
+    <div className="debug-pane agent-install">
+      {hosts.map(h => {
+        const label = h.hostLabel ?? h.hostId
+        const agents = h.agents
+        const installs = agents?.installs ?? []
+        const names = [...new Set([
+          ...(agents?.agents ?? []).map(a => a.name).filter(n => !DEV_AGENTS.has(n)),
+          ...installs.map(i => i.agent),
+        ])]
+        const checking = agents?.status === 'checking'
+        return (
+          <div key={h.hostId} className="agent-install-host">
+            <div className="sys-providers-heading">
+              <span className="sys-providers-header">{label}</span>
+              {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+              {h.connected && agents != null && (
+                <span className="sys-agents-controls">
+                  <button className="sys-btn sys-btn-branch" onClick={() => onInspect(h.hostId)} disabled={checking}
+                    title="ask this host's ambiguous-agent again which agents it has">
+                    {checking ? 'inspecting…' : 're-inspect'}
+                  </button>
+                </span>
+              )}
+            </div>
+            {!h.connected ? (
+              <div className="debug-pane-empty">not connected</div>
+            ) : agents == null ? (
+              <div className="debug-pane-empty">this host's LR doesn't report agents</div>
+            ) : (
+              <>
+                {agents.status === 'failed' && (
+                  <div className="sys-provider-error agent-install-note">inspection failed: {agents.detail || 'unknown error'}</div>
+                )}
+                {agents.installs == null && (
+                  <div className="sys-provider-placeholder agent-install-note">this host's LR predates agent installs</div>
+                )}
+                <table className="agent-install-table">
+                  <thead>
+                    <tr><th>agent</th><th>present</th><th>version / path</th><th>install</th></tr>
+                  </thead>
+                  <tbody>
+                    {names.map(name => {
+                      const info = agents.agents.find(a => a.name === name)
+                      const inst = installs.find(i => i.agent === name)
+                      const key = `${h.hostId}/${name}`
+                      const running = inst?.state === 'running'
+                      const logOpen = openLog === key || running
+                      return [
+                        <tr key={name}>
+                          <td className="agent-install-name">{name}</td>
+                          <td>
+                            {info?.installed ? <span className="sys-provider-status-ok">yes</span>
+                              : info ? <span className="sys-provider-status-failed">no</span>
+                              : <span className="sys-provider-placeholder">{checking ? 'checking…' : 'not inspected'}</span>}
+                          </td>
+                          <td className="agent-install-where">
+                            {info?.installed ? [info.version, info.path].filter(Boolean).join(' · ') : ''}
+                          </td>
+                          <td>
+                            {running ? (
+                              <span className="sys-provider-status-checking">installing… (started {formatAgo(inst!.started_at ?? nowSec, nowSec)})</span>
+                            ) : info?.installed ? (
+                              <span className="sys-provider-placeholder">—</span>
+                            ) : !inst ? (
+                              <span className="sys-provider-placeholder">no install script</span>
+                            ) : !inst.script ? (
+                              <span className="sys-provider-error" title={inst.detail}>script not found</span>
+                            ) : (
+                              <button className="sys-btn sys-btn-branch"
+                                title={`run ${inst.script} on ${label}`}
+                                onClick={() => {
+                                  if (!window.confirm(`Install ${name} on ${label}?\n\nThis runs ${inst.script} as that host's LR user. Any step needing root goes through passwordless sudo, and fails if that isn't available.`)) return
+                                  setOpenLog(key)
+                                  onInstall(h.hostId, name)
+                                }}>
+                                install
+                              </button>
+                            )}
+                            {inst?.state && !running && (
+                              <span className={`agent-install-last ${inst.state === 'succeeded' ? 'sys-provider-status-ok' : 'sys-provider-error'}`}
+                                title={inst.detail}>
+                                last install {inst.state}{inst.finished_at ? ` ${formatAgo(inst.finished_at, nowSec)}` : ''}
+                                {inst.detail ? ` — ${inst.detail}` : ''}
+                              </span>
+                            )}
+                            {(inst?.log?.length ?? 0) > 0 && !running && (
+                              <button className="sys-btn sys-btn-neutral agent-install-logbtn" onClick={() => setOpenLog(logOpen ? null : key)}>
+                                {logOpen ? 'hide log' : 'log'}
+                              </button>
+                            )}
+                          </td>
+                        </tr>,
+                        logOpen && inst && (
+                          <tr key={`${name}-log`}>
+                            <td colSpan={4}>
+                              <div className="debug-pane-lines agent-install-log">
+                                {(inst.log ?? []).length === 0
+                                  ? <div className="debug-pane-empty">no output yet</div>
+                                  : inst.log!.map((line, i) => <div className="debug-pane-line" key={i}>{line}</div>)}
+                              </div>
+                            </td>
+                          </tr>
+                        ),
+                      ]
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const PLUGINS_DEBUG_MODES = ['state', 'manifests'] as const
+type PluginsDebugMode = typeof PLUGINS_DEBUG_MODES[number]
+
+const DEBUG_TABS = ['network', 'logs', 'stateboard', 'plugins', 'install'] as const
+type DebugTab = typeof DEBUG_TABS[number]
+
+// DebugView is the system tab's "debug" button destination: network capture
+// (see useNetworkLog, app-wide and identical in both perspectives since it's
+// this one frontend's own request log -- merged chronologically with
+// chainLines, the backend-to-backend SM<->LR<->AC calls the caller already
+// formatted via formatChainCallLine, same reasoning as logLines below),
+// logs (logLines, already formatted by the caller -- see
+// formatDebugLogLine -- since per-host and global differ in whether a host
+// tag is needed), and stateboard (stateLines, formatted the same way via
+// formatStateboardLine -- condocs/initialDistributedSessionsImpls/
+// Step2Prompt.md Revision E), and plugins (pluginLines, see
+// formatPluginsLines -- condocs/privateRepoOpsImpls/Step3Prompt.md
+// Revision A -- or, in its "manifests" mode, pluginHosts' manifests: see
+// PluginManifestViewer, Revision B), and install (installHosts' agents, with
+// an entrypoint to the install script for a missing one: see
+// AgentInstallPane).
+function DebugView({
+  logLines, chainLines, stateLines, pluginLines, pluginHosts, installHosts, onInstallAgent, onInspectAgents, uploadHostId, uploadFiles,
+}: {
+  logLines: string[]
+  chainLines: TimedLine[]
+  stateLines: string[]
+  pluginLines: string[]
+  pluginHosts: PluginsHostState[]
+  installHosts: InstallHostState[]
+  onInstallAgent: (hostId: string, agent: string) => void
+  onInspectAgents: (hostId: string) => void
+  uploadHostId: string | null
+  uploadFiles: (hostId: string, files: File[]) => void
+}) {
+  const [tab, setTab] = useState<DebugTab>('network')
+  const [pluginsMode, setPluginsMode] = useState<PluginsDebugMode>('state')
+  const networkEntries = useNetworkLog()
+
+  const networkLines = useMemo(() => {
+    const fetchLines: TimedLine[] = networkEntries.map(e => ({ ts: e.time, line: formatNetworkLogLine(e) }))
+    return [...fetchLines, ...chainLines].sort((a, b) => a.ts - b.ts).map(l => l.line)
+  }, [networkEntries, chainLines])
+
+  return (
+    <div className="debug-view">
+      <div className="tab-bar tab-bar-nested">
+        <div className="tabs">
+          {DEBUG_TABS.map(t => (
+            <button key={t} className={`tab${tab === t ? ' tab-active' : ''}`} onClick={() => setTab(t)}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {tab === 'network' ? (
+        <DebugLogPane
+          lines={networkLines}
+          toFileName={`network-debug-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no network activity captured yet"
+        />
+      ) : tab === 'logs' ? (
+        <DebugLogPane
+          lines={logLines}
+          toFileName={`logs-debug-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no LR-managed sub-app log lines captured yet"
+        />
+      ) : tab === 'stateboard' ? (
+        <DebugLogPane
+          lines={stateLines}
+          toFileName={`stateboard-${Date.now()}.log`}
+          uploadHostId={uploadHostId}
+          uploadFiles={uploadFiles}
+          emptyMessage="no stateboard entries reported yet"
+        />
+      ) : tab === 'install' ? (
+        <AgentInstallPane hosts={installHosts} onInstall={onInstallAgent} onInspect={onInspectAgents} />
+      ) : (
+        <>
+          <div className="tab-bar tab-bar-nested">
+            <div className="tabs">
+              {PLUGINS_DEBUG_MODES.map(m => (
+                <button key={m} className={`tab${pluginsMode === m ? ' tab-active' : ''}`} onClick={() => setPluginsMode(m)}>
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+          {pluginsMode === 'state' ? (
+            <DebugLogPane
+              lines={pluginLines}
+              toFileName={`plugins-${Date.now()}.log`}
+              uploadHostId={uploadHostId}
+              uploadFiles={uploadFiles}
+              emptyMessage="no plug-in state reported yet"
+            />
+          ) : (
+            <PluginManifestViewer hosts={pluginHosts} />
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// DebugToggleButton sits at the right edge of the system tab's own tab bar
+// (both per-host and global -- Step1SubstepBPrompt.md Revision E: "a 'debug'
+// button in the system tab in the top right corner"), only rendered while
+// that tab is active.
+function DebugToggleButton({ open, onClick }: { open: boolean; onClick: () => void }) {
+  return (
+    <div className="tab-bar-right">
+      <button className={`sys-btn sys-btn-neutral${open ? ' debug-toggle-btn-active' : ''}`} onClick={onClick}>
+        debug
+      </button>
+    </div>
+  )
+}
+
+// isLRTab narrows an app name (e.g. a ProcInfo.name) to one of a host
+// view's tabs -- every managed sub-application has a same-named tab.
+function isLRTab(name: string): name is LRTab {
+  return (LR_TABS as readonly string[]).includes(name)
+}
+
+/* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) ---- */
+
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub', claude: 'Claude' }
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+function connectionStatusLabel(status: string): string {
+  return status === 'ok' ? 'connected' : status === 'failed' ? 'not working' : 'checking…'
+}
+
+// connectionTitle is a provider icon's hover text: who the credentials
+// authenticate as, or why they don't.
+function connectionTitle(c: ConnectionInfo): string {
+  const label = providerLabel(c.provider)
+  if (c.status === 'ok') return `${label} — ${c.principal ?? 'connected'}`
+  if (c.status === 'failed') return `${label} — credentials not working${c.detail ? `: ${c.detail}` : ''}`
+  return `${label} — checking credentials…`
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  if (provider === 'github') {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    )
+  }
+  if (provider === 'aws') {
+    return (
+      <svg viewBox="0 0 28 16" width="24" height="14" aria-hidden="true">
+        <text x="14" y="9" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor" fontFamily="sans-serif">aws</text>
+        <path d="M5 11.5 Q14 16 23 11.5" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M20.6 10.6 L23.2 11.4 L22.3 13.8" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return <span>{providerLabel(provider)}</span>
+}
+
+// AgentIcon is an agent tile's image (Step1SubstepEPrompt.md Revision E),
+// drawn like ProviderIcon: a small inline mark per ambiguous-agent agent
+// (ambiguous-agent/main.go's availableAgents), tinted after that agent's own
+// color there, falling back to the agent's name for one it doesn't know.
+function AgentIcon({ agent }: { agent: string }) {
+  switch (agent) {
+    case 'claude':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g stroke="#d97757" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M8 1.5V14.5M1.5 8H14.5M3.4 3.4L12.6 12.6M12.6 3.4L3.4 12.6" />
+          </g>
+        </svg>
+      )
+    case 'gemini':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M8 0C8 4.4 11.6 8 16 8C11.6 8 8 11.6 8 16C8 11.6 4.4 8 0 8C4.4 8 8 4.4 8 0Z" fill="#4e8cf7" />
+        </svg>
+      )
+    case 'codex':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="#a78bfa" strokeWidth="1.3">
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" />
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" transform="rotate(60 8 8)" />
+            <ellipse cx="8" cy="8" rx="6.5" ry="2.6" transform="rotate(120 8 8)" />
+          </g>
+        </svg>
+      )
+    case 'copilot':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="#4fb3e8" strokeWidth="1.3" strokeLinejoin="round">
+            <path d="M2.5 7.5C2.5 4.5 4.8 2.5 8 2.5S13.5 4.5 13.5 7.5V11C13.5 12.4 11.2 13.5 8 13.5S2.5 12.4 2.5 11Z" />
+            <rect x="4.2" y="6" width="3" height="2.6" rx="1" />
+            <rect x="8.8" y="6" width="3" height="2.6" rx="1" />
+          </g>
+        </svg>
+      )
+    case 'opencode':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <rect x="2" y="2" width="12" height="12" fill="none" stroke="#4caf50" strokeWidth="1.5" />
+          <rect x="5.5" y="5.5" width="5" height="5" fill="#4caf50" />
+        </svg>
+      )
+    case 'pi':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M2 2H11V8H8V5H2Z" fill="#f09082" />
+          <path d="M2 5H5V8H8V11H5V14H2Z" fill="#4d9abf" />
+          <path d="M11 8H14V14H11Z" fill="#f1be58" />
+        </svg>
+      )
+    case 'grok':
+      return (
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M11.5 4.2A5 5 0 1 0 12.6 10" />
+            <path d="M14 1.5L5 14.5" />
+          </g>
+        </svg>
+      )
+  }
+  return <span>{agent}</span>
+}
+
+// CONNECTABLE_PROVIDERS are the providers the "connect" control offers
+// (Step1SubstepEPrompt.md) -- local-representative/connectivity.go's
+// connectableProviders, with how each is connected.
+interface ConnectOption { provider: string, method: string, placeholder: string }
+
+const CONNECTABLE_PROVIDERS: ConnectOption[] = [
+  { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
+]
+
+// CONNECTABLE_AGENTS are the agents the "agents & models" section's
+// "connect" offers (Revision D) -- local-representative/agents.go's
+// agentAuthEnv. They travel as a provider named after the agent.
+const CONNECTABLE_AGENTS: ConnectOption[] = [
+  { provider: 'claude', method: 'OAuth token', placeholder: 'CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)' },
+]
+
+// DEV_AGENTS are ambiguous-agent's test agents: hidden in "agents & models"
+// unless its "show-dev" toggle is on, and never drawn as topology tiles.
+const DEV_AGENTS: ReadonlySet<string> = new Set(['clod'])
+
+// ProviderConnectForm is the "connect" control: a provider (or agent)
+// picker and a masked credential field. Whitespace is rejected here because
+// the credential travels as one word of a "__system:connect" command.
+function ProviderConnectForm({ options = CONNECTABLE_PROVIDERS, onConnect, onCancel }: {
+  options?: ConnectOption[]
+  onConnect: (provider: string, token: string) => void
+  onCancel: () => void
+}) {
+  const [provider, setProvider] = useState(options[0].provider)
+  const [token, setToken] = useState('')
+  const spec = options.find(p => p.provider === provider) ?? options[0]
+  const trimmed = token.trim()
+  const invalid = trimmed === '' || /\s/.test(trimmed)
+  const submit = () => {
+    if (invalid) return
+    onConnect(provider, trimmed)
+    setToken('')
+  }
+  return (
+    <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
+      <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
+        {options.map(p => (
+          <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
+        ))}
+      </select>
+      <input
+        className="sys-provider-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={spec.placeholder}
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        autoFocus
+      />
+      <button type="submit" className="sys-btn sys-btn-branch" disabled={invalid}
+        title={invalid && trimmed !== '' ? 'a token can\'t contain whitespace' : `use this ${spec.method} for ${providerLabel(provider)} on this host`}>
+        connect
+      </button>
+      <button type="button" className="sys-btn sys-btn-neutral" onClick={onCancel}>cancel</button>
+    </form>
+  )
+}
+
+// ProvidersPanel is the per-host system tab's "providers" section: always
+// shown, with one sub-section per provider that host holds credentials for
+// -- see local-representative/connectivity.go -- plus the "connect" control
+// (Step1SubstepEPrompt.md). A provider connected through it (source
+// "connected") takes precedence over the host's environment credentials
+// and gets a "disconnect", which falls back to them.
+function ProvidersPanel({ connections, onConnect, onDisconnect }: {
+  connections?: ConnectionInfo[] | null
+  onConnect: (provider: string, token: string) => void
+  onDisconnect: (provider: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  return (
+    <div className="sys-providers">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">providers</span>
+        {!connecting && connections != null && (
+          <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+            title="give this host credentials for a provider (GitHub PAT)">
+            connect
+          </button>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          onConnect={(provider, token) => { onConnect(provider, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {connections == null ? (
+        <div className="sys-providers-none">this host's LR doesn't report provider connections</div>
+      ) : connections.length === 0 ? (
+        <div className="sys-providers-none">no provider credentials present</div>
+      ) : connections.map(c => (
+        <div key={c.provider} className={`sys-provider sys-provider-${c.status}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
+            <span className="sys-provider-name">{providerLabel(c.provider)}</span>
+            <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+            {c.source === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(c.provider)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          <div className="sys-readout-row">
+            <span className="sys-readout-label">principal</span>
+            <span className="sys-readout-value">
+              {c.principal || <span className="sys-readout-placeholder">{c.status === 'checking' ? 'not yet verified' : 'unknown'}</span>}
+            </span>
+          </div>
+          {c.source && (
+            <div className="sys-readout-row">
+              <span className="sys-readout-label">credentials from</span>
+              <span className="sys-readout-value">{c.source}</span>
+            </div>
+          )}
+          {c.status === 'failed' && c.detail && (
+            <div className="sys-readout-row">
+              <span className="sys-readout-label">error</span>
+              <span className="sys-readout-value sys-provider-error">{c.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// AgentsPanel is the per-host system tab's "agents & models" section, below
+// "providers" (Step1SubstepEPrompt.md Revision B): the AI agents that host
+// can run and their models, as its ambiguous-agent layer reports them
+// (ambiguous-agent --inspect, run by its LR -- see
+// local-representative/agents.go). Installed agents get a card each; the
+// rest are listed on one line. Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
+//
+// Revision D adds a "connect" control for CONNECTABLE_AGENTS (Claude's
+// CLAUDE_CODE_OAUTH_TOKEN, which that host's LR passes to every app it
+// launches afterwards) and a "show-dev" toggle, off by default, that the
+// DEV_AGENTS (clod) are hidden behind.
+function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
+  agents?: AgentsState | null
+  nowSec: number
+  onInspect: () => void
+  onConnect: (agent: string, token: string) => void
+  onDisconnect: (agent: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  const [showDev, setShowDev] = useState(false)
+  const hasDev = agents?.agents.some(a => DEV_AGENTS.has(a.name)) ?? false
+  const shown = agents?.agents.filter(a => showDev || !DEV_AGENTS.has(a.name)) ?? []
+  const installed = shown.filter(a => a.installed)
+  const missing = shown.filter(a => !a.installed)
+  const checking = agents?.status === 'checking'
+  return (
+    <div className="sys-providers sys-agents">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">agents &amp; models</span>
+        {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+        {agents != null && (
+          <span className="sys-agents-controls">
+            {hasDev && (
+              <label className="sys-agents-showdev" title="also list ambiguous-agent's test agents (clod)">
+                <input type="checkbox" checked={showDev} onChange={e => setShowDev(e.target.checked)} />
+                show-dev
+              </label>
+            )}
+            {!connecting && (
+              <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+                title="give an agent on this host credentials (Claude OAuth token)">
+                connect
+              </button>
+            )}
+            <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+              title="ask this host's ambiguous-agent again which agents and models it has">
+              {checking ? 'inspecting…' : 're-inspect'}
+            </button>
+          </span>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          options={CONNECTABLE_AGENTS}
+          onConnect={(agent, token) => { onConnect(agent, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {agents?.status === 'failed' && (
+        <div className="sys-provider-row">
+          <span className="sys-provider-label">error</span>
+          <span className="sys-provider-value sys-provider-error">{agents.detail || 'inspection failed'}</span>
+        </div>
+      )}
+      {agents == null ? (
+        <div className="sys-providers-none">this host's LR doesn't report agents</div>
+      ) : installed.length === 0 && agents.status !== 'checking' ? (
+        <div className="sys-providers-none">no agents available</div>
+      ) : installed.map(a => (
+        <div key={a.name} className={`sys-provider ${a.detail ? 'sys-provider-failed' : ''}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-name">{a.name}</span>
+            {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
+            <span className="sys-provider-status sys-provider-status-ok">available</span>
+            {a.auth === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(a.name)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          {CONNECTABLE_AGENTS.some(c => c.provider === a.name) && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">auth</span>
+              <span className="sys-provider-value">
+                {a.auth === 'connected' ? 'connected — passed to apps launched from now on'
+                  : a.auth ? `${a.auth} (LR's environment)`
+                  : <span className="sys-provider-placeholder">none passed — relies on the agent's own login, if any</span>}
+              </span>
+            </div>
+          )}
+          {a.version && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">version</span>
+              <span className="sys-provider-value">{a.version}</span>
+            </div>
+          )}
+          {a.path && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">path</span>
+              <span className="sys-provider-value">{a.path}</span>
+            </div>
+          )}
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">models</span>
+            {a.models && a.models.length > 0 ? (
+              <span className="sys-agent-models">
+                {a.models.map(m => (
+                  <span key={m} className="sys-agent-model">{m}{m === a.default_model ? ' (default)' : ''}</span>
+                ))}
+              </span>
+            ) : (
+              <span className="sys-provider-value">
+                <span className="sys-provider-placeholder">
+                  {a.model_selection ? 'none listed' : 'no model selection (uses its built-in default)'}
+                </span>
+              </span>
+            )}
+          </div>
+          {a.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{a.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="sys-agents-missing">not installed: {missing.map(a => a.name).join(', ')}</div>
+      )}
+    </div>
+  )
+}
+
+// LaunchPanel fills a sub-app's per-host tab while that app isn't up on the
+// host (dTT-IntegrationImpls Step 1, Revision O): a launch button in the
+// middle of the tab instead of only a pointer to the system tab. It launches
+// the same way the system tab's button does, and is held off the same way --
+// while an instance is already running (it just hasn't connected yet) or an
+// app it excludes is running. managed is null until the host's first
+// system-state. Mirrors local-representative's.
+function LaunchPanel({ name, managed, onLaunch }: {
+  name: string
+  managed: ProcInfo[] | null
+  onLaunch: (name: string) => void
+}) {
+  const running = (app: string) => (managed ?? []).some(p => p.name === app && p.status === 'running')
+  const spec = LAUNCHABLE_APPS.find(a => a.name === name)
+  const blocker = spec?.excludes?.find(running)
+  const starting = running(name)
+  // Set on click and cleared once this app's processes change (it started,
+  // or failed to), so a double click doesn't launch twice.
+  const [requested, setRequested] = useState(false)
+  const procKey = (managed ?? []).filter(p => p.name === name).map(p => `${p.instance_id}:${p.status}`).join(',')
+  useEffect(() => setRequested(false), [name, procKey])
+
+  return (
+    <div className="service-empty service-empty-embed launch-panel">
+      <div className="launch-panel-inner">
+        <div className="launch-panel-msg">
+          {starting ? `${name} is running on this host but hasn't connected yet…` : `${name} is not running on this host`}
+        </div>
+        {spec && !starting && (
+          <button
+            className="sys-btn sys-btn-launch launch-panel-btn"
+            disabled={managed === null || requested || blocker !== undefined}
+            onClick={() => { setRequested(true); onLaunch(name) }}
+          >
+            {requested ? `launching ${name}…` : `launch ${name}`}
+          </button>
+        )}
+        {blocker !== undefined && !starting && (
+          <div className="launch-panel-note">can't run alongside {blocker} — terminate it from the system tab first</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SystemPanel({
+  hostId, state, active, fcState, fcInstances, repoState, onLaunch, onTerminate, onRestart, onRestartManaged, onRebuild, onSetAutoRebuild, onSwitchBranch,
+  onWatchExternal, onBuildExternal, onShowPluginRegistration, onSetAutoUpdate,
+  onConnectProvider, onDisconnectProvider, onInspectAgents, onOpenTab, plugins, onOpenPlugin,
+}: {
+  hostId: string
+  state: LRSystemStateMsg | undefined
+  active: boolean
+  fcState: string // an older LR's single FC state -- see HostClientState
+  fcInstances: FCInstanceInfo[]
+  repoState: LRRepoStateMsg | undefined
+  onLaunch: (hostId: string, name: string) => void
+  onTerminate: (hostId: string, id: string) => void
+  onRestart: (hostId: string) => void
+  onRestartManaged: (hostId: string, id: string) => void
+  onRebuild: (hostId: string) => void
+  onSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  onSwitchBranch: (hostId: string, branch: string) => void
+  onWatchExternal: (hostId: string, path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  onBuildExternal: (hostId: string, path: string) => void
+  onShowPluginRegistration: (appId: string) => void
+  onSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  onConnectProvider: (hostId: string, provider: string, token: string) => void
+  onDisconnectProvider: (hostId: string, provider: string) => void
+  onInspectAgents: (hostId: string) => void
+  onOpenTab: (tab: LRTab) => void
+  plugins: PluginsState | undefined // this host's relayed plug-in registry
+  onOpenPlugin: (appId: string) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  // Which process row's drill-down is open, keyed by procRowKey -- cleared
+  // whenever that row disappears (e.g. a terminated instance is dismissed)
+  // rather than left pointing at a stale selection.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const troughEntries = useTrough(repoState?.last_error)
+  // Drilled into "agent operations"' full-page view (its "↑ system" leaves).
+  const [opsPage, setOpsPage] = useState(false)
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (!active) {
+    return <div className="service-empty">local-representative on this host is not connected</div>
+  }
+  if (!state) {
+    return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+  if (opsPage) {
+    return <div className="sys-panel"><AgentOps ops={state.agent_ops} nowSec={nowSec} onUp={() => setOpsPage(false)} /></div>
+  }
+
+  const managed = state.managed ?? []
+  const runningCount = (name: string) =>
+    managed.filter(p => p.name === name && p.status === 'running').length
+
+  // A managed app's row opens its own tab on double-click: a first-party
+  // sub-app's host tab, or an external plug-in's tab under plugins (a
+  // plug-in's process is named after its app id -- local-representative's
+  // procman.go launch specs and extlaunch.go's devPluginSpec).
+  const isPluginApp = (name: string) =>
+    (plugins?.plugins ?? []).some(p => p.app_id === name && isExternalPlugin(p, plugins))
+    || (repoState?.externals ?? []).some(e => e.plugin && e.app_id === name)
+  const openRow = (name: string) =>
+    isLRTab(name) ? () => onOpenTab(name as LRTab)
+    : isPluginApp(name) ? () => onOpenPlugin(name)
+    : undefined
+
+  const fcRunning = runningCount('federation-command') > 0
+  const fcControl = (st: string) =>
+    st === 'remote-control' ? 'remote'
+    : st === 'local-control' ? 'local'
+    : 'not connected'
+  // One line per connected FC instance (see FCInstancePicker); a single line
+  // for an older LR, or while launched instances have yet to connect.
+  const fcRows = fcInstances.length > 0
+    ? fcInstances.map(inst => ({ key: inst.key, label: `federation-command ${inst.label}`, state: inst.state }))
+    : [{ key: '', label: 'federation-command', state: fcState }]
+
+  const selectedProc = selectedKey === null
+    ? undefined
+    : [state.self, ...managed].find(p => procRowKey(p) === selectedKey)
+
+  return (
+    <div className="sys-panel">
+      <RepoWatchPanel
+        repoState={repoState}
+        onRebuild={() => onRebuild(hostId)}
+        onSetAutoRebuild={enabled => onSetAutoRebuild(hostId, enabled)}
+        onSwitchBranch={branch => onSwitchBranch(hostId, branch)}
+        onWatchExternal={(path, watch, plugin, appId) => onWatchExternal(hostId, path, watch, plugin, appId)}
+        onBuildExternal={path => onBuildExternal(hostId, path)}
+        onShowPluginRegistration={onShowPluginRegistration}
+        managed={managed}
+        onLaunch={name => onLaunch(hostId, name)}
+      />
+      {fcRunning && fcRows.map(row => (
+        <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
+          {row.label} control: <strong>{fcControl(row.state)}</strong>
+          {fcControl(row.state) !== 'remote' && ' — expected remote in a machine-driven chain'}
+        </div>
+      ))}
+      <div className="sys-table">
+        <div className="sys-row sys-row-head">
+          <span className="sys-col sys-col-name">process</span>
+          <span className="sys-col sys-col-pid">pid</span>
+          <span className="sys-col sys-col-status">status</span>
+          <span className="sys-col sys-col-detail">uptime</span>
+          <span className="sys-col sys-col-actions" />
+        </div>
+        <SystemProcRow
+          proc={state.self}
+          nowSec={nowSec}
+          selected={selectedKey === procRowKey(state.self)}
+          onSelect={() => setSelectedKey(k => k === procRowKey(state.self) ? null : procRowKey(state.self))}
+          onRestart={() => onRestart(hostId)}
+          onSetAutoUpdate={enabled => onSetAutoUpdate(hostId, enabled)}
+        />
+        {managed.map(p => (
+          <SystemProcRow
+            key={p.instance_id}
+            proc={p}
+            nowSec={nowSec}
+            selected={selectedKey === procRowKey(p)}
+            onSelect={() => setSelectedKey(k => k === procRowKey(p) ? null : procRowKey(p))}
+            onTerminate={id => onTerminate(hostId, id)}
+            onRestartManaged={id => onRestartManaged(hostId, id)}
+            onOpen={openRow(p.name)}
+          />
+        ))}
+        {managed.length === 0 && (
+          <div className="sys-row sys-row-none">no managed applications</div>
+        )}
+      </div>
+      {selectedProc && <SystemProcDetails proc={selectedProc} nowSec={nowSec} />}
+
+      <div className="sys-launch">
+        <span className="sys-launch-label">launch</span>
+        {LAUNCHABLE_APPS.map(({ name, multi, excludes }) => {
+          const n = runningCount(name)
+          const blocker = excludes?.find(other => runningCount(other) > 0)
+          return (
+            <button
+              key={name}
+              className="sys-btn sys-btn-launch"
+              disabled={(!multi && n > 0) || blocker !== undefined}
+              title={blocker !== undefined ? `can't run alongside ${blocker} — terminate it first` : undefined}
+              onClick={() => onLaunch(hostId, name)}
+            >
+              {multi
+                ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
+                : (n > 0 ? `${name} (running)` : blocker !== undefined ? `${name} (${blocker} running)` : name)}
+            </button>
+          )
+        })}
+      </div>
+      <ProvidersPanel
+        connections={state.connections}
+        onConnect={(provider, token) => onConnectProvider(hostId, provider, token)}
+        onDisconnect={provider => onDisconnectProvider(hostId, provider)}
+      />
+      <AgentsPanel
+        agents={state.agents}
+        nowSec={nowSec}
+        onInspect={() => onInspectAgents(hostId)}
+        onConnect={(agent, token) => onConnectProvider(hostId, agent, token)}
+        onDisconnect={agent => onDisconnectProvider(hostId, agent)}
+      />
+      <AgentOps ops={state.agent_ops} nowSec={nowSec} onOpen={() => setOpsPage(true)} />
+      <Trough entries={troughEntries} />
+    </div>
+  )
+}
+
+/* ---- Files panel (upload relayed through AC -- see docs/DistributedExchange.md) ---- */
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+function formatAgo(tsSec: number, nowSec: number): string {
+  const secs = Math.max(0, nowSec - tsSec)
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+}
+
+function formatCountdown(expiresAtSec: number, nowSec: number): string {
+  const secs = expiresAtSec - nowSec
+  if (secs <= 0) return 'expiring…'
+  if (secs < 60) return `${secs}s left`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m left`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`
+}
+
+// FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
+// the files tab supports: text, image, archive (a zippered page -- see
+// local-representative/files.go's archiveExtensions), and a catch-all for
+// everything else. Mirrors local-representative's own copy. Each renders in `currentColor`, so FileIcon's state-driven CSS class is
+// what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
+const FILE_ICON_PATH: Record<string, JSX.Element> = {
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h9l5 5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M14 2v6h6" strokeLinecap="round" />
+      <path d="M8 13h8M8 17h8M8 9h3" strokeLinecap="round" />
+    </svg>
+  ),
+  image: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <circle cx="8.5" cy="9.5" r="1.5" />
+      <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  archive: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M11 3h1M12 5h1M11 7h1M12 9h1M11 11h1" strokeLinecap="round" />
+      <rect x="10.25" y="13" width="3.5" height="5" rx="0.75" />
+      <path d="M12 15.5v0.5" strokeLinecap="round" />
+    </svg>
+  ),
+  other: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M12 2 3 7v10l9 5 9-5V7z" />
+      <path d="M3 7l9 5 9-5M12 12v10" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+// SEQUENCE_ICON_PATH replaces FILE_ICON_PATH's for a YAML file that
+// validates for import as a sequence (FileInfo.sequence -- see
+// local-representative/seqfiles.go): a robot's head for a robot (IANAR
+// sequence-v2) sequence, a flow of three linked steps for a control-tab
+// sequence. Mirrors local-representative's own copy.
+const SEQUENCE_ICON_PATH: Record<string, JSX.Element> = {
+  robot: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="4" y="7" width="16" height="12" rx="2" />
+      <circle cx="9" cy="12" r="1.5" />
+      <circle cx="15" cy="12" r="1.5" />
+      <path d="M9 16h6M12 7V4M2 11v4M22 11v4" strokeLinecap="round" />
+      <circle cx="12" cy="3" r="1" />
+    </svg>
+  ),
+  control: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="2.5" width="8" height="5" rx="1" />
+      <rect x="13" y="9.5" width="8" height="5" rx="1" />
+      <rect x="3" y="16.5" width="8" height="5" rx="1" />
+      <path d="M11 5h4v4.5M13 12H7v4.5" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+// FILE_STATE_CLASS drives the icon color the file-details dialog's
+// hold/persist actions describe: orange while short-term cached, yellow once
+// held, green once persisted to the host-store.
+const FILE_STATE_CLASS: Record<string, string> = {
+  cached: 'file-state-cached',
+  held: 'file-state-held',
+  persisted: 'file-state-persisted',
+}
+
+function FileIcon({ kind, state, sequence }: { kind: string; state?: string; sequence?: string }) {
+  const stateClass = FILE_STATE_CLASS[state ?? ''] ?? FILE_STATE_CLASS.cached
+  const seqIcon = sequence ? SEQUENCE_ICON_PATH[sequence] : undefined
+  return (
+    <span className={`file-icon file-icon-${seqIcon ? `seq-${sequence}` : kind} ${stateClass}`}>
+      {seqIcon ?? FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
+    </span>
+  )
+}
+
+// fileTypeLabel is the file-details "type" row: the kind, or which sequence
+// a sequence YAML imports as.
+function fileTypeLabel(file: FileInfo): string {
+  return file.sequence && SEQUENCE_ICON_PATH[file.sequence] ? `${file.sequence} sequence` : file.kind
+}
+
+// fileRawUrl/fileDownloadUrl address a file's bytes through AC's existing
+// /host/<id>/* transparent reverse proxy — local-representative's
+// raw-serving route (GET /api/files/<id>) isn't gated on the proxied-request
+// header the way uploads are, so viewing/downloading works the same here as
+// connected directly to that LR. Upload (a POST to the same /api/files path)
+// takes a different route, AC's dedicated upload-relay handler — see
+// docs/DistributedExchange.md. The file-details dialog's hold/persist/delete
+// actions (fileHoldUrl/filePersistUrl/fileDeleteUrl below) aren't gated
+// either -- see local-representative/files.go's relayedUploadHeader comment
+// for why that's a deliberate difference from upload -- so they also go
+// through this same transparent proxy unmodified.
+function fileRawUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
+}
+
+function fileDownloadUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}?download=1`
+}
+
+function fileHoldUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/hold`
+}
+
+function filePersistUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/persist`
+}
+
+// fileHighlightUrl backs the file-details dialog's "highlight" toggle,
+// through the same transparent proxy as hold/persist/delete above -- see
+// local-representative/files.go's handleFileHighlight.
+function fileHighlightUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/highlight`
+}
+
+function fileDeleteUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}`
+}
+
+// fileImportUrl backs the file-details dialog's integrations ("import" and,
+// with run, "import and run"), through the same transparent proxy as
+// hold/persist/delete above -- see local-representative/fileintegrations.go.
+function fileImportUrl(hostId: string, id: string, run: boolean): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/import${run ? '?run=1' : ''}`
+}
+
+// markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F),
+// through the same transparent proxy as hold/persist/highlight above -- see
+// local-representative/files.go's handleMarkupGet and friends.
+function markupUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup`
+}
+
+function markupCommitUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/commit`
+}
+
+function markupCancelUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/cancel`
+}
+
+function markupCopyUrl(hostId: string, id: string): string {
+  return `/host/${encodeURIComponent(hostId)}/api/files/${encodeURIComponent(id)}/markup/copy`
+}
+
+// isReservedFileName mirrors local-representative/files.go's saveUploadedFile
+// reserved-prefix checks -- a friendlier client-side echo of a rejection the
+// server would otherwise give silently (a rejected file is just dropped from
+// the response).
+function isReservedFileName(name: string): boolean {
+  return name.startsWith('.manifest_') || name.startsWith('.markup_')
+}
+
+const RESERVED_NAME_ERROR = "that name is reserved for the host-cache's own bookkeeping files"
+
+// NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
+// Revision J: "add a 'new text file' button to the files tab ... accepts the
+// name and text (with optional voice input with mic icon when available)").
+// There's no dedicated "create file" API on the server -- this reuses the
+// very same multipart upload endpoint every drag-and-drop/browse upload
+// already goes through (relayed via handleFileUploadRelay to the target
+// host's own handleFileUpload, in files.go) by synthesizing a File from the
+// typed name and body client-side, the same trick the debug-log panel's
+// "save to file" button already uses. Mirrors local-representative's own
+// copy of this dialog.
+function NewTextFileDialog({
+  onCreate,
+  onClose,
+}: {
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState('')
+  const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([body], finalName, { type: 'text/plain' })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">new text file</span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          className="new-file-name-input"
+          placeholder="file name (e.g. notes.txt)"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          autoFocus
+        />
+        <div className="field-with-mic">
+          <textarea
+            className="new-file-body-input"
+            placeholder="file contents…"
+            value={body}
+            onChange={e => setBody(e.target.value)}
+            rows={10}
+          />
+          <MicButton onTranscript={text => setBody(prev => appendTranscript(prev, text))} />
+        </div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ClipboardContent is what the files tab's "new file from clipboard" button
+// (Step4SubstepDPrompt.md Revisions D/E, brought over from
+// local-representative's files tab in Revision G) found in the copy buffer:
+// an image or plain text, already as the Blob the upload will carry, plus the
+// extension its default name gets -- for text, from detectTextFormat. This
+// whole block, down to ClipboardFileDialog, mirrors local-representative's
+// own copy.
+interface ClipboardContent {
+  kind: 'image' | 'text'
+  blob: Blob
+  ext: string
+  text?: string // kind 'text' only -- shown as the dialog's preview
+  format?: string // kind 'text' only -- the detected format's label, e.g. "JSON"
+}
+
+// CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
+// preference order. Browsers' async clipboard API only ever hands back
+// image/png (whatever was copied gets re-encoded), but a paste event can
+// carry the others when a site or the OS puts them there as-is.
+const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+}
+
+// CLIPBOARD_POLL_MS is how often useClipboardState rechecks the copy buffer
+// while the page is focused -- there's no "clipboard changed" event.
+const CLIPBOARD_POLL_MS = 3000
+
+function textClipboard(text: string): ClipboardContent {
+  const f = detectTextFormat(text)
+  return { kind: 'text', blob: new Blob([text], { type: f.mime }), ext: f.ext, text, format: f.label }
+}
+
+// clipboardSupported says whether the page may read the copy buffer itself
+// at all -- the async clipboard API exists only in a secure context (https
+// or localhost), so over plain http only a Ctrl+V paste event can get at it.
+function clipboardSupported(): boolean {
+  return !!(navigator.clipboard?.read || navigator.clipboard?.readText)
+}
+
+// readClipboard reads the copy buffer through the async clipboard API: the
+// first image item wins, then plain text. null means it's empty (or holds
+// only things we don't take); it throws when the read isn't allowed.
+async function readClipboard(): Promise<ClipboardContent | null> {
+  const cb = navigator.clipboard
+  if (cb?.read) {
+    const items = await cb.read()
+    for (const item of items) {
+      const type = Object.keys(CLIPBOARD_IMAGE_EXT).find(t => item.types.includes(t))
+      if (type) return { kind: 'image', blob: await item.getType(type), ext: CLIPBOARD_IMAGE_EXT[type] }
+    }
+    for (const item of items) {
+      if (!item.types.includes('text/plain')) continue
+      const text = await (await item.getType('text/plain')).text()
+      if (text) return textClipboard(text)
+    }
+    return null
+  }
+  if (cb?.readText) {
+    const text = await cb.readText()
+    return text ? textClipboard(text) : null
+  }
+  throw new Error('clipboard API unavailable')
+}
+
+// clipboardFromPaste is readClipboard's counterpart for a paste event's
+// DataTransfer -- no permission needed, so it works even over plain http.
+function clipboardFromPaste(data: DataTransfer): ClipboardContent | null {
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !CLIPBOARD_IMAGE_EXT[item.type]) continue
+    const f = item.getAsFile()
+    if (f) return { kind: 'image', blob: f, ext: CLIPBOARD_IMAGE_EXT[item.type] }
+  }
+  const text = data.getData('text/plain')
+  return text ? textClipboard(text) : null
+}
+
+// ClipboardState is what the "new file from clipboard" button knows about
+// the copy buffer: 'unknown' leaves it enabled (clicking it asks the browser),
+// 'empty' disables it, 'has' enables it.
+type ClipboardState = 'unknown' | 'empty' | 'has'
+
+// useClipboardState watches the copy buffer, but only once the browser has
+// already granted clipboard-read -- without that grant every probe would pop
+// a permission prompt or "Paste" bubble, so the state just stays 'unknown'.
+// The probe only lists the item types; it never pulls the bytes.
+function useClipboardState(): ClipboardState {
+  const [state, setState] = useState<ClipboardState>('unknown')
+  useEffect(() => {
+    if (!navigator.clipboard?.read || !navigator.permissions?.query) return
+    let cancelled = false
+    let granted = false
+    let perm: PermissionStatus | null = null
+    const probe = async () => {
+      if (!granted || document.visibilityState !== 'visible' || !document.hasFocus()) return
+      try {
+        const items = await navigator.clipboard.read()
+        const has = items.some(item => item.types.some(t => t === 'text/plain' || CLIPBOARD_IMAGE_EXT[t]))
+        if (!cancelled) setState(has ? 'has' : 'empty')
+      } catch {
+        // Focus lost mid-read or access revoked -- keep the last answer.
+      }
+    }
+    const onPerm = () => {
+      granted = perm?.state === 'granted'
+      if (granted) void probe()
+      else setState('unknown')
+    }
+    // 'clipboard-read' isn't in every TS lib's PermissionName union.
+    navigator.permissions.query({ name: 'clipboard-read' } as unknown as PermissionDescriptor)
+      .then(p => {
+        if (cancelled) return
+        perm = p
+        p.addEventListener('change', onPerm)
+        onPerm()
+      })
+      .catch(() => { /* Firefox/Safari don't know the name -- stay 'unknown' */ })
+    const onWake = () => { void probe() }
+    // "copy"/"cut" fire before the copy buffer is written, hence the delay.
+    const onCopy = () => { window.setTimeout(onWake, 100) }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    document.addEventListener('copy', onCopy)
+    document.addEventListener('cut', onCopy)
+    const timer = window.setInterval(onWake, CLIPBOARD_POLL_MS)
+    return () => {
+      cancelled = true
+      perm?.removeEventListener('change', onPerm)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      document.removeEventListener('copy', onCopy)
+      document.removeEventListener('cut', onCopy)
+      window.clearInterval(timer)
+    }
+  }, [])
+  return state
+}
+
+// clipboardDefaultName is the naming dialog's starting name, e.g.
+// "clipboard-20261010-142233.png".
+function clipboardDefaultName(ext: string): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `clipboard-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+}
+
+// CLIPBOARD_TEXT_PREVIEW caps how much pasted text the naming dialog shows.
+const CLIPBOARD_TEXT_PREVIEW = 2000
+
+// ClipboardFileDialog names a file about to be created from the copy buffer.
+// It opens with the default name's stem (not its extension) selected; a name
+// typed without any extension gets the content's own one back. Like
+// NewTextFileDialog it saves through the relayed upload.
+function ClipboardFileDialog({
+  content,
+  onCreate,
+  onClose,
+}: {
+  content: ClipboardContent
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState(() => clipboardDefaultName(content.ext))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }, [])
+
+  useEffect(() => {
+    if (content.kind !== 'image') return
+    const url = URL.createObjectURL(content.blob)
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [content])
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.${content.ext}`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([content.blob], finalName, { type: content.blob.type })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  const text = content.text ?? ''
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">
+            new {content.kind === 'image' ? 'image' : 'text'} file from clipboard
+            {content.format && <span className="clip-file-format"> · detected {content.format}</span>}
+          </span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          ref={nameRef}
+          className="new-file-name-input"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !busy) void handleCreate()
+            else if (e.key === 'Escape') onClose()
+          }}
+        />
+        {content.kind === 'image' ? (
+          imageUrl && <img className="clip-file-image" src={imageUrl} alt="clipboard image" />
+        ) : (
+          <pre className="clip-file-text">
+            {text.length > CLIPBOARD_TEXT_PREVIEW
+              ? `${text.slice(0, CLIPBOARD_TEXT_PREVIEW)}\n… (${text.length - CLIPBOARD_TEXT_PREVIEW} more characters)`
+              : text}
+          </pre>
+        )}
+        <div className="clip-file-size">{formatBytes(content.blob.size)}</div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// isEditableTarget says a paste is meant for a text field, not the files tab.
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+}
+
+function FilesPanel({
+  files, active, selectedId, onSelect, onEnter, onUpload, hostApi, onHostImport,
+}: {
+  files: FileInfo[]
+  active: boolean
+  selectedId: string | null
+  onSelect: (id: string) => void
+  onEnter: (id: string) => void
+  onUpload: (files: FileList | File[]) => void
+  hostApi: string // the host's /host/<id> proxy, for the "select from host" picker
+  onHostImport: (paths: string[], folders?: string[]) => Promise<string | null> // the error, if any
+}) {
+  const [dragging, setDragging] = useState(false)
+  const [newFileOpen, setNewFileOpen] = useState(false)
+  const [hostPickOpen, setHostPickOpen] = useState(false)
+  const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
+  const [clipError, setClipError] = useState<string | null>(null)
+  const clipState = useClipboardState()
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  const fromClipboard = async () => {
+    setClipError(null)
+    if (!clipboardSupported()) {
+      setClipError("this page can't read the clipboard over plain http — press Ctrl+V (⌘V) on this tab instead")
+      return
+    }
+    try {
+      const content = await readClipboard()
+      if (content) setClipContent(content)
+      else setClipError('the clipboard has no text or image in it')
+    } catch {
+      setClipError("couldn't read the clipboard — allow clipboard access for this page, or press Ctrl+V (⌘V) on this tab")
+    }
+  }
+
+  // Ctrl+V anywhere on the tab (outside a text field) opens the same naming
+  // dialog -- the one way in over plain http, and a shortcut everywhere else.
+  useEffect(() => {
+    if (!active || newFileOpen || clipContent) return
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || !e.clipboardData) return
+      const content = clipboardFromPaste(e.clipboardData)
+      if (!content) return
+      e.preventDefault()
+      setClipError(null)
+      setClipContent(content)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [active, newFileOpen, clipContent])
+
+  if (!active) {
+    return <div className="service-empty">local-representative on this host is not connected</div>
+  }
+  return (
+    <div className="files-panel">
+      <div
+        className={`files-dropzone${dragging ? ' files-dropzone-active' : ''}`}
+        onDragOver={e => { e.preventDefault(); setDragging(true) }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => {
+          e.preventDefault()
+          setDragging(false)
+          if (e.dataTransfer.files.length > 0) onUpload(e.dataTransfer.files)
+        }}
+        onClick={() => inputRef.current?.click()}
+      >
+        <span className="files-dropzone-text">drag files here, or click to browse</span>
+        <span className="files-dropzone-hint">relayed through agent-coordinator — removed after 1 hour</span>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          className="files-dropzone-input"
+          onChange={e => {
+            if (e.target.files && e.target.files.length > 0) onUpload(e.target.files)
+            e.target.value = ''
+          }}
+        />
+      </div>
+      <div className="files-new-row">
+        <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+          + new text file
+        </button>
+        <button
+          type="button"
+          className="files-new-btn"
+          onClick={() => void fromClipboard()}
+          disabled={clipState === 'empty'}
+          title={clipState === 'empty' ? 'the clipboard is empty' : 'create a file from the text or image on the clipboard (or press Ctrl+V on this tab)'}
+        >
+          + new file from clipboard
+        </button>
+        <button
+          type="button"
+          className="files-new-btn"
+          onClick={() => setHostPickOpen(true)}
+          title="copy files that are already on this host into its files tab"
+        >
+          + select from host
+        </button>
+      </div>
+      {clipError && <div className="files-clip-error">{clipError}</div>}
+      {newFileOpen && (
+        <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {hostPickOpen && (
+        <HostFilePicker
+          api={hostApi}
+          multiple
+          title="select from host"
+          onClose={() => setHostPickOpen(false)}
+          onPick={async paths => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport(paths))
+          }}
+          onZipFolder={async dir => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport([], [dir]))
+          }}
+        />
+      )}
+      {clipContent && (
+        <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
+      )}
+      {files.length === 0 ? (
+        <div className="files-empty">no files in the host-cache</div>
+      ) : (
+        <div className="files-grid">
+          {files.map(f => (
+            <button
+              key={f.id}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}${f.marked_up ? ' files-item-markedup' : ''}`}
+              onClick={() => onSelect(f.id)}
+              onDoubleClick={() => onEnter(f.id)}
+              title={f.name}
+            >
+              <FileIcon kind={f.kind} state={f.state} sequence={f.sequence} />
+              <span className="files-item-name">{f.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FileDetailPane({
+  file, hostId, onClose, onEnter, onMarkup, onOpenTab,
+}: {
+  file: FileInfo
+  hostId: string
+  onClose: () => void
+  onEnter: (id: string) => void
+  onMarkup: (id: string) => void
+  onOpenTab: (tab: LRTab) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // runAction hits one of the state-changing routes (hold/persist/delete):
+  // the files-tab listing itself refreshes via the next "lr-files-state"
+  // broadcast, not from this response -- this just reports whether the
+  // request was accepted.
+  const runAction = useCallback(async (url: string, method: string): Promise<boolean> => {
+    setBusy(true)
+    try {
+      const resp = await fetch(url, { method })
+      if (!resp.ok) {
+        console.error('file action failed:', method, url, resp.status, await resp.text())
+        return false
+      }
+      return true
+    } catch (err) {
+      console.error('file action failed:', method, url, err)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const handleHoldOrPersist = () => {
+    const url = file.state === 'held' ? filePersistUrl(hostId, file.id) : fileHoldUrl(hostId, file.id)
+    void runAction(url, 'POST')
+  }
+
+  const handleHighlight = () => {
+    void runAction(fileHighlightUrl(hostId, file.id), 'POST')
+  }
+
+  const handleDelete = () => {
+    if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
+    void runAction(fileDeleteUrl(hostId, file.id), 'DELETE').then(ok => { if (ok) onClose() })
+  }
+
+  return (
+    <div className="file-detail-pane">
+      <div className="file-detail-header">
+        <span className="file-detail-title">file details</span>
+        <button className="file-detail-close" onClick={onClose}>×</button>
+      </div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} sequence={file.sequence} /></div>
+      <div className="file-detail-rows">
+        <div className="file-detail-row">
+          <span className="file-detail-label">name</span>
+          <span className="file-detail-value" title={file.name}>{file.name}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">type</span>
+          <span className="file-detail-value">{fileTypeLabel(file)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">size</span>
+          <span className="file-detail-value">{formatBytes(file.size)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">uploaded</span>
+          <span className="file-detail-value">{formatAgo(file.uploaded_at, nowSec)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">{file.state === 'persisted' ? 'status' : 'expires'}</span>
+          <span className="file-detail-value">
+            {file.state === 'persisted' ? 'persisted — never expires' : formatCountdown(file.expires_at, nowSec)}
+          </span>
+        </div>
+      </div>
+      <div className="file-detail-actions">
+        <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
+          view
+        </button>
+        <a className="file-detail-download" href={fileDownloadUrl(hostId, file.id)} download={file.name}>
+          download
+        </a>
+      </div>
+      {file.kind === 'image' && (
+        <div className="file-detail-actions">
+          <button
+            className={`file-detail-markup${file.marked_up ? ' file-detail-markup-active' : ''}`}
+            onClick={() => onMarkup(file.id)}
+            title={file.marked_up ? 'keep editing the in-progress markup' : 'draw arrows, rectangles, or text on this image'}
+          >
+            markup
+          </button>
+        </div>
+      )}
+      <div className="file-detail-actions">
+        <button
+          className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
+          onClick={handleHighlight}
+          disabled={busy}
+          title="Mark this file at the LR/AC level"
+        >
+          {file.highlighted ? 'unhighlight' : 'highlight'}
+        </button>
+      </div>
+      <div className="file-detail-actions">
+        {file.state !== 'persisted' && (
+          <button className="file-detail-hold" onClick={handleHoldOrPersist} disabled={busy}>
+            {file.state === 'held' ? 'persist' : 'hold'}
+          </button>
+        )}
+        <button className="file-detail-delete" onClick={handleDelete} disabled={busy}>
+          delete
+        </button>
+      </div>
+      <FileIntegrations file={file} importUrl={(id, run) => fileImportUrl(hostId, id, run)} onRunStarted={onOpenTab} />
+    </div>
+  )
+}
+
+// FileIntegrations mirrors local-representative's file-details subsection of
+// the same name: a sequence YAML's "import" into its tab's library on that
+// host, and "import and run", which also runs its first sequence with every
+// control at its default. It renders nothing for any other file. A plain
+// import stays here; a started run hands over to onRunStarted with the
+// host's tab it shows in.
+function FileIntegrations({
+  file,
+  importUrl,
+  onRunStarted,
+}: {
+  file: FileInfo
+  importUrl: (id: string, run: boolean) => string
+  onRunStarted: (tab: 'robot' | 'control') => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  useEffect(() => setStatus(null), [file.id])
+  if (!file.sequence || !SEQUENCE_ICON_PATH[file.sequence]) return null
+  const tab = file.sequence === 'robot' ? 'robot' : 'control'
+
+  const doImport = async (run: boolean) => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const resp = await fetch(importUrl(file.id, run), { method: 'POST' })
+      if (!resp.ok) {
+        setStatus({ ok: false, text: (await resp.text()).trim() || `failed (${resp.status})` })
+        return
+      }
+      const body = (await resp.json()) as { message?: string }
+      setStatus({ ok: true, text: body.message ?? 'imported' })
+      if (run) onRunStarted(tab)
+    } catch (err) {
+      setStatus({ ok: false, text: String(err) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="file-detail-integrations">
+      <span className="file-detail-integrations-label">{tab} sequence integrations</span>
+      <div className="file-detail-actions">
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(false)}
+          disabled={busy}
+          title={`Import into the ${tab} tab's library on this host`}
+        >
+          import
+        </button>
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(true)}
+          disabled={busy}
+          title="Import, then run its first sequence with every control at its default"
+        >
+          import and run
+        </button>
+      </div>
+      {status && (
+        <span className={`file-detail-integrate-status${status.ok ? '' : ' file-detail-integrate-error'}`}>
+          {status.text}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/* ---- File viewer ---- */
+
+// FileViewer mirrors local-representative's own files-tab viewer, reached the
+// same way (double-click a grid item, or the detail pane's "view" button), just
+// fetching through this host's /host/<id>/* proxy instead of same-origin.
+function FileViewer({
+  hostId, fileId, file, onBack,
+}: {
+  hostId: string
+  fileId: string
+  file: FileInfo | null
+  onBack: () => void
+}) {
+  const [textContent, setTextContent] = useState<string | null>(null)
+  const [textError, setTextError] = useState<string | null>(null)
+  const rawUrl = fileRawUrl(hostId, fileId)
+
+  useEffect(() => {
+    setTextContent(null)
+    setTextError(null)
+    if (!file || file.kind !== 'text') return
+    let cancelled = false
+    fetch(rawUrl)
+      .then(resp => {
+        if (!resp.ok) throw new Error(`status ${resp.status}`)
+        return resp.text()
+      })
+      .then(text => { if (!cancelled) setTextContent(text) })
+      .catch(err => { if (!cancelled) setTextError(String(err)) })
+    return () => { cancelled = true }
+  }, [rawUrl, file?.kind])
+
+  return (
+    <div className="file-viewer">
+      <div className="file-viewer-header">
+        <button className="file-viewer-back" onClick={onBack}>← back</button>
+        <span className="file-viewer-name" title={file?.name ?? fileId}>{file?.name ?? fileId}</span>
+        {file && (
+          <a className="file-detail-download" href={fileDownloadUrl(hostId, fileId)} download={file.name}>
+            download
+          </a>
+        )}
+      </div>
+      <div className="file-viewer-body">
+        {!file ? (
+          <div className="file-viewer-empty">this file is no longer in the host-cache</div>
+        ) : file.kind === 'image' ? (
+          <img className="file-viewer-image" src={rawUrl} alt={file.name} />
+        ) : file.kind === 'text' ? (
+          textError ? (
+            <div className="file-viewer-empty">couldn't load preview: {textError}</div>
+          ) : (
+            <pre className="file-viewer-text">{textContent ?? 'loading…'}</pre>
+          )
+        ) : (
+          <div className="file-viewer-empty">no preview available for this file type — use download above</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ---- Markup dialog (Step1SubstepCPrompt.md Revision F) ---- */
+
+// MarkupTool/MARKUP_COLORS/MARKUP_TOOL_ICON/canvasPoint/drawMarkupArrow/
+// drawMarkupRect all mirror local-representative's own copies verbatim (see
+// local-representative/frontend/src/App.tsx) -- this file has no shared
+// module to hang them off, same duplication as the rest of the files-tab UI
+// (FileIcon, FilesPanel, FileDetailPane, FileViewer above).
+type MarkupTool = 'arrow' | 'rect' | 'text'
+
+const MARKUP_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#af52de', '#ffffff', '#111111']
+
+const MARKUP_TOOL_ICON: Record<MarkupTool, JSX.Element> = {
+  arrow: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20 18 6" />
+      <path d="M9 6h9v9" />
+    </svg>
+  ),
+  rect: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+      <rect x="4" y="6" width="16" height="12" rx="1" />
+    </svg>
+  ),
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 6h14M12 6v13" />
+    </svg>
+  ),
+}
+
+function canvasPoint(e: React.MouseEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY }
+}
+
+function drawMarkupArrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  const headLen = Math.max(14, Math.hypot(x1 - x0, y1 - y0) * 0.18)
+  const angle = Math.atan2(y1 - y0, x1 - x0)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(x0, y0)
+  ctx.lineTo(x1, y1)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawMarkupRect(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0))
+  ctx.restore()
+}
+
+// MarkupDialog mirrors local-representative's own copy, fetching/saving
+// through this host's /host/<id>/* proxy (markupUrl et al. above) instead of
+// same-origin -- see that file's MarkupDialog for the full rationale.
+function MarkupDialog({
+  file,
+  hostId,
+  rawUrl,
+  onClose,
+}: {
+  file: FileInfo
+  hostId: string
+  rawUrl: string
+  onClose: () => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const snapshotRef = useRef<ImageData | null>(null)
+  const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [tool, setTool] = useState<MarkupTool>('arrow')
+  const [color, setColor] = useState(MARKUP_COLORS[0])
+  const [hasMarkup, setHasMarkup] = useState(file.marked_up)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setReady(false)
+    setLoadError(null)
+
+    const draw = (src: string) => {
+      const img = new Image()
+      img.onload = () => {
+        if (cancelled) return
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        canvas.getContext('2d')!.drawImage(img, 0, 0)
+        setReady(true)
+      }
+      img.onerror = () => { if (!cancelled) setLoadError("couldn't load the image") }
+      img.src = src
+    }
+
+    fetch(markupUrl(hostId, file.id))
+      .then(resp => {
+        if (cancelled) return
+        if (resp.ok) {
+          setHasMarkup(true)
+          return resp.blob().then(b => {
+            if (cancelled) return
+            objectUrl = URL.createObjectURL(b)
+            draw(objectUrl)
+          })
+        }
+        draw(rawUrl)
+      })
+      .catch(() => { if (!cancelled) draw(rawUrl) })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [hostId, file.id, rawUrl])
+
+  const saveComposite = useCallback(async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    if (!blob) return
+    const form = new FormData()
+    form.append('file', blob, 'markup.jpg')
+    try {
+      const resp = await fetch(markupUrl(hostId, file.id), { method: 'POST', body: form })
+      if (resp.ok) setHasMarkup(true)
+      else setActionError('failed to save markup')
+    } catch {
+      setActionError('failed to save markup')
+    }
+  }, [hostId, file.id])
+
+  const handlePointerDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!ready || busy) return
+    const canvas = canvasRef.current!
+    const pt = canvasPoint(e, canvas)
+    if (tool === 'text') {
+      const text = window.prompt('markup text:')
+      if (text) {
+        const ctx = canvas.getContext('2d')!
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.font = `${Math.max(20, Math.round(canvas.width * 0.028))}px sans-serif`
+        ctx.textBaseline = 'top'
+        ctx.fillText(text, pt.x, pt.y)
+        ctx.restore()
+        void saveComposite()
+      }
+      return
+    }
+    snapshotRef.current = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+    dragStartRef.current = pt
+  }
+
+  const handlePointerMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+    else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+  }
+
+  const handlePointerUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    const moved = Math.hypot(pt.x - start.x, pt.y - start.y) > 2
+    if (moved) {
+      if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+      else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+    }
+    dragStartRef.current = null
+    snapshotRef.current = null
+    if (moved) void saveComposite()
+  }
+
+  const runAction = async (url: string) => {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const resp = await fetch(url, { method: 'POST' })
+      if (resp.ok) onClose()
+      else setActionError('action failed')
+    } catch {
+      setActionError('action failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="markup-overlay">
+      <div className="markup-dialog">
+        <div className="markup-header">
+          <span className="markup-title">markup</span>
+          <span className="markup-filename" title={file.name}>{file.name}</span>
+        </div>
+        <div className="markup-canvas-wrap">
+          {!ready && !loadError && <div className="markup-status">loading…</div>}
+          {loadError && <div className="markup-status markup-status-error">{loadError}</div>}
+          <canvas
+            ref={canvasRef}
+            className="markup-canvas"
+            style={{ visibility: ready ? 'visible' : 'hidden' }}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onMouseLeave={handlePointerUp}
+          />
+        </div>
+        <div className="markup-toolbar">
+          <div className="markup-tools">
+            {(Object.keys(MARKUP_TOOL_ICON) as MarkupTool[]).map(t => (
+              <button
+                key={t}
+                className={`markup-tool-btn${tool === t ? ' markup-tool-active' : ''}`}
+                onClick={() => setTool(t)}
+                title={t}
+              >
+                {MARKUP_TOOL_ICON[t]}
+              </button>
+            ))}
+          </div>
+          <div className="markup-palette">
+            {MARKUP_COLORS.map(c => (
+              <button
+                key={c}
+                className={`markup-swatch${color === c ? ' markup-swatch-active' : ''}`}
+                style={{ background: c }}
+                onClick={() => setColor(c)}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+        {actionError && <div className="markup-status markup-status-error">{actionError}</div>}
+        <div className="markup-actions">
+          <button className="markup-btn markup-btn-cancel" onClick={() => runAction(markupCancelUrl(hostId, file.id))} disabled={busy}>
+            cancel
+          </button>
+          <button
+            className="markup-btn markup-btn-copy"
+            onClick={() => runAction(markupCopyUrl(hostId, file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'create a file duplicate with the markup included' : 'draw something first'}
+          >
+            copy
+          </button>
+          <button
+            className="markup-btn markup-btn-commit"
+            onClick={() => runAction(markupCommitUrl(hostId, file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'edit the markup into the image file directly' : 'draw something first'}
+          >
+            commit
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ---- Global view ----
+ *
+ * The global selection sits above the per-host list (App.tsx's
+ * selectedHostId === null) and shows a net-centric alternative to a single
+ * host's dashboard. Every one of a host's tabs (LR_TABS) has a global
+ * counterpart in principle, but only 'system', 'plugins' and 'demo' have one
+ * implemented so far -- the rest render the same "not yet implemented" placeholder until a later
+ * increment gives them a real view (Step4Prompt.md).
+ */
+
+// GLOBAL_SYSTEM_TABS: nested tabs within the global system tab's main-view
+// selector: 'topology' (below) and 'timeline' (host lanes over time, see
+// Timeline.tsx -- privateRepoOpsImpls Step6Prompt.md Revision J).
+const GLOBAL_SYSTEM_TABS = ['topology', 'timeline'] as const
+type GlobalSystemTab = typeof GLOBAL_SYSTEM_TABS[number]
+
+// initialGlobalSystemTab: the nested tab survives a refresh or AC restart the
+// same way the top-level tab does (browser pickup strategy, Layer 2 -- see
+// initialACTab), so a timeline left open doesn't fall back to topology.
+function initialGlobalSystemTab(): GlobalSystemTab {
+  const stored = sessionStorage.getItem('ac-global-system-tab')
+  return (GLOBAL_SYSTEM_TABS as readonly string[]).includes(stored ?? '') ? (stored as GlobalSystemTab) : 'topology'
+}
+
+// serviceHealthy reports whether `services` (a host's lrState.services, as
+// also used by LRView's getServiceStatus) lists `name` as healthy -- drives
+// whether that sub-application's box in the topology diagram renders green.
+function serviceHealthy(services: ServiceStatus[] | undefined, name: string): boolean {
+  return services?.find(s => s.name === name)?.status === 'healthy'
+}
+
+// subAppOutOfDate reports whether `managed` (a host's system.managed, keyed
+// by app name the same way ServiceStatus.name is -- representable only
+// tracks one connection identity per app name today) lists `name` with
+// update_available set: that application's on-disk binary now differs from
+// the version its connected instance last reported (see
+// local-representative/procman.go's pollManagedVersions). Drives the orange
+// halo drawn around that sub-application's green "connected" box in the
+// topology diagram (Step4Prompt.md Revision D) -- LR itself is excluded
+// because hostOutOfDate already covers it at the whole-card level.
+function subAppOutOfDate(managed: ProcInfo[] | undefined, name: string): boolean {
+  return !!managed?.find(p => p.name === name)?.update_available
+}
+
+// subAppManaged reports whether `managed` lists `name` at all -- a
+// sub-application can be connected (see serviceHealthy) without LR having
+// launched it (e.g. run manually and pointed at LR's address), in which case
+// it never appears here. Drives the topology diagram's distinction (Step4Prompt.md
+// Revision K) between a managed connected box (green border, matching LR)
+// and a merely-connected one (green abbreviation, but the border stays the
+// same grey as an unlit box) -- LR itself is always "managed" by definition
+// so this only applies to the sub-app boxes (FC/TC/SM/RB/CM/W).
+function subAppManaged(managed: ProcInfo[] | undefined, name: string): boolean {
+  return !!managed?.find(p => p.name === name)
+}
+
+// subAppBoxClass builds a sub-app box's className: connected-and-managed
+// gets the full green treatment (border + text, matching the LR box);
+// connected-but-unmanaged (see subAppManaged) gets only the green
+// abbreviation, leaving the border the same grey as an unlit box
+// (Step4Prompt.md Revision K). outdated layers its halo on top of either, and
+// never applies unless healthy is also true (see subAppOutOfDate).
+function subAppBoxClass(healthy: boolean, managed: boolean, outdated: boolean): string {
+  const healthClass = healthy ? (managed ? ' topo-node-box-healthy' : ' topo-node-box-unmanaged') : ''
+  return `topo-node-box${healthClass}${outdated ? ' topo-node-box-outdated' : ''}`
+}
+
+// hostRebuildReady reports whether this host's LR is watching a --dev-repo
+// whose "rebuild" control would be enabled right now (HEAD has moved past
+// the last successful build and the repo is clean) -- the same condition
+// RepoWatchPanel uses to un-disable its own rebuild button. Factored out of
+// hostOutOfDate so the global "rebuild all" control (Step4Prompt.md
+// Revision J) can ask the same question across every connected host at once.
+function hostRebuildReady(data: HostClientState | undefined): boolean {
+  return !!data?.repo?.watched && !data.repo.building && !!data.repo.rebuild_ready
+}
+
+// hostOutOfDate reports whether a host's LR is behind the dev branch it's
+// tracking -- true while either the "rebuild" control would be enabled (see
+// hostRebuildReady) or the "restart" control would read "update and restart"
+// (a newer build has already landed on disk but isn't running yet). Drives
+// the topology card's orange halo (Step4Prompt.md Revision C); dev-mode-only,
+// so callers gate this on the viewing agent-coordinator's own devMode.
+function hostOutOfDate(data: HostClientState | undefined): boolean {
+  const updateAvailable = !!data?.system?.self?.update_available
+  return hostRebuildReady(data) || updateAvailable
+}
+
+// hostAnySubAppUpdateAvailable reports whether any of this host's connected
+// sub-applications is running an older build than what's on disk -- the same
+// per-app check that drives an individual box's own halo (see
+// subAppOutOfDate), OR'd across them all. Factored out so both the
+// self-host-only "host update all" button and the network-wide "network
+// update all" button (Step4Prompt.md Revisions F/G and J) share one
+// definition of "this host has a pending sub-app update".
+function hostAnySubAppUpdateAvailable(data: HostClientState | undefined): boolean {
+  const services = data?.lrState?.services
+  const managed = data?.system?.managed
+  return ['federation-command', 'condocv2', 'convo', 'sessions', 'robot', 'compose', 'dg', 'worker'].some(
+    name => serviceHealthy(services, name) && subAppOutOfDate(managed, name)
+  )
+}
+
+// TopologyNodeCard is one node in the topology main pane: the "self" card
+// (agent-coordinator collapsed together with its own LR box -- there's no
+// separate self-only panel any more) is pinned to its own row above the
+// per-host cards, which are selectable and color their sub-application boxes
+// green once that host's LR reports them healthy -- fully green (border and
+// abbreviation) once LR also launched it (see subAppManaged), or just the
+// abbreviation, with the border left the same grey as an unlit box, when it's
+// merely connected without LR managing it (Step4Prompt.md Revision K).
+// outOfDate draws a faint orange halo around the whole card (dev mode only)
+// without displacing the grey-vs-blue selected indication -- see
+// hostOutOfDate. devMode additionally draws that same halo around an
+// individual sub-app box's own green border once it's connected but out of
+// date (see subAppOutOfDate) -- LR/AC never get one; the card-level halo
+// already implies it for LR.
+//
+// connections adds a bar of provider icons (AWS, GitHub) above the boxes --
+// unlike the boxes, an icon is only drawn at all when that host holds the
+// credentials, with a yellow border once they've failed verification (see
+// local-representative/connectivity.go). onOpen drives double-click
+// navigation: the card opens that host's system tab, a sub-app box that
+// sub-app's own tab (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md).
+//
+// Step1SubstepEPrompt.md Revision D adds a row of agent tiles below the
+// boxes -- one per agent installed on that host, never a DEV_AGENTS one
+// (double-click opens the system tab, where "agents & models" lists them) --
+// and buildFailed's small red dot beside the label (see BuildFailedDot).
+// startedAt (the host's LR start, unix seconds) puts a tiny uptime readout in
+// the header's top-right (Step1Prompt.md Revision C, privateRepoOpsImpls),
+// and a green halo around the card while that uptime is under 10 minutes
+// (Step2Prompt.md) -- layered inside the orange outOfDate halo when both apply.
+// building (the host's watched dev-repo has a build in progress -- see
+// local-representative/repowatch.go's Building) draws the fresh halo as
+// marching ants: the same green ring and glow at the same radius, broken into
+// dashes that run smoothly round the card's rounded border
+// (privateRepoOpsImpls Step3Prompt.md Revisions F and I). It's an SVG rect
+// rather than CSS gradients so it can follow the corners; pathLength makes
+// the dash pattern divide the perimeter evenly, so the loop has no seam
+// whatever the card's size.
+//
+// privateRepoOpsImpls Step6Prompt.md Revision E adds a row of plug-in tiles
+// below the agents -- one per external plug-in registered on that host (see
+// hostPluginTiles; double-click opens the plugins tab). One whose plug-in dev
+// repo is building wears the same marching ants as the card, round its own
+// border; one whose last build failed gets a red border.
+//
+// Revision G: double-clicking a plug-in tile opens that plug-in's own tab in
+// the host's plugins tab (rather than whichever came first), and a tile whose
+// managed instance was launched or restarted less than FRESH_UPTIME_SECS ago
+// wears the card's green fresh halo round its own border (pluginTileFresh).
+const FRESH_UPTIME_SECS = 10 * 60
+const BUILDING_RING_DASHES = 48
+const PLUGIN_TILE_RING_DASHES = 12
+
+function TopologyNodeCard({
+  label, status, isSelf, services, managed, connections, agents, pluginTiles, buildFailed, building, devMode, selected, outOfDate, startedAt, nowSec, onClick, onOpen,
+}: {
+  label: string
+  status?: string
+  startedAt?: number
+  nowSec?: number
+  isSelf?: boolean
+  services?: ServiceStatus[]
+  managed?: ProcInfo[]
+  connections?: ConnectionInfo[] | null
+  agents?: AgentsState | null
+  pluginTiles?: TopologyPluginTile[]
+  buildFailed?: boolean
+  building?: boolean
+  devMode?: boolean
+  selected?: boolean
+  outOfDate?: boolean
+  onClick?: () => void
+  onOpen?: (tab: LRTab, appId?: string) => void
+}) {
+  // A sub-app box's double-click handler -- stops the event reaching the
+  // card's own (which would open the system tab instead).
+  const openTab = (tab: LRTab) => onOpen
+    ? (e: React.MouseEvent) => { e.stopPropagation(); onOpen(tab) }
+    : undefined
+
+  const fcHealthy = serviceHealthy(services, 'federation-command')
+  const tcHealthy = serviceHealthy(services, 'convo')
+  const smHealthy = serviceHealthy(services, 'sessions')
+  const rbHealthy = serviceHealthy(services, 'robot')
+  const cpHealthy = serviceHealthy(services, 'compose')
+  const dgHealthy = serviceHealthy(services, 'dg')
+  const wHealthy = serviceHealthy(services, 'worker')
+  const fcManaged = subAppManaged(managed, 'federation-command')
+  const tcManaged = subAppManaged(managed, 'convo')
+  const smManaged = subAppManaged(managed, 'sessions')
+  const rbManaged = subAppManaged(managed, 'robot')
+  const cpManaged = subAppManaged(managed, 'compose')
+  const dgManaged = subAppManaged(managed, 'dg')
+  const wManaged = subAppManaged(managed, 'worker')
+  const fcOutdated = devMode && fcHealthy && subAppOutOfDate(managed, 'federation-command')
+  const tcOutdated = devMode && tcHealthy && subAppOutOfDate(managed, 'convo')
+  const smOutdated = devMode && smHealthy && subAppOutOfDate(managed, 'sessions')
+  const rbOutdated = devMode && rbHealthy && subAppOutOfDate(managed, 'robot')
+  const cpOutdated = devMode && cpHealthy && subAppOutOfDate(managed, 'compose')
+  const dgOutdated = devMode && dgHealthy && subAppOutOfDate(managed, 'dg')
+  const wOutdated = devMode && wHealthy && subAppOutOfDate(managed, 'worker')
+  const agentTiles = agents?.agents.filter(a => a.installed && !DEV_AGENTS.has(a.name)) ?? []
+  // Recently (re)started: a green halo while the uptime readout is under
+  // FRESH_UPTIME_SECS (Step2Prompt.md, privateRepoOpsImpls). Not dev-mode gated.
+  const fresh = !!startedAt && nowSec !== undefined && nowSec - startedAt < FRESH_UPTIME_SECS
+  // A failed rebuild turns the outer halo red until the next successful build
+  // or an LR restart (buildFailed lives only in the LR's memory). It takes the
+  // orange outOfDate halo's place rather than stacking with it, so out-of-date
+  // never hides a failure (privateRepoOpsImpls Step5Prompt.md Revision M).
+  const outdatedHalo = outOfDate && !buildFailed
+
+  return (
+    <div
+      className={`topo-node${isSelf ? ' topo-node-self' : ''}${selected ? ' topo-node-selected' : ''}${onClick ? ' topo-node-clickable' : ''}${outdatedHalo ? ' topo-node-outdated' : ''}${buildFailed ? ' topo-node-build-failed' : ''}${fresh ? ' topo-node-fresh' : ''}${building ? ' topo-node-building' : ''}`}
+      title={building ? "this host's LR is building its dev repo" : buildFailed ? "this host's LR's last rebuild failed — clears on the next successful rebuild or an LR restart" : outOfDate ? "this host's LR is behind the dev branch it's tracking — see details & control" : fresh ? "this host's LR started less than 10 minutes ago" : undefined}
+      onClick={onClick}
+      onDoubleClick={onOpen ? () => onOpen('system') : undefined}
+    >
+      {building && (
+        <svg className="topo-node-building-ring" aria-hidden="true">
+          <rect x="0" y="0" width="100%" height="100%" rx="7" ry="7" pathLength={BUILDING_RING_DASHES * 2} />
+        </svg>
+      )}
+      <div className="topo-node-header">
+        {status && <span className={`host-dot ${hostDotClass(status)}`} />}
+        <span className="topo-node-label">{label}</span>
+        {buildFailed && <BuildFailedDot />}
+        {isSelf && <span className="topo-node-self-tag">self</span>}
+        {!!startedAt && nowSec !== undefined && (
+          <span className="topo-node-uptime" title="LR uptime">{formatShortUptime(startedAt, nowSec)}</span>
+        )}
+      </div>
+      <div className="topo-node-diagram">
+        {connections && connections.length > 0 && (
+          <div className="topo-node-row topo-node-conns">
+            {connections.map(c => (
+              <span key={c.provider} className={`topo-conn-icon topo-conn-${c.status}`} title={connectionTitle(c)}>
+                <ProviderIcon provider={c.provider} />
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="topo-node-row topo-node-row-top">
+          {isSelf && <span className="topo-node-box topo-node-box-ac">AC</span>}
+          <span className="topo-node-box topo-node-box-lr">LR</span>
+        </div>
+        <div className="topo-node-row topo-node-row-bottom">
+          <span
+            className={subAppBoxClass(fcHealthy, fcManaged, !!fcOutdated)}
+            title={fcOutdated ? "federation-command is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('federation-command')}
+          >FC</span>
+          <span
+            className={subAppBoxClass(tcHealthy, tcManaged, !!tcOutdated)}
+            title={tcOutdated ? "convo is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('convo')}
+          >TC</span>
+          <span
+            className={subAppBoxClass(smHealthy, smManaged, !!smOutdated)}
+            title={smOutdated ? "sessions is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('sessions')}
+          >SM</span>
+          <span
+            className={subAppBoxClass(rbHealthy, rbManaged, !!rbOutdated)}
+            title={rbOutdated ? "robot is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('robot')}
+          >RB</span>
+          <span
+            className={subAppBoxClass(cpHealthy, cpManaged, !!cpOutdated)}
+            title={cpOutdated ? "compose is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('compose')}
+          >CM</span>
+          <span
+            className={subAppBoxClass(dgHealthy, dgManaged, !!dgOutdated)}
+            title={dgOutdated ? "dg is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('dg')}
+          >DG</span>
+          <span
+            className={subAppBoxClass(wHealthy, wManaged, !!wOutdated)}
+            title={wOutdated ? "worker is connected but running an older build than what's on disk" : undefined}
+            onDoubleClick={openTab('worker')}
+          >W</span>
+        </div>
+        {agentTiles.length > 0 && (
+          <div className="topo-node-row topo-node-agents">
+            {agentTiles.map(a => (
+              <span key={a.name} className={`topo-agent-tile${a.auth ? ' topo-agent-tile-auth' : ''}`} title={agentTileTitle(a)}>
+                <AgentIcon agent={a.name} />
+              </span>
+            ))}
+          </div>
+        )}
+        {pluginTiles && pluginTiles.length > 0 && (
+          <div className="topo-node-row topo-node-plugins">
+            {pluginTiles.map(t => (
+              <span
+                key={t.appId}
+                className={`topo-plugin-tile topo-plugin-tile-${t.status === 'online' ? 'online' : 'offline'}${t.building ? ' topo-plugin-tile-building' : ''}${!t.building && t.buildError ? ' topo-plugin-tile-build-failed' : ''}${pluginTileFresh(t, nowSec) ? ' topo-plugin-tile-fresh' : ''}`}
+                title={pluginTileTitle(t, nowSec)}
+                onDoubleClick={onOpen ? e => { e.stopPropagation(); onOpen('plugins', t.appId) } : undefined}
+              >
+                {t.building && (
+                  <svg className="topo-plugin-tile-ring" aria-hidden="true">
+                    <rect x="0" y="0" width="100%" height="100%" rx="4" ry="4" pathLength={PLUGIN_TILE_RING_DASHES * 2} />
+                  </svg>
+                )}
+                {t.iconSrc
+                  ? <PluginIcon src={t.iconSrc} label={t.label} size={14} mask={t.iconMask} />
+                  : <span className="topo-plugin-tile-label">{pluginTileInitials(t.label)}</span>}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// pluginTileInitials is what a plug-in tile shows without an icon: the
+// initials of its label's first two words (split on spaces, dashes and
+// underscores), else its first two letters.
+function pluginTileInitials(label: string): string {
+  const words = label.split(/[\s_-]+/).filter(Boolean)
+  const s = words.length >= 2 ? words[0][0] + words[1][0] : label.slice(0, 2)
+  return s.toUpperCase()
+}
+
+// TopologyPluginTile is one registered external plug-in on a topology card
+// (privateRepoOpsImpls Step6Prompt.md Revision E): from the host's registry
+// once it has said hello (anything but pending -- an unapproved one isn't
+// registered), and from its plug-in dev repos (registered when watched,
+// whether or not it has said hello yet). building comes from the dev repo.
+interface TopologyPluginTile {
+  appId: string
+  label: string
+  status: string // as PluginInfo.status, or 'not seen yet'
+  iconSrc: string
+  iconMask: boolean
+  devRepo?: string // the plug-in dev repo's path, if it has one
+  building: boolean
+  buildError?: string
+  startedAt?: number // unix seconds: when its running managed instance was (re)launched
+}
+
+// hostPluginTiles builds a topology card's plug-in row, sorted by app id.
+// startedAt comes from the host's managed list: LR runs a plug-in dev repo's
+// plug-in (like cats-ufa-plugin) as a managed app named by its app id, and a
+// restart after a build is a fresh launch, so it moves on each one.
+function hostPluginTiles(hostId: string, data: HostClientState | undefined): TopologyPluginTile[] {
+  const tiles = new Map<string, TopologyPluginTile>()
+  for (const p of data?.plugins?.plugins ?? []) {
+    if (p.status === 'pending' || !isExternalPlugin(p, data?.plugins)) continue
+    tiles.set(p.app_id, {
+      appId: p.app_id,
+      label: p.manifest?.short_name || p.manifest?.display_name || p.hello.display_name || p.app_id,
+      status: p.status,
+      iconSrc: p.status === 'online' ? pluginIconSrc(hostId, p) : '',
+      iconMask: pluginIconMask(p),
+      building: false,
+    })
+  }
+  for (const e of data?.repo?.externals ?? []) {
+    if (!e.plugin || !e.app_id) continue
+    const t = tiles.get(e.app_id) ?? { appId: e.app_id, label: e.app_id, status: 'not seen yet', iconSrc: '', iconMask: false, building: false }
+    tiles.set(e.app_id, { ...t, devRepo: e.path, building: t.building || !!e.building, buildError: e.build_error || t.buildError })
+  }
+  for (const p of data?.system?.managed ?? []) {
+    const t = tiles.get(p.name)
+    if (!t || p.status !== 'running' || !p.started_at) continue
+    if (!t.startedAt || p.started_at > t.startedAt) t.startedAt = p.started_at
+  }
+  return [...tiles.values()].sort((a, b) => a.appId.localeCompare(b.appId))
+}
+
+// pluginTileFresh reports whether t's managed instance was launched or
+// restarted less than FRESH_UPTIME_SECS ago.
+function pluginTileFresh(t: TopologyPluginTile, nowSec?: number): boolean {
+  return !!t.startedAt && nowSec !== undefined && nowSec - t.startedAt < FRESH_UPTIME_SECS
+}
+
+function pluginTileTitle(t: TopologyPluginTile, nowSec?: number): string {
+  const parts = [t.label === t.appId ? t.appId : `${t.label} (${t.appId})`, t.status]
+  if (pluginTileFresh(t, nowSec)) parts.push('launched or restarted less than 10 minutes ago')
+  if (t.devRepo) parts.push(`plug-in dev repo: ${t.devRepo}`)
+  if (t.building) parts.push('building…')
+  else if (t.buildError) parts.push(`last build failed: ${t.buildError}`)
+  return parts.join('\n')
+}
+
+// agentTileTitle is an agent tile's hover text: its version, and for a
+// connectable agent where its credential comes from.
+function agentTileTitle(a: AgentInfo): string {
+  const parts = [a.version ? `${a.name} — ${a.version}` : a.name]
+  if (a.auth) parts.push(`auth: ${a.auth}`)
+  else if (CONNECTABLE_AGENTS.some(c => c.provider === a.name)) parts.push('auth: none passed')
+  return parts.join('\n')
+}
+
+// GlobalTopologyPanel: main pane of host cards (left, agent-coordinator's own
+// card always on top, a faint divider below it) plus a details-and-control
+// pane (right) -- see
+// condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg.
+// Selecting a host card drives the details pane's readouts and its restart
+// control (which sends that host's LR a restart, same as the per-host system
+// tab's self-restart button). When selfHostId names a currently-connected
+// host, that's the host agent-coordinator itself runs on -- its card
+// collapses the AC box together with that host's own LR/sub-app card (one
+// panel, keeping the host's real name) and it's selectable like any other
+// host. Without a match (no co-located LR connected), a static,
+// unselectable "agent-coordinator" placeholder card is shown instead, same
+// as before. Everything else here (live per-app data beyond health) is still
+// a placeholder. devMode gates the out-of-date halo and the rebuild/restart
+// controls below (Step4Prompt.md Revision C) -- both are meaningless outside
+// a dev workflow. When the selected card is the self host, the details pane
+// also grows a small "agent-coordinator" section below the rebuild/restart
+// controls with its own restart button, since that selection's restart
+// control above only ever targets that host's LR -- restarting AC itself is
+// a separate action (Step4Prompt.md Revision E) -- its rebuild & restart
+// controls sibling above is labeled "restart LR"/"restart and update LR" to
+// keep the two unambiguous now that they sit side by side. That same
+// agent-coordinator section also grows a "host update all" button, enabled
+// once any connected sub-application on this host is out of date (see
+// anySubAppUpdateAvailable) -- but pressing it only actually restarts
+// whichever of this host's LR / AC itself is the one running a stale
+// binary (each checked independently, same willUpdate/acWillUpdate flags
+// the controls above already use), rather than always restarting both
+// (Step4Prompt.md Revision F, narrowed by Revision G). Two more controls
+// (Revision J) round out that section: a green "rebuild all" button plus its
+// accompanying auto-rebuild toggle at the top, sweeping every connected
+// host's dev-repo watcher instead of just the selected one; and a
+// blue-or-orange "network update all" button at the bottom, the same
+// selective-restart effect as "host update all" but generalized to every
+// connected host's LR plus AC, rather than just the AC host.
+function GlobalTopologyPanel({
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
+}: {
+  onOpenHost: (hostId: string, tab: LRTab, appId?: string) => void
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selfHostId: string | null
+  devMode: boolean
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  acAutoUpdate: boolean
+  acStartedAt: number
+  sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
+}) {
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+  const selectedData = selectedHostId ? hostData[selectedHostId] : undefined
+  const selfProc = selectedData?.system?.self
+  const canRestart = !!selectedHostId && !!selfProc?.loader_managed
+  const willUpdate = devMode && !!selfProc?.update_available
+  // The selected card is the one agent-coordinator itself runs on -- see
+  // GlobalTopologyPanel's self-card collapsing above.
+  const isSelfSelected = !!selectedHostId && selectedHostId === selfHostId
+  const acWillUpdate = devMode && acUpdateAvailable
+
+  const selfHost = selfHostId ? hosts.find(h => h.id === selfHostId) ?? null : null
+  const otherHosts = selfHost ? hosts.filter(h => h.id !== selfHost.id) : hosts
+
+  // Drives the "host update all" button below: true once any connected
+  // sub-application on the AC host itself is running an older build than
+  // what's on disk (same per-app check TopologyNodeCard uses for that box's
+  // own halo -- see hostAnySubAppUpdateAvailable) -- LR/AC's own staleness
+  // isn't counted here since they're what the button updates, not what it's
+  // watching for.
+  const selfHostData = selfHost ? hostData[selfHost.id] : undefined
+  const anySubAppUpdateAvailable = devMode && hostAnySubAppUpdateAvailable(selfHostData)
+  const canUpdateAll = anySubAppUpdateAvailable && !!selfHostData?.system?.self?.loader_managed && acLoaderManaged
+
+  // allHosts: every connected host, self first when known -- the set both new
+  // agent-coordinator-section controls below (Step4Prompt.md Revision J)
+  // sweep across, since unlike the controls above them these two aren't
+  // scoped to whichever single host card is selected.
+  const allHosts = selfHost ? [selfHost, ...otherHosts] : otherHosts
+
+  // "rebuild all": green when needed (any connected host's LR has a rebuild
+  // ready, see hostRebuildReady); when no host needs a rebuild, can be selected
+  // manually with a neutral styling as long as at least one host's dev-repo is
+  // not dirty and not building.
+  const rebuildableHosts = devMode ? allHosts.filter(h => hostRebuildReady(hostData[h.id])) : []
+  const anyRebuildReady = rebuildableHosts.length > 0
+
+  // Accompanying auto-rebuild toggle-selector: applies to every connected
+  // host with a watched dev-repo (not just ones currently rebuild-ready,
+  // since auto-rebuild is a standing setting, not a one-shot action).
+  // Reads as checked only when every watched repo already has it on.
+  const watchedHosts = devMode ? allHosts.filter(h => hostData[h.id]?.repo?.watched) : []
+  const manualRebuildHosts = devMode ? watchedHosts.filter(h => {
+    const r = hostData[h.id]?.repo
+    return !!r && !r.building && !r.dirty
+  }) : []
+  const canManualRebuildAll = manualRebuildHosts.length > 0
+  const canRebuildAll = anyRebuildReady || canManualRebuildAll
+
+  const handleRebuildAll = () => {
+    const targets = anyRebuildReady ? rebuildableHosts : manualRebuildHosts
+    targets.forEach(h => sendLRRebuildApp(h.id))
+  }
+  const allAutoRebuildOn = watchedHosts.length > 0 && watchedHosts.every(h => !!hostData[h.id]?.repo?.auto_rebuild)
+  const handleSetAutoRebuildAll = (enabled: boolean) =>
+    watchedHosts.forEach(h => sendLRSetAutoRebuild(h.id, enabled))
+
+  // Network-wide "dev branch" control under "rebuild all"
+  // (Step1SubstepCPrompt.md Revision B): reads the one branch every watched
+  // host is on, or "<differs>" when they disagree; offers every branch any
+  // of them reports; and a switch is sent to every watched host at once.
+  const watchedRepos = watchedHosts.map(h => hostData[h.id]!.repo!)
+  const watchedBranches = new Set(watchedRepos.map(r => r.branch || '(detached)'))
+  const allBranchesLabel = watchedBranches.size === 0 ? '—'
+    : watchedBranches.size === 1 ? [...watchedBranches][0]
+    : '<differs>'
+  const allBranchOptions = [...new Set(watchedRepos.flatMap(r => r.branches ?? []))].sort()
+  const commonBranch = watchedBranches.size === 1 ? watchedRepos[0]?.branch : undefined
+  const switchErrors = watchedHosts
+    .filter(h => hostData[h.id]?.repo?.switch_error)
+    .map(h => `${h.label}: ${hostData[h.id]!.repo!.switch_error}`)
+  const handleSwitchBranchAll = (branch: string) =>
+    watchedHosts.forEach(h => sendLRSwitchBranch(h.id, branch))
+
+  // "network update all": the same selective-restart effect as "host update
+  // all" above, generalized to every connected host's LR plus AC -- each
+  // host's own `update_available` (not its sub-apps') decides whether that
+  // host's LR gets restarted, same as the "restart LR"/"restart and update
+  // LR" control above already does for whichever single host is selected.
+  const staleHosts = allHosts.filter(h => devMode && !!hostData[h.id]?.system?.self?.update_available)
+  const restartableStaleHosts = staleHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed)
+  const anyNetworkUpdateAvailable = staleHosts.length > 0 || acWillUpdate
+  const canNetworkUpdateAll = restartableStaleHosts.length > 0 || (acWillUpdate && acLoaderManaged)
+  const handleNetworkUpdateAll = () => {
+    restartableStaleHosts.forEach(h => sendLRRestartApp(h.id))
+    if (acWillUpdate && acLoaderManaged) sendACRestartApp()
+  }
+
+  // Accompanying auto-update toggle-selector, mirroring auto-rebuild's above:
+  // applies to every connected, loader-managed host at once (not just ones
+  // currently stale, since like auto-rebuild this is a standing setting, not
+  // a one-shot action) -- Step5Prompt.md Revision E. Also arms AC's own
+  // auto-update alongside every host's, so agent-coordinator restarts itself
+  // the moment it notices an update too, rather than only ever coming back
+  // up via a manual "restart AC" -- see Step1SubstepCPrompt.md Revision D.
+  const updatableHosts = devMode ? allHosts.filter(h => !!hostData[h.id]?.system?.self?.loader_managed) : []
+  const allAutoUpdateOn = (updatableHosts.length > 0 || acLoaderManaged) &&
+    updatableHosts.every(h => !!hostData[h.id]?.system?.self?.auto_update) &&
+    (!acLoaderManaged || acAutoUpdate)
+  const handleSetAutoUpdateAll = (enabled: boolean) => {
+    updatableHosts.forEach(h => sendLRSetAutoUpdate(h.id, enabled))
+    if (acLoaderManaged) sendACSetAutoUpdate(enabled)
+  }
+
+  return (
+    <div className="topo-panel">
+      <div className="topo-main">
+        {selfHost ? (
+          <TopologyNodeCard
+            label={selfHost.label}
+            status={selfHost.status}
+            isSelf
+            services={hostData[selfHost.id]?.lrState?.services}
+            managed={hostData[selfHost.id]?.system?.managed}
+            connections={hostData[selfHost.id]?.system?.connections}
+            agents={hostData[selfHost.id]?.system?.agents}
+            pluginTiles={hostPluginTiles(selfHost.id, hostData[selfHost.id])}
+            buildFailed={!!hostData[selfHost.id]?.repo?.build_failed}
+            building={!!hostData[selfHost.id]?.repo?.building}
+            devMode={devMode}
+            selected={selectedHostId === selfHost.id}
+            outOfDate={devMode && hostOutOfDate(hostData[selfHost.id])}
+            startedAt={hostData[selfHost.id]?.system?.self?.started_at}
+            nowSec={nowSec}
+            onClick={() => setSelectedHostId(prev => prev === selfHost.id ? null : selfHost.id)}
+            onOpen={(tab, appId) => onOpenHost(selfHost.id, tab, appId)}
+          />
+        ) : (
+          <TopologyNodeCard label="agent-coordinator" isSelf />
+        )}
+        {otherHosts.length > 0 && <div className="topo-divider" />}
+        {otherHosts.map(h => (
+          <TopologyNodeCard
+            key={h.id}
+            label={h.label}
+            status={h.status}
+            services={hostData[h.id]?.lrState?.services}
+            managed={hostData[h.id]?.system?.managed}
+            connections={hostData[h.id]?.system?.connections}
+            agents={hostData[h.id]?.system?.agents}
+            pluginTiles={hostPluginTiles(h.id, hostData[h.id])}
+            buildFailed={!!hostData[h.id]?.repo?.build_failed}
+            building={!!hostData[h.id]?.repo?.building}
+            devMode={devMode}
+            selected={selectedHostId === h.id}
+            outOfDate={devMode && hostOutOfDate(hostData[h.id])}
+            startedAt={hostData[h.id]?.system?.self?.started_at}
+            nowSec={nowSec}
+            onClick={() => setSelectedHostId(prev => prev === h.id ? null : h.id)}
+            onOpen={(tab, appId) => onOpenHost(h.id, tab, appId)}
+          />
+        ))}
+      </div>
+      <div className="topo-details">
+        <div className="topo-details-header">details &amp; control</div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">Host</span>
+          <span className={`topo-readout-value${selectedHost ? '' : ' topo-readout-placeholder'}`}>
+            {selectedHost?.label ?? '—'}
+          </span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">status</span>
+          <span className={`topo-readout-value${selectedHost ? '' : ' topo-readout-placeholder'}`}>
+            {selectedHost?.status ?? '—'}
+          </span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">LR version</span>
+          <span className={`topo-readout-value${selfProc?.version ? '' : ' topo-readout-placeholder'}`}>
+            {selfProc?.version ?? '—'}
+          </span>
+        </div>
+        <div className="topo-readout-row">
+          <span className="topo-readout-label">LR uptime</span>
+          <span className={`topo-readout-value${selfProc ? '' : ' topo-readout-placeholder'}`}>
+            {selfProc ? formatUptime(selfProc.started_at, nowSec) : '—'}
+          </span>
+        </div>
+        <div className="topo-controls">
+          <div className="topo-controls-label">rebuild &amp; restart controls</div>
+          {devMode && (
+            <RepoWatchPanel
+              repoState={selectedData?.repo}
+              onRebuild={() => selectedHostId && sendLRRebuildApp(selectedHostId)}
+              onSetAutoRebuild={enabled => selectedHostId && sendLRSetAutoRebuild(selectedHostId, enabled)}
+            />
+          )}
+          <div className="topo-controls-buttons">
+            <button
+              className={`sys-btn sys-btn-restart${willUpdate ? ' sys-btn-restart-update' : ''}`}
+              disabled={!canRestart}
+              title={
+                !selectedHostId
+                  ? 'select a host to enable'
+                  : !canRestart
+                  ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                  : willUpdate
+                  ? 'a newer build has landed on disk — terminate this LR so ufa-loader relaunches it with the new binary'
+                  : "terminate that host's LR so ufa-loader relaunches it with the identical config"
+              }
+              onClick={() => selectedHostId && sendLRRestartApp(selectedHostId)}
+            >
+              {willUpdate ? 'restart and update LR' : 'restart LR'}
+            </button>
+            <label
+              className="sys-auto-rebuild"
+              title={canRestart
+                ? 'restart that host\'s LR automatically the instant an update becomes available, instead of waiting for the button above'
+                : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            >
+              <input
+                type="checkbox"
+                disabled={!canRestart}
+                checked={!!selfProc?.auto_update}
+                onChange={e => selectedHostId && sendLRSetAutoUpdate(selectedHostId, e.target.checked)}
+              />
+              auto-update
+            </label>
+          </div>
+          {!selectedHostId && (
+            <div className="topo-controls-hint">select a host to enable rebuild/restart controls</div>
+          )}
+        </div>
+        {isSelfSelected && (
+          <div className="topo-ac-controls">
+            <div className="topo-controls-label">agent-coordinator</div>
+            <div className="topo-readout-row">
+              <span className="topo-readout-label">AC uptime</span>
+              <span className={`topo-readout-value${acStartedAt ? '' : ' topo-readout-placeholder'}`}>
+                {acStartedAt ? formatUptime(acStartedAt, nowSec) : '—'}
+              </span>
+            </div>
+            {devMode && (
+              <div className="topo-controls-buttons">
+                <button
+                  className={`sys-btn sys-btn-rebuild${
+                    watchedHosts.length > 0 && watchedHosts.every(h => !!hostData[h.id]?.repo?.dirty) && !anyRebuildReady
+                      ? ' sys-btn-rebuild-dirty'
+                      : !anyRebuildReady
+                      ? ' sys-btn-rebuild-manual'
+                      : ''
+                  }`}
+                  disabled={!canRebuildAll}
+                  title={
+                    anyRebuildReady
+                      ? 'runs make deploy-dev-binaries on every connected host whose dev-repo has moved past its last rebuild'
+                      : canManualRebuildAll
+                      ? 'rebuild all manually — runs make deploy-dev-binaries on every clean connected host'
+                      : watchedHosts.length === 0
+                      ? 'no connected host is watching a dev-repo'
+                      : watchedHosts.every(h => !!hostData[h.id]?.repo?.building)
+                      ? 'a rebuild is already running'
+                      : watchedHosts.every(h => !!hostData[h.id]?.repo?.dirty)
+                      ? 'uncommitted changes on watched host(s) — commit or revert to enable rebuilding'
+                      : 'no connected host has a rebuild ready'
+                  }
+                  onClick={handleRebuildAll}
+                >
+                  rebuild all
+                </button>
+                <label
+                  className="sys-auto-rebuild"
+                  title="rebuild automatically, per host, whenever it becomes possible -- toggles auto-rebuild for every connected host's dev-repo watcher at once"
+                >
+                  <input
+                    type="checkbox"
+                    disabled={watchedHosts.length === 0}
+                    checked={allAutoRebuildOn}
+                    onChange={e => handleSetAutoRebuildAll(e.target.checked)}
+                  />
+                  auto-rebuild
+                </label>
+              </div>
+            )}
+            {devMode && watchedHosts.length > 0 && (
+              <BranchSwitcher
+                branch={allBranchesLabel}
+                branches={allBranchOptions}
+                current={commonBranch}
+                disabledReason={branchSwitchBlocker(watchedRepos)}
+                error={switchErrors.length > 0 ? switchErrors.join('; ') : undefined}
+                onSwitch={handleSwitchBranchAll}
+              />
+            )}
+            <div className="topo-controls-buttons">
+              <button
+                className={`sys-btn sys-btn-restart${acWillUpdate ? ' sys-btn-restart-update' : ''}`}
+                disabled={!acLoaderManaged}
+                title={
+                  !acLoaderManaged
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : acWillUpdate
+                    ? 'a newer build has landed on disk — terminate agent-coordinator so ufa-loader relaunches it with the new binary'
+                    : 'terminate agent-coordinator so ufa-loader relaunches it with the identical config'
+                }
+                onClick={sendACRestartApp}
+              >
+                {acWillUpdate ? 'restart and update AC' : 'restart AC'}
+              </button>
+              <button
+                className={`sys-btn sys-btn-restart${anySubAppUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
+                disabled={!canUpdateAll}
+                title={
+                  !anySubAppUpdateAvailable
+                    ? 'no sub-application on this host has a pending update'
+                    : !canUpdateAll
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : willUpdate && acWillUpdate
+                    ? "terminate this host's LR, then agent-coordinator, so ufa-loader relaunches both with their new binaries"
+                    : willUpdate
+                    ? "terminate this host's LR so ufa-loader relaunches it with its new binary — agent-coordinator is already up to date"
+                    : acWillUpdate
+                    ? "terminate agent-coordinator so ufa-loader relaunches it with its new binary — this host's LR is already up to date"
+                    : "this host's LR and agent-coordinator are both already up to date"
+                }
+                onClick={() => {
+                  if (selfHost && willUpdate) sendLRRestartApp(selfHost.id)
+                  if (acWillUpdate) sendACRestartApp()
+                }}
+              >
+                host update all
+              </button>
+            </div>
+            <div className="topo-controls-buttons">
+              <button
+                className={`sys-btn sys-btn-restart${anyNetworkUpdateAvailable ? ' sys-btn-restart-update' : ''}`}
+                disabled={!canNetworkUpdateAll}
+                title={
+                  !anyNetworkUpdateAvailable
+                    ? 'every connected host and agent-coordinator are already up to date'
+                    : !canNetworkUpdateAll
+                    ? 'not loader-managed — run under ufa-loader (see make run-loader) to enable'
+                    : "terminate every connected host's LR that has a newer build waiting, plus agent-coordinator itself if it does, so ufa-loader relaunches each with its new binary"
+                }
+                onClick={handleNetworkUpdateAll}
+              >
+                network update all
+              </button>
+              <label
+                className="sys-auto-rebuild"
+                title="restart automatically, the instant an update becomes available -- toggles auto-update for every connected, loader-managed host's LR at once, plus agent-coordinator's own restart above"
+              >
+                <input
+                  type="checkbox"
+                  disabled={updatableHosts.length === 0 && !acLoaderManaged}
+                  checked={allAutoUpdateOn}
+                  onChange={e => handleSetAutoUpdateAll(e.target.checked)}
+                />
+                auto-update-all
+              </label>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function GlobalSystemPanel({
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, onOpenHost,
+}: {
+  onOpenHost: (hostId: string, tab: LRTab, appId?: string) => void
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selfHostId: string | null
+  devMode: boolean
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  acAutoUpdate: boolean
+  acStartedAt: number
+  sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
+}) {
+  const [subTab, setSubTab] = useState<GlobalSystemTab>(initialGlobalSystemTab)
+  useEffect(() => {
+    sessionStorage.setItem('ac-global-system-tab', subTab)
+  }, [subTab])
+  const troughEntries = useAggregateTrough(hosts, hostData)
+  return (
+    <div className="global-sys-panel">
+      <div className="tab-bar tab-bar-nested">
+        <div className="tabs">
+          {GLOBAL_SYSTEM_TABS.map(t => (
+            <button
+              key={t}
+              className={`tab${subTab === t ? ' tab-active' : ''}`}
+              onClick={() => setSubTab(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+      {subTab === 'topology' ? (
+        <GlobalTopologyPanel
+          hosts={hosts}
+          hostData={hostData}
+          selfHostId={selfHostId}
+          devMode={devMode}
+          sendLRRestartApp={sendLRRestartApp}
+          sendLRRebuildApp={sendLRRebuildApp}
+          sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+          sendLRSwitchBranch={sendLRSwitchBranch}
+          sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+          acLoaderManaged={acLoaderManaged}
+          acUpdateAvailable={acUpdateAvailable}
+          acAutoUpdate={acAutoUpdate}
+          acStartedAt={acStartedAt}
+          sendACRestartApp={sendACRestartApp}
+          sendACSetAutoUpdate={sendACSetAutoUpdate}
+          onOpenHost={onOpenHost}
+        />
+      ) : (
+        <GlobalTimelinePanel hosts={hosts} onOpenHost={hostId => onOpenHost(hostId, 'system')} />
+      )}
+      <Trough entries={troughEntries} />
+    </div>
+  )
+}
+
+function GlobalView({
+  hosts, hostData, selfHostId, devMode, sendLRRestartApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRSetAutoUpdate, sendLRInspectAgents, sendLRInstallAgent, activeTab, setActiveTab,
+  acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt, sendACRestartApp, sendACSetAutoUpdate, hasHighlighted, onGoToHighlighted, uploadFiles, onOpenHost,
+}: {
+  onOpenHost: (hostId: string, tab: LRTab, appId?: string) => void
+  hosts: Host[]
+  hostData: Record<string, HostClientState>
+  selfHostId: string | null
+  devMode: boolean
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  sendLRInspectAgents: (hostId: string) => void
+  sendLRInstallAgent: (hostId: string, agent: string) => void
+  activeTab: LRTab
+  setActiveTab: (tab: LRTab) => void
+  acLoaderManaged: boolean
+  acUpdateAvailable: boolean
+  acAutoUpdate: boolean
+  acStartedAt: number
+  sendACRestartApp: () => void
+  sendACSetAutoUpdate: (enabled: boolean) => void
+  hasHighlighted: boolean
+  onGoToHighlighted: () => void
+  uploadFiles: (hostId: string, files: FileList | File[]) => void
+}) {
+  const [debugOpen, setDebugOpen] = useState(false)
+  const pluginHosts: PluginsHostState[] = hosts.map(h => ({ hostId: h.id, hostLabel: h.label, state: hostData[h.id]?.plugins }))
+  // The plugins tab's "!" (Revision G): set when any external plug-in's
+  // hosts disagree on its version; that plug-in's own tab inside has one too.
+  const skewed = globalPluginTabs(pluginHosts).filter(t => t.skew)
+  const externalSkew = skewed.length ? skewed.flatMap(t => t.skew!.map(l => `${t.appId} — ${l}`)) : null
+
+  return (
+    <div className="lr-view">
+      <div className="lr-header">
+        <span className="lr-host-label">global</span>
+      </div>
+      <div className="tab-bar">
+        <ScrollTabs activeKey={activeTab}>
+          {LR_TABS.map(t => (
+            <button
+              key={t}
+              className={`tab${activeTab === t ? ' tab-active' : ''}${EMBED_TABS.has(t) ? ' tab-with-icon' : ''}`}
+              onClick={() => setActiveTab(t)}
+              title={EMBED_TABS.has(t) ? appTabTitle(t, pluginHosts) : undefined}
+            >
+              {EMBED_TABS.has(t) && <AppTabIcon appId={t} hosts={pluginHosts} />}
+              {LR_TAB_LABELS[t] ?? t}
+              {EMBED_TABS.has(t) && <VersionSkewMark lines={pluginVersionSkew(t, pluginHosts)} what={t} />}
+              {t === 'plugins' && <VersionSkewMark lines={externalSkew} />}
+              {t === 'files' && hasHighlighted && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); onGoToHighlighted() }}
+                />
+              )}
+            </button>
+          ))}
+        </ScrollTabs>
+        {activeTab === 'system' && (
+          <DebugToggleButton open={debugOpen} onClick={() => setDebugOpen(o => !o)} />
+        )}
+      </div>
+      <div className={`main-pane${activeTab === 'plugins' ? ' main-pane-embed' : ''}`}>
+        {activeTab === 'system' ? (
+          debugOpen ? (
+            <DebugView
+              logLines={hosts.flatMap(h =>
+                (hostData[h.id]?.debugLog?.entries ?? []).map(e => formatDebugLogLine(e, h.label)),
+              )}
+              chainLines={hosts.flatMap(h =>
+                (hostData[h.id]?.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e, h.label) })),
+              )}
+              stateLines={mergeGlobalStateboard(hosts, hostData).map(e => formatStateboardLine(e))}
+              pluginLines={hosts.flatMap(h => formatPluginsLines(hostData[h.id]?.plugins, h.label))}
+              pluginHosts={pluginHosts}
+              installHosts={hosts.map(h => ({ hostId: h.id, hostLabel: h.label, connected: h.status === 'connected', agents: hostData[h.id]?.system?.agents }))}
+              onInstallAgent={sendLRInstallAgent}
+              onInspectAgents={sendLRInspectAgents}
+              uploadHostId={resolveGlobalDebugUploadHost(hosts, selfHostId)}
+              uploadFiles={uploadFiles}
+            />
+          ) : (
+            <GlobalSystemPanel
+              hosts={hosts}
+              hostData={hostData}
+              selfHostId={selfHostId}
+              devMode={devMode}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              acLoaderManaged={acLoaderManaged}
+              acUpdateAvailable={acUpdateAvailable}
+              acAutoUpdate={acAutoUpdate}
+              acStartedAt={acStartedAt}
+              sendACRestartApp={sendACRestartApp}
+              sendACSetAutoUpdate={sendACSetAutoUpdate}
+              onOpenHost={onOpenHost}
+            />
+          )
+        ) : activeTab === 'plugins' ? (
+          <PluginsShell hosts={pluginHosts} global />
+        ) : activeTab === 'demo' ? (
+          // A demo can span hosts, so each part is counted across the
+          // connected ones; a host's own demo tab says which it is on.
+          <div className="service-view">
+            <div className="service-name">demo</div>
+            <DemoPanel
+              scope={`${hosts.length} host${hosts.length === 1 ? '' : 's'}`}
+              appStatus={(app, own): DemoAppStatus => {
+                const connected = hosts.filter(h => hostData[h.id]?.lrState?.active)
+                const n = own ? connected.length : connected.filter(h => serviceHealthy(hostData[h.id]?.lrState?.services, app)).length
+                if (connected.length === 0) return { kind: 'unknown', label: 'no host connected' }
+                return { kind: n > 0 ? 'up' : 'down', label: `on ${n} of ${hosts.length}` }
+              }}
+            />
+          </div>
+        ) : (
+          <div className="service-empty">not yet implemented</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const WORKER_SUBTABS = ['direct', 'slopspace', 'visual'] as const
+type WorkerSubTab = typeof WORKER_SUBTABS[number]
+
+// WorkerPanel is a host's worker tab, split in three: direct is a temporary
+// prompt box that hands prompt-only work to that host's dungeon-keeper, and
+// the work signals it reports, newest first; slopspace lists that host's
+// slopspaces, whether a local agent is using one, and a manual control
+// panel for them -- see worker.go; visual draws both as swimlanes over time
+// (see WorkerVisual.tsx). Mirrors
+// local-representative/frontend/src/App.tsx's own copy.
+function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+  slopspaceReply,
+  onControlSlopspace,
+  focus,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+  slopspaceReply: WorkerSlopspaceReply | null
+  onControlSlopspace: (req: WorkerSlopspaceRequest) => void
+  focus: WorkFocus | null
+}) {
+  const [sub, setSub] = useState<WorkerSubTab>(focus ? 'visual' : 'direct')
+  // A work submission asked for (condocv2's agent box) is on the visual.
+  useEffect(() => {
+    if (focus) setSub('visual')
+  }, [focus?.seq])
+  // The direct sub-tab's slopspace filter (dTT-IntegrationImpls Step 1,
+  // Revision K): null shows every signal.
+  const [directSlopspace, setDirectSlopspace] = useState<string | null>(null)
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="ctl-subtabs">
+        {WORKER_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'direct' && (
+        <WorkerDirectView
+          healthy={healthy}
+          state={state}
+          reply={reply}
+          onSubmit={onSubmit}
+          slopspace={directSlopspace}
+          onSlopspace={setDirectSlopspace}
+        />
+      )}
+      {sub === 'slopspace' && (
+        <WorkerSlopspaceView
+          healthy={healthy}
+          state={state}
+          reply={slopspaceReply}
+          onControl={onControlSlopspace}
+          onShowWork={id => {
+            setDirectSlopspace(id)
+            setSub('direct')
+          }}
+        />
+      )}
+      {sub === 'visual' && <WorkerVisual state={state} focus={focus} />}
+    </div>
+  )
+}
+
+// slopspaceWork is the work signals that ran, or will run, in slopspace id
+// (Revision J). A signal only names its slopspace once it starts; until
+// then, slopspace work for the agent type it's deployed to will run in it.
+// s is the slopspace as last reported, if it still is.
+function slopspaceWork(signals: WorkerSignalInfo[], id: string, s?: SlopspaceInfo): WorkerSignalInfo[] {
+  return signals.filter(sig => sig.slopspace_id
+    ? sig.slopspace_id === id
+    : !!s && sig.work_type === 'slopspace' && s.deployed && sig.agent_type === s.agent_type && (sig.status === 'pending' || sig.status === 'processing'))
+}
+
+// WorkerDirectView is the worker tab's direct sub-tab: the prompt box and
+// the work signals, optionally only those for one slopspace (Revision K).
+function WorkerDirectView({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+  slopspace,
+  onSlopspace,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+  slopspace: string | null
+  onSlopspace: (id: string | null) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const submit = () => {
+    const text = prompt.trim()
+    if (!text || !healthy) return
+    onSubmit(text)
+    setPrompt('')
+  }
+
+  const all = state?.signals ?? []
+  const slopspaces = state?.slopspaces ?? []
+  const signals = slopspace ? slopspaceWork(all, slopspace, slopspaces.find(s => s.id === slopspace)) : all
+  // The filter's choices: every reported slopspace, plus the filtered one if
+  // it's no longer reported.
+  const choices = slopspace && !slopspaces.some(s => s.id === slopspace) ? [...slopspaces.map(s => s.id), slopspace] : slopspaces.map(s => s.id)
+  return (
+    <>
+      <div className="worker-submit">
+        <textarea
+          className="worker-prompt"
+          value={prompt}
+          rows={3}
+          placeholder={healthy ? 'prompt for the worker (runs prompt-only, in /tmp)… Ctrl+Enter to submit' : 'the worker is not running on this host — launch it from the system tab'}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit()
+          }}
+          disabled={!healthy}
+        />
+        <button className="worker-submit-btn" onClick={submit} disabled={!healthy || !prompt.trim()}>submit</button>
+      </div>
+      {reply?.error && <div className="worker-error">{reply.error}</div>}
+      {(choices.length > 0 || slopspace) && (
+        <div className="worker-slopctl-line">
+          <span className="worker-slopctl-label">slopspace</span>
+          <select className="worker-slopctl-input worker-slopctl-pick" value={slopspace ?? ''} onChange={e => onSlopspace(e.target.value || null)}>
+            <option value="">all work</option>
+            {choices.map(id => <option key={id} value={id}>only {id.slice(0, 8)}</option>)}
+          </select>
+          {slopspace && <button className="worker-submit-btn" onClick={() => onSlopspace(null)}>show all</button>}
+        </div>
+      )}
+      {signals.length === 0
+        ? <div className="service-empty">{slopspace ? `no work signals for slopspace ${slopspace.slice(0, 8)} (only the most recent are listed)` : 'no work signals yet'}</div>
+        : (
+          <div className="worker-signals">
+            {signals.map(sig => (
+              <WorkerSignalRow
+                key={sig.id || sig.file}
+                signal={sig}
+                open={openId === (sig.id || sig.file)}
+                onToggle={() => setOpenId(openId === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+              />
+            ))}
+          </div>
+        )}
+    </>
+  )
+}
+
+// WorkerSlopspaceView is the worker tab's slopspace sub-tab: the host's
+// slopspaces as dungeon-keeper last reported them, in use first, and below
+// them the manual control panel. Clicking a row picks it for the panel.
+function WorkerSlopspaceView({
+  healthy,
+  state,
+  reply,
+  onControl,
+  onShowWork,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+  onShowWork: (id: string) => void
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  // "view files" (Revision H): the slopspace being browsed, and where to start.
+  const [files, setFiles] = useState<{ id: string; path: string } | null>(null)
+  // A create picks the new slopspace.
+  useEffect(() => {
+    if (reply?.ok && reply.op === 'create' && reply.id) setSelected(reply.id)
+  }, [reply])
+  if (!state) return <div className="service-empty">the worker hasn't reported yet</div>
+  if (!state.slopspaces) return <div className="service-empty">this worker is too old to report its slopspaces — rebuild it</div>
+  const slopspaces = state.slopspaces
+  const inUse = slopspaces.filter(s => s.in_use)
+  const reviewing = slopspaces.filter(s => s.pending_proposals?.length)
+  const filesOf = files && slopspaces.find(s => s.id === files.id)
+  // While its files are entered (Revision L) the viewer takes the sub-tab's
+  // place, like zooming into a condoc; the rest stays mounted (hidden) so the
+  // control panel keeps what's typed into it.
+  return (
+    <>
+      {filesOf && files && (
+        <SlopspaceFiles
+          slopspace={filesOf}
+          start={files.path}
+          upLabel={`slopspace ${filesOf.id.slice(0, 8)}`}
+          healthy={healthy}
+          reply={reply}
+          onControl={onControl}
+          onUp={() => setFiles(null)}
+        />
+      )}
+      <div hidden={!!filesOf}>
+      <div className="worker-meta">
+        {inUse.length > 0
+          ? `in use by a local agent: ${inUse.map(s => `${s.id.slice(0, 8)} (${s.agent_type})`).join(', ')}`
+          : 'no slopspace is in use by a local agent'}
+      </div>
+      {reviewing.length > 0 && (
+        <div className="worker-dtt-banner">
+          DTT proposals awaiting your review: {reviewing.map(s => (
+            <button key={s.id} className="wv-link" onClick={() => setSelected(s.id)}>{s.id.slice(0, 8)}</button>
+          ))}
+        </div>
+      )}
+      {slopspaces.length === 0
+        ? <div className="service-empty">no slopspaces on this host</div>
+        : (
+          <div className="worker-signals">
+            {slopspaces.map(s => (
+              <WorkerSlopspaceRow
+                key={s.id}
+                slopspace={s}
+                selected={s.id === selected}
+                onSelect={() => setSelected(s.id === selected ? null : s.id)}
+              />
+            ))}
+            {!!state.slopspaces_omitted && <div className="worker-signal-detail">…and {state.slopspaces_omitted} older not shown</div>}
+          </div>
+        )}
+      <WorkerSlopspaceControl
+        healthy={healthy}
+        state={state}
+        selected={slopspaces.find(s => s.id === selected) ?? null}
+        onSelect={setSelected}
+        reply={reply}
+        onControl={onControl}
+        onViewFiles={(id, path) => setFiles({ id, path })}
+        onShowWork={onShowWork}
+      />
+      </div>
+    </>
+  )
+}
+
+const WORKER_AGENT_TYPES = ['agent-worker', 'heuristic-request']
+
+// How many of a slopspace's work signals the manual control panel lists.
+const WORK_ROWS = 3
+
+// WorkerSlopspaceControl is the slopspace sub-tab's manual control panel
+// (SlopspaceSlopspaceCondocs Step 1 Substep B, Revision A). Each button is
+// one call on the host's dungeon-keeper slopspace Manager -- the same
+// interface the `dungeon-keeper slopspace` CLI uses -- run by
+// that host's dungeon-keeper (see dungeon-keeper/slopctl.go). It refuses
+// anything on a slopspace a local agent is working in.
+function WorkerSlopspaceControl({
+  healthy,
+  state,
+  selected: sel,
+  onSelect,
+  reply,
+  onControl,
+  onViewFiles,
+  onShowWork,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg
+  selected: SlopspaceInfo | null
+  onSelect: (id: string | null) => void
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+  onViewFiles: (id: string, path: string) => void
+  onShowWork: (id: string) => void
+}) {
+  const [agentType, setAgentType] = useState(state.agent_type || WORKER_AGENT_TYPES[0])
+  const [repo, setRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [writeRepo, setWriteRepo] = useState('')
+  const [message, setMessage] = useState('')
+  const [command, setCommand] = useState('')
+  const [pending, setPending] = useState<string | null>(null)
+  // The last op's answer -- kept here, as browsing files (whose answers the
+  // file viewer takes) clears the shared reply.
+  const [shown, setShown] = useState<WorkerSlopspaceReply | null>(null)
+  // Whether the next deploy offers DTT proposals (dTT-IntegrationImpls Step 1,
+  // Revision J), starting from the picked slopspace's own setting.
+  const [dttProposals, setDTTProposals] = useState(true)
+  const [openSignal, setOpenSignal] = useState<string | null>(null)
+  useEffect(() => {
+    setDTTProposals(sel?.dtt_proposals ?? true)
+  }, [sel?.id, sel?.dtt_proposals])
+
+  // The answer ends the wait. A dungeon-keeper from before the panel never
+  // answers, so give up eventually; add-repo clones and write pushes can
+  // take a while. A queued command clears the box.
+  useEffect(() => {
+    if (!reply || reply.op === 'files') return
+    setPending(null)
+    setShown(reply)
+    if (reply.ok && reply.op === 'command') setCommand('')
+  }, [reply])
+  useEffect(() => {
+    if (!pending) return
+    const t = setTimeout(() => setPending(null), 120_000)
+    return () => clearTimeout(t)
+  }, [pending])
+
+  const send = (req: WorkerSlopspaceRequest) => {
+    setPending(req.op)
+    onControl(req)
+  }
+  const id = sel?.id
+  const busy = !healthy || !!pending
+  const locked = busy || !sel || sel.in_use
+  const repos = sel?.repos ?? []
+  const stored = !!sel && !sel.deployed
+  // Returned with DTT proposals not yet answered (Revision H): no deploying
+  // until they are.
+  const reviewPending = !!sel?.pending_proposals?.length
+  // Where its spaces are right now on the host: the deploy location while
+  // deployed, else its directory under the slopspaces dir (which keeps its
+  // metadata either way).
+  const path = sel ? (sel.deployed ? sel.deploy_path : sel.path) ?? '' : ''
+  // A command (Revision B) queues a slopspace work signal for the host
+  // worker's agent, which runs it in the deployed slopspace; it shows on the
+  // direct sub-tab with the other signals.
+  const commandable = !locked && !!sel && sel.deployed && sel.agent_type === state.agent_type
+  const sendCommand = () => {
+    const text = command.trim()
+    if (!commandable || !text) return
+    send({ op: 'command', id, prompt: text })
+  }
+  // The direct sub-tab's work signals for this slopspace (Revision J), the
+  // newest WORK_ROWS of them; More... opens the rest on the direct sub-tab,
+  // filtered to it (Revision K).
+  const work = sel ? slopspaceWork(state.signals ?? [], sel.id, sel) : []
+
+  return (
+    <div className="worker-slopctl">
+      <div className="worker-slopctl-title">manual control</div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">slopspace</span>
+        <select className="worker-slopctl-input worker-slopctl-pick" value={id ?? ''} onChange={e => onSelect(e.target.value || null)}>
+          <option value="">— pick one (or click a row) —</option>
+          {(state.slopspaces ?? []).map(s => (
+            <option key={s.id} value={s.id}>
+              {s.id.slice(0, 8)} · {s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'}{s.repos?.length ? ` · ${s.repos.join(', ')}` : ''}
+            </option>
+          ))}
+        </select>
+        <button className="worker-submit-btn" disabled={busy} onClick={() => send({ op: 'create' })}>+ create</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">path</span>
+        <input
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-path"
+          readOnly
+          value={path}
+          placeholder={!sel ? 'pick a slopspace' : 'rebuild dungeon-keeper to see paths'}
+          onFocus={e => e.target.select()}
+          disabled={!sel}
+        />
+        <button className="worker-submit-btn" disabled={!healthy || !sel} onClick={() => id && onViewFiles(id, '')}>view files</button>
+      </div>
+      {sel?.deployed && sel.path && <div className="worker-meta">deployed — stored at {sel.path} when returned</div>}
+      {sel?.in_use &&<div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
+      {sel && reviewPending && (
+        <ProposalReview
+          slopspace={sel}
+          disabled={locked}
+          workerAgentType={state.agent_type}
+          healthy={healthy}
+          reply={reply}
+          onSend={send}
+          onControl={onControl}
+        />
+      )}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">lifecycle</span>
+        <select className="worker-slopctl-input" value={agentType} onChange={e => setAgentType(e.target.value)} disabled={locked || !stored || reviewPending}>
+          {WORKER_AGENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <label
+          className="worker-slopctl-check"
+          title="deploy with writespaces/dtt-requests, where the agent may propose DTT documents for you to review on return"
+        >
+          <input
+            type="checkbox"
+            checked={dttProposals}
+            onChange={e => setDTTProposals(e.target.checked)}
+            disabled={locked || !stored || reviewPending}
+          />
+          DTT proposals
+        </label>
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || reviewPending}
+          title={reviewPending ? 'review its DTT proposals first' : ''}
+          onClick={() => send({ op: 'deploy', id, agent_type: agentType, dtt_proposals: dttProposals })}
+        >deploy</button>
+        <button className="worker-submit-btn" disabled={locked || stored} onClick={() => send({ op: 'return', id })}>return</button>
+        <button
+          className="worker-submit-btn worker-slopctl-danger"
+          disabled={locked}
+          onClick={() => {
+            if (window.confirm(`Delete slopspace ${id}? Anything not pushed from its writespaces is lost.`)) send({ op: 'delete', id })
+          }}
+        >delete</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">add repo</span>
+        <input className="worker-slopctl-input" placeholder="owner/name" value={repo} onChange={e => setRepo(e.target.value)} disabled={locked || !stored} />
+        <input className="worker-slopctl-input" placeholder="new branch" value={branch} onChange={e => setBranch(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || !/^[^/\s]+\/[^/\s]+$/.test(repo.trim()) || !branch.trim()}
+          onClick={() => send({ op: 'add-repo', id, repo: repo.trim(), branch: branch.trim() })}
+        >add</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">commit &amp; push</span>
+        <select className="worker-slopctl-input" value={writeRepo} onChange={e => setWriteRepo(e.target.value)} disabled={locked || !stored}>
+          <option value="">every repo</option>
+          {repos.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input className="worker-slopctl-input worker-slopctl-grow" placeholder="commit message (optional)" value={message} onChange={e => setMessage(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || repos.length === 0}
+          onClick={() => send({ op: 'write', id, repo: repos.includes(writeRepo) ? writeRepo : undefined, message: message.trim() || undefined })}
+        >write</button>
+      </div>
+      {sel?.deployed && !sel.in_use && <div className="worker-meta">adding repos and writing need it returned first</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">command</span>
+        <textarea
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-command"
+          rows={2}
+          placeholder={commandable ? `prompt for the ${sel?.agent_type} agent, run in this slopspace… Ctrl+Enter to send` : 'deploy the slopspace to send it a command'}
+          value={command}
+          onChange={e => setCommand(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendCommand()
+          }}
+          disabled={!commandable}
+        />
+        <button className="worker-submit-btn" disabled={!commandable || !command.trim()} onClick={sendCommand}>send</button>
+      </div>
+      {sel?.deployed && !sel.in_use && sel.agent_type !== state.agent_type && (
+        <div className="worker-meta">deployed for {sel.agent_type}, but this worker runs {state.agent_type} agents — commands need it deployed for {state.agent_type}</div>
+      )}
+      {sel?.deployed && sel.dtt_proposals !== undefined && (
+        <div className="worker-meta">deployed {sel.dtt_proposals ? 'with' : 'without'} DTT proposals</div>
+      )}
+      {sel && (
+        <div className="worker-slopctl-work">
+          <span className="worker-slopctl-label">work here</span>
+          {work.length === 0
+            ? <div className="worker-signal-detail">no work from the direct tab has run in this slopspace (it lists the most recent only)</div>
+            : (
+              <div className="worker-signals">
+                {work.slice(0, WORK_ROWS).map(sig => (
+                  <WorkerSignalRow
+                    key={sig.id || sig.file}
+                    signal={sig}
+                    open={openSignal === (sig.id || sig.file)}
+                    onToggle={() => setOpenSignal(openSignal === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+                  />
+                ))}
+                {work.length > WORK_ROWS && (
+                  <div className="worker-signal">
+                    <button
+                      className="worker-signal-head worker-signal-more"
+                      onClick={() => id && onShowWork(id)}
+                      title={`${work.length - WORK_ROWS} more — show them on the direct tab`}
+                    >More...</button>
+                  </div>
+                )}
+              </div>
+            )}
+        </div>
+      )}
+      {pending && <div className="worker-meta">{pending}: waiting for dungeon-keeper…</div>}
+      {!pending && shown && (shown.ok
+        ? <div className="worker-slopctl-ok">{shown.op}{shown.id ? ` ${shown.id.slice(0, 8)}` : ''}: {shown.detail || 'done'}</div>
+        : <div className="worker-error">{shown.op ? `${shown.op}: ` : ''}{shown.error}</div>)}
+    </div>
+  )
+}
+
+function WorkerSlopspaceRow({ slopspace: s, selected, onSelect }: { slopspace: SlopspaceInfo; selected: boolean; onSelect: () => void }) {
+  const status = s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'
+  const repos = s.repos ?? []
+  const proposals = (s.pending_proposals?.length ?? 0) + (s.proposals_omitted ?? 0)
+  return (
+    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}${selected ? ' worker-slopspace-selected' : ''}`}>
+      <div className="worker-signal-head worker-slopspace-head" onClick={onSelect} title="pick for manual control">
+        <span className="worker-signal-status">{status}</span>
+        {proposals > 0 && <span className="worker-dtt-badge" title="DTT proposals awaiting your review">{proposals} to review</span>}
+        <span className="worker-signal-prompt" title={s.id}>
+          {s.id}
+          {repos.length > 0 && <span className="worker-slopspace-repos"> · {repos.join(', ')}</span>}
+        </span>
+        <span className="worker-signal-when">
+          {s.deployed && s.agent_type ? `${s.agent_type} · ` : ''}
+          {s.iteration} deploy{s.iteration === 1 ? '' : 's'} · created {new Date(s.created_at).toLocaleString()}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo; open: boolean; onToggle: () => void }) {
+  const when = new Date(signal.created_at).toLocaleString()
+  return (
+    <div className={`worker-signal worker-status-${signal.status}`}>
+      <button className="worker-signal-head" onClick={onToggle} title={signal.file}>
+        <span className="worker-signal-status">{signal.status}</span>
+        <span className="worker-signal-prompt">{signal.prompt}</span>
+        <span className="worker-signal-when">{when}</span>
+      </button>
+      {open && (
+        <div className="worker-signal-body">
+          <div className="worker-signal-detail">
+            {signal.role} · {signal.work_type}{signal.work_location ? ` in ${signal.work_location}` : ''}
+            {signal.mode ? ` · ${signal.mode}` : ''}
+            {signal.agent ? ` · ${signal.agent}` : ''}{signal.model ? ` (${signal.model})` : ''}
+          </div>
+          <pre className="worker-signal-text">{signal.prompt}</pre>
+          {signal.comment && <div className="worker-signal-comment">{signal.comment}</div>}
+          {signal.output
+            ? (
+              <>
+                {signal.output_trimmed && <div className="worker-signal-detail">output is long — showing only the end</div>}
+                <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
+              </>
+            )
+            : signal.output_trimmed
+              ? <div className="worker-signal-detail">output is too long to show here — it's in the signal file {signal.file}</div>
+              : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LRView({
+  host, data, sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, sendLRWorkerSubmit, sendLRWorkerSlopspace,
+  sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRWatchExternal, sendLRBuildExternal, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendLRInstallAgent, requestLRTools, uploadFiles, importHostFiles, activeTab, setActiveTab,
+  hasHighlighted, onGoToHighlighted, pendingFileTarget, onConsumePendingFileTarget, pendingPluginTarget, onConsumePendingPluginTarget,
+}: {
+  host: Host
+  data: HostClientState
+  sendLRCommand: (hostId: string, cmd: string, fc?: string) => void
+  sendLRRidealongCommand: (hostId: string, action: string, fc?: string) => void
+  sendLRControlRun: (hostId: string, sequence: string, controls: Record<string, string>, recordOverride?: string) => void
+  sendLRControlCancel: (hostId: string) => void
+  sendLRControlContinue: (hostId: string, run: string) => void
+  requestLRControl: (hostId: string, req: ControlLibRequest) => string
+  sendLRLaunchApp: (hostId: string, name: string) => void
+  sendLRTerminateApp: (hostId: string, id: string) => void
+  sendLRWorkerSubmit: (hostId: string, prompt: string) => void
+  sendLRWorkerSlopspace: (hostId: string, req: WorkerSlopspaceRequest) => void
+  sendLRRestartApp: (hostId: string) => void
+  sendLRRestartManagedApp: (hostId: string, id: string) => void
+  sendLRRebuildApp: (hostId: string) => void
+  sendLRSetAutoRebuild: (hostId: string, enabled: boolean) => void
+  sendLRSwitchBranch: (hostId: string, branch: string) => void
+  sendLRWatchExternal: (hostId: string, path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  sendLRBuildExternal: (hostId: string, path: string) => void
+  sendLRSetAutoUpdate: (hostId: string, enabled: boolean) => void
+  sendLRConnectProvider: (hostId: string, provider: string, token: string) => void
+  sendLRDisconnectProvider: (hostId: string, provider: string) => void
+  sendLRInspectAgents: (hostId: string) => void
+  sendLRInstallAgent: (hostId: string, agent: string) => void
+  requestLRTools: (hostId: string, req: ToolsRequest) => string
+  uploadFiles: (hostId: string, files: FileList | File[]) => void
+  importHostFiles:(hostId: string, paths: string[], folders?: string[]) => Promise<string | null>
+  activeTab: LRTab
+  setActiveTab: (tab: LRTab) => void
+  hasHighlighted: boolean
+  onGoToHighlighted: () => void
+  pendingFileTarget: { hostId: string; fileId: string } | null
+  onConsumePendingFileTarget: () => void
+  pendingPluginTarget: { hostId: string; appId: string } | null
+  onConsumePendingPluginTarget: () => void
+}) {
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // debugOpen is reset whenever the viewed host changes -- this component
+  // isn't remounted on host switch (see condocv2Hash below), so without
+  // this a debug view left open on one host would otherwise still be open
+  // after picking a different one.
+  const [debugOpen, setDebugOpen] = useState(false)
+  useEffect(() => setDebugOpen(false), [host.id])
+  // markupFile is snapshotted at the moment the dialog opens (rather than
+  // re-derived from `files` below) so an in-flight files-state broadcast
+  // can't yank the dialog's target out from under an open editing session --
+  // see local-representative/frontend/src/App.tsx's own copy of this.
+  const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
+  const lrState = data.lrState
+  const active = lrState?.active ?? false
+  // Mirrors local-representative/frontend/src/App.tsx's own fcSession: the
+  // session this host's federation-command is on, relayed down through
+  // lr-system-state (see condocs/initialDistributedSessionsImpls/
+  // Step2Prompt.md Revision C). Surfaced on the federation-command tab
+  // itself rather than only the system tab's per-row tag.
+  // The federation-command tab follows one FC instance at a time (see
+  // FCInstancePicker): the one picked on this host, else the first.
+  const [selectedFC, setSelectedFC] = useState<Record<string, string>>({})
+  const fc = data.fcInstances.find(i => i.key === selectedFC[host.id]) ?? data.fcInstances[0] ?? null
+  const fcSession = fc?.session ?? data.system?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+
+  // Consume the global "go to first highlighted file" handoff (Step5SubstepR
+  // Revision E) once this is the host it was aimed at -- App() has already
+  // selected this host and switched to the files tab by the time this fires.
+  useEffect(() => {
+    if (pendingFileTarget && pendingFileTarget.hostId === host.id) {
+      setSelectedFileId(null)
+      setViewerFileId(pendingFileTarget.fileId)
+      onConsumePendingFileTarget()
+    }
+  }, [pendingFileTarget, host.id, onConsumePendingFileTarget])
+
+  // condocv2 is embedded via a same-origin iframe and resumes from its hash
+  // (#/condoc/<stem>/<text|visual>), but its frame remounts whenever the tab
+  // is left -- e.g. for the worker tab via its agent box, then back with the
+  // nav arrow -- or this outer page is refreshed, so its hash is captured as
+  // it navigates and baked back into `src` (PrivateRepoOps Step 4, Revision
+  // B). Keyed per host so switching between hosts (this component isn't
+  // remounted on host change) doesn't leak one host's condoc position into
+  // another's iframe.
+  // The hash is read as the frame mounts (the tab shown, or the host
+  // switched) and only stored as condocv2 navigates, so `src` never chases
+  // it -- condocv2 reads its hash once, on load.
+  // A rebuild-and-restart remounts the frame too, without the tab being
+  // left: it drops while condocv2 isn't healthy on this host, and its `src`
+  // can switch between the plug-in and legacy routes as it says hello again.
+  // So the hash is read afresh on each of those as well (Step6Prompt.md
+  // Revision H).
+  const condocv2FrameRef = useRef<HTMLIFrameElement>(null)
+  const condocv2Up = active && lrState?.services?.find((s: ServiceStatus) => s.name === 'condocv2')?.status === 'healthy'
+  const condocv2Src = hostFrameSrc(host.id, 'condocv2', data.plugins)
+  const condocv2Hash = useMemo(
+    () => (activeTab === 'condocv2' && condocv2Up ? sessionStorage.getItem(`ac-condocv2-hash:${host.id}`) ?? '' : ''),
+    [activeTab, host.id, condocv2Up, condocv2Src],
+  )
+  const handleCondocv2Load = () => {
+    const win = condocv2FrameRef.current?.contentWindow
+    if (!win) return
+    const capture = () => sessionStorage.setItem(`ac-condocv2-hash:${host.id}`, win.location.hash)
+    win.addEventListener('hashchange', capture)
+    capture()
+  }
+
+  // A clicked agent box on condocv2's visual (PrivateRepoOps Step 4) asks
+  // for this host's worker tab's visual with its work submission selected;
+  // the visual finds it in the host worker's slopspace history (WorkFocus).
+  // Only this host's embedded condocv2 frame is listened to.
+  const [workFocus, setWorkFocus] = useState<WorkFocus | null>(null)
+  useEffect(() => setWorkFocus(null), [host.id])
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin || e.source !== condocv2FrameRef.current?.contentWindow) return
+      const d = e.data
+      if (d?.type !== 'condocv2-open-work' || typeof d.at !== 'number') return
+      const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
+      setWorkFocus(f => ({ slopspace: str(d.slopspace), role: str(d.role), signal: str(d.signal), at: d.at, seq: (f?.seq ?? 0) + 1 }))
+      setActiveTab('worker')
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [setActiveTab])
+
+  const getServiceStatus = (name: string): string => {
+    if (!active) return 'unknown'
+    return lrState?.services?.find((s: ServiceStatus) => s.name === name)?.status ?? 'unknown'
+  }
+
+  const files = data.files?.files ?? []
+  const selectedFile = activeTab === 'files' && !viewerFileId
+    ? files.find(f => f.id === selectedFileId) ?? null
+    : null
+  const viewerFile = activeTab === 'files' && viewerFileId
+    ? files.find(f => f.id === viewerFileId) ?? null
+    : null
+  const isEmbedTab = EMBED_TABS.has(activeTab)
+
+  // A sub-app tab whose app isn't up on this host shows LaunchPanel: the
+  // embedded tabs while their app isn't connected, worker and
+  // federation-command while no instance of them is running (notLaunched).
+  // Unknown until the host's first system-state, when they show as before.
+  const managedProcs = data.system ? data.system.managed ?? [] : null
+  const notLaunched = (name: string): boolean =>
+    active && managedProcs !== null &&
+    LAUNCHABLE_APPS.some(a => a.name === name) &&
+    !managedProcs.some(p => p.name === name && p.status === 'running')
+  const launchPanel = (
+    <LaunchPanel name={activeTab} managed={managedProcs} onLaunch={name => sendLRLaunchApp(host.id, name)} />
+  )
+
+  // Drives every MicButton under this host's view (Step2Prompt.md Revision
+  // J) via TCCaptureContext, below -- gated on this host's own data.convo
+  // (whether a the-conversationalist instance is actually running there and,
+  // per Step5Prompt.md Revision B, can reach its transcription engine), not
+  // the header's global tcAvailable, since dictation has to reach this
+  // specific host's convo instance -- see useTCCapture's doc comment.
+  const frameSrc = (appId: string) => hostFrameSrc(host.id, appId, data.plugins)
+  const tcCapture = useTCCapture(Boolean(data.convo?.transcribe_available), frameSrc('convo'))
+  const pluginHosts: PluginsHostState[] = [{ hostId: host.id, state: data.plugins, repo: data.repo }]
+  // A plug-in dev repo's "registration" link in the system tab (Step6Prompt.md
+  // Revision E): which registration the plugins tab should open on and
+  // scroll to. Not carried across hosts.
+  const [pluginFocus, setPluginFocus] = useState<PluginRegistrationFocus | null>(null)
+  // A plug-in tile double-clicked on the global topology view (Revision G):
+  // which plug-in's own tab the plugins tab should open on. Only one of the
+  // two requests is kept, so a stale one can't win when the tab remounts.
+  const [pluginOpen, setPluginOpen] = useState<PluginTabOpen | null>(null)
+  useEffect(() => { setPluginFocus(null); setPluginOpen(null) }, [host.id])
+  const showPluginRegistration = (appId: string) => {
+    setPluginOpen(null)
+    setPluginFocus({ hostId: host.id, appId, seq: Date.now() })
+    setActiveTab('plugins')
+  }
+
+  // Opens the plugins tab at one of this host's plug-ins -- a plug-in tile
+  // double-clicked on the global topology view, or a managed plug-in's row
+  // double-clicked in the system tab. A plug-in that hasn't said hello here
+  // yet (a plug-in dev repo's, before its first launch) has no tab of its
+  // own, so it opens on its registration instead.
+  const openPluginTab = (appId: string) => {
+    if (data.plugins?.plugins?.some(p => p.app_id === appId && isExternalPlugin(p, data.plugins))) {
+      setPluginFocus(null)
+      setPluginOpen({ hostId: host.id, appId, seq: Date.now() })
+      setActiveTab('plugins')
+    } else {
+      showPluginRegistration(appId)
+    }
+  }
+
+  // Consume App()'s handoff from that double-click once this is the host it
+  // was aimed at.
+  useEffect(() => {
+    if (!pendingPluginTarget || pendingPluginTarget.hostId !== host.id) return
+    const { appId } = pendingPluginTarget
+    onConsumePendingPluginTarget()
+    openPluginTab(appId)
+  }, [pendingPluginTarget, host.id, onConsumePendingPluginTarget])
+
+  return (
+    <TCCaptureContext.Provider value={{ available: tcCapture.available, capture: tcCapture.capture }}>
+    <div className="lr-view">
+      <div className="lr-header">
+        <span className="lr-host-label">{host.label}</span>
+        <span className={`lr-conn-badge${active ? ' lr-conn-badge-active' : ' lr-conn-badge-inactive'}`}>
+          {active ? 'connected' : 'not connected'}
+        </span>
+      </div>
+      <div className="tab-bar">
+        <ScrollTabs activeKey={activeTab}>
+          {LR_TABS.map(svc => (
+            <button
+              key={svc}
+              className={`tab${activeTab === svc ? ' tab-active' : ''}${EMBED_TABS.has(svc) ? ' tab-with-icon' : ''}`}
+              onClick={() => { setActiveTab(svc); setSelectedFileId(null); setViewerFileId(null) }}
+              title={EMBED_TABS.has(svc) ? appTabTitle(svc, pluginHosts) : undefined}
+            >
+              {EMBED_TABS.has(svc) && <AppTabIcon appId={svc} hosts={pluginHosts} />}
+              {LR_TAB_LABELS[svc] ?? svc}
+              {svc === 'files' && hasHighlighted && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); onGoToHighlighted() }}
+                />
+              )}
+            </button>
+          ))}
+        </ScrollTabs>
+        {activeTab === 'system' && (
+          <DebugToggleButton open={debugOpen} onClick={() => setDebugOpen(o => !o)} />
+        )}
+      </div>
+      {isEmbedTab && (
+        <div className={`embed-status-bar health-${getServiceStatus(activeTab)}`}>
+          <span className="health-dot" />
+          <span className="health-label">{activeTab} — {getServiceStatus(activeTab)}</span>
+        </div>
+      )}
+      <div className={`main-pane${isEmbedTab || activeTab === 'plugins' ? ' main-pane-embed' : ''}`}>
+        {isEmbedTab ? (
+          // Every sub-app's own UI, through this host's local-representative
+          // (/host/<id>/* is a transparent proxy to LR -- see proxyToHost) at
+          // its plug-in route, or its legacy proxy until it has said hello --
+          // see hostFrameSrc.
+          !active ? (
+            <div className="service-empty service-empty-embed">local-representative on this host is not connected</div>
+          ) : activeTab === 'condocv2' ? (
+            getServiceStatus('condocv2') === 'healthy' ? (
+              <iframe
+                ref={condocv2FrameRef}
+                className="embed-frame"
+                src={`${frameSrc('condocv2')}${condocv2Hash}`}
+                title={`condocv2 on ${host.label}`}
+                onLoad={handleCondocv2Load}
+              />
+            ) : launchPanel
+          ) : activeTab === 'sessions' ? (
+            data.sessions ? (
+              <iframe className="embed-frame" src={frameSrc('sessions')} title={`sessions on ${host.label}`} />
+            ) : launchPanel
+          ) : activeTab === 'robot' ? (
+            data.robot ? (
+              <iframe className="embed-frame" src={frameSrc('robot')} title={`robot on ${host.label}`} />
+            ) : launchPanel
+          ) : activeTab === 'compose' ? (
+            data.compose ? (
+              <iframe className="embed-frame" src={frameSrc('compose')} title={`compose on ${host.label}`} />
+            ) : launchPanel
+          ) : activeTab === 'dg' ? (
+            // diagrammographer has no legacy /dg/ proxy to fall back on, so
+            // it's framed only once its hello has put it online on this host.
+            getServiceStatus('dg') !== 'healthy' ? launchPanel
+            : data.plugins?.plugins?.some(p => p.app_id === 'dg' && p.status === 'online') ? (
+              <iframe className="embed-frame" src={frameSrc('dg')} title={`dg on ${host.label}`} />
+            ) : (
+              <div className="service-empty service-empty-embed">dg is connected; waiting for its plug-in hello…</div>
+            )
+          ) : (
+            data.convo ? (
+              <iframe className="embed-frame" src={frameSrc('convo')} title={`convo on ${host.label}`} />
+            ) : launchPanel
+          )
+        ) : activeTab === 'plugins' ? (
+          <PluginsShell hosts={pluginHosts} focus={pluginFocus} open={pluginOpen} />
+        ) : (
+          <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+            <div className="service-view">
+              <div className="service-name">{activeTab}</div>
+              {(activeTab === 'federation-command' || activeTab === 'worker') && (
+                <div className={`health-indicator health-${getServiceStatus(activeTab)}`}>
+                  <span className="health-dot" />
+                  <span className="health-label">{getServiceStatus(activeTab)}</span>
+                  {fcSession && (
+                    <span className="fc-session-tag" title="active session">{fcSession}</span>
+                  )}
+                </div>
+              )}
+              {activeTab === 'system' && (
+                debugOpen ? (
+                  <DebugView
+                    logLines={(data.debugLog?.entries ?? []).map(e => formatDebugLogLine(e))}
+                    chainLines={(data.chainCall?.entries ?? []).map(e => ({ ts: e.ts * 1000, line: formatChainCallLine(e) }))}
+                    stateLines={(data.stateboard?.entries ?? []).map(e => formatStateboardLine(e))}
+                    pluginLines={formatPluginsLines(data.plugins)}
+                    pluginHosts={[{ hostId: host.id, state: data.plugins }]}
+                    installHosts={[{ hostId: host.id, hostLabel: host.label, connected: host.status === 'connected', agents: data.system?.agents }]}
+                    onInstallAgent={sendLRInstallAgent}
+                    onInspectAgents={sendLRInspectAgents}
+                    uploadHostId={active ? host.id : null}
+                    uploadFiles={uploadFiles}
+                  />
+                ) : (
+                  <SystemPanel
+                    hostId={host.id}
+                    state={data.system}
+                    active={active}
+                    fcState={data.fcState}
+                    fcInstances={data.fcInstances}
+                    repoState={data.repo}
+                    onLaunch={sendLRLaunchApp}
+                    onTerminate={sendLRTerminateApp}
+                    onRestart={sendLRRestartApp}
+                    onRestartManaged={sendLRRestartManagedApp}
+                    onRebuild={sendLRRebuildApp}
+                    onSetAutoRebuild={sendLRSetAutoRebuild}
+                    onSwitchBranch={sendLRSwitchBranch}
+                    onWatchExternal={sendLRWatchExternal}
+                    onBuildExternal={sendLRBuildExternal}
+                    onShowPluginRegistration={showPluginRegistration}
+                    onSetAutoUpdate={sendLRSetAutoUpdate}
+                    onConnectProvider={sendLRConnectProvider}
+                    onDisconnectProvider={sendLRDisconnectProvider}
+                    onInspectAgents={sendLRInspectAgents}
+                    onOpenTab={setActiveTab}
+                    plugins={data.plugins}
+                    onOpenPlugin={openPluginTab}
+                  />
+                )
+              )}
+              {activeTab === 'files' && viewerFileId ? (
+                <FileViewer
+                  hostId={host.id}
+                  fileId={viewerFileId}
+                  file={viewerFile}
+                  onBack={() => setViewerFileId(null)}
+                />
+              ) : activeTab === 'files' && (
+                <FilesPanel
+                  files={files}
+                  active={active}
+                  selectedId={selectedFileId}
+                  onSelect={setSelectedFileId}
+                  onEnter={setViewerFileId}
+                  onUpload={f => uploadFiles(host.id, f)}
+                  hostApi={`/host/${encodeURIComponent(host.id)}`}
+                  onHostImport={(paths, folders) => importHostFiles(host.id, paths, folders)}
+                />
+              )}
+              {activeTab === 'control' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <ControlPanel
+                    hostId={host.id}
+                    connected={active}
+                    state={data.control ?? null}
+                    lib={data.controlLib ?? null}
+                    replies={data.controlReplies ?? {}}
+                    request={req => requestLRControl(host.id, req)}
+                    robotHealthy={getServiceStatus('robot') === 'healthy'}
+                    onRun={(seq, controls, recordOverride) => sendLRControlRun(host.id, seq, controls, recordOverride)}
+                    onCancel={() => sendLRControlCancel(host.id)}
+                    onContinue={run => sendLRControlContinue(host.id, run)}
+                  />
+                )
+              )}
+              {activeTab === 'tools' && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <ToolsPanel
+                    connected={active}
+                    state={data.tools ?? null}
+                    replies={data.toolsReplies ?? {}}
+                    request={req => requestLRTools(host.id, req)}
+                    fileUrl={id => fileRawUrl(host.id, id)}
+                    hostApi={`/host/${encodeURIComponent(host.id)}`}
+                    node="this host"
+                  />
+                )
+              )}
+              {activeTab === 'demo' && (
+                <DemoPanel
+                  key={host.id}
+                  scope="this host"
+                  request={req => requestLRTools(host.id, req)}
+                  replies={data.toolsReplies ?? {}}
+                  connected={!!active}
+                  fileUrl={id => fileRawUrl(host.id, id)}
+                  hostApi={`/host/${encodeURIComponent(host.id)}`}
+                  nodes={data.control?.nodes ?? []}
+                  thisNode={data.control?.node ?? ''}
+                  appStatus={(app, own): DemoAppStatus => {
+                    if (!active) return { kind: 'unknown', label: 'not connected' }
+                    if (own) return { kind: 'up', label: 'ready' }
+                    if (notLaunched(app)) return { kind: 'down', label: 'not launched' }
+                    const s = getServiceStatus(app)
+                    return { kind: s === 'healthy' ? 'up' : s === 'unhealthy' ? 'down' : 'unknown', label: s }
+                  }}
+                  onOpenApp={app => { if (isLRTab(app)) setActiveTab(app) }}
+                />
+              )}
+              {(activeTab === 'worker' || activeTab === 'federation-command') && notLaunched(activeTab) && launchPanel}
+              {activeTab === 'worker' && !notLaunched(activeTab) && (
+                !active ? (
+                  <div className="service-empty">local-representative on this host is not connected</div>
+                ) : (
+                  <WorkerPanel
+                    healthy={getServiceStatus('worker') === 'healthy'}
+                    state={data.worker ?? null}
+                    reply={data.workerReply ?? null}
+                    onSubmit={prompt => sendLRWorkerSubmit(host.id, prompt)}
+                    slopspaceReply={data.slopspaceReply ?? null}
+                    onControlSlopspace={req => sendLRWorkerSlopspace(host.id, req)}
+                    focus={workFocus}
+                  />
+                )
+              )}
+              {activeTab === 'federation-command' && !notLaunched(activeTab) && (fc ? (
+                // A current LR: one instance at a time, picked above.
+                <>
+                  <FCInstancePicker
+                    instances={data.fcInstances}
+                    selected={fc.key}
+                    onSelect={key => setSelectedFC(prev => ({ ...prev, [host.id]: key }))}
+                  />
+                  {fc.ridealong && (
+                    <RidealongPanel
+                      hostId={host.id}
+                      state={{ ...fc.ridealong, host_id: host.id }}
+                      fcState={fc.state}
+                      sendLRRidealongCommand={(hostId, action) => sendLRRidealongCommand(hostId, action, fc.key)}
+                    />
+                  )}
+                  <FCCommandPanel
+                    key={fc.key}
+                    hostId={host.id}
+                    fcState={fc.state}
+                    fcLog={data.fcLogs[fc.key] ?? []}
+                    sendLRCommand={(hostId, cmd) => sendLRCommand(hostId, cmd, fc.key)}
+                  />
+                </>
+              ) : (
+                // An older LR that doesn't tell its instances apart (or none
+                // connected yet).
+                <>
+                  {data.ridealong && (
+                    <RidealongPanel
+                      hostId={host.id}
+                      state={data.ridealong}
+                      fcState={data.fcState}
+                      sendLRRidealongCommand={sendLRRidealongCommand}
+                    />
+                  )}
+                  <FCCommandPanel
+                    hostId={host.id}
+                    fcState={data.fcState}
+                    fcLog={data.fcLog}
+                    sendLRCommand={sendLRCommand}
+                  />
+                </>
+              ))}
+            </div>
+            {selectedFile && (
+              <FileDetailPane
+                file={selectedFile}
+                hostId={host.id}
+                onClose={() => setSelectedFileId(null)}
+                onEnter={setViewerFileId}
+                onMarkup={id => setMarkupFile(files.find(f => f.id === id) ?? null)}
+                onOpenTab={tab => { setActiveTab(tab); setSelectedFileId(null); setViewerFileId(null) }}
+              />
+            )}
+          </div>
+        )}
+      </div>
+      {markupFile && (
+        <MarkupDialog
+          file={markupFile}
+          hostId={host.id}
+          rawUrl={fileRawUrl(host.id, markupFile.id)}
+          onClose={() => setMarkupFile(null)}
+        />
+      )}
+      {tcCapture.captureURL && (
+        <TCCaptureOverlay url={tcCapture.captureURL} onCancel={tcCapture.cancel} />
+      )}
+    </div>
+    </TCCaptureContext.Provider>
+  )
+}
+
+// CAMERA_ICON is a grey-palette wireframe icon (Step1SubstepCPrompt.md),
+// matching the files tab's own outline icon set so the quick-feedback
+// screenshot button reads as part of the same icon family. Kept identical to
+// local-representative's copy -- see App.tsx there for the file-icon
+// convention this follows.
+const CAMERA_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+    <path d="M9 4 7.5 6H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-3.5L15 4z" strokeLinecap="round" />
+    <circle cx="12" cy="13" r="3.5" />
+  </svg>
+)
+
+// captureScreenshot grabs a single frame of "the current display"
+// (Step1SubstepCPrompt.md) via the browser's screen-capture API rather than
+// rasterizing the DOM, so it genuinely captures whatever's on screen
+// (including an embedded tab's own iframe content) without pulling in a
+// DOM-to-canvas dependency. The capture stream is stopped immediately after
+// the one frame is drawn -- this is a screenshot, not a recording.
+async function captureScreenshot(): Promise<File> {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+  try {
+    const track = stream.getVideoTracks()[0]
+    const video = document.createElement('video')
+    video.srcObject = stream
+    await video.play()
+    // Give the first frame a tick to actually land before drawing it.
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    canvas.getContext('2d')!.drawImage(video, 0, 0)
+    track.stop()
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))), 'image/png'),
+    )
+    return new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })
+  } finally {
+    stream.getTracks().forEach(t => t.stop())
+  }
+}
+
+// MIC_ICON follows the same grey-palette wireframe convention as CAMERA_ICON
+// (Step1SubstepCPrompt.md) so the mic-availability indicator reads as part of
+// the same icon family. Kept identical to local-representative's copy -- see
+// App.tsx there. See
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// ---- The Conversationalist mic-capture, for per-field dictation ----
+//
+// Step2Prompt.md Revision J adds the files tab's "new text file" dialog, whose
+// body field gets a mic-dictation affordance. Mirrors local-representative's
+// own copy of this block almost exactly, with one difference: agent-coordinator only
+// ever reaches a the-conversationalist instance *through* a specific host's
+// local-representative (/host/<id>/apps/convo/, or the legacy
+// /host/<id>/convo/ -- see hostFrameSrc -- reverse-proxied by proxyToHost in
+// main.go), so both the capture URL and the "is TC available" gate are
+// host-scoped rather than global -- see LRView's own per-host
+// TCCaptureContext.Provider, below, which already knows which host (and
+// whether that host's own data.convo says TC is running there) it's for.
+// convoSrc is that host's convo frame path.
+function tcCaptureURL(convoSrc: string): string {
+  return `${window.location.origin}${convoSrc}?embed=capture`
+}
+
+interface TCCaptureContextValue {
+  available: boolean
+  capture: (onTranscript: (text: string) => void) => void
+}
+
+// Default value only matters if a MicButton somehow renders outside a
+// TCCaptureContext.Provider -- available: false keeps it inert.
+const TCCaptureContext = createContext<TCCaptureContextValue>({ available: false, capture: () => {} })
+
+// useTCCapture owns the one hidden-until-active iframe a given host's
+// TCCaptureContext.Provider ever opens into that host's the-conversationalist,
+// and the postMessage listener that receives its transcript back. `available`
+// gates every MicButton under that provider; `capture` starts a capture,
+// invoking its callback once (and only once) with the final text.
+function useTCCapture(tcAvailable: boolean, convoSrc: string) {
+  const [captureURL, setCaptureURL] = useState<string | null>(null)
+  const onTranscriptRef = useRef<((text: string) => void) | null>(null)
+
+  const capture = useCallback((onTranscript: (text: string) => void) => {
+    onTranscriptRef.current = onTranscript
+    setCaptureURL(tcCaptureURL(convoSrc))
+  }, [convoSrc])
+
+  const cancel = useCallback(() => {
+    onTranscriptRef.current = null
+    setCaptureURL(null)
+  }, [])
+
+  useEffect(() => {
+    if (!captureURL) return
+    let expectedOrigin: string
+    try {
+      expectedOrigin = new URL(captureURL).origin
+    } catch {
+      return
+    }
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== expectedOrigin) return
+      const data = ev.data as { type?: string; text?: string } | undefined
+      if (data?.type === 'tc-transcript') {
+        onTranscriptRef.current?.(data.text ?? '')
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      } else if (data?.type === 'tc-transcript-cancel') {
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [captureURL])
+
+  return { available: tcAvailable, capture, captureURL, cancel }
+}
+
+// MicButton is the per-field affordance -- renders nothing while the
+// enclosing TCCaptureContext.Provider says TC isn't available for that host.
+// See the new-text-file dialog's body field, below, for its one call site in
+// this app so far.
+function MicButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const { available, capture } = useContext(TCCaptureContext)
+  if (!available) return null
+  return (
+    <button
+      type="button"
+      className="mic-btn"
+      title="dictate with The Conversationalist"
+      onClick={() => capture(onTranscript)}
+    >
+      {MIC_ICON}
+    </button>
+  )
+}
+
+// appendTranscript is the shared "insert dictated text" behaviour every
+// MicButton call site uses: appended after any existing content, space-
+// separated, rather than overwriting it.
+function appendTranscript(prev: string, text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return prev
+  return prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed
+}
+
+// TCCaptureOverlay hosts the actual iframe while a capture is in progress.
+function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void }) {
+  return (
+    <div className="tc-capture-backdrop" onClick={onCancel}>
+      <div className="tc-capture-panel" onClick={e => e.stopPropagation()}>
+        <div className="tc-capture-panel-header">
+          <span>The Conversationalist</span>
+          <button type="button" className="tc-capture-close" onClick={onCancel} aria-label="Cancel dictation">×</button>
+        </div>
+        <iframe className="tc-capture-frame" src={url} title="the-conversationalist capture" allow="microphone" />
+      </div>
+    </div>
+  )
+}
+
+// TCAvailabilityIndicator sits beside the camera/screenshot icon in the
+// header: illuminated (mic-btn-active) once at least one
+// the-conversationalist instance is available on any connected host (the
+// aggregate agent-coordinator itself computes -- see tcavailability.go).
+// Unlike ScreenshotButton this is a passive indicator, not a control -- the
+// actual mic-to-transcribe action lives on the per-field MicButtons (see
+// Step2Prompt.md: "we will keep the TC functionality as contained in that
+// sub-app as we can").
+function TCAvailabilityIndicator({ available }: { available: boolean }) {
+  return (
+    <span
+      className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
+      title={available ? 'The Conversationalist is available' : 'The Conversationalist transcription is not available on any connected host'}
+    >
+      {MIC_ICON}
+    </span>
+  )
+}
+
+// ScreenshotButton sits immediately left of the nav arrows. `enabled`
+// reflects whether there's at least one file store to save into -- see
+// callers for what that means in each app -- independent of `busy`, which
+// just covers the capture/upload round-trip so a slow save can't be
+// double-fired.
+function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
+  const active = enabled && !busy
+  return (
+    <button
+      className={`screenshot-btn${active ? ' screenshot-btn-active' : ''}`}
+      onClick={onClick}
+      disabled={!active}
+      title={enabled ? (busy ? 'saving screenshot…' : 'save a screenshot to the most-preferred file store') : 'no file store available -- select a connected host first'}
+    >
+      {CAMERA_ICON}
+    </button>
+  )
+}
+
+export default function App() {
+  const {
+    connected, hosts, hostData, selectHost, devMode, selfHostId, modeMismatches, tcAvailable,
+    acLoaderManaged, acUpdateAvailable, acAutoUpdate, acStartedAt,
+    sendLRCommand, sendLRRidealongCommand, sendLRControlRun, sendLRControlCancel, sendLRControlContinue, requestLRControl, sendLRLaunchApp, sendLRTerminateApp, uploadFiles, importHostFiles,
+    sendLRWorkerSubmit, sendLRWorkerSlopspace, sendLRRestartApp, sendLRRestartManagedApp, sendLRRebuildApp, sendLRSetAutoRebuild,sendLRSwitchBranch, sendLRWatchExternal, sendLRBuildExternal, sendLRSetAutoUpdate, sendLRConnectProvider, sendLRDisconnectProvider, sendLRInspectAgents, sendLRInstallAgent, sendACRestartApp, sendACSetAutoUpdate,
+    requestLRTools,
+  } = useCoordinatorWS()
+  const mismatches = Object.values(modeMismatches)
+  // Seeded from sessionStorage (browser pickup strategy, Layer 2) so a
+  // refresh lands back on the same host -- if that host id no longer
+  // exists, `selectedHost` below just comes back null and we fall through
+  // to the global view, same as picking an unknown host any other way.
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(() => sessionStorage.getItem('ac-selected-host'))
+  // Shared across the global view and any host's view, so switching between
+  // them (selecting/deselecting a host) keeps whichever tab was active
+  // instead of resetting it.
+  const [activeTab, setActiveTab] = useState<LRTab>(initialACTab)
+  // Mobile nav drawer: the host sidebar becomes an off-canvas panel below the
+  // `mobile-breakpoint` width (see index.css). Desktop layout is untouched -- this state has no visible effect
+  // above the breakpoint.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [screenshotBusy, setScreenshotBusy] = useState(false)
+
+  const handleSelectHost = (id: string) => {
+    setSelectedHostId(id)
+    selectHost(id)
+    setMobileNavOpen(false)
+  }
+
+  // Global is the default landing view (selectedHostId === null) and is
+  // mutually exclusive with a particular host selection.
+  const handleSelectGlobal = () => {
+    setSelectedHostId(null)
+    setMobileNavOpen(false)
+  }
+
+  const selectedHost = hosts.find(h => h.id === selectedHostId) ?? null
+
+  // Double-click navigation from the global topology view
+  // (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md): a host card
+  // opens that host's system tab, a sub-app box that sub-app's tab. A plug-in
+  // tile names its app id too, handed off to LRView (pendingPluginTarget) to
+  // open that plug-in's own tab (privateRepoOpsImpls Step6Prompt.md Revision G).
+  const handleOpenHostTab = (id: string, tab: LRTab, appId?: string) => {
+    if (appId) setPendingPluginTarget({ hostId: id, appId })
+    if (id !== selectedHostId) handleSelectHost(id)
+    setActiveTab(tab)
+  }
+  const [pendingPluginTarget, setPendingPluginTarget] = useState<{ hostId: string; appId: string } | null>(null)
+  const consumePendingPluginTarget = useCallback(() => setPendingPluginTarget(null), [])
+
+  // "At least one file store available" (Step1SubstepCPrompt.md): AC has no
+  // file store of its own -- a screenshot can only ever land somewhere by
+  // relaying through the selected host's local-representative (same route
+  // uploadFiles already uses), which only works once a host is both picked
+  // and actually connected. uploadFiles below already prefers a cloud cache
+  // over the host-cache wherever the target LR has one; today that's
+  // nowhere, so every screenshot lands in that host's host-cache.
+  const hasFileStore = !!selectedHost && selectedHost.status === 'connected'
+
+  const handleScreenshot = async () => {
+    if (screenshotBusy || !selectedHostId) return
+    setScreenshotBusy(true)
+    try {
+      const file = await captureScreenshot()
+      await uploadFiles(selectedHostId, [file])
+    } catch (err) {
+      console.error('screenshot failed:', err)
+    } finally {
+      setScreenshotBusy(false)
+    }
+  }
+
+  // Files tab picker's highlighted-file indicator (Step5SubstepR Revision E).
+  // Computed across every known host -- not just whichever one is currently
+  // selected -- so the dot lights up on the global view, or while looking at
+  // an unrelated host, and double-clicking it can jump to the right host
+  // *and* the right file. "First" follows the host sidebar's own order, then
+  // each host's own file order.
+  const firstHighlighted = useMemo(() => {
+    for (const host of hosts) {
+      const hit = hostData[host.id]?.files?.files?.find(f => f.highlighted)
+      if (hit) return { hostId: host.id, fileId: hit.id }
+    }
+    return null
+  }, [hosts, hostData])
+  // One-shot handoff to whichever LRView ends up rendered for the target
+  // host, telling it to open that file's viewer -- cleared once consumed.
+  const [pendingFileTarget, setPendingFileTarget] = useState<{ hostId: string; fileId: string } | null>(null)
+
+  const goToFirstHighlighted = () => {
+    if (!firstHighlighted) return
+    setPendingFileTarget(firstHighlighted)
+    if (firstHighlighted.hostId !== selectedHostId) handleSelectHost(firstHighlighted.hostId)
+    setActiveTab('files')
+  }
+
+  useEffect(() => {
+    if (selectedHostId) sessionStorage.setItem('ac-selected-host', selectedHostId)
+    else sessionStorage.removeItem('ac-selected-host')
+  }, [selectedHostId])
+
+  useEffect(() => {
+    sessionStorage.setItem('ac-active-tab', activeTab)
+  }, [activeTab])
+
+  // Forward/back nav arrows (Step5Prompt.md Revision M) track the pair of
+  // top-level navigation choices -- which host (or global) and which tab --
+  // as a single "screen".
+  const navScreen = useMemo(() => ({ hostId: selectedHostId, tab: activeTab }), [selectedHostId, activeTab])
+  const applyNavScreen = (s: { hostId: string | null; tab: LRTab }) => {
+    // Only re-issue the host (de)selection -- with its selectHost() resubscribe
+    // -- when the host actually changes, so navigating between tabs on the
+    // same host doesn't needlessly resubscribe on every back/forward step.
+    if (s.hostId !== selectedHostId) {
+      if (s.hostId) handleSelectHost(s.hostId)
+      else handleSelectGlobal()
+    }
+    setActiveTab(s.tab)
+  }
+  const nav = useScreenHistory(
+    navScreen,
+    (a, b) => a.hostId === b.hostId && a.tab === b.tab,
+    applyNavScreen,
+    NAV_HISTORY_MAX,
+  )
+
+  // A host id restored from sessionStorage was never sent via
+  // handleSelectHost's own selectHost() call -- issue it here exactly once,
+  // now that the websocket is actually up.
+  const hashSelectHostDone = useRef(false)
+  useEffect(() => {
+    if (connected && selectedHostId && !hashSelectHostDone.current) {
+      hashSelectHostDone.current = true
+      selectHost(selectedHostId)
+    }
+  }, [connected, selectedHostId, selectHost])
+
+  return (
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {mismatches.length > 0 && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch — {mismatches.map(m => `${m.host_id} (${m.peer_mode})`).join(', ')}:
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
+      <div className="app-header">
+        <span className="app-title">agent-coordinator</span>
+        <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <TCAvailabilityIndicator available={tcAvailable} />
+        <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
+        <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
+        <ConnDot connected={connected} startedAt={acStartedAt} />
+      </div>
+      <div className="app-body">
+        <button
+          className="mobile-nav-toggle"
+          aria-label="Open hosts"
+          onClick={() => setMobileNavOpen(true)}
+        >
+          ☰
+        </button>
+
+        {/* Direct one-tap "go up" to the host list, without opening the
+            drawer first. */}
+        {selectedHost && (
+          <button
+            className="mobile-back-btn"
+            aria-label="Back to hosts"
+            onClick={() => setSelectedHostId(null)}
+          >
+            ‹
+          </button>
+        )}
+
+        {mobileNavOpen && (
+          <div className="mobile-nav-backdrop" onClick={() => setMobileNavOpen(false)} />
+        )}
+
+        <div className={`sidebar-wrap${mobileNavOpen ? ' mobile-open' : ''}`}>
+          <HostSidebar
+            hosts={hosts}
+            hostData={hostData}
+            selectedHostId={selectedHostId}
+            onSelect={handleSelectHost}
+            onSelectGlobal={handleSelectGlobal}
+          />
+        </div>
+        <div className="content">
+          {selectedHost ? (
+            <LRView
+              host={selectedHost}
+              data={hostData[selectedHost.id] ?? emptyHostState()}
+              sendLRCommand={sendLRCommand}
+              sendLRRidealongCommand={sendLRRidealongCommand}
+              sendLRControlRun={sendLRControlRun}
+              sendLRControlCancel={sendLRControlCancel}
+              sendLRControlContinue={sendLRControlContinue}
+              requestLRControl={requestLRControl}
+              sendLRLaunchApp={sendLRLaunchApp}
+              sendLRTerminateApp={sendLRTerminateApp}
+              sendLRWorkerSubmit={sendLRWorkerSubmit}
+              sendLRWorkerSlopspace={sendLRWorkerSlopspace}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRestartManagedApp={sendLRRestartManagedApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
+              sendLRWatchExternal={sendLRWatchExternal}
+              sendLRBuildExternal={sendLRBuildExternal}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              sendLRConnectProvider={sendLRConnectProvider}
+              sendLRDisconnectProvider={sendLRDisconnectProvider}
+              sendLRInspectAgents={sendLRInspectAgents}
+              sendLRInstallAgent={sendLRInstallAgent}
+              requestLRTools={requestLRTools}
+              uploadFiles={uploadFiles}
+              importHostFiles={importHostFiles}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              hasHighlighted={!!firstHighlighted}
+              onGoToHighlighted={goToFirstHighlighted}
+              pendingFileTarget={pendingFileTarget}
+              onConsumePendingFileTarget={() => setPendingFileTarget(null)}
+              pendingPluginTarget={pendingPluginTarget}
+              onConsumePendingPluginTarget={consumePendingPluginTarget}
+            />
+          ) : (
+            <GlobalView
+              hosts={hosts}
+              hostData={hostData}
+              selfHostId={selfHostId}
+              devMode={devMode}
+              sendLRRestartApp={sendLRRestartApp}
+              sendLRRebuildApp={sendLRRebuildApp}
+              sendLRSetAutoRebuild={sendLRSetAutoRebuild}
+              sendLRSwitchBranch={sendLRSwitchBranch}
+              sendLRSetAutoUpdate={sendLRSetAutoUpdate}
+              sendLRInspectAgents={sendLRInspectAgents}
+              sendLRInstallAgent={sendLRInstallAgent}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              acLoaderManaged={acLoaderManaged}
+              acUpdateAvailable={acUpdateAvailable}
+              acAutoUpdate={acAutoUpdate}
+              acStartedAt={acStartedAt}
+              sendACRestartApp={sendACRestartApp}
+              sendACSetAutoUpdate={sendACSetAutoUpdate}
+              hasHighlighted={!!firstHighlighted}
+              onGoToHighlighted={goToFirstHighlighted}
+              uploadFiles={uploadFiles}
+              onOpenHost={handleOpenHostTab}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}

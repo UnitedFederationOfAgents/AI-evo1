@@ -1,0 +1,95 @@
+# DTT example -- localrep, prepare a node for a local-system-under-test demo (see ../../README.md "The localrep tool").
+#
+# It takes a variable, node: the node to prepare, as agent-coordinator
+# names it ("" by default, for this node). It imports the control sequence in
+# resources/demo-prepare.control.yaml into that node's control library and
+# runs it there: it starts the robot (ianar) if it isn't running, unlocks
+# and wakes the screen, has the robot create a small HTML page on the
+# node's desktop, ~/Desktop/demo-<unix seconds>.html (the run's "file"
+# output), and has the robot switch to an empty workspace with
+# the keyboard (super+end, GNOME's "switch to last workspace") while the
+# node's screen is recorded. The open windows aren't touched: they stay on
+# the workspace left behind. Nothing checks yet that the workspace switched
+# to is empty (../../../ianar/window-checks-todo.md); the recording shows it.
+# Then composer, on this node, puts a title card, the recording and a
+# closing card together into a WebM in the files tab.
+#
+# The run and the composition are named by the time of the assert (unix
+# seconds), so each assert prepares the node again and makes a new
+# composition. at sets that time instead (unix seconds): the complete demo
+# (localrep-demo-complete) gives its own, so the cool demo and the shutdown
+# find this page by it. Each assert also replaces whatever version of the sequence
+# the node holds (from.source_file "*"), so a run always takes this file's
+# steps, not an older import's. Reading measures only. Deleting, with the assert's image,
+# removes the sequence and the composition (the run has happened, so it's
+# kept; the render stays in the files tab until it's swept). Deleting
+# doesn't switch the node back to its old workspace or remove the demo page;
+# the shutdown demo (localrep-demo-shutdown) does, given the same at.
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it (the sequence launches it),
+# and GNOME with dynamic workspaces (its default), so the last workspace is
+# an empty one. Here: compose launched and connected (it renders on its own
+# with ffmpeg; otherwise keep the compose tab open and visible). The node's
+# recording is copied here.
+#
+#   dtt read examples/compositions/localrep-demo-prepare.dtt.yaml --var node=<node>
+#   dtt assert examples/compositions/localrep-demo-prepare.dtt.yaml --var node=<node>
+#   dtt delete examples/compositions/localrep-demo-prepare.dtt.yaml --var node=<node> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to prepare, as agent-coordinator names it; empty for this node
+  keys:
+    default: super+end
+    help: the keys that switch to an empty workspace (GNOME's "switch to last workspace")
+  at:
+    default: now
+    help: the demo's time, which names the run, the page and the composition -- now, or unix seconds
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-prepare
+    node: ${{var.node}}
+  alias: prep-seq
+  assert:
+    source_file: resources/demo-prepare.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-prepare
+    key: demo-prep-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: prep-run
+  assert:
+    controls:
+      keys: ${{var.keys}}
+      file: "~/Desktop/demo-${{the-time.unix}}.html"
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-prep-${{the-time.unix}}
+  alias: prep-comp
+  assert:
+    composition: |
+      {
+        "name": "Demo prep on ${{prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Preparing ${{prep-seq.node}} for a demo -- ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "media", "file_id": "${{prep-run.recording.file_id}}", "file_name": "${{prep-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{prep-run.output.workspace}}", "color": "#1a1a1a", "background": "#e0c060"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

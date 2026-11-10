@@ -1,0 +1,947 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	ufahostid "ufa-hostid"
+)
+
+// This file gives session-manager parity with federation-command's "ufa
+// session" sub-menu (main.go's handleUFACommand: list/select/new/set/get/
+// describe/rename/archive), plus a "view" capability neither federation-
+// command nor clauditable's TUI has -- rendering a session's session.jsonl
+// as a readable transcript instead of raw log text.
+//
+// Sessions live as directories under AGENT_RECORDS_PATH/sessions (see
+// sessionsRoot), one per session, each holding a session.yaml (id/name/created) and a session.jsonl
+// event/transcript log -- see clauditable/pkg/records and
+// clauditable/main.go's ensureSession/writeSessionYAMLIfAbsent. The path
+// resolution, YAML field helpers, and ID-generation below mirror
+// clauditable's and federation-command's own copies of the same logic
+// (each of those two already carries its own copy rather than sharing a
+// library); this is a third.
+
+// ---- WebSocket glue ----
+//
+// main.go's handleClientMsg dispatches "list-sessions"/"new-session"/
+// "set-session"/"rename-session"/"describe-session"/"view-session"/
+// "view-processed"/"archive-sessions" into the handlers below, which wrap the pure functions
+// below (path resolution, listing, describing, creating, renaming,
+// archiving, viewing) with WS request/response and s.currentSession
+// bookkeeping.
+
+// SessionsMsg is the "sessions" WebSocket payload: the full session list
+// plus which one (if any) is current, pushed on connect and after any
+// mutation.
+type SessionsMsg struct {
+	Sessions []SessionSummary `json:"sessions"`
+	Current  string           `json:"current"`
+}
+
+// ArchiveResultMsg is the "archive-result" WebSocket payload reporting
+// "ufa session archive" parity's outcome.
+type ArchiveResultMsg struct {
+	Count int    `json:"count"`
+	Path  string `json:"path,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+func (s *Server) getCurrentSession() string {
+	s.sessMu.RLock()
+	defer s.sessMu.RUnlock()
+	return s.currentSession
+}
+
+func (s *Server) setCurrentSession(id string) {
+	s.sessMu.Lock()
+	s.currentSession = id
+	s.sessMu.Unlock()
+	s.pushCurrentSessionStateboard()
+}
+
+// sendSessions replies to c only.
+func (s *Server) sendSessions(c *wsClient) {
+	sessions, err := s.listSessionsWithRemote()
+	if err != nil {
+		s.sendToClient(c, "error", err.Error())
+		return
+	}
+	s.sendToClient(c, "sessions", SessionsMsg{Sessions: sessions, Current: s.getCurrentSession()})
+}
+
+// broadcastSessions notifies every connected client -- used after a
+// mutation (new/set/rename/archive) so other open tabs stay in sync.
+func (s *Server) broadcastSessions() {
+	sessions, err := s.listSessionsWithRemote()
+	msg := SessionsMsg{Current: s.getCurrentSession()}
+	if err != nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for c := range s.clients {
+			s.sendToClient(c, "error", err.Error())
+		}
+		return
+	}
+	msg.Sessions = sessions
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for c := range s.clients {
+		s.sendToClient(c, "sessions", msg)
+	}
+}
+
+// handleNewSession is "ufa session new [name]" parity: create a session and
+// make it current, mirroring federation-command's handleNewSession
+// switching to the session it just created.
+func (s *Server) handleNewSession(c *wsClient, name string) {
+	id, err := createSession(s.recordsPath, name)
+	if err != nil {
+		s.sendToClient(c, "error", "new-session: "+err.Error())
+		return
+	}
+	s.setCurrentSession(id)
+	s.broadcastSessions()
+}
+
+// handleSetSession is "ufa session set <id>" parity. id may name a session
+// this host has only ever seen as a Remote entry from listSessionsWithRemote
+// (discovered on another host, nothing pulled locally yet) -- triggerSessionSync
+// materializes it (session.yaml/session.jsonl/-processed, see sessionSyncGlobs)
+// before the existence check, the same way sendSessionView already does for
+// viewing, so selecting a remote session doesn't require it to already exist
+// in this host's own AGENT_RECORDS_PATH.
+func (s *Server) handleSetSession(c *wsClient, id string) {
+	if id == "" {
+		s.sendToClient(c, "error", "set-session: id is required")
+		return
+	}
+	if _, err := os.Stat(filepath.Join(sessionsRoot(s.recordsPath), id)); err != nil {
+		s.triggerSessionSync(id)
+		if _, err := os.Stat(filepath.Join(sessionsRoot(s.recordsPath), id)); err != nil {
+			s.sendToClient(c, "error", fmt.Sprintf("set-session: session %q not found", id))
+			return
+		}
+	}
+	s.setCurrentSession(id)
+	s.broadcastSessions()
+}
+
+// handleRenameSession is "ufa session rename <name>" parity (the agent-
+// assisted "-a" variant is out of scope for this basic pass).
+func (s *Server) handleRenameSession(c *wsClient, id, name string) {
+	if id == "" {
+		s.sendToClient(c, "error", "rename-session: id is required")
+		return
+	}
+	if err := renameSession(s.recordsPath, id, name); err != nil {
+		s.sendToClient(c, "error", "rename-session: "+err.Error())
+		return
+	}
+	s.broadcastSessions()
+	s.sendSessionInfo(c, id)
+}
+
+// sendSessionInfo is "ufa session describe" parity, replying to c only. Like
+// sendSessionView, this syncs id in first -- the frontend's selectSession
+// fires describe-session and view-session together for a row that may be a
+// Remote-tagged entry (listSessionsWithRemote) never pulled locally before,
+// so without this describeSession's plain os.Stat would reliably lose the
+// race against view-session's own sync and report "not found".
+func (s *Server) sendSessionInfo(c *wsClient, id string) {
+	if id == "" {
+		s.sendToClient(c, "error", "describe-session: id is required")
+		return
+	}
+	s.triggerSessionSync(id)
+	info, err := describeSession(s.recordsPath, id)
+	if err != nil {
+		s.sendToClient(c, "error", "describe-session: "+err.Error())
+		return
+	}
+	s.sendToClient(c, "session-info", info)
+}
+
+// sendSessionView renders id's session.jsonl as a readable transcript,
+// replying to c only. Before reading, it asks local-representative to
+// sync-refresh id's "session.jsonl"/"-processed" files from every other
+// LR-active host (see repr.go's triggerSessionSync) -- this is "bringing it
+// up in session-manager for viewing" from
+// docs/DistributedSessionsBrainstorm.md's sync trigger.
+//
+// When that sync reports it couldn't actually reach a peer (Revision G's
+// fix, see triggerSessionSync), the rendered view is tagged SyncIncomplete so
+// the frontend can tell "this session is genuinely empty/short" apart from
+// "this session may be missing turns because a remote host was unreachable
+// when we tried to refresh it" -- previously indistinguishable, which is what
+// made a remote session like "Hambone23" look like it simply wasn't there.
+func (s *Server) sendSessionView(c *wsClient, id string) {
+	if id == "" {
+		s.sendToClient(c, "error", "view-session: id is required")
+		return
+	}
+	incomplete := s.triggerSessionSync(id)
+	if validSessionID(id) {
+		if err := reconcileSessionLogs(filepath.Join(sessionsRoot(s.recordsPath), id), ufahostid.GetHostID()); err != nil {
+			log.Printf("view-session %s: reconciling session logs: %v", id, err)
+		}
+	}
+	view, err := viewSession(s.recordsPath, id)
+	if err != nil {
+		s.sendToClient(c, "error", "view-session: "+err.Error())
+		return
+	}
+	view.SyncIncomplete = incomplete
+	s.sendToClient(c, "session-view", view)
+}
+
+// handleArchiveSessions is "ufa session archive" parity: archiving the
+// current session (if any) clears it, since its directory no longer exists
+// under sessionsRoot(recordsPath).
+func (s *Server) handleArchiveSessions(c *wsClient) {
+	count, path, err := archiveSessions(s.recordsPath)
+	if err != nil {
+		s.sendToClient(c, "archive-result", ArchiveResultMsg{Count: count, Path: path, Error: err.Error()})
+		if count == 0 {
+			return
+		}
+	} else {
+		s.sendToClient(c, "archive-result", ArchiveResultMsg{Count: count, Path: path})
+	}
+	if count > 0 {
+		s.setCurrentSession("")
+		s.broadcastSessions()
+	}
+}
+
+const (
+	// EnvAgentRecordsPath and DefaultRecordsPath mirror
+	// clauditable/main.go and federation-command/main.go's constants of the
+	// same name.
+	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
+	DefaultRecordsPath         = "/host-agent-files/agent-records"
+
+	// sessionLogPrefix* mirror clauditable/pkg/records' InputPrefix/
+	// OutputPrefix/ErrorPrefix -- the line prefixes FormatSessionLog uses
+	// when writing each record's command/stdout/stderr into session.jsonl.
+	sessionLogInputPrefix  = "IN>> "
+	sessionLogOutputPrefix = "OUT>> "
+	sessionLogErrorPrefix  = "ERR>> "
+)
+
+// resolveRecordsPath returns AGENT_RECORDS_PATH, falling back to
+// DefaultRecordsPath, exactly as clauditable's getEnvOrDefault does.
+func resolveRecordsPath() string {
+	if v := os.Getenv(EnvAgentRecordsPath); v != "" {
+		return v
+	}
+	return DefaultRecordsPath
+}
+
+// ---- the records layout ----
+//
+// AGENT_RECORDS_PATH is the records ROOT: session directories live under
+// <root>/sessions/<id>, beside <root>/dtt-calls and <root>/invocations
+// (clauditable's copies of DTT-call and agent-invocation records). Sessions
+// used to live directly under the root; migrateLegacySessions moves them.
+// s.recordsPath stays the root -- it's what clauditable is handed as
+// AGENT_RECORDS_PATH -- and every function below that takes recordsPath
+// joins a session ID onto sessionsRoot(recordsPath), never onto the root.
+
+// mirrors clauditable/layout.go
+const (
+	sessionsDirName    = "sessions"
+	dttCallsDirName    = "dtt-calls"
+	invocationsDirName = "invocations"
+)
+
+// sessionsRoot is where session directories live under the records root.
+func sessionsRoot(recordsPath string) string { return filepath.Join(recordsPath, sessionsDirName) }
+
+// isReservedRecordsName mirrors clauditable/layout.go: the layout's own
+// directories under the records root, never (legacy) sessions.
+func isReservedRecordsName(name string) bool {
+	switch name {
+	case sessionsDirName, dttCallsDirName, invocationsDirName:
+		return true
+	}
+	return false
+}
+
+// isLegacySessionDir mirrors clauditable/layout.go: dir holds session.jsonl,
+// or session.yaml (a session that has had no command yet only has that).
+func isLegacySessionDir(dir string) bool {
+	for _, marker := range []string{primaryLogName, "session.yaml"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// migrateLegacySessions moves session directories still directly under the
+// records root into sessionsRoot (clauditable's migrate-sessions), mirroring
+// clauditable/layout.go. A session whose sessions/<name> already exists is
+// left where it is, with a logged warning -- the two are never merged. A
+// rename that fails because another process (clauditable, local-
+// representative ...) already moved the directory is fine. main() calls it
+// once at startup, best-effort.
+func migrateLegacySessions(recordsPath string) (moved int, err error) {
+	entries, err := os.ReadDir(recordsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	root := sessionsRoot(recordsPath)
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || isReservedRecordsName(name) {
+			continue
+		}
+		src := filepath.Join(recordsPath, name)
+		if !isLegacySessionDir(src) {
+			continue
+		}
+		if err := os.MkdirAll(root, 0755); err != nil {
+			return moved, fmt.Errorf("creating %s: %w", root, err)
+		}
+		dst := filepath.Join(root, name)
+		// os.Rename would happily replace an empty directory at dst, so check
+		// first rather than rely on it failing.
+		if _, statErr := os.Lstat(dst); statErr == nil {
+			log.Printf("warning: legacy session %s not migrated: %s already exists", src, dst)
+			continue
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			errs = append(errs, statErr)
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // another process moved it first
+			}
+			errs = append(errs, fmt.Errorf("moving %s: %w", src, err))
+			continue
+		}
+		moved++
+	}
+	return moved, errors.Join(errs...)
+}
+
+// ---- listing / describing ----
+
+// SessionSummary is one row of "ufa session list" parity data. Remote/Host
+// are set only for a session discovered on another host but not (yet)
+// present in this host's own AGENT_RECORDS_PATH -- see listSessionsWithRemote.
+type SessionSummary struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	FileCount int    `json:"file_count"`
+	Current   bool   `json:"current"`
+	Remote    bool   `json:"remote,omitempty"`
+	Host      string `json:"host,omitempty"`
+}
+
+// listSessions returns every session directory under sessionsRoot(recordsPath),
+// newest first (matching federation-command's renderSessions sort order),
+// flagging whichever one equals currentID.
+func listSessions(recordsPath, currentID string) ([]SessionSummary, error) {
+	root := sessionsRoot(recordsPath)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading sessions directory: %w", err)
+	}
+
+	var ids []string
+	for _, e := range entries {
+		if e.IsDir() {
+			ids = append(ids, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+
+	summaries := make([]SessionSummary, 0, len(ids))
+	for _, id := range ids {
+		sessionDir := filepath.Join(root, id)
+		files, _ := os.ReadDir(sessionDir)
+		summaries = append(summaries, SessionSummary{
+			ID:        id,
+			Name:      readSessionName(sessionDir),
+			FileCount: len(files),
+			Current:   id == currentID,
+		})
+	}
+	return summaries, nil
+}
+
+// listSessionsWithRemote returns listSessions's purely-local summaries plus
+// every session triggerSessionsDiscovery (repr.go) reports from another
+// LR-active host whose ID isn't already in that local list, tagged Remote
+// and with which host it came from -- closing the gap
+// condocs/initialDistributedSessionsImpls/RemoteSessionListingGap.md
+// describes: "list-sessions never leaves the local filesystem." Called by
+// sendSessions/broadcastSessions, so "any list-sessions behaviour" (both the
+// WS "list-sessions" verb and every other trigger that reaches those two --
+// a new browser connection, a mutation, or the connect-time refresh --
+// initiates the same discovery poll (Step1SubstepBPrompt.md Revision A). A
+// session already present locally (e.g. because it was previously pulled)
+// is left as its local entry, never duplicated as remote.
+func (s *Server) listSessionsWithRemote() ([]SessionSummary, error) {
+	summaries, err := listSessions(s.recordsPath, s.getCurrentSession())
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool, len(summaries))
+	for _, sum := range summaries {
+		known[sum.ID] = true
+	}
+	for _, r := range s.triggerSessionsDiscovery() {
+		if known[r.ID] {
+			continue
+		}
+		known[r.ID] = true
+		summaries = append(summaries, SessionSummary{ID: r.ID, Name: r.Name, Remote: true, Host: r.HostID})
+	}
+	return summaries, nil
+}
+
+// SessionInfo is "ufa session describe" parity data: the current session's
+// ID, on-disk location, and every field session.yaml carries (not just
+// name).
+type SessionInfo struct {
+	ID       string      `json:"id"`
+	Location string      `json:"location"`
+	Fields   [][2]string `json:"fields"`
+}
+
+// describeSession reads id's session.yaml fields, mirroring federation-
+// command's renderSessionDescribe.
+func describeSession(recordsPath, id string) (SessionInfo, error) {
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), id)
+	if _, err := os.Stat(sessionDir); err != nil {
+		return SessionInfo{}, fmt.Errorf("session %q not found", id)
+	}
+	fields := readSessionYAMLFields(sessionDir)
+	kept := make([][2]string, 0, len(fields))
+	for _, f := range fields {
+		if f[0] == "id" {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return SessionInfo{ID: id, Location: sessionDir, Fields: kept}, nil
+}
+
+// readSessionName mirrors federation-command/main.go's readSessionName.
+func readSessionName(sessionDir string) string {
+	for _, f := range readSessionYAMLFields(sessionDir) {
+		if f[0] == "name" {
+			return f[1]
+		}
+	}
+	return ""
+}
+
+// readSessionYAMLFields mirrors federation-command/main.go's function of the
+// same name: every "key: value" line from session.yaml, in file order.
+func readSessionYAMLFields(sessionDir string) [][2]string {
+	data, err := os.ReadFile(filepath.Join(sessionDir, "session.yaml"))
+	if err != nil {
+		return nil
+	}
+	var fields [][2]string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 && parts[0] != "" {
+			fields = append(fields, [2]string{parts[0], parts[1]})
+		}
+	}
+	return fields
+}
+
+// ---- creating / renaming / archiving ----
+
+// createSession makes a new session directory + session.yaml under
+// sessionsRoot(recordsPath) and returns its generated ID, mirroring clauditable's
+// new-session (ensureSession + generateSessionID).
+func createSession(recordsPath, name string) (string, error) {
+	name = stripSurroundingQuotes(name)
+	if name == "" {
+		name = "Unnamed - " + time.Now().Format("2006-01-02 - 15:04:05")
+	}
+	id := generateSessionID(name)
+	if strings.HasSuffix(id, "-default") {
+		return "", fmt.Errorf("session IDs ending in '-default' are reserved for daily defaults")
+	}
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), id)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return "", fmt.Errorf("creating session directory: %w", err)
+	}
+	if err := writeSessionYAMLIfAbsent(sessionDir, id, name); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// generateSessionID mirrors clauditable/main.go's function of the same name.
+func generateSessionID(name string) string {
+	slug := slugify(name)
+	if slug == "" {
+		slug = "session"
+	}
+	return fmt.Sprintf("%s_%s", time.Now().Format("2006-01-02_15-04-05"), slug)
+}
+
+// slugify mirrors clauditable/main.go's function of the same name: a
+// lowercase, hyphen-separated, filesystem-safe slug capped at 40 chars.
+func slugify(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	prevDash := true
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteRune('-')
+			prevDash = true
+		}
+	}
+	result := strings.TrimRight(b.String(), "-")
+	if len(result) > 40 {
+		result = strings.TrimRight(result[:40], "-")
+	}
+	return result
+}
+
+// stripSurroundingQuotes mirrors federation-command/main.go's function of
+// the same name: removes one matching pair of leading/trailing double or
+// single quotes from s, e.g. `"My New Session"` -> `My New Session`. The
+// frontend's "new session name…" field (and the rename equivalent) is a
+// plain text input, not shell-parsed, so a user quoting a multi-word name
+// out of habit would otherwise end up with the quotes baked into the name.
+func stripSurroundingQuotes(s string) string {
+	if len(s) >= 2 {
+		first, last := s[0], s[len(s)-1]
+		if (first == '"' || first == '\'') && first == last {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
+// writeSessionYAMLIfAbsent mirrors clauditable/main.go's function of the
+// same name, including the owner field recording the creating host (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C).
+func writeSessionYAMLIfAbsent(sessionDir, id, name string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	if _, err := os.Stat(yamlPath); err == nil {
+		return nil
+	}
+	content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n", id, name, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
+	return os.WriteFile(yamlPath, []byte(content), 0644)
+}
+
+// renameSession mirrors federation-command/main.go's updateSessionName plus
+// handleRenameSession's default-session guard.
+func renameSession(recordsPath, id, newName string) error {
+	newName = stripSurroundingQuotes(newName)
+	if strings.HasSuffix(id, "-default") {
+		return fmt.Errorf("cannot rename a default session")
+	}
+	if newName == "" {
+		return fmt.Errorf("rename-session: provide a name")
+	}
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), id)
+	if _, err := os.Stat(sessionDir); err != nil {
+		return fmt.Errorf("session %q not found", id)
+	}
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		return writeSessionYAMLIfAbsent(sessionDir, id, newName)
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, l := range lines {
+		if strings.HasPrefix(l, "name: ") {
+			lines[i] = "name: " + newName
+			found = true
+			break
+		}
+	}
+	if !found {
+		newLines := make([]string, 0, len(lines)+1)
+		idInserted := false
+		for _, l := range lines {
+			newLines = append(newLines, l)
+			if !idInserted && strings.HasPrefix(l, "id: ") {
+				newLines = append(newLines, "name: "+newName)
+				idInserted = true
+			}
+		}
+		if !idInserted {
+			newLines = append(newLines, "name: "+newName)
+		}
+		lines = newLines
+	}
+	return os.WriteFile(yamlPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+// archiveSessions moves every session directory out of sessionsRoot(recordsPath)
+// into a timestamped subdirectory of AGENT_RECORDS_ARCHIVE_PATH (default
+// recordsPath+"-archive"), mirroring clauditable's runArchive ("ufa session
+// archive" shells out to `clauditable archive`). Only sessions are archived:
+// the root's dtt-calls/ and invocations/ stay where they are. No sessions/
+// directory yet means nothing to archive.
+func archiveSessions(recordsPath string) (count int, archiveDir string, err error) {
+	archiveBase := os.Getenv(EnvAgentRecordsArchivePath)
+	if archiveBase == "" {
+		archiveBase = recordsPath + "-archive"
+	}
+
+	root := sessionsRoot(recordsPath)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, "", nil
+		}
+		return 0, "", fmt.Errorf("reading sessions directory: %w", err)
+	}
+	var sessions []string
+	for _, e := range entries {
+		if e.IsDir() {
+			sessions = append(sessions, e.Name())
+		}
+	}
+	if len(sessions) == 0 {
+		return 0, "", nil
+	}
+
+	archiveDir = filepath.Join(archiveBase, time.Now().Format("2006-01-02_15-04-05"))
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		return 0, "", fmt.Errorf("creating archive directory: %w", err)
+	}
+
+	var firstErr error
+	for _, session := range sessions {
+		src := filepath.Join(root, session)
+		dst := filepath.Join(archiveDir, session)
+		if err := os.Rename(src, dst); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("moving session %q: %w", session, err)
+			}
+			continue
+		}
+		count++
+	}
+	return count, archiveDir, firstErr
+}
+
+// ---- viewing (session.jsonl -> readable transcript) ----
+
+// sessionLogEvent is the JSON header FormatSessionLog writes at the start of
+// each record block in session.jsonl, mirroring the subset of
+// clauditable/pkg/records.Event this viewer displays.
+type sessionLogEvent struct {
+	Timestamp  string `json:"timestamp"`
+	EventType  string `json:"event_type"`
+	Host       string `json:"host"`
+	Agent      string `json:"agent"`
+	Model      string `json:"model"`
+	DurationMs int64  `json:"duration_ms"`
+	ExitCode   int    `json:"exit_code"`
+	RecordPath string `json:"record_path"`
+
+	Metadata map[string]string `json:"metadata"`
+}
+
+// SessionEntry is one readable turn of a session's transcript: the event
+// header plus its IN>>/OUT>>/ERR>> blocks with prefixes stripped. Record is
+// the turn's record ID (see recordIDFromPath) -- what "view-processed" takes
+// to expand the turn into its full -processed file; empty when the header
+// carries no record_path. EventType tells a command_execution, an
+// ai_invocation, a note and a resource apart (see clauditable's
+// RECORD_SCHEMAS.md); a resource's Metadata names its file
+// (resource_name/resource_file/resource_size). Host is the host the turn ran
+// on, from its header (empty for records that don't name one). SecondaryHost
+// is set on a turn that so far only exists in that host's secondary log (see
+// sessionlog.go). RecordMissing is set when the turn names a record whose
+// processed file isn't on this host.
+type SessionEntry struct {
+	Timestamp     string            `json:"timestamp"`
+	EventType     string            `json:"event_type,omitempty"`
+	Host          string            `json:"host,omitempty"`
+	Agent         string            `json:"agent,omitempty"`
+	Model         string            `json:"model,omitempty"`
+	DurationMs    int64             `json:"duration_ms"`
+	ExitCode      int               `json:"exit_code"`
+	Record        string            `json:"record,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
+	Input         string            `json:"input,omitempty"`
+	Output        string            `json:"output,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	SecondaryHost string            `json:"secondary_host,omitempty"`
+	RecordMissing bool              `json:"record_missing,omitempty"`
+
+	header string // the turn's header line, which identifies it across logs
+}
+
+// SessionView is the "view session" response: id/name plus its parsed
+// transcript. Warnings describe log content that couldn't be shown.
+type SessionView struct {
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	Entries  []SessionEntry `json:"entries"`
+	Warnings []string       `json:"warnings,omitempty"`
+	// SyncIncomplete is set by sendSessionView, not viewSession (a purely
+	// local read has no notion of it) -- see sendSessionView's doc comment.
+	SyncIncomplete bool `json:"sync_incomplete,omitempty"`
+}
+
+// viewSession reads id's session.jsonl, splices in the turns its secondary
+// logs carry that it doesn't (see sessionlog.go), and parses the result into
+// a readable transcript. A session with no session.jsonl yet is an empty
+// transcript (plus whatever secondary logs hold), not an error.
+func viewSession(recordsPath, id string) (SessionView, error) {
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), id)
+	if _, err := os.Stat(sessionDir); err != nil {
+		return SessionView{}, fmt.Errorf("session %q not found", id)
+	}
+	data, err := os.ReadFile(filepath.Join(sessionDir, primaryLogName))
+	if err != nil && !os.IsNotExist(err) {
+		return SessionView{}, fmt.Errorf("reading session log: %w", err)
+	}
+	// Entries is set (not nil) so it marshals to "[]" rather than "null"
+	// for the frontend.
+	entries := spliceSecondaryEntries(sessionDir, parseSessionLog(data))
+	view := SessionView{ID: id, Name: readSessionName(sessionDir), Entries: entries}
+
+	missing := 0
+	for i := range view.Entries {
+		e := &view.Entries[i]
+		if e.Record != "" && !processedFileExists(sessionDir, e.Record) {
+			e.RecordMissing = true
+			missing++
+		}
+	}
+	if n := countUnreadableLines(data); n > 0 {
+		view.Warnings = append(view.Warnings, fmt.Sprintf("%d line(s) of session.jsonl couldn't be read and were skipped", n))
+	}
+	if missing > 0 {
+		view.Warnings = append(view.Warnings, fmt.Sprintf("%d turn(s) name a record that isn't on this host yet; their previews are shown, but they can't be expanded", missing))
+	}
+	return view, nil
+}
+
+// processedFileExists reports whether any of record's processed file names
+// is present in sessionDir.
+func processedFileExists(sessionDir, record string) bool {
+	for _, name := range processedFileNames(record) {
+		if _, err := os.Stat(filepath.Join(sessionDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// countUnreadableLines counts lines that look like a turn's JSON header but
+// don't parse -- what parseSessionLog silently skips.
+func countUnreadableLines(data []byte) int {
+	n := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "{") && !json.Valid([]byte(line)) {
+			n++
+		}
+	}
+	return n
+}
+
+// parseSessionLog splits session.jsonl's alternating JSON-header /
+// prefixed-text blocks (see clauditable/pkg/records.Record.FormatSessionLog)
+// back into structured entries. A line is treated as a new entry's header
+// only when it parses as JSON *and* carries a timestamp or event type --
+// this skips over FormatProcessedFile's optional auto-maintenance headers
+// (redact_secrets/strip_loading_bars/...), which are JSON too but carry
+// neither field, without special-casing them.
+func parseSessionLog(data []byte) []SessionEntry {
+	// Non-nil (not "var entries") so an empty log marshals to the "session-
+	// view" payload's entries as "[]" rather than "null".
+	entries := make([]SessionEntry, 0)
+	var cur *SessionEntry
+	var in, out, errBlock strings.Builder
+
+	flush := func() {
+		if cur == nil {
+			return
+		}
+		cur.Input = strings.TrimRight(in.String(), "\n")
+		cur.Output = strings.TrimRight(out.String(), "\n")
+		cur.Error = strings.TrimRight(errBlock.String(), "\n")
+		entries = append(entries, *cur)
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "{") {
+			if ev, ok := entryHeader(line); ok {
+				flush()
+				cur = &SessionEntry{
+					Timestamp:  ev.Timestamp,
+					EventType:  ev.EventType,
+					Host:       ev.Host,
+					Agent:      ev.Agent,
+					Model:      ev.Model,
+					DurationMs: ev.DurationMs,
+					ExitCode:   ev.ExitCode,
+					Record:     recordIDFromPath(ev.RecordPath),
+					Metadata:   ev.Metadata,
+					header:     line,
+				}
+				in.Reset()
+				out.Reset()
+				errBlock.Reset()
+			}
+			// Malformed or header-shaped-but-fieldless JSON (e.g. a
+			// processing header) -- not a new entry; drop the line.
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, sessionLogInputPrefix):
+			in.WriteString(strings.TrimPrefix(line, sessionLogInputPrefix))
+			in.WriteByte('\n')
+		case strings.HasPrefix(line, sessionLogOutputPrefix):
+			out.WriteString(strings.TrimPrefix(line, sessionLogOutputPrefix))
+			out.WriteByte('\n')
+		case strings.HasPrefix(line, sessionLogErrorPrefix):
+			errBlock.WriteString(strings.TrimPrefix(line, sessionLogErrorPrefix))
+			errBlock.WriteByte('\n')
+		}
+		// Any other stray/blank line between blocks is ignored.
+	}
+	flush()
+	return entries
+}
+
+// ---- expanding one turn (its {record}-processed.txt) ----
+
+// recordIDFromPath reduces an event header's record_path (e.g.
+// ".../1791294265-raw.txt", or a promoted secondary's "-s-raw.txt") to its
+// record ID -- the prefix clauditable names every file of one turn with (see
+// clauditable/main.go's writeProcessedFile): "1791294265" on the session's
+// owner, "1791294265-<host>" on any other host (see sessionlog.go). Only the
+// base name is used: record_path is absolute on whichever host produced the
+// turn, which needn't match this host's AGENT_RECORDS_PATH. Returns "" for
+// anything that isn't a record ID.
+func recordIDFromPath(recordPath string) string {
+	if recordPath == "" {
+		return ""
+	}
+	base := filepath.Base(recordPath)
+	for _, suffix := range []string{"-s-raw.txt", "-raw.txt", "-s-processed.txt", "-processed.txt"} {
+		if id, ok := strings.CutSuffix(base, suffix); ok {
+			if isRecordID(id) {
+				return id
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// isRecordID reports whether s is a record ID: a unix timestamp, optionally
+// followed by "-<host>" (letters, digits, '.', '_', '-'). This is also what
+// keeps a client-supplied "view-processed" record from naming a path outside
+// the session directory.
+func isRecordID(s string) bool {
+	ts, host, hasHost := strings.Cut(s, "-")
+	if ts == "" || (hasHost && host == "") || strings.Contains(s, "..") {
+		return false
+	}
+	for _, r := range ts {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ProcessedView is the "processed-view" response: one turn's full
+// -processed file, which the transcript only previews (session.jsonl caps
+// each block at clauditable's MaxPreviewLines).
+type ProcessedView struct {
+	ID      string `json:"id"`
+	Record  string `json:"record"`
+	File    string `json:"file,omitempty"`
+	Content string `json:"content"`
+	Error   string `json:"error,omitempty"`
+}
+
+// processedFileNames are the names a record's processed file may have, in
+// preference order: a consolidated turn's {record}-processed.txt, then a
+// secondary's not-yet-consolidated {record}-s-processed.txt.
+func processedFileNames(record string) []string {
+	return []string{record + "-processed.txt", record + "-s-processed.txt"}
+}
+
+// viewProcessed reads id's processed file for record.
+func viewProcessed(recordsPath, id, record string) (ProcessedView, error) {
+	if !isRecordID(record) {
+		return ProcessedView{}, fmt.Errorf("invalid record %q", record)
+	}
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), id)
+	if _, err := os.Stat(sessionDir); err != nil {
+		return ProcessedView{}, fmt.Errorf("session %q not found", id)
+	}
+	for _, name := range processedFileNames(record) {
+		data, err := os.ReadFile(filepath.Join(sessionDir, name))
+		if err == nil {
+			return ProcessedView{ID: id, Record: record, File: name, Content: string(data)}, nil
+		}
+		if !os.IsNotExist(err) {
+			return ProcessedView{}, fmt.Errorf("reading %s: %w", name, err)
+		}
+	}
+	return ProcessedView{}, fmt.Errorf("no processed file for record %s in session %q", record, id)
+}
+
+// sendProcessedView expands one transcript turn into its full -processed
+// file, replying to c only. The file is normally already here -- the
+// transcript's own sendSessionView synced the "*-processed.txt" glob -- so
+// this only asks local-representative to sync again when the first read
+// misses (e.g. a remote turn that landed after the transcript was fetched).
+// A failure is reported on the payload rather than as a generic "error", so
+// the expanded pane can show it in place.
+func (s *Server) sendProcessedView(c *wsClient, id, record string) {
+	view, err := viewProcessed(s.recordsPath, id, record)
+	if err != nil && isRecordID(record) {
+		s.triggerSessionSync(id)
+		view, err = viewProcessed(s.recordsPath, id, record)
+	}
+	if err != nil {
+		view = ProcessedView{ID: id, Record: record, Error: err.Error()}
+	}
+	s.sendToClient(c, "processed-view", view)
+}

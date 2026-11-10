@@ -1,0 +1,2417 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport; vh is a
+     fallback for browsers that don't support it. */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable green
+   border around the whole app, reusing the "healthy"/"connected" green
+   palette rather than introducing a new accent color. An outline (not
+   border) so it never nudges the layout. Revision A: the original 1px/45%
+   outline was too subtle, so it became a thick, fully-opaque outline plus an
+   inner glow. Revision B: still too easy to miss, so the outline/glow now use
+   the brighter #6ec96e (already used elsewhere for "connect"/"launch" accent
+   text) instead of the darker #4ec94e, the glow is bigger and more opaque,
+   and a fixed "DEV MODE" tag is pinned to the top of the viewport so it's
+   visible even when the outline itself is scrolled out of view. Revision G:
+   now that the outline uses such a bright green, it reads clearly at half
+   the thickness, so it dropped from 4px to 2px. */
+.app-dev-mode {
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
+}
+
+.app-dev-mode::before {
+  content: 'DEV MODE';
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #6ec96e;
+  color: #0d1f0d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 10px;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
+.mode-mismatch-banner {
+  flex-shrink: 0;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.sys-dev-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #6ec96e;
+  background: #1a3a1a;
+  border: 1px solid #6ec96e;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+/* ---- App header ---- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  height: 40px;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.app-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex: 1;
+}
+
+.conn-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.conn-dot-ok  { background: #4ec94e; }
+.conn-dot-err { background: #cc4444; }
+/* Recently-started halo (see ConnDot in App.tsx): .topo-node-fresh's green
+   ring and glow, for the first 10 minutes after AC launched. */
+.conn-dot-fresh { box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.55), 0 0 10px 2px rgba(78, 201, 110, 0.45); }
+
+/* Quick-feedback version string + screenshot button (Step1SubstepCPrompt.md)
+   -- sit immediately left of the nav arrows, in that order (version, then
+   camera icon). Mirrors local-representative's copy of the same rules. */
+.header-version-tag {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.screenshot-btn {
+  background: none;
+  border: none;
+  color: #666;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 3px;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.screenshot-btn svg { width: 100%; height: 100%; display: block; }
+
+.screenshot-btn.screenshot-btn-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.screenshot-btn.screenshot-btn-active:hover { background: #333; }
+
+/* Mic-availability indicator (Step2Prompt.md) -- sits beside the camera
+   icon, illuminated once at least one the-conversationalist instance is
+   available on any host. Mirrors screenshot-btn's sizing/palette, but it's a
+   passive indicator (no hover/active-cursor state) rather than a control --
+   the actual mic-to-transcribe action lives on the MicButtons beside text
+   inputs.
+   Mirrors local-representative's copy of the same rules. */
+.mic-indicator {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.mic-indicator svg { width: 100%; height: 100%; display: block; }
+
+.mic-indicator.mic-indicator-active { color: #6fcf8f; }
+
+/* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
+   right corner alongside the connection dot. Unlike local-representative's
+   tab-bar, this app's header has nothing else in the middle, so the arrows
+   used to read as an empty gap between the title and the connection dot
+   (Step5Prompt.md Revision Q) -- the bordered pill below gives the control
+   group a visible presence of its own regardless of active/inactive state. */
+.nav-arrows {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.nav-arrow-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.nav-arrow-btn.nav-arrow-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.nav-arrow-btn.nav-arrow-active:hover { background: #333; }
+
+/* ---- App body: sidebar + content ---- */
+
+.app-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ---- Sidebar ---- */
+
+.sidebar-wrap {
+  display: contents;
+}
+
+.sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  background: #1e1e1e;
+  border-right: 1px solid #3c3c3c;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 12px 12px 8px;
+  flex-shrink: 0;
+}
+
+.sidebar-empty {
+  font-size: 12px;
+  color: #555;
+  padding: 8px 12px;
+  font-style: italic;
+}
+
+.host-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background 0.1s;
+}
+
+.host-item:hover {
+  background: #2a2a2a;
+}
+
+.host-item-active {
+  background: #2a2d2e;
+  border-left-color: #007acc;
+}
+
+.host-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.host-dot-connected    { background: #4ec94e; }
+.host-dot-disconnected { background: #cc4444; }
+.host-dot-unknown      { background: #666; }
+
+/* Last rebuild failed, until the next successful one (Step1SubstepEPrompt.md
+   Revision D) -- on the sidebar row and the topology card. */
+.host-build-failed {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #e05252;
+  box-shadow: 0 0 3px rgba(224, 82, 82, 0.6);
+}
+
+.host-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.host-label {
+  color: #d4d4d4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.host-addr {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Content area ---- */
+
+.content {
+  flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- Global sidebar item ----
+ *
+ * Sits above the per-host list; mutually exclusive with a particular host
+ * (App.tsx: selectedHostId === null) and is the default view on first load.
+ */
+
+.global-item {
+  border-bottom: 1px solid #2a2a2a;
+  margin-bottom: 4px;
+}
+
+.global-icon {
+  display: inline-block;
+  width: 7px;
+  text-align: center;
+  color: #6ea6c9;
+  flex-shrink: 0;
+}
+
+/* ---- LR view ---- */
+
+.lr-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix */
+  overflow: hidden;
+}
+
+.lr-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  flex-shrink: 0;
+}
+
+.lr-host-label {
+  font-weight: 600;
+  color: #d4d4d4;
+}
+
+.lr-host-addr {
+  font-size: 12px;
+  color: #888;
+}
+
+.lr-conn-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  margin-left: auto;
+}
+
+.lr-conn-badge-active   { background: #1e3a1e; color: #4ec94e; }
+.lr-conn-badge-inactive { background: #2d1e1e; color: #cc4444; }
+
+/* ---- Tab bar ---- */
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  height: 36px;
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+
+.tabs {
+  display: flex;
+  height: 100%;
+}
+
+.tab {
+  position: relative;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 0 16px;
+  height: 100%;
+  cursor: pointer;
+  transition: color 0.1s;
+  white-space: nowrap;
+}
+
+.tab:hover { color: #ccc; }
+
+.tab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+}
+
+/* Files tab picker's "something is highlighted" indicator (Step5SubstepR
+   Revision E). Double-clicking it jumps to the right host and file. */
+.tab-highlight-dot {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d7c22b;
+  cursor: pointer;
+}
+
+/* ---- Main pane ---- */
+
+.main-pane {
+  flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix */
+  overflow: auto;
+  padding: 40px;
+}
+
+/* Embedded-app tabs (condocv2/sessions/convo -- see .embed-status-bar and
+   EMBED_TABS in App.tsx, Step1Prompt.md Revision A/B): the nested app's own
+   UI should fill the whole tab pane rather than sit in a padded,
+   header-topped box, so this drops main-pane's padding entirely and lets
+   .embed-frame flex to fill what's left. Mirrors local-representative's
+   identically-named rules. */
+.main-pane-embed {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+.service-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.service-name {
+  font-size: 20px;
+  font-weight: 600;
+  color: #d4d4d4;
+}
+
+.health-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.health-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.health-label {
+  font-size: 13px;
+}
+
+.health-healthy   .health-dot  { background: #4ec94e; }
+.health-healthy   .health-label { color: #4ec94e; }
+.health-unhealthy .health-dot  { background: #cc4444; }
+.health-unhealthy .health-label { color: #cc4444; }
+.health-unknown   .health-dot  { background: #666; }
+.health-unknown   .health-label { color: #666; }
+
+.fc-session-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: #888;
+  background: #262626;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 1px 8px;
+}
+
+.service-empty {
+  color: #555;
+  font-style: italic;
+  margin-top: 8px;
+}
+
+.service-empty-embed {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px;
+  margin-top: 0;
+}
+
+.embed-frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #1e1e1e;
+}
+
+/* Slim meta-status bar for embedded-app tabs, standing in for the
+   service-name/health-indicator header those tabs no longer render inline
+   (see .main-pane-embed above) -- keeps a sliver of "is this healthy" status
+   visible under the tab bar without taking space back from the nested UI. */
+.embed-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 12px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ---- FC control panel ---- */
+
+.fc-status { font-size: 13px; }
+.fc-status-disconnected { color: #555; font-style: italic; }
+
+.fc-panel { display: flex; flex-direction: column; gap: 12px; }
+
+.fc-output {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.fc-log-empty { color: #555; font-style: italic; }
+.fc-log-line { padding: 2px 0; color: #d4d4d4; }
+.fc-log-prompt { color: #5bb8ff; margin-right: 6px; user-select: none; }
+.fc-log-state { padding: 5px 0; color: #555; font-style: italic; font-size: 11px; text-align: center; }
+.fc-log-output { padding: 1px 0 1px 14px; color: #888; white-space: pre-wrap; word-break: break-all; }
+
+.fc-command-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.fc-cmd-prompt { color: #5bb8ff; font-size: 14px; flex-shrink: 0; }
+.fc-cmd-input { flex: 1; background: transparent; border: none; outline: none; color: #d4d4d4; font-family: inherit; font-size: 13px; min-width: 0; }
+.fc-cmd-input::placeholder { color: #555; }
+.fc-cmd-send { background: #1a3a5c; border: 1px solid #2e5c8a; border-radius: 3px; color: #5bb8ff; font-family: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; flex-shrink: 0; }
+.fc-cmd-send:hover { background: #2e5c8a; }
+
+/* FC instance picker (condocs/initialRobotImpls/Step3Prompt.md) -- one pill
+   per instance on the host, its dot coloured by control state. Mirrors
+   local-representative/frontend/src/index.css. */
+.fc-instances { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+.fc-instances-label { font-size: 11px; color: #666; margin-right: 4px; }
+.fc-instance { display: inline-flex; align-items: center; gap: 6px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 12px; color: #bbb; font-family: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; }
+.fc-instance:hover { border-color: #555; }
+.fc-instance-active { border-color: #2e5c8a; background: #1a2a3a; color: #d4d4d4; }
+.fc-instance-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+.fc-instance-remote-control .fc-instance-dot { background: #4ec94e; }
+.fc-instance-local-control .fc-instance-dot { background: #d1c48f; }
+.fc-instance-session { font-size: 10px; color: #777; }
+
+/* ---- Control tab (local-representative/control.go) ---- */
+.ctl-panel { display: flex; flex-direction: column; gap: 14px; max-width: 760px; }
+.ctl-subtabs { display: flex; gap: 4px; border-bottom: 1px solid #3c3c3c; }
+.ctl-subtab { background: none; border: none; border-bottom: 2px solid transparent; color: #888; font-family: inherit; font-size: 12px; padding: 4px 12px; cursor: pointer; }
+.ctl-subtab-active { color: #d4d4d4; border-bottom-color: #007acc; }
+.ctl-empty { color: #888; font-style: italic; }
+.ctl-hint { font-size: 11px; color: #777; }
+.ctl-hint-warn { color: #e0a83e; }
+.ctl-seq { border: 1px solid #3c3c3c; border-radius: 4px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.ctl-seq-head { display: flex; align-items: center; gap: 10px; }
+.ctl-seq-name { font-weight: 600; color: #d4d4d4; flex: 1; }
+.ctl-seq-desc { font-size: 12px; color: #888; }
+.ctl-run-status { font-size: 11px; font-weight: 600; }
+.ctl-run-running { color: #5bb8ff; }
+.ctl-run-success { color: #4ec94e; }
+.ctl-run-error { color: #cc4444; }
+.ctl-run-cancelled { color: #9c9c9c; }
+.ctl-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ctl-step { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; }
+.ctl-step-icon { width: 14px; flex-shrink: 0; text-align: center; color: #555; }
+.ctl-step-running .ctl-step-icon { color: #5bb8ff; }
+.ctl-step-success .ctl-step-icon { color: #4ec94e; }
+.ctl-step-error .ctl-step-icon { color: #cc4444; }
+.ctl-step-body { flex: 1; min-width: 0; }
+.ctl-step-label { color: #d4d4d4; }
+.ctl-step-skipped .ctl-step-label, .ctl-step-pending .ctl-step-label { color: #888; }
+.ctl-step-detail { font-size: 11px; color: #666; }
+.ctl-step-msg { font-size: 11px; color: #9c9c9c; overflow-wrap: anywhere; }
+.ctl-step-error .ctl-step-msg { color: #c96e6e; }
+.ctl-step-time { font-size: 11px; color: #666; flex-shrink: 0; }
+.ctl-values { font-size: 11px; color: #9c9c9c; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-wrap: anywhere; }
+.ctl-value-label { color: #666; }
+.ctl-prompt { display: flex; align-items: center; gap: 8px; margin-top: 4px; padding: 6px 8px; border: 1px solid #5a7fa8; border-radius: 4px; background: #1c2530; }
+.ctl-prompt-msg { flex: 1; font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.ctl-output { font-size: 12px; color: #d4d4d4; border-top: 1px solid #2a2a2a; padding-top: 6px; overflow-wrap: anywhere; }
+.ctl-output-head { font-size: 11px; color: #666; text-transform: uppercase; }
+.ctl-output-value { color: #8fc98f; font-family: monospace; }
+.ctl-recordings { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px; }
+.ctl-recording-head { font-size: 11px; color: #9c9c9c; overflow-wrap: anywhere; }
+.ctl-recording-head a { color: #5bb8ff; }
+.ctl-recording-video { width: 100%; max-height: 480px; background: #000; border: 1px solid #2a2a2a; border-radius: 4px; }
+.ctl-save { border-top: 1px solid #2a2a2a; padding-top: 6px; }
+.ctl-save-link { font-size: 11px; color: #5bb8ff; overflow-wrap: anywhere; }
+.ctl-run-error-msg { font-size: 12px; color: #cc4444; overflow-wrap: anywhere; }
+/* v1's runner / definer / composer (ControlV1.tsx, shared with local-representative) */
+.ctl-v1 { display: flex; flex-direction: column; gap: 10px; }
+.ctl-v1-views .ctl-subtab { font-size: 11px; padding: 3px 10px; }
+.ctl-v1-view { display: flex; flex-direction: column; gap: 10px; }
+.ctl-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-section { display: flex; flex-direction: column; gap: 6px; border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px 10px; }
+.ctl-section-title { font-size: 11px; font-weight: 600; color: #9c9c9c; text-transform: uppercase; letter-spacing: 0.04em; }
+.ctl-field { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ctl-field-name { width: 130px; flex-shrink: 0; color: #888; overflow-wrap: anywhere; }
+.ctl-field > .ctl-input, .ctl-field > .ctl-row { flex: 1; }
+.ctl-input, .ctl-select, .ctl-textarea { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4; font-family: inherit; font-size: 12px; padding: 3px 6px; min-width: 0; }
+.ctl-input { flex: 1; }
+.ctl-input-name { flex: 0 0 120px; }
+.ctl-input-bad { border-color: #7a2e2e; }
+.ctl-select { max-width: 100%; }
+.ctl-textarea { width: 100%; box-sizing: border-box; font-family: monospace; resize: vertical; }
+.ctl-btn { background: #3c3c3c; border: 1px solid #555; border-radius: 3px; color: #ccc; font-family: inherit; font-size: 11px; padding: 2px 10px; cursor: pointer; }
+.ctl-btn:hover:not(:disabled) { background: #4a4a4a; }
+.ctl-btn:disabled { opacity: 0.5; cursor: default; }
+.ctl-icon-btn { padding: 2px 6px; }
+.ctl-controls { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.ctl-controls .ctl-row { align-self: stretch; }
+.ctl-instrs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ctl-instr { display: flex; flex-direction: column; gap: 4px; border-left: 2px solid #3c3c3c; padding-left: 8px; }
+.ctl-num { color: #666; font-size: 12px; min-width: 20px; }
+.ctl-step-action { flex: 1; color: #d4d4d4; font-size: 12px; }
+.ctl-step-do { margin: 2px 0 0; padding-left: 16px; font-size: 11px; color: #777; overflow-wrap: anywhere; }
+.ctl-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9c9c9c; }
+.ctl-ok { font-size: 12px; color: #4ec94e; }
+.ctl-yaml-box { display: flex; flex-direction: column; gap: 6px; }
+.ctl-help { font-size: 11px; color: #888; }
+.ctl-help summary { cursor: pointer; }
+.ctl-help code { color: #c8c8a0; }
+.ctl-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border-top: 1px solid #2a2a2a; padding-top: 8px; }
+
+/* Recording blocks: slim bars to the right of the steps (Step4Prompt.md).
+   The step list is a grid -- steps, a column per lane, the ⏺ buttons -- and
+   each bar one element spanning its steps' rows, gaps and all (Revision A). */
+.ctl-rec-grid { display: grid; column-gap: 3px; }
+.ctl-comp-step { display: flex; gap: 8px; min-width: 0; }
+.ctl-comp-step > .ctl-instr { flex: 1; min-width: 0; }
+.ctl-steps.ctl-rec-grid > .ctl-step { min-width: 0; }
+.ctl-rec-bar { position: relative; margin: 2px 0; min-height: 8px; border-radius: 5px; opacity: 0.8; }
+.ctl-rec-bar-click { cursor: pointer; }
+.ctl-rec-bar-selected { opacity: 1; box-shadow: 0 0 0 1px #fff; }
+.ctl-rec-grip { position: absolute; left: -2px; right: -2px; height: 8px; cursor: ns-resize; border-radius: 4px; }
+.ctl-rec-grip-from { top: -2px; }
+.ctl-rec-grip-to { bottom: -2px; }
+.ctl-rec-bar:hover .ctl-rec-grip, .ctl-rec-bar-selected .ctl-rec-grip { background: rgba(255, 255, 255, 0.55); }
+.ctl-rec-bar.ctl-rec-st-pending, .ctl-rec-bar.ctl-rec-st-starting { opacity: 0.35; }
+.ctl-rec-bar.ctl-rec-st-recording { opacity: 1; animation: ctl-rec-pulse 1.2s ease-in-out infinite; }
+.ctl-rec-bar.ctl-rec-st-saving { opacity: 0.6; }
+.ctl-rec-bar.ctl-rec-st-saved { opacity: 1; }
+.ctl-rec-bar.ctl-rec-st-error { opacity: 0.5; box-shadow: inset 0 0 0 2px #cc4444; }
+.ctl-rec-bar.ctl-rec-st-skipped { opacity: 0.15; }
+@keyframes ctl-rec-pulse { 50% { opacity: 0.55; } }
+.ctl-rec-add-cell { padding-left: 5px; }
+.ctl-rec-add {
+  align-self: flex-start; width: 18px; height: 18px; padding: 0; margin-left: 2px;
+  background: none; border: 1px dashed #555; border-radius: 3px; color: #cc4444; font-size: 9px; line-height: 1; cursor: pointer;
+}
+.ctl-rec-add:hover:not(:disabled) { border-color: #cc4444; }
+.ctl-rec-add:disabled { opacity: 0.3; cursor: default; }
+.ctl-rec-swatch { display: inline-block; flex-shrink: 0; width: 9px; height: 14px; border-radius: 3px; }
+.ctl-rec-edit { padding: 2px 4px; border-radius: 3px; }
+.ctl-rec-edit-selected { background: #2a2d2e; }
+.ctl-rec-edit .ctl-select { flex: 0 0 auto; }
+.ctl-rec-legend { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #9c9c9c; }
+.ctl-rec-legend-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-rec-status { color: #888; }
+.ctl-rec-status.ctl-rec-st-recording { color: #cc4444; }
+.ctl-rec-status.ctl-rec-st-saved { color: #4ec94e; }
+.ctl-rec-status.ctl-rec-st-error { color: #cc4444; }
+.ctl-rec-msg { color: #777; overflow-wrap: anywhere; }
+
+/* ---- Ridealong panel ---- */
+
+.ra-panel { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #4a2e6e; border-radius: 6px; padding: 14px 16px; }
+.ra-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ra-icon { font-size: 15px; }
+.ra-title { font-size: 12px; font-weight: 700; color: #b388ff; text-transform: uppercase; letter-spacing: 0.08em; }
+.ra-file { font-size: 12px; color: #666; font-style: italic; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ra-progress { font-size: 11px; color: #888; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+.ra-steps { display: flex; flex-direction: column; gap: 3px; background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 4px; padding: 10px 12px; }
+.ra-step { display: flex; align-items: baseline; gap: 6px; font-size: 12px; min-height: 18px; }
+.ra-step-marker { flex-shrink: 0; }
+.ra-step-marker-prev { color: #555; }
+.ra-step-marker-current { color: #ffe066; font-size: 13px; }
+.ra-step-marker-next { color: #555; }
+.ra-step-prev .ra-step-text { color: #555; }
+.ra-step-current .ra-step-text { color: #ffe066; font-weight: 600; }
+.ra-step-next .ra-step-text { color: #555; }
+.ra-step-empty { font-style: italic; }
+.ra-exit-code { color: #e05c5c; font-size: 11px; font-weight: 700; margin-left: 4px; flex-shrink: 0; }
+.ra-countdown { color: #ffe066; font-size: 11px; margin-left: 6px; flex-shrink: 0; }
+.ra-controls { display: flex; flex-direction: column; gap: 8px; }
+.ra-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ra-btn { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #aaa; font-family: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer; transition: background 0.1s, border-color 0.1s, color 0.1s; }
+.ra-btn:hover { background: #2a2a2a; border-color: #555; color: #d4d4d4; }
+.ra-btn-primary { background: #1a3a1a; border-color: #2e7a2e; color: #6ec96e; }
+.ra-btn-primary:hover { background: #2e5a2e; border-color: #4ec94e; }
+.ra-btn-danger { background: #3a1a1a; border-color: #7a2e2e; color: #c96e6e; }
+.ra-btn-danger:hover { background: #5a2e2e; border-color: #c94e4e; }
+.ra-btn-active { background: #2a1a4a; border-color: #6a3e9a; color: #b388ff; }
+.ra-btn-active:hover { background: #3a2a5a; border-color: #9a5ecc; }
+.ra-btn-waypoint { background: #1a2a3a; border-color: #2e5c8a; color: #5bb8ff; }
+.ra-btn-waypoint:hover { background: #2e3a4a; border-color: #4e8cca; }
+.ra-waypoints { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ra-waypoints-label { font-size: 11px; color: #555; flex-shrink: 0; }
+.ra-custom { display: flex; align-items: center; gap: 8px; background: #141414; border: 1px solid #2a2a2a; border-radius: 4px; padding: 6px 10px; }
+.ra-cmd-prompt { color: #b388ff; font-size: 14px; flex-shrink: 0; }
+.ra-cmd-input { flex: 1; background: transparent; border: none; outline: none; color: #d4d4d4; font-family: inherit; font-size: 13px; min-width: 0; }
+.ra-cmd-input::placeholder { color: #444; }
+.ra-observe-hint { font-size: 11px; color: #555; font-style: italic; text-align: center; padding: 2px 0; }
+
+/* ---- Nested tab bar (e.g. global system tab's topology/timeline selector) ---- */
+
+.tab-bar-nested {
+  background: none;
+  border-bottom: 1px solid #2a2a2a;
+  height: 30px;
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.tab-bar-nested .tab {
+  font-size: 12px;
+  padding: 0 12px;
+}
+
+/* tab-bar-right pins a control (the system tab's "debug" button -- see
+   DebugToggleButton) to the right edge of a .tab-bar, alongside the tab
+   buttons' own flex row rather than below or above it. */
+.tab-bar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+}
+
+.debug-toggle-btn-active { background: #1a2a3a; border-color: #2e5a7a; color: #6ea6c9; }
+
+/* ---- Debug view (system tab's "debug" button -- Step1SubstepBPrompt.md
+   Revision E): a very simple two-tab scrolling-log viewer, shared by the
+   network and logs tabs (see DebugLogPane). ---- */
+
+.debug-view { display: flex; flex-direction: column; gap: 0; flex: 1; min-height: 0; }
+
+.debug-pane { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+
+/* The plugins tab's "manifests" mode (PluginManifestViewer,
+   condocs/privateRepoOpsImpls/Step3Prompt.md Revision B): plug-ins on the
+   left, the selected one's held manifest, live manifest file and hello on
+   the right. */
+.plugin-manifests { display: flex; gap: 12px; flex: 1; min-height: 0; }
+.plugin-manifests-list { display: flex; flex-direction: column; gap: 2px; width: 220px; flex-shrink: 0; overflow-y: auto; }
+.plugin-manifests-item {
+  display: flex; align-items: center; gap: 6px;
+  background: none; border: 1px solid transparent; border-radius: 4px;
+  color: #c8c8c8; font: inherit; font-size: 12px; padding: 4px 8px; text-align: left; cursor: pointer;
+}
+.plugin-manifests-item:hover { background: #1f1f1f; }
+.plugin-manifests-item-active { background: #252526; border-color: #3c3c3c; }
+.plugin-manifests-host { color: #888; }
+.plugin-manifests-app { flex: 1; font-family: monospace; }
+.plugin-status { font-size: 10px; text-transform: uppercase; color: #888; }
+.plugin-status-online { color: #4ec9b0; }
+.plugin-status-offline { color: #ce9178; }
+.plugin-status-pending { color: #dcdcaa; }
+.plugin-manifests-detail { display: flex; flex-direction: column; gap: 12px; flex: 1; min-width: 0; overflow-y: auto; max-height: 70vh; }
+.plugin-manifests-section { display: flex; flex-direction: column; gap: 4px; }
+.plugin-manifests-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: #d4d4d4; }
+.plugin-manifests-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.plugin-manifests-link { font-size: 11px; color: #3794ff; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-manifests-meta { font-size: 11px; color: #888; }
+.plugin-manifests-error { font-size: 12px; color: #f48771; }
+.plugin-manifests-json {
+  margin: 0; padding: 8px 10px; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px;
+  font-size: 12px; color: #d4d4d4; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* The held manifest's icon beside its JSON (Revision C). */
+.plugin-manifests-with-icon { display: flex; gap: 12px; align-items: flex-start; }
+.plugin-manifests-with-icon .plugin-manifests-json { flex: 1; min-width: 0; }
+.plugin-manifests-icon {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; width: 96px; flex-shrink: 0;
+  padding: 8px 4px; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; text-align: center;
+}
+.plugin-manifests-icon .plugin-manifests-link { max-width: 88px; }
+
+/* PluginIcon: a plug-in's manifest icon, or its initials. An SVG loaded as
+   an <img> can't inherit the page's colour (currentColor draws black), so
+   icons sit on a light chip that any icon colour shows up on. */
+.plugin-icon {
+  display: inline-block; flex-shrink: 0; vertical-align: middle; object-fit: contain;
+  box-sizing: border-box; padding: 1px; background: #d4d4d4; border-radius: 3px;
+}
+.plugin-icon-none {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #2d2d2d; border-radius: 3px; color: #888; font-family: monospace; line-height: 1;
+}
+
+/* ---- Plugins tab (PluginsShell, Step3Prompt.md Revisions B and C): its own
+   tab bar of external plug-ins over a full pane, like the service tab bar
+   over an embedded tab. ---- */
+.plugins-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.plugins-shell .tab-bar-nested { background: #1e1e1e; padding: 0 12px; margin-bottom: 0; }
+.plugins-shell-none { align-self: center; font-size: 12px; color: #555; font-style: italic; }
+.plugins-shell-pane { display: flex; flex: 1; min-height: 0; }
+.plugins-shell-tab { display: inline-flex; align-items: center; gap: 6px; }
+.tab-dim { opacity: 0.5; }
+
+/* PluginIcon with mask (a version 2 manifest's icon_mask, Step3Prompt.md
+   Revision E): the icon's shape drawn in the surrounding text colour.
+   Mirrors local-representative's index.css. */
+.plugin-icon-mask {
+  display: inline-block; flex-shrink: 0; vertical-align: middle; background-color: currentColor;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain;
+}
+.plugin-manifests-version { font-size: 10px; color: #888; font-family: monospace; }
+
+/* A hosted-UI sub-app's service tab with its manifest icon (Revision E). */
+.tab-with-icon { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ScrollTabs (Revision E): a row of tabs that scrolls sideways under the
+   mouse wheel instead of overflowing the bar, its scrollbar hidden, with a
+   fade on the edge that has more tabs past it. */
+.tabs-scroll {
+  position: relative; min-width: 0; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; overscroll-behavior-x: contain;
+}
+.tabs-scroll::-webkit-scrollbar { display: none; }
+.tabs-scroll > .tab { flex-shrink: 0; }
+.tabs-more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.tabs-more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); }
+.tabs-more-left.tabs-more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
+
+/* The plugins tab's registration sub-tab (Revision E): always at the far
+   left, divided from the registered plug-ins' tabs. "register example" works
+   from here (Revision F); manual registration is only shown -- it is made on
+   each host's own local-representative. The button and error rules mirror
+   local-representative's index.css. */
+.plugins-shell-reg-tab { flex-shrink: 0; font-style: italic; }
+.plugins-shell-divider { flex-shrink: 0; width: 1px; align-self: stretch; margin: 6px 4px; background: #3c3c3c; }
+.plugins-shell-btn-approve { background: #1e3a2e; border: 1px solid #2e6a4a; color: #4ec9b0; font-size: 12px; padding: 4px 14px; }
+.plugins-shell-btn-approve:hover:not(:disabled) { background: #26503c; }
+.plugins-shell-error { padding: 4px 12px; margin-bottom: 6px; font-size: 12px; color: #f48771; background: #2a1a1a; }
+.plugins-reg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.plugins-reg-row .plugins-reg-status { margin-bottom: 0; }
+.plugins-reg-last { margin-bottom: 6px; font-size: 12px; color: #9c9c9c; }
+.plugins-reg-last-error { color: #f48771; }
+/* The global perspective's plugins tab (Revision F): its per-plug-in tabs
+   aren't implemented yet. */
+.plugins-shell-global-note { align-self: center; font-size: 12px; color: #777; font-style: italic; }
+.plugins-reg-global-note { margin-left: 10px; font-size: 12px; color: #777; font-style: italic; }
+
+/* VersionSkewMark (Step3Prompt.md Revision G): a plug-in that isn't the same
+   version on every host gets a bold "!" on its global tab, in the orange of
+   .topo-node-outdated / .sys-btn-rebuild-dirty. */
+.tab-version-skew {
+  display: inline-block; margin-left: 5px; font-weight: 800; font-size: 14px; line-height: 1;
+  color: #e0a83e; text-shadow: 0 0 6px rgba(224, 168, 62, 0.7); cursor: help;
+}
+.plugins-global-skew { margin: 0 0 12px; font-size: 12px; color: #e0a83e; }
+.plugins-global-skew .tab-version-skew { margin: 0 4px 0 0; }
+.plugins-reg { flex: 1; overflow: auto; padding: 12px 18px; font-size: 13px; color: #c8c8c8; }
+.plugins-reg-intro { margin: 0 0 14px; max-width: 900px; color: #9c9c9c; line-height: 1.45; }
+.plugins-reg-section { margin-bottom: 18px; max-width: 900px; }
+.plugins-reg-host { margin: 0 0 6px; font-size: 13px; color: #d4d4d4; }
+.plugins-reg-status { font-size: 12px; color: #9c9c9c; margin-bottom: 6px; }
+.plugins-reg-none { font-size: 12px; color: #555; font-style: italic; }
+.plugins-reg-table { border-collapse: collapse; font-size: 12px; }
+.plugins-reg-table th { text-align: left; font-weight: normal; color: #777; padding: 2px 12px 4px 0; }
+.plugins-reg-table td { padding: 3px 12px 3px 0; vertical-align: middle; }
+.plugins-reg-st-online { color: #4ec9b0; }
+.plugins-reg-st-offline { color: #ce9178; }
+.plugins-reg-st-pending { color: #dcdcaa; }
+/* Plug-in dev repos' registrations (privateRepoOpsImpls Step6Prompt.md
+   Revision E), and the one a system tab "registration" link opened on:
+   briefly lit, then back to normal. */
+.plugins-reg-devrepos { margin-top: 10px; }
+.plugins-reg-focused { animation: plugins-reg-focus 2.4s ease-out; }
+@keyframes plugins-reg-focus {
+  0%, 40% { background: #264f78; }
+  100% { background: transparent; }
+}
+
+.debug-pane-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.debug-pane-count { font-size: 12px; color: #888; }
+
+.debug-pane-lines {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+  flex: 1;
+  min-height: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.debug-pane-line {
+  padding: 1px 0;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.debug-pane-empty { color: #555; font-style: italic; }
+
+/* The debug view's "install" tab (AgentInstallPane,
+   condocs/switchToUfabuildImpls/Step1.md Prompt 9): one block per host,
+   a row per agent, and the selected (or running) install's output. */
+.agent-install { overflow-y: auto; gap: 16px; padding-top: 8px; }
+.agent-install-host { display: flex; flex-direction: column; gap: 6px; }
+.agent-install-note { font-size: 12px; }
+.agent-install-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.agent-install-table th {
+  text-align: left;
+  font-weight: 400;
+  color: #888;
+  border-bottom: 1px solid #3c3c3c;
+  padding: 4px 8px;
+}
+.agent-install-table td { padding: 4px 8px; border-bottom: 1px solid #262626; vertical-align: middle; }
+.agent-install-name { color: #d4d4d4; font-weight: 600; }
+.agent-install-where { color: #888; word-break: break-all; }
+.agent-install-last { margin-left: 8px; font-size: 11px; }
+.agent-install-logbtn { margin-left: 8px; }
+.agent-install-log { min-height: 0; max-height: 40vh; }
+
+/* ---- Global topology panel (global system tab, see
+   condocs/initialDistributedDevelopmentImpls/global_topology_panel.jpg) ----
+ *
+ * Main pane of dummy host cards on the left, details-and-control pane on the
+ * right. This increment: visible but not interactive.
+ */
+
+.topo-panel { display: flex; align-items: flex-start; gap: 24px; }
+
+/* GlobalSystemPanel's wrapper -- deliberately not .sys-panel (that class's
+   max-width is right for the single-host process table, but would keep the
+   topology pane's details-and-control column short of the tab's actual
+   right edge). */
+.global-sys-panel { display: flex; flex-direction: column; gap: 20px; }
+
+.topo-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.topo-node {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 12px 14px;
+  /* Sized for the bottom row's sub-app boxes (FC/TC/SM/RB/CM/W) at
+     .topo-node-box's min-width + .topo-node-row's gap. */
+  width: 208px;
+}
+
+/* Self (agent-coordinator collapsed with its own LR) always leads, on its
+   own row -- flex-basis: 100% forces every card after it in .topo-main's
+   wrap onto the next line. */
+.topo-node-self { flex-basis: 100%; width: auto; max-width: 208px; }
+
+/* Faint separator between the self card and the per-host cards below --
+   flex-basis: 100% pushes it onto its own line, same trick as
+   .topo-node-self. */
+.topo-divider { flex-basis: 100%; height: 1px; background: #2a2a2a; margin: 2px 0; }
+
+.topo-node-clickable { cursor: pointer; }
+.topo-node-clickable:hover { border-color: #565656; }
+.topo-node-selected { border-color: #007acc; box-shadow: 0 0 0 1px #007acc; }
+
+/* Out-of-date halo (dev mode only -- see hostOutOfDate in App.tsx): an orange
+   glow just outside the card's own border, distinct from the grey-vs-blue
+   selected ring above so the two stack instead of fighting for the same
+   box-shadow layer. */
+.topo-node-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 10px 2px rgba(224, 168, 62, 0.45); }
+.topo-node-outdated.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(224, 168, 62, 0.55), 0 0 10px 2px rgba(224, 168, 62, 0.45); }
+
+/* Build-failed halo (see TopologyNodeCard's buildFailed in App.tsx): the
+   outdated halo's ring in red, from a failed rebuild until the next successful
+   one or an LR restart. A card never has both classes -- red replaces orange --
+   and every .topo-node-outdated combination below has a red twin. */
+.topo-node-build-failed { box-shadow: 0 0 0 2px rgba(224, 82, 82, 0.7), 0 0 10px 2px rgba(224, 82, 82, 0.5); }
+.topo-node-build-failed.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(224, 82, 82, 0.7), 0 0 10px 2px rgba(224, 82, 82, 0.5); }
+
+/* Recently-started halo (see FRESH_UPTIME_SECS in App.tsx): the same glow as
+   .topo-node-outdated but green, while the host's LR uptime is under 10
+   minutes. When a card is both, the green ring sits inside the orange one. */
+.topo-node-fresh { box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.55), 0 0 10px 2px rgba(78, 201, 110, 0.45); }
+.topo-node-fresh.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(78, 201, 110, 0.55), 0 0 10px 2px rgba(78, 201, 110, 0.45); }
+.topo-node-fresh.topo-node-outdated { box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.55), 0 0 0 5px rgba(224, 168, 62, 0.55), 0 0 12px 4px rgba(224, 168, 62, 0.45); }
+.topo-node-fresh.topo-node-outdated.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(78, 201, 110, 0.55), 0 0 0 7px rgba(224, 168, 62, 0.55), 0 0 12px 4px rgba(224, 168, 62, 0.45); }
+.topo-node-fresh.topo-node-build-failed { box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.55), 0 0 0 5px rgba(224, 82, 82, 0.7), 0 0 12px 4px rgba(224, 82, 82, 0.5); }
+.topo-node-fresh.topo-node-build-failed.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 4px rgba(78, 201, 110, 0.55), 0 0 0 7px rgba(224, 82, 82, 0.7), 0 0 12px 4px rgba(224, 82, 82, 0.5); }
+
+/* Building halo (see TopologyNodeCard's building in App.tsx): the fresh halo
+   as marching ants. The card keeps .topo-node-fresh's soft green glow, and
+   .topo-node-building-ring draws the ring itself -- same green, same 2px
+   width, same radius just outside the border, following the rounded corners
+   -- as dashes that run clockwise round the card. It takes the fresh ring's
+   place, so a building card that's also fresh shows only the ants, and the
+   orange outdated ring moves outside them exactly as it does around a fresh
+   one. Declared after the fresh/outdated rules so these win at equal
+   specificity. */
+.topo-node-building { position: relative; box-shadow: 0 0 10px 2px rgba(78, 201, 110, 0.45); }
+.topo-node-building.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 10px 2px rgba(78, 201, 110, 0.45); }
+.topo-node-building.topo-node-outdated { box-shadow: 0 0 0 5px rgba(224, 168, 62, 0.55), 0 0 12px 4px rgba(224, 168, 62, 0.45); }
+.topo-node-building.topo-node-outdated.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 7px rgba(224, 168, 62, 0.55), 0 0 12px 4px rgba(224, 168, 62, 0.45); }
+.topo-node-building.topo-node-build-failed { box-shadow: 0 0 0 5px rgba(224, 82, 82, 0.7), 0 0 12px 4px rgba(224, 82, 82, 0.5); }
+.topo-node-building.topo-node-build-failed.topo-node-selected { box-shadow: 0 0 0 1px #007acc, 0 0 0 7px rgba(224, 82, 82, 0.7), 0 0 12px 4px rgba(224, 82, 82, 0.5); }
+/* Absolute insets are measured from the padding box, so -2px puts the rect's
+   edge 1px outside the card's 1px border: the centre line of the fresh
+   ring's 0-2px spread. The 2px stroke straddles it, hence overflow: visible.
+   rx 7 = the card's 6px radius + 1px, matching the box-shadow's curve there.
+   When selected, the ring moves out past the blue 1px ring (fresh's 1-4px
+   spread). */
+.topo-node-building-ring {
+  position: absolute;
+  inset: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  overflow: visible;
+  pointer-events: none;
+}
+.topo-node-selected > .topo-node-building-ring { inset: -3.5px; width: calc(100% + 7px); height: calc(100% + 7px); }
+.topo-node-building-ring rect {
+  fill: none;
+  stroke: rgba(78, 201, 110, 0.8);
+  stroke-width: 2px;
+  stroke-dasharray: 1 1;
+  animation: topo-node-building-march 0.8s linear infinite;
+}
+.topo-node-selected > .topo-node-building-ring rect { stroke-width: 3px; }
+/* One dash + one gap (2 pathLength units) per cycle, so the loop is seamless. */
+@keyframes topo-node-building-march {
+  to { stroke-dashoffset: -2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topo-node-building-ring rect { animation: none; }
+}
+
+.topo-node-header { display: flex; align-items: center; gap: 6px; }
+.topo-node-label { color: #d4d4d4; font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topo-node-self-tag { margin-left: auto; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; flex-shrink: 0; }
+/* Tiny top-right uptime readout; sits right of the self tag when there is one. */
+.topo-node-uptime { margin-left: auto; font-size: 9px; color: #777; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.topo-node-self-tag + .topo-node-uptime { margin-left: 0; }
+
+.topo-node-diagram { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.topo-node-row { display: flex; gap: 6px; }
+.topo-node-box {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 22px; padding: 0 5px;
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 10px; color: #9c9c9c;
+}
+.topo-node-box-ac { border-color: #245a7a; color: #6ea6c9; }
+.topo-node-box-lr { border-color: #2e7a2e; color: #6ec96e; }
+/* A sub-application box (FC/TC/SM/RB/CM/W) turns the same green as the LR box once
+   that host's LR reports it healthy (see serviceHealthy in App.tsx) AND LR
+   itself launched it (see subAppManaged) -- i.e. it's a managed instance. */
+.topo-node-box-healthy { border-color: #2e7a2e; color: #6ec96e; }
+/* Connected but not managed (Step4Prompt.md Revision K): the abbreviation
+   still reads green, but the border is left at .topo-node-box's default grey
+   -- the same grey as an unlit box -- since LR isn't the one running it. */
+.topo-node-box-unmanaged { color: #6ec96e; }
+/* Sub-application out-of-date halo (dev mode only -- see subAppOutOfDate in
+   App.tsx): the same orange glow as .topo-node-outdated, scaled down for a
+   box this small, drawn just outside a connected (green-bordered) sub-app
+   box so the green "connected" border stays visible underneath -- it never
+   applies without .topo-node-box-healthy already being set. */
+.topo-node-box-outdated { box-shadow: 0 0 0 2px rgba(224, 168, 62, 0.55), 0 0 6px 1px rgba(224, 168, 62, 0.45); }
+
+/* Connectivity icon bar above the boxes (Step1SubstepCPrompt.md): an icon is
+   only drawn when that host holds the provider's credentials at all, so
+   there's no unlit state -- just a yellow border once they've failed
+   verification (see local-representative/connectivity.go). */
+.topo-node { user-select: none; } /* double-click navigates rather than selecting text */
+.topo-conn-icon {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  color: #d4d4d4;
+}
+.topo-conn-checking { color: #777; }
+.topo-conn-failed { border-color: #d6b62e; box-shadow: 0 0 0 1px rgba(214, 182, 46, 0.35); }
+
+/* Agent tiles below the boxes (Step1SubstepEPrompt.md Revision D): one per
+   agent installed on the host (never a dev agent such as clod); a blue
+   border once a connectable agent has a credential (connected or from LR's
+   environment). */
+.topo-node-agents { flex-wrap: wrap; justify-content: center; gap: 4px; }
+.topo-agent-tile {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 9px; color: #d4d4d4;
+}
+.topo-agent-tile-auth { border-color: #245a7a; color: #6ea6c9; }
+
+/* Registered external plug-ins (privateRepoOpsImpls Step6Prompt.md Revision
+   E): sized like the agent tiles, green-bordered while online. One whose dev
+   repo is building gets the card's marching ants -- same green, same glow,
+   same 2px ring just outside the border (rx = the tile's 3px radius + 1px)
+   -- round its own border, reusing the card's march; red-bordered once its
+   last build failed. */
+.topo-node-plugins { flex-wrap: wrap; justify-content: center; gap: 4px; }
+.topo-plugin-tile {
+  position: relative;
+  display: flex; align-items: center; justify-content: center;
+  min-width: 26px; height: 20px; padding: 0 4px;
+  border: 1px solid #3c3c3c; border-radius: 3px;
+  font-size: 9px; color: #9c9c9c;
+}
+.topo-plugin-tile-online { border-color: #2e7a2e; color: #6ec96e; }
+.topo-plugin-tile-build-failed { border-color: #e05252; }
+/* Launched or restarted in the last 10 minutes (Step6Prompt.md Revision G):
+   .topo-node-fresh's green halo, scaled to the tile. Declared before
+   -building so a build in progress swaps it for the marching ants. */
+.topo-plugin-tile-fresh { box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.55), 0 0 6px 1px rgba(78, 201, 110, 0.45); }
+.topo-plugin-tile-building { box-shadow: 0 0 6px 1px rgba(78, 201, 110, 0.45); }
+.topo-plugin-tile-label { font-weight: 600; letter-spacing: 0.03em; }
+.topo-plugin-tile-ring {
+  position: absolute;
+  inset: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  overflow: visible;
+  pointer-events: none;
+}
+.topo-plugin-tile-ring rect {
+  fill: none;
+  stroke: rgba(78, 201, 110, 0.8);
+  stroke-width: 2px;
+  stroke-dasharray: 1 1;
+  animation: topo-node-building-march 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .topo-plugin-tile-ring rect { animation: none; }
+}
+
+.topo-details {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.topo-details-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-readout-row { display: flex; flex-direction: column; gap: 2px; }
+.topo-readout-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-readout-value { font-size: 12px; color: #d4d4d4; }
+.topo-readout-placeholder { color: #555; font-style: italic; }
+
+.topo-controls {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 12px;
+}
+.topo-controls-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.topo-controls-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.topo-controls-hint { font-size: 11px; color: #555; font-style: italic; }
+
+/* Small "restart agent-coordinator" section shown under the rebuild &
+   restart controls when the selected card is the self host -- see
+   isSelfSelected in App.tsx and Step4Prompt.md Revision E. Mirrors
+   .topo-controls's own divider treatment so it reads as a distinct
+   sub-section rather than more of the same control block. */
+.topo-ac-controls {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 12px;
+}
+
+/* ---- System panel (host system tab) ---- */
+
+.sys-panel { display: flex; flex-direction: column; gap: 20px; max-width: 720px; }
+.sys-panel-empty { color: #888; font-style: italic; }
+.sys-fc-control { font-size: 12px; padding: 6px 10px; border-radius: 4px; border: 1px solid #3c3c3c; color: #bbb; }
+.sys-fc-control-remote-control { border-color: #2e5a2e; color: #8fd18f; }
+.sys-fc-control-local-control { border-color: #6a5a2e; color: #d1c48f; }
+.sys-table { border: 1px solid #3c3c3c; border-radius: 4px; overflow: hidden; }
+.sys-row { display: grid; grid-template-columns: 1fr 80px 90px 120px 230px; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #2a2a2a; font-size: 12px; }
+.sys-row:last-child { border-bottom: none; }
+.sys-row-head { background: #252526; color: #666; text-transform: uppercase; letter-spacing: 0.05em; font-size: 10px; font-weight: 600; }
+.sys-row-none { display: block; color: #666; font-style: italic; padding: 10px 12px; }
+.sys-row-failed { background: #241717; }
+/* Process rows are clickable to open the version drill-down below the table
+   (see SystemProcDetails/procRowKey) -- Step5Prompt.md Revision J. */
+.sys-row-clickable { cursor: pointer; user-select: none; } /* double-click opens the app's tab rather than selecting text */
+.sys-row-clickable:hover { background: #262626; }
+.sys-row-selected { background: #16324a; }
+.sys-row-selected:hover { background: #1a3a56; }
+.sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-col-name { color: #d4d4d4; font-weight: 600; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; overflow: visible; white-space: normal; }
+.sys-col-name-main { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-version-tag { font-size: 10px; font-weight: 400; color: #666; white-space: normal; overflow-wrap: anywhere; }
+.sys-session-tag { font-size: 10px; font-weight: 400; color: #888; white-space: normal; overflow-wrap: anywhere; }
+.sys-col-pid { color: #9c9c9c; }
+.sys-col-detail { color: #9c9c9c; }
+.sys-self-tag { margin-left: 8px; font-size: 10px; font-weight: 400; color: #007acc; border: 1px solid #245a7a; border-radius: 8px; padding: 0 6px; }
+.sys-col-status { font-weight: 600; }
+.sys-status-running { color: #4ec94e; }
+.sys-status-exited { color: #9c9c9c; }
+.sys-status-failed { color: #cc4444; }
+.sys-col-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; overflow: visible; white-space: normal; }
+.sys-btn { font-family: inherit; font-size: 11px; padding: 2px 10px; border-radius: 3px; cursor: pointer; }
+.sys-btn:disabled { opacity: 0.5; cursor: default; }
+/* Plain grey, no color-coded meaning attached -- the debug view's "debug"
+   toggle and "to file" buttons (Step1SubstepBPrompt.md Revision E). */
+.sys-btn-neutral { background: #3c3c3c; border: 1px solid #555; color: #ccc; }
+.sys-btn-neutral:hover:not(:disabled) { background: #4a4a4a; }
+.sys-btn-terminate { background: #3a1a1a; border: 1px solid #7a2e2e; color: #c96e6e; }
+.sys-btn-terminate:hover { background: #5a2e2e; }
+.sys-btn-restart { background: #1a2a3a; border: 1px solid #2e5a7a; color: #6ea6c9; }
+.sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
+/* A newer build has landed on disk since this LR started -- orange, matching
+   .sys-btn-rebuild-dirty's "worth your attention" treatment. */
+.sys-btn-restart-update { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
+.sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
+/* Version drill-down for a selected process row (SystemProcDetails) --
+   mirrors .topo-details/.topo-readout-* from the global topology view's
+   per-host "Details & Control" pane, scaled down to sit under the table. */
+.sys-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+.sys-details-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-readout-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-readout-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-readout-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-readout-placeholder { color: #555; font-style: italic; }
+
+.sys-launch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sys-launch-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px; }
+.sys-btn-launch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* A sub-app tab whose app isn't running on the host: a launch button in the
+   middle of the tab (LaunchPanel). */
+.launch-panel { min-height: 240px; font-style: normal; }
+.launch-panel-inner { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.launch-panel-msg { font-size: 14px; color: #888; font-style: italic; }
+.launch-panel-btn { font-size: 13px; padding: 6px 18px; }
+.launch-panel-note { font-size: 12px; color: #c9a227; }
+
+/* "providers" section (Step1SubstepCPrompt.md): always present, one
+   sub-section per provider the host holds credentials for -- yellow border
+   when they don't work, matching the topology card's connectivity icon. */
+.sys-providers { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-providers-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-providers-none { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider { display: flex; flex-direction: column; gap: 6px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 10px; }
+.sys-provider-failed { border-color: #d6b62e; }
+.sys-provider-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #d4d4d4; }
+.sys-provider-icon { display: flex; align-items: center; color: #d4d4d4; }
+.sys-provider-status { margin-left: auto; font-size: 11px; font-weight: 400; }
+.sys-provider-status-ok { color: #4ec94e; }
+.sys-provider-status-failed { color: #d6b62e; }
+.sys-provider-status-checking { color: #888; font-style: italic; }
+.sys-provider-error { color: #d6b62e; }
+/* The "connect" control (Step1SubstepEPrompt.md). */
+.sys-providers-heading { display: flex; align-items: center; gap: 8px; }
+.sys-providers-heading .sys-btn { margin-left: auto; }
+.sys-provider-connect { display: flex; align-items: center; gap: 6px; }
+.sys-provider-connect .sys-branch-select { flex: 0 0 auto; }
+.sys-provider-token { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 6px; }
+/* "agents & models" (Step1SubstepEPrompt.md Revision B) reuses the providers styles. */
+.sys-agents-checked { font-size: 11px; color: #555; }
+.sys-agent-tag { font-size: 10px; font-weight: 400; color: #888; border: 1px solid #3c3c3c; border-radius: 3px; padding: 0 4px; }
+.sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
+.sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
+/* "agent operations" (AgentOps.tsx) also reuses them. */
+.agent-ops-count { font-size: 11px; color: #555; }
+.sys-providers-heading .agent-ops-up { margin-left: 0; }
+.agent-op { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; color: #d4d4d4; }
+.agent-op-done { color: #777; }
+.agent-op-dot { width: 7px; height: 7px; border-radius: 50%; background: #4a9eff; align-self: center; }
+.agent-op-done .agent-op-dot { background: #555; }
+.agent-op-agent { font-weight: 600; }
+.agent-op-session { color: #888; }
+.agent-op-time { margin-left: auto; font-size: 11px; color: #888; }
+/* The full-page view's text sub-tab: calls on the left, details on the right. */
+.agent-ops-split { display: flex; gap: 12px; align-items: flex-start; }
+.agent-ops-list { flex: 0 0 40%; display: flex; flex-direction: column; gap: 2px; }
+.agent-op-pick { cursor: pointer; padding: 3px 6px; border-radius: 3px; }
+.agent-op-pick:hover { background: #2a2d2e; }
+.agent-op-sel { background: #094771; }
+.agent-ops-details { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #d4d4d4; border-left: 1px solid #3c3c3c; padding-left: 12px; }
+.agent-ops-label { margin-top: 6px; font-size: 11px; color: #888; text-transform: uppercase; }
+.agent-ops-pre { margin: 0; font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; background: #1a1a1a; padding: 6px; }
+.sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-provider-placeholder { color: #555; font-style: italic; }
+/* Revision D: "show-dev" toggle + "connect" beside "re-inspect". */
+.sys-agents-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Revision F: "show-dev" in the same green as .sys-btn-rebuild, brighter while on. */
+.sys-agents-showdev { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-showdev:hover { background: #2e5a2e; }
+.sys-agents-showdev:has(input:checked) { background: #2e5a2e; border-color: #4caf50; color: #9be29b; }
+.sys-agents-showdev input { accent-color: #2e7a2e; margin: 0; }
+
+/* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) -- mirrors this
+   host's LR system tab, forwarded up as "lr-repo-state" ---- */
+.sys-repo-panel { display: flex; flex-direction: column; gap: 8px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-repo-info { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sys-repo-label { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; flex-shrink: 0; }
+.sys-repo-root { color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sys-repo-head { color: #666; font-size: 11px; flex-shrink: 0; }
+.sys-repo-controls { display: flex; align-items: center; gap: 12px; }
+.sys-btn-rebuild { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-rebuild:hover:not(:disabled) { background: #2e5a2e; }
+/* Dirty repo: orange, per the prompt -- distinct from the plain green "HEAD
+   moved" rebuild state. */
+.sys-btn-rebuild-dirty { background: #3a2a14; border: 1px solid #a06a1e; color: #e0a83e; }
+.sys-btn-rebuild-dirty:hover:not(:disabled) { background: #5a4420; }
+/* Manual rebuild: neutral grey when repo is clean but no rebuild is currently needed (not rebuild_ready),
+   distinct from the plain green "needed" state and orange "dirty" state. */
+.sys-btn-rebuild-manual { background: #2c2c2c; border: 1px solid #4a4a4a; color: #bbb; }
+.sys-btn-rebuild-manual:hover:not(:disabled) { background: #3a3a3a; color: #eee; }
+.sys-auto-rebuild { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aaa; cursor: pointer; }
+/* Auto-rebuild's 90s debounce countdown (Step3Prompt.md Revision E) -- shown
+   next to the auto-rebuild toggle while it's waiting for changes to settle
+   before building. */
+.sys-repo-auto-pending { font-size: 11px; color: #e0a83e; font-style: italic; }
+.sys-repo-error { font-size: 11px; color: #e05c5c; font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The .ufabuild request readout. */
+.sys-repo-ufabuild { font-size: 11px; color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B):
+   inside the dev-repo panel per-host, and under "rebuild all" globally. */
+.sys-branch { display: flex; flex-direction: column; gap: 6px; }
+.sys-branch-name { color: #9c9c9c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+/* Same green as .sys-btn-rebuild (Step1SubstepCPrompt.md Revision C). */
+.sys-btn-branch { background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; }
+.sys-btn-branch:hover:not(:disabled) { background: #2e5a2e; }
+.sys-branch-select { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 4px; }
+/* External paths registered for watching beside the dev-repo, mirroring
+   LR's own (privateRepoOpsImpls Step6Prompt.md Revisions C-E): one row per
+   path, then a path box and "watch"/"plugin dev repo". */
+.sys-ext { display: flex; flex-direction: column; gap: 6px; }
+.sys-ext-row .sys-repo-root { flex: 0 1 auto; }
+.sys-ext-state { font-size: 11px; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.sys-ext-dirty { color: #e0a83e; }
+.sys-ext-note { color: #e05c5c; font-style: italic; }
+.sys-ext-input { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 4px; }
+/* A plug-in dev repo's link to its registration in the plugins tab. */
+.sys-ext-reg-link { background: none; border: none; padding: 0; font: inherit; color: #4fa3e0; cursor: pointer; }
+.sys-ext-reg-link:hover { text-decoration: underline; }
+
+/* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
+.sys-trough { border: 1px solid #3c3c3c; border-radius: 4px; background: #111; }
+.sys-trough-line { display: flex; align-items: center; gap: 8px; width: 100%; font-family: inherit; font-size: 11px; color: #aaa; background: transparent; border: none; padding: 6px 10px; cursor: pointer; text-align: left; }
+.sys-trough-line:disabled { cursor: default; color: #666; }
+.sys-trough-chevron { flex-shrink: 0; color: #666; }
+.sys-trough-ts { flex-shrink: 0; color: #666; }
+.sys-trough-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sys-trough-empty { font-style: italic; color: #666; }
+.sys-trough-count { flex-shrink: 0; font-size: 10px; color: #888; background: #252526; border-radius: 8px; padding: 0 6px; }
+.sys-trough-list { max-height: 160px; overflow-y: auto; border-top: 1px solid #2a2a2a; }
+.sys-trough-entry { display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; font-size: 11px; color: #c96e6e; border-bottom: 1px solid #202020; }
+.sys-trough-entry:last-child { border-bottom: none; }
+
+/* ---- Main pane with optional right-hand detail pane (files tab) ---- */
+
+.main-pane-inner { display: flex; align-items: flex-start; gap: 24px; }
+.main-pane-inner .service-view { flex: 1; min-width: 0; }
+
+/* ---- Files panel (upload relayed through AC -- see docs/DistributedExchange.md) ---- */
+
+.files-panel { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+.files-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 1px dashed #3c3c3c; border-radius: 6px; padding: 24px; cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+.files-dropzone:hover { border-color: #555; background: #1e1e1e; }
+.files-dropzone-active { border-color: #007acc; background: #14283a; }
+.files-dropzone-text { font-size: 13px; color: #aaa; }
+.files-dropzone-hint { font-size: 11px; color: #666; }
+.files-dropzone-input { display: none; }
+/* "new text file" button (Step2Prompt.md Revision J) -- sits right below the
+   dropzone, same width, so it reads as a second way to add a file rather
+   than a buried action. */
+.files-new-btn {
+  background: #262626; border: 1px dashed #3c3c3c; border-radius: 6px; color: #aaa;
+  font-family: inherit; font-size: 13px; padding: 10px; cursor: pointer; text-align: center;
+}
+.files-new-btn:hover:not(:disabled) { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
+.files-new-btn:disabled { opacity: 0.5; cursor: default; }
+/* "new file from clipboard" (Step4SubstepDPrompt.md Revisions D/G) shares the
+   row with "new text file", half each. */
+.files-new-row { display: flex; gap: 8px; }
+.files-new-row .files-new-btn { flex: 1; }
+.files-clip-error { color: #e06a6a; font-size: 12px; }
+.files-empty { color: #888; font-style: italic; font-size: 13px; }
+.files-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 12px; }
+.files-item {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 6px;
+  cursor: pointer; font-family: inherit; color: #d4d4d4; transition: background 0.1s, border-color 0.1s;
+}
+.files-item:hover { background: #2a2a2a; border-color: #555; }
+.files-item-active { border-color: #007acc; background: #14283a; }
+/* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
+   independent of (and layered outside) the active-selection border above. */
+.files-item-highlighted { box-shadow: 0 0 0 2px #d7c22b; }
+/* Marked up (Step1SubstepCPrompt.md Revision F): a bright orange border --
+   an in-progress markup-dialog session is open on this file. Independent of
+   (and can combine with) the highlighted ring above. */
+.files-item-markedup { box-shadow: 0 0 0 2px #ff6a00; }
+.files-item-highlighted.files-item-markedup { box-shadow: 0 0 0 2px #d7c22b, 0 0 0 4px #ff6a00; }
+.file-icon { display: inline-flex; width: 28px; height: 28px; }
+.file-icon svg { width: 100%; height: 100%; }
+/* File-details-dialog cache state: orange while short-term cached, yellow
+   once held (72h), green once persisted to the host-store. */
+.file-state-cached { color: #d9822b; }
+.file-state-held { color: #d7c22b; }
+.file-state-persisted { color: #4caf6e; }
+.files-item-name { font-size: 11px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- File detail pane ---- */
+
+.file-detail-pane {
+  width: 240px; flex-shrink: 0; display: flex; flex-direction: column; gap: 14px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 6px; padding: 14px 16px;
+}
+.file-detail-header { display: flex; align-items: center; justify-content: space-between; }
+.file-detail-title { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.file-detail-close { background: none; border: none; color: #888; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.file-detail-close:hover { color: #d4d4d4; }
+.file-detail-icon { display: flex; justify-content: center; }
+.file-detail-icon .file-icon { width: 40px; height: 40px; }
+.file-detail-rows { display: flex; flex-direction: column; gap: 8px; }
+.file-detail-row { display: flex; flex-direction: column; gap: 2px; }
+.file-detail-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.file-detail-value { font-size: 12px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.file-detail-actions { display: flex; gap: 8px; }
+.file-detail-enter {
+  flex: 1; background: #14283a; border: 1px solid #245a7a; border-radius: 3px; color: #5bb8ff;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-enter:hover { background: #1e3a52; border-color: #4e8cca; }
+.file-detail-download {
+  flex: 1; background: #1a3a1a; border: 1px solid #2e7a2e; border-radius: 3px; color: #6ec96e;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center; text-decoration: none;
+}
+.file-detail-download:hover { background: #2e5a2e; }
+.file-detail-hold {
+  flex: 1; background: #3a341a; border: 1px solid #7a6a2e; border-radius: 3px; color: #d7c22b;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-hold:hover { background: #5a4e2e; border-color: #c4b04e; }
+.file-detail-hold:disabled { opacity: 0.5; cursor: default; }
+.file-detail-highlight {
+  flex: 1; background: #2a2a1a; border: 1px solid #5a5a2e; border-radius: 3px; color: #999;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-highlight:hover { background: #3a3a2a; border-color: #7a7a4e; }
+.file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
+.file-detail-highlight-active { background: #3a341a; border-color: #d7c22b; color: #d7c22b; }
+.file-detail-highlight-active:hover { background: #5a4e2e; }
+.file-detail-markup {
+  flex: 1; background: #2a1e14; border: 1px solid #7a4e2e; border-radius: 3px; color: #ff9d5c;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-markup:hover { background: #4a2e1a; border-color: #c47a4e; }
+.file-detail-markup-active { background: #4a2e14; border-color: #ff6a00; color: #ff6a00; }
+.file-detail-markup-active:hover { background: #5a3a1a; }
+.file-detail-delete {
+  flex: 1; background: #3a1a1a; border: 1px solid #7a2e2e; border-radius: 3px; color: #e06a6a;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-delete:hover { background: #5a2e2e; border-color: #c44e4e; }
+.file-detail-delete:disabled { opacity: 0.5; cursor: default; }
+
+/* The integrations subsection -- see local-representative's index.css. */
+.file-detail-integrations {
+  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px dashed #2e4a5a; padding-top: 8px;
+}
+.file-detail-integrations-label { color: #777; font-size: 11px; }
+.file-detail-integrate {
+  flex: 1; background: #142a24; border: 1px solid #2e7a5e; border-radius: 3px; color: #5cd6a8;
+  font-family: inherit; font-size: 12px; padding: 5px 0; cursor: pointer; text-align: center;
+}
+.file-detail-integrate:hover { background: #1e4a3a; border-color: #4ec49a; }
+.file-detail-integrate:disabled { opacity: 0.5; cursor: default; }
+.file-detail-integrate-status { font-size: 11px; color: #5cd6a8; overflow-wrap: anywhere; }
+.file-detail-integrate-error { color: #e06a6a; }
+
+/* ---- File viewer ---- */
+
+.file-viewer { display: flex; flex-direction: column; gap: 16px; max-width: 900px; }
+.file-viewer-header { display: flex; align-items: center; gap: 12px; }
+.file-viewer-back {
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #aaa;
+  font-family: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer; flex-shrink: 0;
+}
+.file-viewer-back:hover { background: #2a2a2a; border-color: #555; color: #d4d4d4; }
+.file-viewer-name {
+  font-size: 13px; color: #d4d4d4; font-weight: 600; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-viewer-body {
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 6px; padding: 20px;
+  min-height: 200px; display: flex; align-items: center; justify-content: center;
+}
+.file-viewer-image { max-width: 100%; max-height: 70vh; border-radius: 4px; }
+.file-viewer-text {
+  align-self: stretch; max-height: 70vh; overflow: auto; font-size: 12px; color: #d4d4d4;
+  white-space: pre-wrap; word-break: break-word;
+}
+.file-viewer-empty { color: #888; font-style: italic; font-size: 13px; }
+
+/* ---- Markup dialog (Step1SubstepCPrompt.md Revision F) ---- */
+
+.markup-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px;
+}
+.markup-dialog {
+  display: flex; flex-direction: column; gap: 12px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; padding: 16px;
+  max-width: min(94vw, 1100px); max-height: 94vh;
+}
+.markup-header { display: flex; align-items: baseline; gap: 10px; }
+.markup-title { font-size: 11px; font-weight: 600; color: #ff9d5c; text-transform: uppercase; letter-spacing: 0.05em; }
+.markup-filename { font-size: 13px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.markup-canvas-wrap {
+  background: #141414; border: 1px solid #3c3c3c; border-radius: 6px; min-height: 200px; min-width: 300px;
+  display: flex; align-items: center; justify-content: center; overflow: auto; flex: 1;
+}
+.markup-canvas { max-width: min(88vw, 1000px); max-height: 62vh; cursor: crosshair; }
+.markup-status { color: #888; font-style: italic; font-size: 13px; }
+.markup-status-error { color: #e06a6a; }
+.markup-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.markup-tools { display: flex; gap: 6px; }
+.markup-tool-btn {
+  display: flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #aaa; cursor: pointer; padding: 5px;
+}
+.markup-tool-btn svg { width: 100%; height: 100%; }
+.markup-tool-btn:hover { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
+.markup-tool-active { background: #14283a; border-color: #4e8cca; color: #5bb8ff; }
+.markup-palette { display: flex; gap: 6px; }
+.markup-swatch { width: 20px; height: 20px; border-radius: 50%; border: 2px solid #3c3c3c; cursor: pointer; padding: 0; }
+.markup-swatch:hover { border-color: #777; }
+.markup-swatch-active { border-color: #fff; box-shadow: 0 0 0 2px #007acc; }
+.markup-actions { display: flex; gap: 8px; }
+.markup-btn {
+  flex: 1; background: #262626; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 7px 0; cursor: pointer; text-align: center;
+}
+.markup-btn:hover { background: #2e2e2e; border-color: #555; }
+.markup-btn:disabled { opacity: 0.5; cursor: default; }
+.markup-btn-cancel { color: #e06a6a; }
+.markup-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+.markup-btn-copy { color: #6ec96e; }
+.markup-btn-copy:hover:not(:disabled) { background: #1a3a1a; border-color: #2e7a2e; }
+.markup-btn-commit { color: #ff9d5c; }
+.markup-btn-commit:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+/* ---- New text file dialog (Step2Prompt.md Revision J) ----
+   Same overlay/dialog shell convention as .markup-overlay/.markup-dialog
+   above, kept as its own class pair (rather than reused) since the two
+   dialogs are otherwise unrelated. */
+
+.new-file-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 24px;
+}
+.new-file-dialog {
+  display: flex; flex-direction: column; gap: 12px;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 8px; padding: 16px;
+  width: min(94vw, 480px);
+}
+.new-file-name-input {
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #d4d4d4;
+  font-family: inherit; font-size: 13px; padding: 7px 9px;
+}
+.new-file-body-input {
+  background: #262626; border: 1px solid #3c3c3c; border-radius: 4px; color: #d4d4d4;
+  font-family: inherit; font-size: 13px; padding: 7px 9px; resize: vertical; min-height: 160px;
+}
+.new-file-name-input:focus, .new-file-body-input:focus { outline: none; border-color: #555; }
+.new-file-error { color: #e06a6a; font-size: 12px; }
+.new-file-actions { display: flex; gap: 8px; }
+.new-file-btn {
+  flex: 1; background: #262626; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 7px 0; cursor: pointer; text-align: center;
+}
+.new-file-btn:hover { background: #2e2e2e; border-color: #555; }
+.new-file-btn:disabled { opacity: 0.5; cursor: default; }
+.new-file-btn-cancel { color: #e06a6a; }
+.new-file-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+.new-file-btn-create { color: #ff9d5c; }
+.new-file-btn-create:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+/* Clipboard naming dialog's preview (Step4SubstepDPrompt.md Revisions D/G). */
+.clip-file-image {
+  max-width: 100%; max-height: 260px; object-fit: contain; align-self: center;
+  border: 1px solid #3c3c3c; border-radius: 4px; background: #262626;
+}
+.clip-file-text {
+  margin: 0; max-height: 220px; overflow: auto; background: #262626; border: 1px solid #3c3c3c;
+  border-radius: 4px; color: #bbb; font-size: 12px; padding: 7px 9px;
+  white-space: pre-wrap; word-break: break-word;
+}
+.clip-file-size { color: #888; font-size: 11px; }
+.clip-file-format { color: #888; font-weight: normal; }
+
+/* ---- The Conversationalist mic-capture (Step2Prompt.md Revision J) ----
+   Mirrors local-representative's own copy of these same
+   rules -- see App.tsx's field-with-mic/.mic-btn/TCCaptureOverlay for the
+   markup they back. field-with-mic wraps the new-text-file dialog's body
+   textarea so MicButton sits beside it rather than overlapping the
+   textarea's own resize handle; the field itself keeps its existing
+   class-driven styling, since this only adds a flex sibling. MicButton
+   renders nothing until its host's TC is available, so field-with-mic is
+   present even when there's nothing to see beside the field. */
+
+.field-with-mic { display: flex; align-items: flex-start; gap: 6px; width: 100%; }
+.field-with-mic > input, .field-with-mic > textarea { flex: 1; min-width: 0; }
+.mic-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 24px; height: 24px; margin-top: 1px; padding: 3px;
+  background: #2d2d2d; color: #999; border: 1px solid #3c3c3c; border-radius: 3px; cursor: pointer;
+}
+.mic-btn svg { width: 100%; height: 100%; display: block; }
+.mic-btn:hover { background: #333; color: #d4d4d4; border-color: #555; }
+
+/* TCCaptureOverlay -- the floating panel hosting the-conversationalist's own
+   capture-mode iframe while a dictation is in progress (App.tsx). */
+
+.tc-capture-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.tc-capture-panel {
+  width: 420px; max-width: 90vw; height: 320px; max-height: 80vh;
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 6px;
+  display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.tc-capture-panel-header {
+  display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;
+  background: #252526; border-bottom: 1px solid #3c3c3c; font-size: 12px; color: #ccc;
+}
+.tc-capture-close { background: none; border: none; color: #999; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
+.tc-capture-close:hover { color: #fff; }
+.tc-capture-frame { flex: 1; width: 100%; border: none; background: #141414; }
+
+/* ---- Mobile (decoupled, CSS-only) ----
+ *
+ * Structurally this app is a sidebar+content shape (a host list beside the
+ * selected host's view), so the sidebar becomes an off-canvas drawer, plus
+ * the same tab-bar/main-pane/table fixes used for local-representative's
+ * near-identical dashboard.
+ */
+
+.mobile-nav-toggle,
+.mobile-back-btn,
+.mobile-nav-backdrop {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .mobile-nav-toggle,
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    /* Below .app-header (40px) -- the original off-canvas-drawer pattern
+       this was copied from had no such header to clear, but AC's does (app-title/nav arrows/conn-dot), so top: 10px here used to sit
+       right on top of it, occluding and swallowing clicks meant for the
+       nav arrows (Step5Prompt.md Revision O/P). */
+    top: 48px;
+    z-index: 101;
+    width: 38px;
+    height: 38px;
+    background: #2d2d2d;
+    color: #ccc;
+    border: 1px solid #3c3c3c;
+    border-radius: 6px;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .mobile-nav-toggle {
+    right: 10px;
+  }
+
+  .mobile-back-btn {
+    left: 10px;
+    font-size: 24px;
+    font-weight: 700;
+  }
+
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 99;
+  }
+
+  .sidebar-wrap {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: 100;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .sidebar-wrap.mobile-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .app-body {
+    padding-top: 92px; /* clears the header (40px) plus the 48px-positioned toggle/back button */
+  }
+
+  .host-item {
+    padding: 10px 12px;
+  }
+
+  button {
+    min-height: 34px;
+  }
+
+  .main-pane {
+    padding: 16px;
+  }
+
+  .main-pane-embed {
+    padding: 0;
+  }
+
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tabs {
+    flex-shrink: 0;
+  }
+
+  /* A ScrollTabs row scrolls itself, so it has to keep to the bar's width:
+     at its full width it can't scroll, and its overscroll-behavior stops a
+     drag on it from scrolling the bar instead. */
+  .tabs.tabs-scroll {
+    flex-shrink: 1;
+  }
+
+  .tab {
+    padding: 0 12px;
+  }
+
+  .main-pane-inner,
+  .topo-panel {
+    flex-direction: column;
+  }
+
+  .file-detail-pane,
+  .topo-details {
+    width: 100%;
+  }
+
+  .sys-table {
+    overflow-x: auto;
+  }
+
+  .sys-row {
+    min-width: 600px;
+  }
+
+  .file-viewer-header {
+    flex-wrap: wrap;
+  }
+
+  .lr-header {
+    flex-wrap: wrap;
+  }
+}
+
+/* "select from host" file picker (HostFilePicker.tsx, Step4Prompt.md
+   Revision F) -- the same block in LR's and AC's index.css. */
+.hfp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 24px;
+}
+
+.hfp-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  padding: 14px;
+  width: min(94vw, 620px);
+  max-height: 86vh;
+  color: #d4d4d4;
+  font-size: 12px;
+}
+
+.hfp-header { display: flex; align-items: center; justify-content: space-between; }
+.hfp-title { font-weight: 600; color: #ff9d5c; }
+.hfp-close {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+.hfp-close:hover { color: #fff; }
+
+.hfp-path-row { display: flex; align-items: center; gap: 6px; }
+.hfp-path-input {
+  flex: 1;
+  min-width: 0;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 5px 7px;
+}
+.hfp-path-input:focus { outline: none; border-color: #ff6a00; }
+.hfp-hidden-toggle { display: flex; align-items: center; gap: 4px; color: #999; white-space: nowrap; }
+
+.hfp-btn {
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.hfp-btn:hover:not(:disabled) { background: #2e2e2e; border-color: #555; }
+.hfp-btn:disabled { opacity: 0.45; cursor: default; }
+.hfp-btn-primary { color: #ff9d5c; }
+.hfp-btn-primary:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+.hfp-error { color: #f48771; white-space: pre-wrap; }
+
+.hfp-list {
+  flex: 1;
+  min-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  background: #1a1a1a;
+}
+.hfp-empty { padding: 10px; color: #777; }
+.hfp-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.hfp-entry:hover { background: #2a2a2a; }
+.hfp-entry-dir .hfp-entry-name { color: #9cdcfe; }
+.hfp-entry-selected { background: #4a2e14; }
+.hfp-entry-selected:hover { background: #5a3818; }
+.hfp-entry-icon { width: 16px; text-align: center; }
+.hfp-entry-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hfp-entry-size { color: #888; font-size: 11px; white-space: nowrap; }
+
+.hfp-footer { display: flex; align-items: center; gap: 8px; }
+.hfp-selection { flex: 1; min-width: 0; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Worker tab (a host's dungeon-keeper signals -- see worker.go; mirrors
+   local-representative's own) ---- */
+
+.worker-panel { display: flex; flex-direction: column; gap: 12px; }
+.worker-meta { font-size: 12px; color: #888; }
+
+.worker-submit { display: flex; gap: 8px; align-items: stretch; }
+.worker-prompt {
+  flex: 1;
+  min-width: 0;
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.worker-prompt::placeholder { color: #555; }
+.worker-prompt:disabled { opacity: 0.6; }
+.worker-submit-btn {
+  background: #1a3a5c;
+  border: 1px solid #2e5c8a;
+  border-radius: 3px;
+  color: #d4d4d4;
+  padding: 0 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.worker-submit-btn:disabled { opacity: 0.5; cursor: default; }
+.worker-error { color: #cc4444; font-size: 13px; }
+
+.worker-signals { display: flex; flex-direction: column; gap: 4px; }
+.worker-signal { background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; }
+.worker-signal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 6px 10px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.worker-signal-head:hover { background: #1e1e1e; }
+.worker-signal-more { color: #5bb8ff; font-size: 12px; }
+.worker-signal-status { width: 80px; flex-shrink: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.worker-status-processing .worker-signal-status { color: #5bb8ff; }
+.worker-status-completed .worker-signal-status { color: #4ec94e; }
+.worker-status-failed .worker-signal-status { color: #cc4444; }
+.worker-signal-prompt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-signal-when { flex-shrink: 0; font-size: 11px; color: #666; }
+
+.worker-signal-body { display: flex; flex-direction: column; gap: 8px; padding: 4px 10px 10px; border-top: 1px solid #2a2a2a; }
+.worker-signal-detail { font-size: 11px; color: #777; }
+.worker-signal-comment { font-size: 12px; color: #aaa; }
+.worker-status-failed .worker-signal-comment { color: #cc4444; }
+.worker-signal-text {
+  margin: 0;
+  padding: 8px;
+  background: #1a1a1a;
+  border-radius: 3px;
+  color: #bbb;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.worker-signal-output { color: #d4d4d4; }
+
+.worker-slopspace-in-use { border-color: #2d5a7a; }
+.worker-slopspace-in-use .worker-signal-status { color: #5bb8ff; }
+.worker-slopspace-deployed .worker-signal-status { color: #e0a83e; }
+.worker-slopspace-repos { color: #777; font-size: 12px; }
+.worker-slopspace-head { cursor: pointer; }
+.worker-slopspace-head:hover { background: #1e1e1e; }
+.worker-slopspace-selected { border-color: #5c8a2e; }
+
+/* The slopspace sub-tab's manual control panel -- see dungeon-keeper/slopctl.go */
+.worker-slopctl { display: flex; flex-direction: column; gap: 8px; padding: 10px; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; }
+.worker-slopctl-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.worker-slopctl-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.worker-slopctl-label { width: 110px; flex-shrink: 0; font-size: 12px; color: #888; }
+.worker-slopctl-check { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #aaa; cursor: pointer; }
+.worker-slopctl-work { display: flex; flex-direction: column; gap: 6px; }
+.worker-slopctl-input {
+  min-width: 0;
+  background: #1a1a1a;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 4px 8px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+}
+.worker-slopctl-input:disabled { opacity: 0.5; }
+.worker-slopctl-pick, .worker-slopctl-grow { flex: 1; }
+.worker-slopctl-command { font-family: inherit; resize: vertical; min-height: 2.5em; }
+.worker-slopctl-path { font-family: monospace; }
+.worker-slopctl .worker-submit-btn { padding: 4px 12px; }
+.worker-slopctl-danger { background: #4a1e1e; border-color: #8a2e2e; }
+.worker-slopctl-ok { color: #4ec94e; font-size: 13px; }
+
+/* DTT proposals and "view files" on the slopspace sub-tab -- see
+   SlopspaceDTT.tsx. The human, and what's submitted to them, is green. */
+.worker-dtt-banner { font-size: 12px; color: #4ec94e; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.worker-dtt-badge { font-size: 11px; color: #4ec94e; border: 1px solid #2f7a2f; border-radius: 3px; padding: 0 5px; margin-right: 6px; white-space: nowrap; }
+.worker-dtt-review { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px dashed #4ec94e; border-radius: 4px; background: #0f1a10; }
+.worker-dtt-title { color: #4ec94e; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.worker-dtt-list { display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow-y: auto; }
+.worker-dtt-item { font-family: monospace; color: #ccc; }
+.worker-dtt-kind { display: inline-block; min-width: 3.5em; font-size: 11px; color: #888; }
+.worker-dtt-write { color: #e0a855; }
+.worker-slopctl .worker-dtt-accept { background: #1e3a1e; border-color: #2f7a2f; }
+/* One proposal's own ✓ / ✗ (Revision M) */
+.worker-dtt-row { display: flex; align-items: center; gap: 8px; }
+.worker-dtt-row .worker-dtt-item { flex: 1; min-width: 0; text-align: left; word-break: break-all; }
+.worker-dtt-one { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.worker-dtt-row .worker-dtt-one .worker-submit-btn { padding: 0 6px; font-size: 11px; }
+/* Entered scopes (Revision L) -- an ↑ back out to the enclosing scope */
+.worker-files-up { align-self: flex-start; background: none; border: none; color: #666; font-size: 11px; cursor: pointer; padding: 0; font-family: inherit; }
+.worker-files-up:hover:not(:disabled) { color: #999; }
+.worker-files-scope { font-family: monospace; font-size: 13px; color: #ccc; font-weight: 600; word-break: break-all; }
+.worker-files-list { display: flex; flex-direction: column; gap: 1px; max-height: 360px; overflow-y: auto; font-family: monospace; }
+.worker-files-entry { display: flex; justify-content: space-between; gap: 16px; color: #ccc; font-family: monospace; padding: 1px 4px; }
+.worker-files-entry:hover { background: #1f1f1f; }
+.worker-files-dir { color: #5bb8ff; }
+.worker-files-size { color: #777; white-space: nowrap; }
+.worker-files-content { max-height: 480px; overflow: auto; }
+
+/* The worker tab's visual sub-tab -- see WorkerVisual.tsx */
+.wv { display: flex; flex-direction: column; gap: 8px; }
+.wv-toolbar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+.wv-toolbar .worker-submit-btn { padding: 2px 10px; }
+.wv-spacer { flex: 1; }
+.wv-zoom { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+.wv-legend { display: inline-flex; align-items: center; gap: 6px; }
+.wv-swatch { display: inline-block; width: 14px; height: 10px; border: 1.5px solid; border-radius: 2px; }
+.wv-swatch-line { height: 0; border-width: 1.5px 0 0; border-radius: 0; }
+.wv-main { display: flex; align-items: stretch; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; min-height: 200px; }
+.wv-labels { position: relative; width: 120px; flex-shrink: 0; border-right: 1px solid #2a2a2a; }
+.wv-label { position: absolute; left: 0; right: 0; padding: 14px 8px 0; font-size: 12px; color: #aaa; border-top: 1px solid #2a2a2a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wv-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+.wv-svg { display: block; }
+.wv-grid { stroke: #232323; }
+.wv-tick { fill: #666; font-size: 10px; }
+.wv-lane-edge { stroke: #2a2a2a; }
+.wv-lane-sep { stroke: #333; }
+.wv-now { stroke: #888; stroke-dasharray: 2 3; }
+.wv-click { cursor: pointer; }
+.wv-sub { fill: #10243a; }
+.wv-sub-pending { fill: #141414; stroke-dasharray: 3 2; }
+.wv-sub-processing { fill: #1a3a5c; }
+.wv-review-waiting { animation: ctl-rec-pulse 2s ease-in-out infinite; }
+.wv-review-mark { font-size: 13px; font-weight: bold; pointer-events: none; }
+.wv-sub-failed { fill: #3a1414; }
+.wv-sub:hover { fill: #22486e; }
+.wv-details { width: 280px; flex-shrink: 0; border-left: 1px solid #2a2a2a; padding: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
+.wv-details-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.wv-detail-body { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.wv-detail-kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.wv-field { display: flex; gap: 8px; }
+.wv-field-label { width: 72px; flex-shrink: 0; font-size: 11px; color: #777; }
+.wv-detail-body > .wv-field-label { width: auto; margin-top: 6px; }
+.wv-field-value { min-width: 0; color: #d4d4d4; word-break: break-all; }
+.wv-field-value .worker-signal-status { width: auto; }
+.wv-link { background: none; border: none; padding: 0; color: #5bb8ff; font-family: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.wv-link:hover { text-decoration: underline; }
+.wv-work-list { display: flex; flex-direction: column; gap: 3px; }
+.wv-work-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Tools tab (Tools.tsx, local-representative/tools.go) -- the same in
+   local-representative's and agent-coordinator's frontends. */
+.tools-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #c8c8c8; }
+.tools-dot { width: 8px; height: 8px; border-radius: 50%; background: #666; flex-shrink: 0; }
+.tools-dot-ok { background: #4ec94e; }
+.tools-dot-checking { background: #5bb8ff; }
+.tools-dot-failed { background: #cc4444; }
+.tools-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.tools-grow { flex: 1; }
+.tools-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #2d2d2d; color: #9c9c9c; border: 1px solid #3c3c3c; }
+.tools-badge-ok { color: #4ec94e; border-color: #2f5f2f; }
+.tools-badge-no { color: #cc8844; border-color: #6a4a2a; }
+.tools-line { font-size: 12px; color: #9c9c9c; overflow-wrap: anywhere; }
+.tools-line b { color: #c8c8c8; font-weight: 600; }
+.tools-problem { color: #c96e6e; }
+.tools-detail { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.tools-table { border-collapse: collapse; font-size: 12px; }
+.tools-table td { padding: 2px 10px 2px 0; vertical-align: top; color: #9c9c9c; }
+.tools-table td:first-child { color: #d4d4d4; font-family: monospace; white-space: nowrap; }
+.tools-pre { margin: 0; padding: 6px 8px; background: #161616; border: 1px solid #2a2a2a; border-radius: 4px; font-size: 11px; color: #c8c8c8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.tools-run .ctl-step-body { flex: 1; }
+.tools-value { font-family: monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tools-calls { display: flex; gap: 12px; align-items: flex-start; min-height: 0; }
+.tools-calls-bar { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 3px; padding-right: 10px; border-right: 1px solid #2a2a2a; max-height: 75vh; overflow-y: auto; }
+.tools-calls-bar .ctl-section-title { margin-top: 6px; }
+.tools-calls-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 3px 6px; background: none; border: 1px solid transparent; border-radius: 4px; color: #c8c8c8; font-family: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.tools-calls-item:hover { background: #252525; }
+.tools-calls-item-active { background: #2d2d2d; border-color: #3c3c3c; }
+.tools-calls-item-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tools-calls-item-sub { font-size: 10px; color: #808080; }
+.tools-calls-main { flex: 1; min-width: 0; }
+.tools-calls-examples > summary { cursor: pointer; user-select: none; }
+.tools-calls-examples-list { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
+.tools-icon { display: inline-block; width: 1.3em; text-align: center; }
+.tools-visual { display: flex; flex-direction: column; gap: 8px; }
+.tools-visual-graph { overflow: auto; max-height: 60vh; background: #161616; border: 1px solid #2a2a2a; border-radius: 4px; }
+.tools-visual-edge { fill: none; stroke: #3c3c3c; stroke-width: 1.5; }
+.tools-visual-edge-done { stroke: #4f7a5f; }
+.tools-visual-node { cursor: pointer; }
+.tools-visual-node rect { stroke-width: 2; }
+.tools-visual-node text { font-family: inherit; pointer-events: none; }
+.tools-visual-icon { font-size: 22px; }
+.tools-visual-label { font-size: 11px; fill: #c8c8c8; }
+.tools-visual-sub { font-size: 9px; fill: #808080; }
+.tools-visual-pending rect { fill: #262626; stroke: #4a4a4a; }
+.tools-visual-pending .tools-visual-icon { opacity: 0.35; filter: grayscale(1); }
+.tools-visual-running rect { fill: #3a3416; stroke: #d7ba3d; animation: tools-visual-pulse 1.2s ease-in-out infinite; }
+.tools-visual-ok rect { fill: #1d3326; stroke: #3fa66b; }
+.tools-visual-failed rect { fill: #3a1d1c; stroke: #d0504a; }
+.tools-visual-selected rect { stroke-width: 3.5; }
+@keyframes tools-visual-pulse { 50% { stroke-opacity: 0.4; } }
+.tools-visual-phase rect { fill: #1c1c1c; stroke: #2f2f2f; stroke-dasharray: 4 3; }
+.tools-visual-phase text { font-size: 10px; fill: #8a8a8a; text-transform: uppercase; letter-spacing: 0.06em; }
+.tools-visual-phase-running rect { stroke: #6e6230; }
+.tools-visual-phase-ok rect { stroke: #2f5a40; }
+.tools-visual-phase-failed rect { stroke: #6e2f2c; }
+.tools-visual-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: #9c9c9c; align-items: center; }
+.tools-visual-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 2px solid; margin-right: 4px; vertical-align: -1px; }
+.tools-visual-swatch.tools-visual-pending { background: #262626; border-color: #4a4a4a; }
+.tools-visual-swatch.tools-visual-running { background: #3a3416; border-color: #d7ba3d; }
+.tools-visual-swatch.tools-visual-ok { background: #1d3326; border-color: #3fa66b; }
+.tools-visual-swatch.tools-visual-failed { background: #3a1d1c; border-color: #d0504a; }
+
+/* ---- Demo tab (Demo.tsx; PrivateRepoOps Step 4, Revision E) ---- */
+.demo-panel { display: flex; flex-direction: column; gap: 16px; }
+.demo-section { display: flex; flex-direction: column; gap: 8px; }
+.demo-heading { display: flex; align-items: center; gap: 10px; }
+.demo-header { font-size: 11px; color: #888; text-transform: uppercase; }
+.demo-count { font-size: 11px; color: #555; }
+.demo-apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; }
+.demo-app { display: grid; grid-template-columns: auto 1fr auto; column-gap: 8px; align-items: center; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 6px 10px; font-size: 12px; }
+.demo-app-open { cursor: pointer; }
+.demo-app-open:hover { border-color: #555; }
+.demo-app-dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+.demo-app-up .demo-app-dot { background: #4ec94e; }
+.demo-app-down .demo-app-dot { background: #cc4444; }
+.demo-app-name { color: #d4d4d4; font-weight: 600; }
+.demo-app-status { font-size: 11px; color: #777; }
+.demo-app-up .demo-app-status { color: #4ec94e; }
+.demo-app-down .demo-app-status { color: #cc4444; }
+.demo-app-role { grid-column: 2 / 4; font-size: 11px; color: #888; }
+.demo-list { display: flex; flex-direction: column; gap: 6px; }
+.demo-card { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 6px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.demo-card-open { border-color: #555; }
+.demo-card-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.demo-card-body { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; border-top: 1px solid #2c2c2c; }
+.demo-desc { white-space: pre-wrap; color: #aaa; font-size: 11px; }
+.demo-origin { font-size: 10px; padding: 0 6px; border-radius: 8px; background: #2a2a2a; color: #888; }
+.demo-origin-configured { background: #23324a; color: #8ab4e8; }
+.demo-origin-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.demo-sut-same { background: #3a2f1a; color: #e0b870; }
+.demo-phases { display: flex; flex-wrap: wrap; gap: 4px; }
+.demo-phase { font-size: 11px; padding: 1px 8px; border-radius: 3px; border-left: 3px solid #666; background: #262626; color: #ccc; }
+.demo-phase-lead-in { border-left-color: #4ec94e; }
+.demo-phase-subject { border-left-color: #569cd6; }
+.demo-phase-tear-down { border-left-color: #e0a83e; }
+.demo-phase-compose { border-left-color: #b180d7; }
+.demo-phase-done { background: #1f3020; }
+.demo-phase-failed { background: #3a1e1e; }
+.demo-phase-not-run { opacity: 0.5; }
+.demo-vars { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 10px; }
+.demo-var { display: flex; align-items: center; gap: 6px; }
+.demo-var-name { font-size: 11px; color: #888; min-width: 80px; }
+.demo-var input, .demo-dup-name { flex: 1; background: #252526; border: 1px solid #3c3c3c; color: #d4d4d4; font-size: 12px; padding: 2px 6px; }
+.demo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.demo-dup-name { flex: 0 1 160px; }
+.demo-source { max-height: 320px; overflow: auto; background: #151515; padding: 6px; font-size: 11px; margin: 0; }
+.demo-renders { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; }
+.demo-renders a { color: #8ab4e8; }
+.demo-renders a.demo-render-unkept { color: #e0b060; }
+.demo-record-running .demo-app-dot { background: #e0a83e; }
+.demo-record-ok .demo-app-dot { background: #4ec94e; }
+.demo-record-failed .demo-app-dot, .demo-record-interrupted .demo-app-dot { background: #cc4444; }
+.demo-phase-running { background: #3a321e; }
+.demo-entry-link { cursor: pointer; }
+.demo-entry-link:hover { color: #fff; }
+.demo-var-for { font-size: 10px; color: #666; }
+.demo-renders a.demo-render-primary, .demo-renders .demo-render-primary { color: #f0d060; font-weight: 600; }
+.demo-shots { display: flex; flex-wrap: wrap; gap: 8px; }
+.demo-shots img { max-width: 220px; max-height: 140px; border: 1px solid #3c3c3c; display: block; }
+.demo-question { width: 100%; min-height: 56px; box-sizing: border-box; background: #252526; border: 1px solid #3c3c3c; color: #d4d4d4; font-size: 12px; padding: 4px 6px; font-family: inherit; }
+.demo-review-output { white-space: pre-wrap; max-height: 480px; }
+/* The demo tab's proposals sub-tab (DemoProposals.tsx). */
+.demo-prop-title { flex: 1 1 240px; background: #252526; border: 1px solid #3c3c3c; color: #d4d4d4; font-size: 12px; padding: 2px 6px; }
+.demo-prop-part { display: flex; flex-direction: column; gap: 2px; }
+.demo-prop-long { min-height: 120px; }
+/* Revision H: a tile per proposal, and the selected one's details. */
+.demo-prop-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 6px 0; }
+.demo-prop-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 6px; background: #252526; border: 1px solid #3c3c3c; border-top: 3px solid #3c3c3c; border-radius: 4px; cursor: pointer; text-align: center; min-width: 0; }
+.demo-prop-tile:hover { background: #2a2d2e; }
+.demo-prop-tile-open { border-color: #8ab4e8; }
+.demo-prop-tile-creating { border-top-color: #d7ba7d; }
+.demo-prop-tile-created { border-top-color: #4ec9b0; }
+.demo-prop-tile-failed { border-top-color: #f48771; }
+.demo-prop-tile .demo-count { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.demo-prop-icon { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #888; }
+.demo-prop-icon img { max-width: 48px; max-height: 48px; }
+.demo-prop-tile-title { font-size: 12px; color: #d4d4d4; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.demo-prop-files { margin: 2px 0 0; padding-left: 18px; font-family: monospace; font-size: 11px; color: #c8c8c8; }
+/* The demo tab's protosurf area (Protosurf.tsx). */
+.ps-areas, .ps-modes { border-bottom: none; }
+.ps-map { display: flex; flex-direction: column; gap: 6px; }
+.ps-path { flex: 0 1 280px; }
+.ps-trail { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.ps-crumb { color: #d4d4d4; }
+.ps-crumb-link { color: #8ab4e8; cursor: pointer; }
+.ps-crumb-link:hover { text-decoration: underline; }
+.ps-crumb-sep { color: #666; margin: 0 2px; }
+.ps-trail .demo-count { margin-left: 8px; }
+.ps-hover { font-size: 11px; color: #aaa; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ps-box { width: 100%; overflow: hidden; }
+.ps-svg { display: block; background: #1e1e1e; }
+.ps-dir { cursor: zoom-in; }
+.ps-dir-box { stroke: #4a4a4a; stroke-width: 1; }
+.ps-depth-0 { fill: #262626; }
+.ps-depth-1 { fill: #232323; }
+.ps-depth-2, .ps-depth-3 { fill: #212121; }
+.ps-dir-label { fill: #c8c8c8; font-size: 10px; pointer-events: none; }
+.ps-tile { stroke: #1e1e1e; stroke-width: 1; cursor: zoom-in; }
+.ps-tile-dim { opacity: 0.2; }
+.ps-tile-hover { stroke: #ffffff; stroke-width: 1.5; }
+/* Revision C: a demo's or suite's coverage picked out on the map. */
+.ps-tile-partial { fill-opacity: 0.5; }
+.ps-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 3px 6px; background: #2a2a2a; border-left: 3px solid #d95926; }
+.demo-map-mark { font-size: 10px; padding: 0 6px; border-radius: 8px; background: #3a2a20; color: #f0a070; cursor: pointer; }
+.demo-map-mark:hover { color: #fff; }
+.demo-phase-mapped { outline: 1px solid #d95926; }
+.ps-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 11px; color: #aaa; }
+.ps-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.ps-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+.ps-legend-table { border-collapse: collapse; font-size: 11px; color: #aaa; }
+.ps-legend-table td { padding: 1px 8px 1px 0; }
+.ps-legend-row { cursor: pointer; }
+.ps-legend-row:hover .ps-legend-name, .ps-legend-on .ps-legend-name { color: #d4d4d4; }
+.ps-legend-on { background: #2a2a2a; }
+.ps-legend-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---- Global system timeline (Timeline.tsx, privateRepoOpsImpls
+   Step6Prompt.md Revision J) ----
+   Host lanes stacked down the page, each with up to three faintly divided
+   sections, one row per component. Every row is a gutter (its label) and an
+   area the lasers are positioned in by percentage. Rows abut with no margin,
+   so a restart bar drawn in each of an LR's rows reads as one bar. */
+.tl-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tl-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: #9a9a9a; }
+.tl-toolbar-label { margin-right: 2px; }
+.tl-window-btn { background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; color: #ccc; font-size: 11px; padding: 1px 8px; cursor: pointer; }
+.tl-window-btn:hover { border-color: #007acc; }
+.tl-window-btn-active { border-color: #007acc; color: #fff; background: #094771; }
+.tl-pan-range { margin-left: 4px; color: #f0b429; font-variant-numeric: tabular-nums; }
+.tl-legend { display: flex; gap: 12px; margin-left: 16px; }
+.tl-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.tl-legend-swatch { position: relative; display: inline-block; width: 22px; height: 3px; border-radius: 2px; }
+/* The halo swatches also carry .tl-state-up, whose blue glow is declared
+ * further down; the doubled class keeps the halo's box-shadow on top. */
+.tl-legend-swatch.tl-legend-fresh { box-shadow: 0 0 0 1px rgba(78, 201, 110, 0.85), 0 0 6px 2px rgba(78, 201, 110, 0.5); }
+.tl-legend-swatch.tl-legend-dirty { box-shadow: 0 0 0 1px rgba(224, 138, 62, 0.9), 0 0 6px 2px rgba(224, 138, 62, 0.55); }
+.tl-legend-request { background: #b48ee8; }
+.tl-legend-bar { display: inline-block; width: 3px; height: 12px; background: #3d7fd9; border-radius: 1px; }
+.tl-error { color: #e05252; margin-left: auto; }
+
+.tl-axis, .tl-track { display: flex; align-items: stretch; }
+.tl-gutter { flex: 0 0 180px; }
+.tl-area { position: relative; flex: 1; min-width: 0; margin-right: 24px; }
+.tl-axis .tl-area { height: 16px; border-bottom: 1px solid #333; }
+.tl-tick { position: absolute; bottom: 2px; transform: translateX(-50%); font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tl-tick-now { color: #4ec96e; }
+.tl-gridline { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.04); }
+
+.tl-lane { border: 1px solid #3c3c3c; border-radius: 6px; background: #1e1e1e; padding: 6px 0 4px; }
+.tl-lane-header { display: flex; align-items: center; gap: 6px; padding: 0 10px 4px; font-size: 12px; font-weight: 600; color: #d4d4d4; cursor: default; }
+.tl-lane-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-lane-header .topo-node-self-tag { margin-left: 0; }
+/* The faint divisions between a lane's sections. */
+.tl-section { position: relative; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.tl-section-label { position: absolute; top: 2px; left: 10px; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: #5a5a5a; pointer-events: none; }
+.tl-track { height: 18px; }
+.tl-track-main { height: 24px; }
+.tl-track-label { padding: 0 8px 0 66px; display: flex; align-items: center; justify-content: flex-end; font-size: 11px; color: #9a9a9a; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.tl-track-main .tl-track-label { color: #d4d4d4; font-weight: 600; }
+
+/* The lasers: slim for sub-apps and plug-ins, fat for AC and LR. */
+.tl-laser { position: absolute; top: 50%; height: 2px; transform: translateY(-50%); border-radius: 1px; }
+.tl-track-main .tl-laser { height: 6px; border-radius: 3px; }
+.tl-state-up { background: #3d7fd9; box-shadow: 0 0 4px rgba(61, 127, 217, 0.6); }
+.tl-state-failed { background: #e05252; box-shadow: 0 0 4px rgba(224, 82, 82, 0.6); }
+/* Building: the topology view's marching ants, run along the laser. */
+.tl-state-building {
+  background: repeating-linear-gradient(90deg, rgba(78, 201, 110, 0.9) 0 6px, transparent 6px 10px);
+  background-size: 10px 100%;
+  box-shadow: 0 0 6px rgba(78, 201, 110, 0.5);
+  animation: tl-building-march 0.8s linear infinite;
+}
+/* Pending: LR's laser while a .ufabuild request waits for its rebuild --
+ * the building ants exactly, marching too, in orange. */
+.tl-state-pending {
+  background: repeating-linear-gradient(90deg, rgba(224, 138, 62, 0.9) 0 6px, transparent 6px 10px);
+  background-size: 10px 100%;
+  box-shadow: 0 0 6px rgba(224, 138, 62, 0.5);
+  animation: tl-building-march 0.8s linear infinite;
+}
+@keyframes tl-building-march { to { background-position: 10px 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .tl-state-building, .tl-state-pending { animation: none; }
+}
+/* Fresh: the topology view's green halo, for 10 minutes after a (re)start.
+ * Exactly the laser's size with no fill, so the line keeps its own colour and
+ * the green rings it. */
+.tl-fresh { position: absolute; top: 50%; height: 2px; transform: translateY(-50%); border-radius: 1px; pointer-events: none; box-shadow: 0 0 0 1px rgba(78, 201, 110, 0.85), 0 0 6px 2px rgba(78, 201, 110, 0.5); }
+.tl-track-main .tl-fresh { height: 6px; border-radius: 3px; box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.85), 0 0 8px 3px rgba(78, 201, 110, 0.5); }
+/* Dirty: LR's own halo, the fresh one in orange, for as long as its watched
+ * repo has uncommitted changes -- around the laser's own colour, whatever
+ * its state. It outranks fresh: the frontend leaves fresh off dirty spans. */
+.tl-dirty { position: absolute; top: 50%; height: 2px; transform: translateY(-50%); border-radius: 1px; pointer-events: none; box-shadow: 0 0 0 1px rgba(224, 138, 62, 0.9), 0 0 6px 2px rgba(224, 138, 62, 0.55); }
+.tl-track-main .tl-dirty { height: 6px; border-radius: 3px; box-shadow: 0 0 0 2px rgba(224, 138, 62, 0.9), 0 0 8px 3px rgba(224, 138, 62, 0.55); }
+
+/* A new build version: an amber diamond on the sub-app's own laser, above
+ * the restart bars, with the new version's short form tagged beside it so
+ * each rebuilt sub-app reads at a glance. Near the right edge the tag sits
+ * on the diamond's left instead. The element is wider than the diamond so
+ * the tooltip is easy to hover. */
+.tl-version { position: absolute; top: 50%; width: 14px; height: 14px; transform: translate(-50%, -50%); z-index: 2; cursor: default; }
+.tl-version-diamond { position: absolute; top: 50%; left: 50%; width: 7px; height: 7px; transform: translate(-50%, -50%) rotate(45deg); background: #f0b429; border: 1px solid #1e1e1e; box-shadow: 0 0 5px 1px rgba(240, 180, 41, 0.7); }
+.tl-track-main .tl-version-diamond { width: 10px; height: 10px; }
+.tl-version:hover .tl-version-diamond { background: #ffd166; box-shadow: 0 0 7px 2px rgba(255, 209, 102, 0.9); }
+.tl-version-tag { position: absolute; top: 50%; left: 14px; transform: translateY(-50%); padding: 0 4px; border: 1px solid rgba(240, 180, 41, 0.7); border-radius: 3px; background: #2b2412; color: #f0c75e; font-size: 9px; line-height: 11px; font-family: monospace; white-space: nowrap; pointer-events: none; }
+.tl-version-tag-left { left: auto; right: 14px; }
+.tl-track-main .tl-version-tag { font-size: 10px; line-height: 13px; }
+.tl-legend-version { position: relative; display: inline-block; width: 12px; height: 12px; }
+
+/* Restart bars: full row height, so abutting rows join up. */
+.tl-restart { position: absolute; top: 0; bottom: 0; width: 2px; transform: translateX(-50%); background: #3d7fd9; border-radius: 1px; }
+/* LR's bar runs through all its rows, across the faint section divider too. */
+.tl-restart-host { top: -1px; bottom: -1px; width: 3px; background: #5b9bf0; z-index: 1; }
+/* A rebuild request arriving (a .ufabuild request): a violet tick on LR's
+ * laser, clear of the amber version diamond and the orange dirty/pending. */
+.tl-request { position: absolute; top: 2px; bottom: 2px; width: 2px; transform: translateX(-50%); background: #b48ee8; border-radius: 1px; z-index: 1; }

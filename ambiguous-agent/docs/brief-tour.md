@@ -21,7 +21,7 @@ cd ambiguous-agent
 ./ambiguous-agent --list-agents
 ```
 
-Available agents include: copilot, gemini, claude, opencode, codex, grok, clod
+Available agents include: copilot, gemini, claude, opencode, codex, pi, grok, clod
 
 ## Listing Models
 

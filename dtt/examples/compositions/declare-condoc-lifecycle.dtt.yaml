@@ -1,0 +1,138 @@
+# DTT example -- declare, condocv2's condoc-lifecycle demo, with the node and agent-coordinator URL given by hand (see ../../../condocv2/docs/demos/README.md).
+#
+# A temporary copy of condocv2/docs/demos/condoc-lifecycle.dtt.yaml, so the
+# tools tab's examples sub-tab can import it. It does the same: two new
+# private repositories for user-1 (condoc-demo-<date>-<take>, the
+# condoc repo, and cat-stories-<date>-<take>, the content repo); the control
+# sequence in resources/condoc-lifecycle.control.yaml imported onto node and
+# run there, the robot taking a condoc through its whole lifecycle in
+# condocv2 (one prompt, for a story about cats) while node's screen is
+# recorded; a Polly narration; and composer putting it together into a WebM
+# in the files tab and the compose tab.
+#
+# Unlike the demo, both node and coordinator_url are required: you drive
+# them by hand rather than having dtt ask local-representative which
+# agent-coordinator it's connected to. coordinator_url is agent-coordinator's
+# URL as node's browser reaches it (http://host:port); the robot opens
+# <coordinator_url>/host/<node>/condocv2/#/propose there. The demo's README
+# lists what node needs before a run (condocv2 running, a screen that won't
+# lock, no other windows open -- the robot reads the whole screen). Asserting
+# takes 10-30 minutes. Each assert replaces whatever version of the sequence
+# node holds (from.source_file "*"), so a take always runs this file's steps.
+# Deleting, with the assert's image, deletes both repositories, the
+# sequence, the clip and the composition.
+#
+# Keep it in step with the demo (TestCondocLifecycleExample checks the
+# control sequence is the same file).
+#
+#   dtt read examples/compositions/declare-condoc-lifecycle.dtt.yaml --var node=<node> --var coordinator_url=http://<host>:<port>
+#   dtt assert examples/compositions/declare-condoc-lifecycle.dtt.yaml --var node=<node> --var coordinator_url=http://<host>:<port> --var take=1
+#   dtt delete examples/compositions/declare-condoc-lifecycle.dtt.yaml --var node=<node> --var coordinator_url=http://<host>:<port> --var take=1 --image <the assert's image>
+
+variables:
+  node:
+    help: the node to demonstrate on, as agent-coordinator names it (not this one)
+  coordinator_url:
+    help: agent-coordinator's URL as the target node's browser should reach it (http://host:port)
+  take:
+    default: "1"
+    help: names this take (its repositories, run, clip and composition) -- lower-case letters, digits and '-'; change it to run again the same day
+  browser:
+    default: google-chrome
+    help: the browser command on the target node (google-chrome, chromium, ...)
+
+timestamp:
+  select: now
+  alias: the-time
+
+github.users.user-1.repos:
+  assert:
+    repos:
+      - select:
+          name: condoc-demo-${{the-time.date}}-${{var.take}}
+        state:
+          exists: true
+          private: true
+          description: The condoc repo for a condocv2 lifecycle demo (${{the-time.date}}, take ${{var.take}}).
+          default_branch: main
+          auto_init: true
+          approve_delete: user-1/condoc-demo-${{the-time.date}}-${{var.take}}
+      - select:
+          name: cat-stories-${{the-time.date}}-${{var.take}}
+        state:
+          exists: true
+          private: true
+          description: The content repo for a condocv2 lifecycle demo (${{the-time.date}}, take ${{var.take}}).
+          default_branch: main
+          auto_init: true
+          approve_delete: user-1/cat-stories-${{the-time.date}}-${{var.take}}
+
+localrep.coordinator:
+  select:
+    url: ${{var.coordinator_url}}
+  alias: ac
+
+localrep.control.sequences:
+  select:
+    id: dtt-condoc-lifecycle
+    node: ${{var.node}}
+  alias: lifecycle-seq
+  assert:
+    source_file: resources/condoc-lifecycle.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-condoc-lifecycle
+    key: condoc-lifecycle-${{the-time.date}}-${{var.take}}
+    node: ${{var.node}}
+  alias: lifecycle
+  assert:
+    controls:
+      url: "${{ac.url}}/host/${{var.node}}/condocv2/#/propose"
+      name: CatStory-${{the-time.date}}-${{var.take}}
+      description: A demo condoc driven by dtt and the robot on ${{var.node}} -- one story about cats
+      target: user-1/cat-stories-${{the-time.date}}-${{var.take}}
+      condoc_repo: user-1/condoc-demo-${{the-time.date}}-${{var.take}}
+      prompt: Write a short story about cats, about 150 words, as stories/cats.md in the target repository. Don't propose any DTT tool calls.
+      browser: ${{var.browser}}
+    wait: 3300
+
+localrep.polly.clips:
+  select:
+    name: condoc-lifecycle-${{the-time.date}}-${{var.take}}
+  alias: narration
+  assert:
+    text: |
+      This is ${{var.node}}, driven through agent-coordinator by one DTT
+      document. Its robot proposes the condoc ${{lifecycle.output.condoc}}
+      over two new private repositories, and asks the agent for a story
+      about cats. Then it completes the condoc, raises and merges its pull
+      requests, and archives it.
+
+localrep.compositions:
+  select:
+    id: condoc-lifecycle-${{the-time.date}}-${{var.take}}
+  assert:
+    composition: |
+      {
+        "name": "A condoc's lifecycle on ${{var.node}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 4, "text": "A condoc, start to finish -- on ${{var.node}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "title", "duration": 2, "text": "1. propose, accept and prompt", "color": "#1a1a1a", "background": "#e0c060"},
+          {"kind": "media", "file_id": "${{lifecycle.by_label.proposing.file_id}}", "file_name": "${{lifecycle.by_label.proposing.name}}"},
+          {"kind": "title", "duration": 2, "text": "2. the agent writes a story about cats -- complete", "color": "#1a1a1a", "background": "#e0c060"},
+          {"kind": "media", "file_id": "${{lifecycle.by_label.completing.file_id}}", "file_name": "${{lifecycle.by_label.completing.name}}"},
+          {"kind": "title", "duration": 2, "text": "3. raise the PRs, merge, archive", "color": "#1a1a1a", "background": "#e0c060"},
+          {"kind": "media", "file_id": "${{lifecycle.by_label.merging.file_id}}", "file_name": "${{lifecycle.by_label.merging.name}}"},
+          {"kind": "title", "duration": 3, "text": "declared with dtt: two GitHub repos, a control sequence, Polly and composer", "color": "#ffffff", "background": "#3a1e5f"}
+        ],
+        "audio": [
+          {"kind": "media", "file_id": "${{narration.file_id}}", "file_name": "${{narration.file_name}}"}
+        ]
+      }
+    rendered: true
+    renderer: auto
+    wait: 1200

@@ -1,0 +1,99 @@
+# DTT example specification -- slopspace cat story: an agent writes a cat story in a slopspace, submitted in one phase and collected into /tmp/ and the preferred file cache in the next (see ../../../README.md "Slopspaces and agent work").
+#
+# Two phases, split by ---. Phase submit makes a slopspace named for the
+# time, cat-story-<unix>, and sends the agent its work as a work
+# submission: done as soon as the work is submitted, without waiting for
+# the agent. Phase collect begins with a work completion that takes its id
+# from the submission and waits for the agent to finish (a completion waits
+# for the work rather than reporting it unfinished). It grabs cat-story.md
+# from the slopspace's files, and the phase puts it in a new directory in
+# dir named for the time, slopspace-cat-story-<unix>/, then uploads that
+# copy to the preferred file cache (this host's own: its
+# local-representative's files tab) as cat-story-<unix>.md.
+#
+# It needs dungeon-keeper's worker (agent-worker) and local-representative
+# running on this host, and waits for any other slopspace deployed for the
+# worker (a condoc's, say) to be returned first. The slopspace stays
+# deployed from the submission until the completion sees the work done. A
+# cached file is swept an hour after it's uploaded unless it's held or
+# persisted in the files tab. Deleting with the assert's image removes the
+# directory and the uploaded story and deletes the slopspace; the work,
+# done, is kept.
+#
+#   dtt read   examples/specifications/slopspace-cat-story
+#   dtt assert examples/specifications/slopspace-cat-story
+#   dtt delete examples/specifications/slopspace-cat-story --image <the assert's image, in images/>
+
+variables:
+  agent:
+    default: claude
+    help: the agent that does the work
+  model:
+    default: ""
+    help: the agent's model; empty for its own default
+  dir:
+    default: /tmp/
+    help: the directory the story is collected into a new directory in (absolute, ending in /)
+  wait:
+    default: 1800
+    help: seconds the completion waits for the agent to finish
+
+timestamp:
+  select: now
+  alias: started
+  phase: submit
+
+slopspace.spaces:
+  select:
+    key: cat-story-${{started.unix}}
+  alias: space
+  assert:
+    exists: true
+
+slopspace.work.submissions:
+  select:
+    space: ${{space.key}}
+    key: cat-story-${{started.unix}}
+  alias: submitted
+  after: space
+  assert:
+    prompt: |
+      Write a short story, three or four paragraphs, about a cat called
+      Marmalade who is convinced the house's new robot vacuum is a rival
+      cat, and how the two of them make peace. Save it as Markdown in
+      writespaces/files/cat-story.md, in your working directory, with the
+      story's title as its first line (# Title). Write nothing else there.
+    agent: ${{var.agent}}
+    model: ${{var.model}}
+
+---
+
+slopspace.work.completions:
+  select:
+    id: ${{submitted.id}}
+    file: cat-story.md
+  alias: done
+  phase: collect
+  assert:
+    completed: true
+    wait: ${{var.wait}}
+
+filesystem.items:
+  select:
+    abspath: ${{var.dir}}slopspace-cat-story-${{started.unix}}/
+  alias: collected
+  assert:
+    exists: true
+    items:
+      cat-story.md:
+        type: text
+        content: ${{done.file_content}}
+
+localrep.files:
+  select:
+    name: cat-story-${{started.unix}}.md
+    cache: preferred
+  alias: uploaded
+  after: collected
+  assert:
+    copy_of: ${{var.dir}}slopspace-cat-story-${{started.unix}}/cat-story.md

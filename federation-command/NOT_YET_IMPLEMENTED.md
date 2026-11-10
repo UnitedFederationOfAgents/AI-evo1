@@ -64,11 +64,11 @@ The following environment variables are recognized:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AGENT_RECORDS_PATH` | Base directory for agent records | `/host-agent-files/agent-records` |
+| `AGENT_RECORDS_PATH` | Base directory for agent records (sessions live in its `sessions/`) | `/host-agent-files/agent-records` |
 | `AGENT_NAME` | Default agent to use | `claude` |
 | `AGENT_MODEL` | Default model override | (none) |
 | `AGENT_SESSION` | Session identifier | Auto-generated |
-| `IS_CLAUDITABLE` | Double-wrap prevention flag | (set by clauditable) |
+| `CLAUDITABLE_ALREADY_ACTIVE` | Double-wrap prevention flag | (set by clauditable) |
 
 ## Dependencies
 

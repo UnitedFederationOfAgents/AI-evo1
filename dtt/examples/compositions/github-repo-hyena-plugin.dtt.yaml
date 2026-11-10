@@ -1,0 +1,45 @@
+# DTT example -- github, a public repository for an external UFA plug-in (see ../../README.md "Variables").
+#
+# Create the public repository HyenaExternalUfaPlugin<seed> if it doesn't
+# exist; run it in delete mode to delete the repository again.
+# The seed variable is an example seed appended to the name, 01 by default,
+# so a trial run makes HyenaExternalUfaPlugin01 and leaves the real name
+# free. Give it blank (seed=) to make the repository named exactly
+# HyenaExternalUfaPlugin.
+#
+# auto_init only means something when the repository is created (a first
+# commit, so main exists); it reads back false afterwards and isn't
+# asserted on a repository that exists.
+#
+# Delete mode asserts exists: false instead, which deletes the repository.
+# That can't be undone, so it needs approve_delete naming the repository
+# (asserting ignores it), and the from rule still decides: give the image
+# the assert returned (the runner fills from_image with it) or force. Give
+# delete mode the same seed the assert had.
+#
+# user-1 is a GitHub user, so the path is github.users.<owner>.repos
+# and the repository is made through /user/repos, which needs a token of
+# user-1's own. For an organization the path is github.orgs.<owner>.repos.
+#
+#   dtt read examples/compositions/github-repo-hyena-plugin.dtt.yaml
+#   dtt assert examples/compositions/github-repo-hyena-plugin.dtt.yaml --var seed=
+#   dtt run github --arg document_file=examples/compositions/github-repo-hyena-plugin.dtt.yaml --arg mode=assert
+#   dtt run github --arg document_file=examples/compositions/github-repo-hyena-plugin.dtt.yaml --arg mode=delete --arg from_image=<the assert run's image.json>
+
+variables:
+  seed:
+    default: "01"
+    help: an example seed appended to the name; blank for exactly HyenaExternalUfaPlugin
+
+github.users.user-1.repos:
+  assert:
+    repos:
+      select:
+        name: HyenaExternalUfaPlugin${{var.seed}}   # HyenaExternalUfaPlugin01
+      state:
+        exists: true
+        private: false
+        description: An external plug-in for the United Federation of Agents.
+        default_branch: main
+        auto_init: true                       # a first commit, so main exists
+        approve_delete: user-1/HyenaExternalUfaPlugin${{var.seed}}   # lets delete mode delete it

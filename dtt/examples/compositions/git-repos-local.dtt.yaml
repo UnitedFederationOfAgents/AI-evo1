@@ -1,0 +1,55 @@
+# DTT example -- git, two local repositories with no remote (see ../../README.md "Declarative tools").
+#
+# Create a content repository and a slopspace repository, named by the
+# moment, under the local root ($UFA_LOCAL_ROOT, ~/workspace/ufa-local by
+# default): the local/<name> repos a slopspace -- and condocv2 -- clone from
+# and push condoc branches into, with no GitHub involved. Run it in delete
+# mode to remove them again.
+#
+# Each is made with git init, HEAD on main, and a first commit of README.md
+# (initial_commit), so main exists to clone and branch from. default_branch,
+# initial_commit and description are create-time only: measured afterwards,
+# never changed on a repository that exists.
+#
+# Delete mode asserts exists: false instead, which removes the repository's
+# directory. That can't be undone, so it needs approve_delete naming the
+# repository as local/<name> (asserting ignores it), and only a git
+# repository directly under the root is ever removed. The from rule still
+# decides: give the image the assert returned (the runner fills from_image
+# with it) or force. With the image, timestamp is the moment the image saw,
+# so the delete finds the repositories that assert made.
+#
+#   dtt read examples/compositions/git-repos-local.dtt.yaml
+#   dtt run git --arg document_file=examples/compositions/git-repos-local.dtt.yaml --arg mode=assert
+#   dtt run git --arg document_file=examples/compositions/git-repos-local.dtt.yaml --arg mode=delete --arg from_image=<the assert run's image.json>
+
+timestamp:
+  select: now
+  alias: the-time
+
+git.repos:
+  alias: local
+  assert:
+    repos:
+      - select:
+          name: example-content-${{the-time.unix}}
+        state:
+          exists: true
+          default_branch: main
+          initial_commit: true
+          description: |
+            # example-content-${{the-time.unix}}
+
+            An example content repository, made ${{the-time.human-readable}} by dtt's git tool.
+          approve_delete: local/example-content-${{the-time.unix}}
+      - select:
+          name: example-slopspace-${{the-time.unix}}
+        state:
+          exists: true
+          default_branch: main
+          initial_commit: true
+          description: |
+            # example-slopspace-${{the-time.unix}}
+
+            An example slopspace repository, made ${{the-time.human-readable}} by dtt's git tool.
+          approve_delete: local/example-slopspace-${{the-time.unix}}

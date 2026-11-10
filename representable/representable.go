@@ -1,0 +1,766 @@
+// Package representable provides the shared client/server protocol used by
+// federation-command (and other sub-applications) to register with and report
+// health to local-representative over a persistent TCP connection.
+//
+// The protocol is bidirectional newline-delimited JSON:
+//   - Client → Server: Msg  (heartbeat, state, log)
+//   - Server → Client: ServerMsg (command)
+package representable
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	HeartbeatInterval = 2 * time.Second
+	StaleThreshold    = 6 * time.Second
+)
+
+// MaxLineBytes is the longest line (one Msg or ServerMsg, newline included)
+// either end reads. It used to be bufio.Scanner's default, 64 KiB, and a
+// longer line silently ended the connection: the reader stopped, the peer
+// reconnected, re-sent the same state and was cut off again -- a retry loop
+// that took agent-coordinator's proxy to that host down with it (see
+// condocs/dTT-IntegrationImpls/Step2Prompt.md, Revision C). Senders still
+// trim their own pushes; this is the backstop.
+const MaxLineBytes = 16 << 20
+
+// newLineScanner reads r a line at a time, up to MaxLineBytes.
+func newLineScanner(r io.Reader) *bufio.Scanner {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), MaxLineBytes)
+	return sc
+}
+
+// encodeLine marshals v as one newline-terminated line, or fails if that
+// line would be longer than MaxLineBytes -- the peer would drop the
+// connection on it, so it is better not sent at all.
+func encodeLine(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(b)+1 > MaxLineBytes {
+		return nil, fmt.Errorf("%d bytes is over representable's %d-byte line limit", len(b)+1, MaxLineBytes)
+	}
+	return append(b, '\n'), nil
+}
+
+// tunnelHandshakePrefix opens the single line a tunnel connection (see
+// DialTunnel) writes immediately after dialing, before any other traffic --
+// every Msg line a control connection (Connect) ever sends is a JSON object,
+// which never starts with this, so Server.handleConn can tell the two kinds
+// of connection apart by peeking just this much.
+const tunnelHandshakePrefix = "TUNNEL "
+
+// Dev-mode identifiers exchanged in Msg.Mode / ServerMsg.Mode. Every UFA
+// sub-application launches as one or the other (see docs/DevMode.md); a peer
+// on the other side of a representable connection is a "mode mismatch".
+const (
+	ModeOps = "ops" // launched without --dev-mode: an operations-branch instance
+	ModeDev = "dev" // launched with --dev-mode: a development-branch instance
+)
+
+// Mode returns the Msg/ServerMsg mode string for a --dev-mode flag value —
+// the argument every Connect/NewServer caller passes.
+func Mode(devMode bool) string {
+	if devMode {
+		return ModeDev
+	}
+	return ModeOps
+}
+
+// LaunchModeEnvVar is set by local-representative, to ModeDev or ModeOps, in
+// the environment of every sub-application it launches: the mode that LR is
+// in, which its launches always cascade (see docs/DevMode.md). Connect honours
+// it over the mode its caller passes, so a sub-app -- above all an external
+// plug-in, whose flag handling LR can't vouch for -- can't come up in the
+// other mode from the LR that launched it just because it ignored or misread
+// --dev-mode.
+const LaunchModeEnvVar = "UFA_LAUNCH_MODE"
+
+// LaunchedMode returns the mode LaunchModeEnvVar says this process was
+// launched in, or "" when it wasn't launched by a local-representative (or
+// the value isn't a mode).
+func LaunchedMode() string {
+	switch m := os.Getenv(LaunchModeEnvVar); m {
+	case ModeDev, ModeOps:
+		return m
+	}
+	return ""
+}
+
+// Msg is sent from client to server on the TCP connection.
+type Msg struct {
+	Type     string          `json:"type"`               // "heartbeat", "state", "log", "data"
+	From     string          `json:"from,omitempty"`     // client name
+	Mode     string          `json:"mode,omitempty"`     // ModeDev or ModeOps — this client's dev-mode status, stamped on every message
+	State    string          `json:"state,omitempty"`    // for type="state": "remote-control" or "local-control"
+	Line     string          `json:"line,omitempty"`     // for type="log": command text or output line
+	Kind     string          `json:"kind,omitempty"`     // for type="log": "cmd" (command echo) or "output" (stdout/stderr)
+	DataType string          `json:"data_type,omitempty"` // for type="data": subtype identifier
+	Data     json.RawMessage `json:"data,omitempty"`      // for type="data": arbitrary JSON payload
+}
+
+// ServerMsg is sent from server to client on the TCP connection.
+type ServerMsg struct {
+	Type string `json:"type"`          // "command" or "hello"
+	Cmd  string `json:"cmd,omitempty"` // for type="command"
+	Mode string `json:"mode,omitempty"` // for type="hello": the server's dev-mode status (ModeDev or ModeOps)
+	// HTTPPort is, for type="hello", the server's own HTTP dashboard port, if
+	// it has one (local-representative does; not every representable.Server
+	// caller sets one -- see Server.SetHTTPPort). It lets a client that only
+	// knows the representable dial address (e.g. condocv2, connecting to
+	// local-representative purely for status/command purposes) also reach
+	// the server's HTTP API directly, without a second flag to keep in sync.
+	HTTPPort string `json:"http_port,omitempty"`
+}
+
+// Client connects to local-representative and sends periodic heartbeats.
+type Client struct {
+	conn         net.Conn
+	name         string
+	mode         string // ModeDev or ModeOps — stamped on every outgoing Msg
+	done         chan struct{}
+	disconnected chan struct{} // closed when readLoop exits (connection dropped or closed)
+	once         sync.Once
+	writeMu      sync.Mutex // serialises writes to conn
+	handlerMu    sync.Mutex
+	cmdHandler   func(string)
+
+	modeMu          sync.RWMutex
+	peerMode        string // the server's mode, learned from its "hello" message
+	mismatched      bool   // true once peerMode is known and differs from mode
+	mismatchHandler func(mismatched bool, peerMode string)
+	peerHTTPPort    string // the server's own HTTP port, learned from its "hello" message (empty if it didn't disclose one)
+}
+
+// Connect dials addr (TCP) with the given timeout and returns a running
+// Client. mode is this client's dev-mode status (see Mode) — it is stamped on
+// every message so the server can detect and disclose a mode mismatch. A
+// mode set in LaunchModeEnvVar by the launching local-representative wins
+// over it.
+func Connect(addr, name, mode string, connectTimeout time.Duration) (*Client, error) {
+	if launched := LaunchedMode(); launched != "" && launched != mode {
+		log.Printf("representable: %s connecting in %s mode, not %s: launched in %s mode (%s=%s)", name, launched, mode, launched, LaunchModeEnvVar, launched)
+		mode = launched
+	}
+	conn, err := net.DialTimeout("tcp", addr, connectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{
+		conn:         conn,
+		name:         name,
+		mode:         mode,
+		done:         make(chan struct{}),
+		disconnected: make(chan struct{}),
+	}
+	go c.heartbeatLoop()
+	go c.readLoop()
+	return c, nil
+}
+
+// DialTunnel opens a second, plain TCP connection to addr -- in addition to,
+// not instead of, a Connect control connection -- and tags it with a one-line
+// handshake naming this client, then hands back the raw net.Conn.
+//
+// Unlike Client, the returned connection is NOT wrapped in the Msg/ServerMsg
+// JSON-line protocol: once the handshake line is written, the connection
+// carries whatever the caller puts on it. This is how local-representative
+// gives agent-coordinator's proxy a connection it opened itself to serve its
+// own HTTP mux over (see Server.ClaimTunnel on the accepting side) -- the
+// only direction guaranteed to work from behind NAT, per
+// condocs/initialDistributedSessionsImpls/Step1SubstepBPrompt.md, Revision I.
+func DialTunnel(addr, name string, connectTimeout time.Duration) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", addr, connectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write([]byte(tunnelHandshakePrefix + name + "\n")); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// Close stops heartbeats and closes the TCP connection.
+func (c *Client) Close() {
+	c.once.Do(func() {
+		close(c.done)
+		c.conn.Close()
+	})
+}
+
+// SetCommandHandler registers fn to be called when the server sends a command.
+func (c *Client) SetCommandHandler(fn func(string)) {
+	c.handlerMu.Lock()
+	c.cmdHandler = fn
+	c.handlerMu.Unlock()
+}
+
+// SendState notifies the server of a control mode change.
+func (c *Client) SendState(state string) {
+	c.send(Msg{Type: "state", From: c.name, State: state})
+}
+
+// SendLog sends a command line to the server for display in local control mode.
+func (c *Client) SendLog(line string) {
+	c.send(Msg{Type: "log", From: c.name, Line: line, Kind: "cmd"})
+}
+
+// SendOutput sends a line of command stdout/stderr output to the server for display.
+func (c *Client) SendOutput(line string) {
+	c.send(Msg{Type: "log", From: c.name, Line: line, Kind: "output"})
+}
+
+// SendData sends a typed JSON payload to the server.
+func (c *Client) SendData(dataType string, payload interface{}) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	c.send(Msg{Type: "data", From: c.name, DataType: dataType, Data: json.RawMessage(b)})
+}
+
+func (c *Client) send(m Msg) {
+	m.Mode = c.mode
+	line, err := encodeLine(m)
+	if err != nil {
+		// Dropping this one message beats losing the connection over it.
+		log.Printf("representable: %s not sending a %s %s message: %v", c.name, m.Type, m.DataType, err)
+		return
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.conn.Write(line) //nolint:errcheck — best-effort
+}
+
+// SetModeMismatchHandler registers fn to be called whenever this client learns
+// (or the answer changes) whether the server it is connected to is running in
+// a different dev-mode than this client. Fires once with mismatched=false on a
+// clean connect if the modes agree.
+func (c *Client) SetModeMismatchHandler(fn func(mismatched bool, peerMode string)) {
+	c.modeMu.Lock()
+	c.mismatchHandler = fn
+	c.modeMu.Unlock()
+}
+
+// ModeMismatch returns true once the server's "hello" has been received and
+// its mode differs from this client's.
+func (c *Client) ModeMismatch() bool {
+	c.modeMu.RLock()
+	defer c.modeMu.RUnlock()
+	return c.mismatched
+}
+
+// PeerMode returns the server's disclosed mode, or "" before its "hello"
+// arrives.
+func (c *Client) PeerMode() string {
+	c.modeMu.RLock()
+	defer c.modeMu.RUnlock()
+	return c.peerMode
+}
+
+// PeerHTTPPort returns the server's disclosed HTTP port, or "" before its
+// "hello" arrives or if the server didn't set one (see Server.SetHTTPPort).
+func (c *Client) PeerHTTPPort() string {
+	c.modeMu.RLock()
+	defer c.modeMu.RUnlock()
+	return c.peerHTTPPort
+}
+
+// noteServerMode records the server's disclosed mode and reports (via the
+// registered handler, if any) when the mismatch verdict changes.
+func (c *Client) noteServerMode(peerMode string) {
+	c.modeMu.Lock()
+	mismatched := peerMode != "" && peerMode != c.mode
+	changed := c.peerMode != peerMode || c.mismatched != mismatched
+	c.peerMode = peerMode
+	c.mismatched = mismatched
+	fn := c.mismatchHandler
+	c.modeMu.Unlock()
+	if changed && fn != nil {
+		fn(mismatched, peerMode)
+	}
+}
+
+func (c *Client) heartbeatLoop() {
+	ticker := time.NewTicker(HeartbeatInterval)
+	defer ticker.Stop()
+
+	c.send(Msg{Type: "heartbeat", From: c.name})
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			c.send(Msg{Type: "heartbeat", From: c.name})
+		}
+	}
+}
+
+// DisconnectCh returns a channel that is closed when the TCP connection drops
+// (either because the remote end closed it or because Close was called).
+func (c *Client) DisconnectCh() <-chan struct{} {
+	return c.disconnected
+}
+
+func (c *Client) readLoop() {
+	defer close(c.disconnected)
+	scanner := newLineScanner(c.conn)
+	defer func() {
+		if err := scanner.Err(); err != nil {
+			select {
+			case <-c.done: // closed on purpose: the read error is expected
+			default:
+				log.Printf("representable: %s dropping its connection: %v", c.name, err)
+			}
+		}
+	}()
+	for scanner.Scan() {
+		var sm ServerMsg
+		if err := json.Unmarshal(scanner.Bytes(), &sm); err != nil {
+			continue
+		}
+		switch sm.Type {
+		case "hello":
+			c.noteServerMode(sm.Mode)
+			c.modeMu.Lock()
+			c.peerHTTPPort = sm.HTTPPort
+			c.modeMu.Unlock()
+		case "command":
+			if sm.Cmd == "" || c.ModeMismatch() {
+				// A mismatched peer gets nothing beyond the heartbeat/hello
+				// exchange above — see docs/DevMode.md.
+				continue
+			}
+			c.handlerMu.Lock()
+			fn := c.cmdHandler
+			c.handlerMu.Unlock()
+			if fn != nil {
+				fn(sm.Cmd)
+			}
+		}
+	}
+}
+
+// connState tracks the live health and mode of a single connected client.
+type connState struct {
+	mu         sync.RWMutex
+	lastSeen   time.Time
+	connected  bool
+	state      string   // "remote-control" or "local-control"
+	conn       net.Conn // nil when disconnected
+	peerHost   string   // remote IP/host of the most recent connection
+	peerMode   string   // ModeDev or ModeOps, learned from the client's messages
+	mismatched bool      // true once peerMode is known and differs from the server's own mode
+}
+
+func (cs *connState) update() {
+	cs.mu.Lock()
+	cs.lastSeen = time.Now()
+	cs.connected = true
+	cs.mu.Unlock()
+}
+
+func (cs *connState) setState(s string) {
+	cs.mu.Lock()
+	cs.state = s
+	cs.mu.Unlock()
+}
+
+func (cs *connState) getState() string {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.state
+}
+
+func (cs *connState) setConn(conn net.Conn) {
+	cs.mu.Lock()
+	cs.conn = conn
+	if conn != nil {
+		if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+			cs.peerHost = host
+		}
+	}
+	cs.mu.Unlock()
+}
+
+func (cs *connState) disconnect() {
+	cs.mu.Lock()
+	cs.connected = false
+	cs.conn = nil
+	cs.mu.Unlock()
+}
+
+// sendCmd writes a command message to the client connection.
+func (cs *connState) sendCmd(cmd string) {
+	cs.mu.RLock()
+	conn := cs.conn
+	cs.mu.RUnlock()
+	if conn == nil {
+		return
+	}
+	line, err := encodeLine(ServerMsg{Type: "command", Cmd: cmd})
+	if err != nil {
+		log.Printf("representable: not sending a command: %v", err)
+		return
+	}
+	conn.Write(line) //nolint:errcheck
+}
+
+// IsHealthy returns true if the client has sent a heartbeat within StaleThreshold.
+func (cs *connState) IsHealthy() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.connected && time.Since(cs.lastSeen) < StaleThreshold
+}
+
+// setMode records the client's disclosed mode and reports whether the
+// mismatch verdict (against selfMode) changed.
+func (cs *connState) setMode(peerMode, selfMode string) bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	mismatched := peerMode != selfMode
+	changed := cs.peerMode != peerMode || cs.mismatched != mismatched
+	cs.peerMode = peerMode
+	cs.mismatched = mismatched
+	return changed
+}
+
+func (cs *connState) getMode() (peerMode string, mismatched bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.peerMode, cs.mismatched
+}
+
+// Server accepts representable TCP connections and tracks client health and state.
+type Server struct {
+	ln             net.Listener
+	mode           string // this server's own dev-mode status (ModeDev or ModeOps)
+	httpPort       string // this server's own HTTP dashboard port, if any -- see SetHTTPPort
+	mu             sync.RWMutex
+	states         map[string]*connState
+	onState        func(name, state string)                          // called on state change or disconnect
+	onLog          func(name, line, kind string)                     // called when client sends a log entry
+	onData         func(name, dataType string, data json.RawMessage) // called when client sends a data message
+	onModeMismatch func(name string, mismatched bool, peerMode string) // called when a client's mode mismatch verdict changes
+
+	tunnelsMu sync.Mutex
+	tunnels   map[string]net.Conn // client name -> one parked tunnel conn (see DialTunnel/ClaimTunnel; N==1 for now)
+}
+
+// NewServer starts a TCP listener on addr and begins accepting connections.
+// mode is this server's own dev-mode status (see Mode) — it is disclosed to
+// every connecting client via a "hello" message so both sides can detect and
+// react to a mode mismatch (see docs/DevMode.md).
+func NewServer(addr, mode string) (*Server, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{
+		ln:      ln,
+		mode:    mode,
+		states:  make(map[string]*connState),
+		tunnels: make(map[string]net.Conn),
+	}
+	go s.acceptLoop()
+	return s, nil
+}
+
+// registerTunnel parks a freshly-handshaken tunnel connection under name,
+// closing whatever was previously parked there -- per Revision I, there is
+// only ever one standing tunnel per client.
+func (s *Server) registerTunnel(name string, conn net.Conn) {
+	s.tunnelsMu.Lock()
+	old := s.tunnels[name]
+	s.tunnels[name] = conn
+	s.tunnelsMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+// ClaimTunnel removes and returns the tunnel connection parked for name, if
+// any. The caller takes full ownership on success -- the server stops
+// tracking it entirely, so a second ClaimTunnel call for the same name finds
+// nothing until that client's DialTunnel loop parks a replacement (see
+// agent-coordinator's hostProxyTransport, which hands a claimed conn
+// straight to an http.Transport for keep-alive reuse across requests rather
+// than giving it back here after one use).
+func (s *Server) ClaimTunnel(name string) (net.Conn, bool) {
+	s.tunnelsMu.Lock()
+	defer s.tunnelsMu.Unlock()
+	conn, ok := s.tunnels[name]
+	if ok {
+		delete(s.tunnels, name)
+	}
+	return conn, ok
+}
+
+// SetHTTPPort records this server's own HTTP dashboard port, disclosed to
+// every client on connect via the "hello" message (see ServerMsg.HTTPPort).
+// Not every representable.Server has an HTTP dashboard of its own to
+// disclose, so this is opt-in -- leave it unset and hello's HTTPPort field
+// stays empty.
+func (s *Server) SetHTTPPort(port string) {
+	s.mu.Lock()
+	s.httpPort = port
+	s.mu.Unlock()
+}
+
+// SetStateChangeHandler registers fn to be called when a client changes state or disconnects.
+// state will be "disconnected" when the TCP connection is lost.
+func (s *Server) SetStateChangeHandler(fn func(name, state string)) {
+	s.mu.Lock()
+	s.onState = fn
+	s.mu.Unlock()
+}
+
+// SetLogHandler registers fn to be called when a client sends a log entry.
+// kind is "cmd" for command echoes or "output" for stdout/stderr lines.
+func (s *Server) SetLogHandler(fn func(name, line, kind string)) {
+	s.mu.Lock()
+	s.onLog = fn
+	s.mu.Unlock()
+}
+
+// SetDataHandler registers fn to be called when a client sends a typed data message.
+func (s *Server) SetDataHandler(fn func(name, dataType string, data json.RawMessage)) {
+	s.mu.Lock()
+	s.onData = fn
+	s.mu.Unlock()
+}
+
+// SetModeMismatchHandler registers fn to be called whenever a named client's
+// mode-mismatch verdict (its dev-mode status vs. this server's own) changes,
+// including the initial verdict once the client's first message arrives.
+func (s *Server) SetModeMismatchHandler(fn func(name string, mismatched bool, peerMode string)) {
+	s.mu.Lock()
+	s.onModeMismatch = fn
+	s.mu.Unlock()
+}
+
+// PeerMode returns the named client's disclosed dev-mode status, or "" if it
+// is unknown (never connected, or no message received yet).
+func (s *Server) PeerMode(name string) string {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	mode, _ := cs.getMode()
+	return mode
+}
+
+// ModeMismatch returns true if the named client's disclosed dev-mode status
+// differs from this server's own.
+func (s *Server) ModeMismatch(name string) bool {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	_, mismatched := cs.getMode()
+	return mismatched
+}
+
+// IsHealthy returns true if the named client is connected and heartbeating.
+func (s *Server) IsHealthy(name string) bool {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	return cs.IsHealthy()
+}
+
+// PeerHost returns the remote IP/host of the named client's most recent
+// connection, or "" if the client is unknown. It survives a disconnect so a
+// caller can still reach back to a briefly-dropped peer's HTTP endpoint.
+func (s *Server) PeerHost(name string) string {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.peerHost
+}
+
+// GetState returns the current control state of a named client ("remote-control",
+// "local-control", or "" if unknown/disconnected).
+func (s *Server) GetState(name string) string {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return cs.getState()
+}
+
+// SendCommand delivers cmd to a named client's FC process.
+func (s *Server) SendCommand(name, cmd string) {
+	s.mu.RLock()
+	cs, ok := s.states[name]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+	cs.sendCmd(cmd)
+}
+
+func (s *Server) getOrCreate(name string) *connState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cs, ok := s.states[name]; ok {
+		return cs
+	}
+	cs := &connState{}
+	s.states[name] = cs
+	return cs
+}
+
+func (s *Server) acceptLoop() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.handleConn(conn)
+	}
+}
+
+// peekedConn is a net.Conn whose Reads continue through a bufio.Reader that
+// already peeked past a leading handshake line, so bytes the peer pipelined
+// right behind it (if any) aren't lost once the raw conn is handed off.
+type peekedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (p *peekedConn) Read(b []byte) (int, error) { return p.r.Read(b) }
+
+func (s *Server) handleConn(conn net.Conn) {
+	br := bufio.NewReader(conn)
+	if prefix, err := br.Peek(len(tunnelHandshakePrefix)); err == nil && string(prefix) == tunnelHandshakePrefix {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			conn.Close()
+			return
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(line, tunnelHandshakePrefix))
+		if name == "" {
+			conn.Close()
+			return
+		}
+		// Ownership passes to the tunnel pool from here -- no defer conn.Close().
+		s.registerTunnel(name, &peekedConn{Conn: conn, r: br})
+		return
+	}
+
+	defer conn.Close()
+	var cs *connState
+	var clientName string
+	scanner := newLineScanner(br)
+	defer func() {
+		if err := scanner.Err(); err != nil {
+			log.Printf("representable: dropping %q's connection: %v", clientName, err)
+		}
+	}()
+	for scanner.Scan() {
+		var m Msg
+		if err := json.Unmarshal(scanner.Bytes(), &m); err != nil || m.From == "" {
+			continue
+		}
+		if cs == nil {
+			clientName = m.From
+			cs = s.getOrCreate(clientName)
+			cs.setConn(conn)
+			// Disclose our own mode (and HTTP port, if any) right away so the
+			// client can flag a mismatch -- and reach our HTTP API directly,
+			// if it has one -- before it has sent anything beyond this first
+			// message.
+			s.mu.RLock()
+			httpPort := s.httpPort
+			s.mu.RUnlock()
+			json.NewEncoder(conn).Encode(ServerMsg{Type: "hello", Mode: s.mode, HTTPPort: httpPort}) //nolint:errcheck — best-effort
+		}
+		if m.Mode != "" {
+			if changed := cs.setMode(m.Mode, s.mode); changed {
+				_, mismatched := cs.getMode()
+				s.mu.RLock()
+				fn := s.onModeMismatch
+				s.mu.RUnlock()
+				if fn != nil {
+					fn(clientName, mismatched, m.Mode)
+				}
+			}
+		}
+		_, mismatched := cs.getMode()
+		switch m.Type {
+		case "heartbeat":
+			// Health/connectivity always flows, mismatch or not.
+			cs.update()
+		case "state":
+			if mismatched {
+				// Refuse anything beyond health exchange and the mismatch
+				// disclosure above — see docs/DevMode.md.
+				continue
+			}
+			cs.setState(m.State)
+			s.mu.RLock()
+			fn := s.onState
+			s.mu.RUnlock()
+			if fn != nil {
+				fn(clientName, m.State)
+			}
+		case "log":
+			if mismatched {
+				continue
+			}
+			s.mu.RLock()
+			fn := s.onLog
+			s.mu.RUnlock()
+			if fn != nil {
+				fn(clientName, m.Line, m.Kind)
+			}
+		case "data":
+			if mismatched {
+				continue
+			}
+			s.mu.RLock()
+			fn := s.onData
+			s.mu.RUnlock()
+			if fn != nil {
+				fn(clientName, m.DataType, m.Data)
+			}
+		}
+	}
+	if cs != nil {
+		cs.disconnect()
+		s.mu.RLock()
+		fn := s.onState
+		s.mu.RUnlock()
+		if fn != nil {
+			fn(clientName, "disconnected")
+		}
+	}
+}

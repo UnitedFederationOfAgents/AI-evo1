@@ -1,0 +1,151 @@
+# local-representative control library: open a session demo's windows on a
+# node prepared by dtt-demo-prepare, for dtt's localrep-demo-session-prepare
+# example (../localrep-demo-session-prepare.dtt.yaml), which imports it into
+# the library of the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running, wakes the screen, and
+# makes sure session-manager (the system tab's "sessions") is running and
+# connected. Then, on the demo's empty workspace, it launches a new
+# federation-command terminal (the run's fc), which the robot tiles to the
+# left half of the screen, and through it starts a browser of its own
+# (browser, with a throwaway profile at profile, in a new window) on
+# agent-coordinator (url), which the robot tiles to the right half. The
+# robot waits for agent-coordinator's page, types this node's
+# session-manager page through agent-coordinator into the address bar
+# (<url>/host/<this node>/sessions/) and waits for it, then has the terminal
+# say the demo is ready. The run's fc output names the terminal: the
+# session hello (dtt-demo-session-hello) works in both windows, and the
+# session shutdown (dtt-demo-session-shutdown) closes the browser through
+# it, then the terminal itself.
+#
+# A browser with its own profile is a new instance, so its window opens on
+# the workspace on screen whatever browser is already open elsewhere, and
+# the shutdown can close it -- and only it -- by its profile. The node's
+# screen is recorded from the terminal's launch to the end (steps 4-7).
+# Every action is its own (dtt-demo-sprep-*), so importing this replaces
+# none of the library's other actions.
+#
+# The browser starts zoomed (zoom, Chrome's --force-device-scale-factor;
+# 1.5 by default), page and tab strip alike: at 1x on a 2560x1600 screen the
+# robot couldn't read agent-coordinator's small, dim header, so it waited
+# out its 60s on a page that had loaded. It waits for "Agent Coordinator",
+# the page's title, which the tab shows dark on light and the header shows
+# as AGENT-COORDINATOR (the robot matches either, ignoring case and the
+# hyphen).
+#
+# The terminal and session-manager are side by side, so neither covers the
+# other: a maximized browser hid the terminal's title bar, and on GNOME
+# Wayland the robot has no window-manager path to focus a window (Eval is
+# refused outside unsafe mode, and the window-calls extension isn't
+# installed). The robot tiles each window with GNOME's keys while it has
+# the focus: the terminal (super+left) once focus-window has clicked its
+# title bar on the still empty workspace, and the browser (super+right) once
+# its page has loaded, a new window having the focus.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-sprep-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-sprep-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-sprep-sessions
+    name: Make sure session-manager is running
+    description: launch session-manager (the system tab's sessions) if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: sessions}
+  - id: dtt-demo-sprep-terminal
+    name: Open a new federation-command terminal
+    description: "launch a new federation-command, on the demo's workspace, and wait for it to connect in remote control; robot: click its title bar and tile it to the left half of the screen (super+left)"
+    do:
+      - {op: launch-fc, save_as: fc}
+      - {op: robot.wait, duration: 1s}
+      - {op: robot.focus-window, title: federation-command}
+      - {op: robot.key, keys: super+left}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-sprep-browser
+    name: Open agent-coordinator in a browser of its own
+    description: "through the terminal, start the browser, zoomed, with its own profile in a new window on agent-coordinator; robot: wait for agent-coordinator's page, then tile the browser to the right half of the screen (super+right)"
+    controls:
+      - name: url
+        label: agent-coordinator URL
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-session-{{timestamp}}"
+      - name: browser
+        label: Browser
+        default: google-chrome
+      - name: zoom
+        label: Browser zoom
+        default: "1.5"
+    do:
+      - {op: random, save_as: open_token, length: "6"}
+      - {op: set, save_as: opened, value: "browser started - {{open_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "setsid {{browser}} --user-data-dir='{{profile}}' --force-device-scale-factor={{zoom}} --no-first-run --no-default-browser-check --new-window '{{url}}/' >/dev/null 2>&1 </dev/null & echo \"{{opened}}\"", expect: "{{opened}}", timeout: 20s}
+      - {op: robot.wait-for-text, text: "Agent Coordinator", exact: "false", timeout: 60s}
+      - {op: robot.key, keys: super+right}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-sprep-sessions-page
+    name: Go to this node's session-manager
+    description: "robot: type this node's session-manager page, through agent-coordinator, into the browser's address bar, and wait for it"
+    controls:
+      - name: url
+        label: agent-coordinator URL
+    do:
+      - {op: robot.key, keys: ctrl+l}
+      - {op: robot.type, text: "{{url}}/host/{{this_node}}/sessions/"}
+      - {op: robot.key, keys: enter}
+      - {op: robot.wait-for-text, text: "Session Manager", exact: "false", timeout: 60s}
+      - {op: robot.wait, duration: 2s}
+  - id: dtt-demo-sprep-ready
+    name: Say the demo is ready
+    description: "have the federation-command terminal, beside session-manager, say the demo is ready"
+    do:
+      - {op: random, save_as: ready_token, length: "6"}
+      - {op: set, save_as: ready, value: "session demo ready on {{this_node}} - {{ready_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: "echo \"{{ready}}\"", expect: "{{ready}}", timeout: 20s}
+      - {op: robot.wait, duration: 2s}
+      - {op: output, label: fc, value: "{{fc}}"}
+      - {op: output, label: demo, value: "{{this_node}}: a federation-command terminal, and session-manager through agent-coordinator beside it"}
+sequences:
+  - id: dtt-demo-session-prep
+    name: "Demo: open a session demo's windows"
+    description: Start the robot if need be, wake the screen and make sure session-manager is running; then open a new federation-command terminal on the left half of the screen and, through it, a browser on agent-coordinator on the right half, which the robot takes to this node's session-manager -- with this node's screen recorded while it works.
+    controls:
+      - name: url
+        label: agent-coordinator URL
+        help: agent-coordinator's URL as this node's browser reaches it (http://host:port, no trailing /)
+      - name: profile
+        label: Browser profile
+        default: "/tmp/dtt-demo-session-{{timestamp}}"
+        help: the browser's own throwaway profile directory; the session shutdown closes the browser using it, and removes it
+      - name: browser
+        label: Browser
+        default: google-chrome
+        help: the browser command (google-chrome, chromium, ...)
+      - name: zoom
+        label: Browser zoom
+        default: "1.5"
+        help: how much bigger the browser draws everything (Chrome's --force-device-scale-factor), so the robot can read agent-coordinator and session-manager off the screen
+    steps:
+      - action: dtt-demo-sprep-robot
+      - action: dtt-demo-sprep-wake
+      - action: dtt-demo-sprep-sessions
+      - action: dtt-demo-sprep-terminal
+      - action: dtt-demo-sprep-browser
+        with:
+          url: "{{url}}"
+          profile: "{{profile}}"
+          browser: "{{browser}}"
+          zoom: "{{zoom}}"
+      - action: dtt-demo-sprep-sessions-page
+        with:
+          url: "{{url}}"
+      - action: dtt-demo-sprep-ready
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 7, label: "session demo prep"}

@@ -1,0 +1,99 @@
+# local-representative control library: prepare a node for a
+# local-system-under-test demo, for dtt's localrep-demo-prepare example
+# (../localrep-demo-prepare.dtt.yaml), which imports it into the library of
+# the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running, unlocks and wakes the
+# screen, has the robot create a small HTML page on the desktop for the demo
+# (file: demo-<time>.html; it fails rather than replace one already there),
+# then has the robot switch to an empty workspace with the keyboard
+# (GNOME's "switch to last workspace", super+end: with GNOME's dynamic
+# workspaces the last one is always empty). No window is closed, minimized
+# or even listed -- they stay as they were on the workspace left behind,
+# ready to go back to after the demo. Nothing checks the new workspace is
+# empty yet (see ../../../../ianar/window-checks-todo.md); the recording shows
+# it. The node's screen is recorded from the switch to the end (steps 4-5).
+# Every action is its own (dtt-demo-prep-*), so importing this replaces none
+# of the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-prep-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-prep-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-prep-file
+    name: Put a demo page on the desktop with the robot
+    description: "robot: create a small HTML page on the desktop, named for the demo, for the demo to open (and a teardown to remove)"
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+    do:
+      - op: robot.create-file
+        path: "{{file}}"
+        content: |
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Demo on {{this_node}}</title>
+            <style>
+              body { font-family: sans-serif; margin: 4em; background: whitesmoke; color: darkslategray; }
+              h1 { color: midnightblue; }
+            </style>
+          </head>
+          <body>
+            <h1>Demo on {{this_node}}</h1>
+            <p>This node was prepared for a local-system-under-test demo at {{timestamp}}.</p>
+            <p>This page was put here by the dtt-demo-prepare control sequence, and can be deleted once the demo is over.</p>
+          </body>
+          </html>
+      - {op: output, label: file, value: "{{file}}"}
+  - id: dtt-demo-prep-workspace
+    name: Switch to an empty workspace with the robot
+    description: "robot: press switch-to-last-workspace, which on GNOME's dynamic workspaces is always an empty one"
+    controls:
+      - name: keys
+        label: Empty-workspace keys
+        default: super+end
+    do:
+      - {op: robot.key, keys: "{{keys}}"}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-prep-hold
+    name: Hold the empty workspace
+    description: "robot: hold the empty workspace for the recording"
+    do:
+      - {op: robot.wait, duration: 2s}
+      - {op: output, label: workspace, value: "{{this_node}}: on an empty workspace, ready for the demo"}
+sequences:
+  - id: dtt-demo-prepare
+    name: "Demo: prepare a local system under test"
+    description: Start the robot if need be, wake the screen, put a demo page (demo-<time>.html) on the desktop, and have the robot switch to an empty workspace, leaving every open window where it was -- with this node's screen recorded while the robot works.
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+        help: the HTML page the robot creates for the demo (~ is the node user's home); dtt's example names it demo-<unix seconds>.html
+      - name: keys
+        label: Empty-workspace keys
+        default: super+end
+        help: pressed once to switch to the last workspace (GNOME's "switch to last workspace"), which with dynamic workspaces is always empty
+    steps:
+      - action: dtt-demo-prep-robot
+      - action: dtt-demo-prep-wake
+      - action: dtt-demo-prep-file
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-prep-workspace
+        with:
+          keys: "{{keys}}"
+      - action: dtt-demo-prep-hold
+    recordings:
+      - {node: "{{this_node}}", from: 4, to: 5, label: "demo prep"}

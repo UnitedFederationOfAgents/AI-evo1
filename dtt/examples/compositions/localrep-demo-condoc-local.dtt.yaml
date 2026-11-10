@@ -1,0 +1,107 @@
+# DTT example -- localrep, a local-only condoc's lifecycle through a condocv2 demo's windows (see ../../README.md "The localrep tool").
+#
+# It goes between localrep-demo-condoc-prepare and
+# localrep-demo-condoc-shutdown, like localrep-demo-condoc-hello, but takes
+# a condoc all the way: its target and condoc repos are local/<name> repos
+# with no remote, which must already be under the local root on the node
+# (the condoc-local demo makes them with dtt's git tool, as
+# git-repos-local.dtt.yaml does, and removes them afterwards). It takes
+# node ("" by default, for this node); at, the unix seconds the node was
+# prepared at; fc, the condoc prep's federation-command terminal; target and
+# condoc_repo, the two repos' local/<name>; and target_dir, the target
+# repo's path on the node. It imports resources/demo-condoc-local.control.yaml
+# into that node's library and runs it there: with the terminal and condocv2
+# side by side, the robot proposes LocalCondoc-<at> in condocv2 and accepts
+# it, enters one cheap prompt (a haiku about a cat, one new file in the
+# target), completes the condoc once the agent has answered, raises the
+# drafts the agent writes -- a local merge each, as there is no GitHub to
+# raise PRs on -- merges them and archives the condoc; then the terminal
+# shows the merge in the target repo's own history. The node's screen is
+# recorded while the robot works, in three parts (proposing, completing,
+# merging), and composer, on this node, puts them together between a title
+# card and a closing card into a WebM in the files tab.
+#
+# The agent runs twice, both times cheaply: the haiku, then the drafts.
+# condocv2's pointer repo (on GitHub) gets the condoc's commits, as for any
+# condoc; nothing else touches GitHub. The run is named by at
+# (demo-condoc-local-<at>), so asserting again doesn't run it again. Deleting,
+# with the assert's image, removes the sequence and the composition (the run
+# has happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar, condocv2, federation-command and a worker
+# (dungeon-keeper) beside it; condocv2's pointer repo ready and pushable; the
+# two local repos; and the condoc prep's windows still open. Here: compose
+# launched and connected.
+#
+#   dtt assert examples/compositions/localrep-demo-condoc-local.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the condoc prep's fc> --var target=local/<content> --var condoc_repo=local/<slopspace> --var target_dir=<local root>/<content>
+
+variables:
+  node:
+    default: ""
+    help: the node the condocv2 demo's windows are on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the condoc
+  fc:
+    help: the condoc prep's federation-command terminal, as its run's fc output names it (federation-command#2, say)
+  target:
+    help: the target repo, local/<name> -- where the agent's work goes
+  condoc_repo:
+    help: the condoc repo, local/<name> -- where the condoc's own files go
+  target_dir:
+    help: the target repo's directory on the node (<local root>/<name>), where the terminal shows the merge
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-condoc-local
+    node: ${{var.node}}
+  alias: clocal-seq
+  assert:
+    source_file: resources/demo-condoc-local.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-condoc-local
+    key: demo-condoc-local-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: clocal-run
+  assert:
+    controls:
+      fc: ${{var.fc}}
+      name: LocalCondoc-${{the-time.unix}}
+      target: ${{var.target}}
+      condoc_repo: ${{var.condoc_repo}}
+      target_dir: ${{var.target_dir}}
+    wait: 3300
+
+localrep.compositions:
+  select:
+    id: demo-condoc-local-${{the-time.unix}}
+  alias: clocal-comp
+  assert:
+    composition: |
+      {
+        "name": "condocv2 on local repos, on ${{clocal-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "A condoc on two local repos -- no remote, no GitHub -- on ${{clocal-seq.node}}", "color": "#ffffff", "background": "#1e3a5f"},
+          {"kind": "title", "duration": 2, "text": "Propose, accept and prompt", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{clocal-run.by_label.proposing.file_id}}", "file_name": "${{clocal-run.by_label.proposing.name}}"},
+          {"kind": "title", "duration": 2, "text": "The agent answered: complete the condoc and draft its merges", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{clocal-run.by_label.completing.file_id}}", "file_name": "${{clocal-run.by_label.completing.name}}"},
+          {"kind": "title", "duration": 2, "text": "Merge into each local repo's main, archive, and see the merge from the terminal", "color": "#ffffff", "background": "#333333"},
+          {"kind": "media", "file_id": "${{clocal-run.by_label.merging.file_id}}", "file_name": "${{clocal-run.by_label.merging.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{clocal-run.output.demo}}", "color": "#1a1a1a", "background": "#a0c0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

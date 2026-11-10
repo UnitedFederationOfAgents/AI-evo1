@@ -1,0 +1,90 @@
+# DTT example -- localrep, close a condocv2 demo's windows (see ../../README.md "The localrep tool").
+#
+# It undoes localrep-demo-condoc-prepare, as localrep-demo-session-shutdown
+# undoes the session prep. It takes node, the node the windows are on, as
+# agent-coordinator names it ("" by default, for this node); at, the unix
+# seconds the node was prepared at (the preparation's time); and fc, the
+# condoc prep's federation-command terminal (its run's fc output, e.g.
+# federation-command#2). It imports the control sequence in
+# resources/demo-condoc-shutdown.control.yaml into that node's library and
+# runs it there: it starts the robot (ianar) if it isn't running, wakes the
+# screen and checks the terminal is still connected; then, through the
+# terminal, it closes the condoc prep's Chrome (every process started with
+# its profile, /tmp/dtt-demo-condoc-<at>, and no other browser) and removes
+# the profile, and has the terminal exit, closing its window. That leaves
+# the demo's workspace empty again, for the shutdown (localrep-demo-shutdown)
+# to leave. condocv2 keeps running. The node's screen is recorded while it
+# works. Then composer, on this node, puts a title card, the recording and a
+# closing card together into a WebM in the files tab.
+#
+# The run is named by at (demo-condoc-shutdown-<at>), so once one
+# preparation's condoc shutdown has succeeded, asserting it again doesn't
+# run it again. A run whose terminal has gone (closed by hand, or after
+# local-representative restarted) fails at once, saying so: close the
+# browser and terminal by hand. The condocv2 demo (localrep-demo-condoc)
+# gives at and fc. Deleting, with the assert's image, removes the sequence
+# and the composition (the run has happened, so it's kept).
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it, and the condoc prep's
+# terminal still open. Here: compose launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-condoc-shutdown.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the condoc prep's fc>
+#   dtt assert examples/compositions/localrep-demo-condoc-shutdown.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var fc=<the condoc prep's fc>
+#   dtt delete examples/compositions/localrep-demo-condoc-shutdown.dtt.yaml --var node=<node> --var at=<the same> --var fc=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node the condocv2 demo's windows are on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the browser's profile
+  fc:
+    help: the condoc prep's federation-command terminal, as its run's fc output names it (federation-command#2, say)
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-condoc-shutdown
+    node: ${{var.node}}
+  alias: cshut-seq
+  assert:
+    source_file: resources/demo-condoc-shutdown.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-condoc-shutdown
+    key: demo-condoc-shutdown-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: cshut-run
+  assert:
+    controls:
+      fc: ${{var.fc}}
+      profile: /tmp/dtt-demo-condoc-${{the-time.unix}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-condoc-shutdown-${{the-time.unix}}
+  alias: cshut-comp
+  assert:
+    composition: |
+      {
+        "name": "condocv2 demo shutdown on ${{cshut-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Closing the condocv2 demo's windows on ${{cshut-seq.node}}", "color": "#ffffff", "background": "#5f4a1e"},
+          {"kind": "media", "file_id": "${{cshut-run.recording.file_id}}", "file_name": "${{cshut-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{cshut-run.output.demo}}", "color": "#1a1a1a", "background": "#e0c0a0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

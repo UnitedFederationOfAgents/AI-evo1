@@ -1,0 +1,218 @@
+# local-representative control library: a condoc's whole lifecycle in
+# condocv2, done by the robot in a browser -- for the condoc-lifecycle demo
+# (condoc-lifecycle.dtt.yaml, beside this), which imports it into the
+# library of the node it targets and runs it there.
+#
+# It opens a browser window on condocv2 (through agent-coordinator, at the
+# url control), then, by reading the screen and clicking and typing:
+# proposes a condoc (name, description, the target repo, the condoc repo),
+# accepts it, enters one prompt (auto-submitted), waits for the agent's
+# response, completes the condoc, waits for the agent to draft the PRs,
+# raises them, merges them once GitHub calls both mergeable, and archives
+# the condoc.
+#
+# The node's screen is recorded in three blocks -- proposing (steps 3-6),
+# completing (step 8) and merging (step 10) -- and not while the agent
+# works (steps 7 and 9), so the recordings stay short.
+#
+# Every action is its own (dtt-cl-*), so importing this replaces none of the
+# library's other actions.
+#
+# The robot reads the whole screen, not just the browser, so text in any
+# other window can be found instead of condocv2's. Close the node's other
+# windows before a run. To help:
+# - the browser starts with a fresh, throwaway profile (--user-data-dir), so
+#   it is a new browser of its own: a new maximized window on top, rather
+#   than a tab or window handed to a browser already open, and no
+#   restore-pages or first-run dialog;
+# - text that stands alone on condocv2's page (a heading, a button) is
+#   matched exactly, so a longer line elsewhere doesn't count;
+# - the propose form is reached from its heading (click it, then Tab into
+#   the name field), not its small grey "Name" label, which the screen
+#   reading can miss or join with the field's placeholder;
+# - likewise the prompt box: the robot waits for its "auto-submit once"
+#   label (as "submit once": the checkbox beside it crowds the "au", which
+#   take 9 read as "To-submit once"), clicks its "Prompt 1" heading, tabs
+#   into it, and sends the prompt with ctrl+enter. The box's "Lock & Insert Prompt" button is greyed out
+#   (disabled) while the box is empty, and the screen reading couldn't see
+#   it (take 5 timed out there with the box on screen), and its grey
+#   placeholder is no easier;
+# - after proposing, condocv2 opens the new proposal itself, and the robot
+#   waits for its accept button rather than clicking the new entry's name in
+#   the sidebar (take 7 proposed, then never read that small sidebar line);
+# - no name or description here contains the text the robot looks for, so
+#   the control tab showing this sequence can't be read as condocv2.
+format: lr-control-v1
+actions:
+  - id: dtt-cl-unlock
+    name: Unlock the screen if it is locked
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+  - id: dtt-cl-open-browser
+    name: Open a browser window on condocv2
+    description: launch a federation-command, and through it start the browser with a fresh, throwaway profile in a maximized window at the url; the terminal echoes a marker once the browser is started
+    controls:
+      - name: url
+        label: URL
+        help: condocv2's page, through agent-coordinator
+      - name: browser
+        label: Browser
+        default: google-chrome
+        help: the browser command (google-chrome, chromium, ...)
+    do:
+      - {op: launch-fc, save_as: fc}
+      - {op: random, save_as: open_token, length: "6"}
+      - {op: set, save_as: opened, value: "browser started - {{open_token}}"}
+      - {op: fc-send, fc: "{{fc}}", command: 'setsid {{browser}} --user-data-dir="$(mktemp -d "${TMPDIR:-/tmp}/dtt-cl-browser-XXXXXX")" --no-first-run --no-default-browser-check --start-maximized "{{url}}" >/dev/null 2>&1 </dev/null & echo "{{opened}}"', expect: "{{opened}}", timeout: 20s}
+  - id: dtt-cl-wait-page
+    name: Wait for condocv2's form
+    description: "robot: wait for the form's heading (condocv2 connected, its pointer repo ready)"
+    do:
+      - {op: robot.ensure-awake}
+      - {op: robot.wait-for-text, text: "Propose a condoc", exact: "true", timeout: 90s}
+  - id: dtt-cl-propose
+    name: Fill in and send the proposal
+    description: "robot: click the form's heading and tab into its first field, type the name, then tab through the description, target and repo fields typing each, and press Enter; then wait for condocv2 to open the new proposal (its accept button showing)"
+    controls:
+      - name: name
+        label: Name
+      - name: description
+        label: Description
+      - name: target
+        label: Target repo
+        help: owner/repo
+      - name: condoc_repo
+        label: Condoc repo
+        help: owner/repo
+    do:
+      - {op: robot.click-text, text: "Propose a condoc", exact: "true", timeout: 10s}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{name}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{description}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{target}}"}
+      - {op: robot.key, keys: tab}
+      - {op: robot.key, keys: ctrl+a}
+      - {op: robot.type, text: "{{condoc_repo}}"}
+      - {op: robot.key, keys: enter}
+      - {op: robot.wait-for-text, text: "Accept — begin the condoc", exact: "true", timeout: 90s}
+  - id: dtt-cl-accept
+    name: Accept the proposal
+    description: "robot: click the accept button, then wait for the prompt box's checkbox label (the slopspace and branches are made)"
+    do:
+      - {op: robot.click-text, text: "Accept — begin the condoc", exact: "true", timeout: 30s}
+      - {op: robot.wait-for-text, text: "submit once", exact: "false", timeout: 5m}
+  - id: dtt-cl-prompt
+    name: Enter the prompt
+    description: "robot: click the prompt box's heading and tab into the box, type the prompt and send it with ctrl+enter (the box's own submit, with its checkbox on by default); then wait for the agent's turn to start"
+    controls:
+      - name: prompt
+        label: Prompt
+    do:
+      - {op: robot.click-text, text: "Prompt 1", exact: "true", timeout: 30s}
+      - {op: robot.key, keys: tab}
+      - {op: robot.type, text: "{{prompt}}"}
+      - {op: robot.key, keys: ctrl+enter}
+      - {op: robot.wait-for-text, text: "interaction 1", exact: "false", timeout: 60s}
+  - id: dtt-cl-wait-response
+    name: Wait for the agent's response
+    description: "robot: wait for the first response's heading, then for the button that finishes the condoc (the interaction recorded and unlocked)"
+    do:
+      - {op: robot.ensure-awake}
+      - {op: robot.wait-for-text, text: "Response 1", exact: "true", timeout: 30m}
+      - {op: robot.wait-for-text, text: "Complete the condoc", exact: "true", timeout: 10m}
+  - id: dtt-cl-complete
+    name: Finish the condoc
+    description: "robot: show the response a moment, click the button that finishes the condoc, then the one that asks for drafts; then wait for the drafting to start"
+    do:
+      - {op: robot.wait, duration: 4s}
+      - {op: robot.click-text, text: "Complete the condoc", exact: "true", timeout: 10s}
+      - {op: robot.click-text, text: "Draft PRs", exact: "false", timeout: 10s}
+      - {op: robot.wait-for-text, text: "the PRs", exact: "false", timeout: 30s}
+      - {op: robot.wait, duration: 3s}
+  - id: dtt-cl-wait-drafts
+    name: Wait for the drafted pull requests
+    description: "robot: wait for the button that opens them (the agent has drafted them)"
+    do:
+      - {op: robot.ensure-awake}
+      - {op: robot.wait-for-text, text: "Raise PRs", exact: "true", timeout: 30m}
+  - id: dtt-cl-merge
+    name: Open and land the pull requests, then file the condoc away
+    description: "robot: open the drafted pull requests, wait until GitHub says both can land, land them, file the condoc away, and wait for the page to say so"
+    do:
+      - {op: robot.wait, duration: 4s}
+      - {op: robot.click-text, text: "Raise PRs", exact: "true", timeout: 10s}
+      - {op: robot.wait-for-text, text: "mergeable", exact: "false", more_than: "1", timeout: 5m}
+      - {op: robot.click-text, text: "Merge", exact: "true", timeout: 30s}
+      - {op: robot.click-text, text: "Archive", exact: "true", timeout: 5m}
+      - {op: robot.wait-for-text, text: "Merged and archived", exact: "false", timeout: 2m}
+      - {op: robot.wait, duration: 4s}
+  - id: dtt-cl-done
+    name: Report the condoc
+    description: bring the condoc's name and the page it was driven on back as the run's output
+    controls:
+      - name: name
+        label: Name
+      - name: url
+        label: URL
+    do:
+      - {op: output, label: condoc, value: "{{name}}"}
+      - {op: output, label: page, value: "{{url}}"}
+sequences:
+  - id: dtt-condoc-lifecycle
+    name: "condocv2: a condoc's lifecycle, recorded"
+    description: Open condocv2 in a browser and have the robot take a new condoc from proposal through one prompt to its landed pull requests and archive, recording this node's screen while it works. Close the node's other windows first.
+    controls:
+      - name: url
+        label: condocv2's URL
+        help: through agent-coordinator, e.g. http://<ac>:<port>/host/<node>/condocv2/#/propose
+      - name: name
+        label: Condoc name
+        default: CatStory
+      - name: description
+        label: Description
+        default: A demo condoc driven by dtt and the robot
+      - name: target
+        label: Target repo
+        help: owner/repo -- where the agent's work goes
+      - name: condoc_repo
+        label: Condoc repo
+        help: owner/repo -- where the condoc's own files go
+      - name: prompt
+        label: Prompt
+        default: Write a short story about cats.
+      - name: browser
+        label: Browser
+        default: google-chrome
+    steps:
+      - action: dtt-cl-unlock
+      - action: dtt-cl-open-browser
+        with:
+          url: "{{url}}"
+          browser: "{{browser}}"
+      - action: dtt-cl-wait-page
+      - action: dtt-cl-propose
+        label: 'Propose "{{name}}"'
+        with:
+          name: "{{name}}"
+          description: "{{description}}"
+          target: "{{target}}"
+          condoc_repo: "{{condoc_repo}}"
+      - action: dtt-cl-accept
+      - action: dtt-cl-prompt
+        with:
+          prompt: "{{prompt}}"
+      - action: dtt-cl-wait-response
+      - action: dtt-cl-complete
+      - action: dtt-cl-wait-drafts
+      - action: dtt-cl-merge
+      - action: dtt-cl-done
+        with:
+          name: "{{name}}"
+          url: "{{url}}"
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 6, label: proposing}
+      - {node: "{{this_node}}", from: 8, to: 8, label: completing}
+      - {node: "{{this_node}}", from: 10, to: 10, label: merging}

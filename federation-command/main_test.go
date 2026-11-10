@@ -4,9 +4,47 @@ import (
 	"bytes"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"representable"
+	ufaconfig "ufa-configurable"
+	ufaversion "ufa-version"
 )
+
+func TestFallbackDefaultSessionIDIncludesHost(t *testing.T) {
+	day := time.Date(2026, 10, 6, 12, 0, 0, 0, time.Local)
+	if got, want := fallbackDefaultSessionID(day, "box-a1b2"), "2026-10-06-box-a1b2-default"; got != want {
+		t.Errorf("fallbackDefaultSessionID = %q, want %q", got, want)
+	}
+	if got, want := fallbackDefaultSessionID(day, "a/b c"), "2026-10-06-a-b-c-default"; got != want {
+		t.Errorf("fallbackDefaultSessionID(unsafe host) = %q, want %q", got, want)
+	}
+	if got, want := fallbackDefaultSessionID(day, ""), "2026-10-06-unknown-default"; got != want {
+		t.Errorf("fallbackDefaultSessionID(\"\") = %q, want %q", got, want)
+	}
+}
+
+// writeConfigFile is a test helper for laying down ufa-configurable YAML files.
+func writeConfigFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// isolateLaunchEnv unsets the FC_* launch variables for the duration of the
+// test, so a run from a shell that inherited them (e.g. one under an
+// LR-launched FC) sees the same defaults as a clean one.
+func isolateLaunchEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range launchEnvVars {
+		t.Setenv(k, "") // registers the restore of the original value
+		os.Unsetenv(k)
+	}
+}
 
 // TestVersion verifies that the --version flag works correctly
 func TestVersion(t *testing.T) {
@@ -32,8 +70,8 @@ func TestVersion(t *testing.T) {
 	if !strings.Contains(output, "federation-command") {
 		t.Errorf("expected output to contain 'federation-command', got: %s", output)
 	}
-	if !strings.Contains(output, Version) {
-		t.Errorf("expected output to contain version '%s', got: %s", Version, output)
+	if !strings.Contains(output, ufaversion.Version) {
+		t.Errorf("expected output to contain version '%s', got: %s", ufaversion.Version, output)
 	}
 }
 
@@ -90,6 +128,78 @@ func TestParseRidealongCommand(t *testing.T) {
 	}
 }
 
+// TestStripSurroundingQuotes verifies new-session's name argument loses a
+// single matching pair of quotes (typed habit, e.g. `new-session "My New
+// Session"`) without mangling names that aren't quoted at all.
+func TestStripSurroundingQuotes(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`"My New Session"`, "My New Session"},
+		{`'My New Session'`, "My New Session"},
+		{"My New Session", "My New Session"},
+		{`"unterminated`, `"unterminated`},
+		{`"`, `"`},
+		{"", ""},
+		{`"mismatched'`, `"mismatched'`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := stripSurroundingQuotes(tt.in); got != tt.want {
+				t.Errorf("stripSurroundingQuotes(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestUpdateSessionNameStampsOwnerOnCreate verifies updateSessionName's
+// create-fallback (taken when renaming a session that has no session.yaml
+// yet) stamps an owner field naming this host -- see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
+func TestUpdateSessionNameStampsOwnerOnCreate(t *testing.T) {
+	prevHostID := fcHostID
+	fcHostID = "test-host-123"
+	defer func() { fcHostID = prevHostID }()
+
+	dir := t.TempDir()
+	if err := updateSessionName(dir, "My Session"); err != nil {
+		t.Fatalf("updateSessionName: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "session.yaml"))
+	if err != nil {
+		t.Fatalf("reading session.yaml: %v", err)
+	}
+	if !strings.Contains(string(data), "owner: test-host-123") {
+		t.Errorf("session.yaml should contain owner, got: %s", data)
+	}
+}
+
+func TestMatchListedModel(t *testing.T) {
+	models := []string{"xai/grok-4.7", "xai/grok-4.6", "opencode/big-pickle"}
+	got, err := matchListedModel(models, "grok-4.7")
+	if err != nil || got != "xai/grok-4.7" {
+		t.Fatalf("suffix match = %q, %v", got, err)
+	}
+	got, err = matchListedModel(models, "xai/grok-4.7")
+	if err != nil || got != "xai/grok-4.7" {
+		t.Fatalf("exact match = %q, %v", got, err)
+	}
+	if _, err := matchListedModel(models, "nope"); err == nil {
+		t.Fatal("expected error for unknown model")
+	}
+	filtered := filterChatModels([]string{"xai/grok-4.7", "xai/grok-imagine-video"})
+	if len(filtered) != 1 || filtered[0] != "xai/grok-4.7" {
+		t.Fatalf("filterChatModels = %v", filtered)
+	}
+	listed := parsePiModels("provider  model\nanthropic  claude-sonnet-4-5\ngoogle  gemini-2.5-pro\n")
+	got, err = matchPiModel(listed, "sonnet")
+	if err != nil || got != "anthropic/claude-sonnet-4-5" {
+		t.Fatalf("pi fuzzy match = %q, %v", got, err)
+	}
+}
+
 // TestIsValidAgent verifies agent validation
 func TestIsValidAgent(t *testing.T) {
 	tests := []struct {
@@ -101,6 +211,7 @@ func TestIsValidAgent(t *testing.T) {
 		{"copilot", true},
 		{"opencode", true},
 		{"codex", true},
+		{"pi", true},
 		{"grok", true},
 		{"clod", true},
 		{"unknown", false},
@@ -250,5 +361,363 @@ func TestModeDescription(t *testing.T) {
 				t.Errorf("modeDescription(%q) = %q, want %q", tt.mode, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestParseCLIArgs verifies startup flag parsing for auto-connect and --lr-port.
+func TestParseCLIArgs(t *testing.T) {
+	// Isolate from any real ~/.ufa/config or FC_* launch vars on the host.
+	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+	isolateLaunchEnv(t)
+
+	defaultAddr := "localhost:8082"
+
+	tests := []struct {
+		name        string
+		args        []string
+		wantAuto    bool
+		wantDev     bool
+		wantAddr    string
+		wantHandled bool
+		wantErr     bool
+	}{
+		{"no args", nil, false, false, defaultAddr, false, false},
+		{"auto-connect long", []string{"--auto-connect"}, true, false, defaultAddr, false, false},
+		{"auto-connect short", []string{"-auto-connect"}, true, false, defaultAddr, false, false},
+		{"lr-port separate", []string{"--lr-port", "9001"}, false, false, "localhost:9001", false, false},
+		{"lr-port equals", []string{"--lr-port=9002"}, false, false, "localhost:9002", false, false},
+		{"auto-connect with port", []string{"--auto-connect", "--lr-port", "9003"}, true, false, "localhost:9003", false, false},
+		{"dev-mode long", []string{"--dev-mode"}, false, true, defaultAddr, false, false},
+		{"dev-mode short", []string{"-dev-mode"}, false, true, defaultAddr, false, false},
+		{"version handled", []string{"--version"}, false, false, "", true, false},
+		{"lr-port missing value", []string{"--lr-port"}, false, false, "", false, true},
+		{"lr-port not a number", []string{"--lr-port", "abc"}, false, false, "", false, true},
+		{"lr-port out of range", []string{"--lr-port", "70000"}, false, false, "", false, true},
+		{"unknown ignored", []string{"--frobnicate", "--auto-connect"}, true, false, defaultAddr, false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, handled, err := parseCLIArgs(tt.args)
+			if handled != tt.wantHandled {
+				t.Fatalf("handled = %v, want %v", handled, tt.wantHandled)
+			}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if handled {
+				return
+			}
+			if cfg.autoConnect != tt.wantAuto {
+				t.Errorf("autoConnect = %v, want %v", cfg.autoConnect, tt.wantAuto)
+			}
+			if cfg.devMode != tt.wantDev {
+				t.Errorf("devMode = %v, want %v", cfg.devMode, tt.wantDev)
+			}
+			if cfg.lrAddr != tt.wantAddr {
+				t.Errorf("lrAddr = %q, want %q", cfg.lrAddr, tt.wantAddr)
+			}
+		})
+	}
+}
+
+// TestParseCLIArgsConfigFilePrecedence verifies config files feed cliConfig
+// (per-app file beating global.yaml per key) and that command-line flags still
+// win over both.
+func TestParseCLIArgsConfigFilePrecedence(t *testing.T) {
+	isolateLaunchEnv(t)
+	dir := t.TempDir()
+	writeConfigFile(t, filepath.Join(dir, "global.yaml"), "lr-host: globalhost\nlr-port: 7000\n")
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\nlr-port: 7100\n")
+
+	conf, err := ufaconfig.Load("federation-command", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Config only: app file wins over global for lr-port; global supplies lr-host.
+	cfg, handled, err := parseCLIArgsWithConfig(nil, conf)
+	if err != nil || handled {
+		t.Fatalf("unexpected handled=%v err=%v", handled, err)
+	}
+	if !cfg.autoConnect {
+		t.Errorf("auto-connect from config not applied")
+	}
+	if cfg.lrAddr != "globalhost:7100" {
+		t.Errorf("lrAddr = %q, want globalhost:7100", cfg.lrAddr)
+	}
+
+	// Flags beat config on a per-item basis.
+	cfg, _, err = parseCLIArgsWithConfig([]string{"--lr-host", "flaghost", "--lr-port=9999"}, conf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.lrAddr != "flaghost:9999" {
+		t.Errorf("lrAddr = %q, want flaghost:9999", cfg.lrAddr)
+	}
+	if !cfg.autoConnect {
+		t.Errorf("auto-connect from config should still apply when unrelated flags are set")
+	}
+}
+
+// TestParseCLIArgsRejectsBadConfig verifies a malformed config value is a
+// startup error rather than being silently ignored.
+func TestParseCLIArgsRejectsBadConfig(t *testing.T) {
+	isolateLaunchEnv(t)
+	dir := t.TempDir()
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: banana\n")
+	conf, err := ufaconfig.Load("federation-command", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, _, err := parseCLIArgsWithConfig(nil, conf); err == nil {
+		t.Fatalf("expected error for non-boolean auto-connect")
+	}
+}
+
+// TestAutoConnectControlState verifies a completed background auto-connect adopts
+// remote control when preferRemote is set (which auto-connect always sets), or
+// when the user was angling for it (dot selected or a manual connect already in
+// flight); an active entry-prompt session otherwise keeps local control.
+func TestAutoConnectControlState(t *testing.T) {
+	tests := []struct {
+		name         string
+		state        BlinkerState
+		preferRemote bool
+		want         BlinkerState
+	}{
+		{"dot selected -> remote", BlinkerSelect, false, BlinkerConnected},
+		{"manual connect in flight -> remote", BlinkerConnecting, false, BlinkerConnected},
+		{"idle entry prompt -> local", BlinkerIdle, false, BlinkerLocalControl},
+		{"typing at prompt -> local", BlinkerInactive, false, BlinkerLocalControl},
+		{"preferRemote forces remote from idle", BlinkerIdle, true, BlinkerConnected},
+		{"preferRemote forces remote while typing", BlinkerInactive, true, BlinkerConnected},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewBlinker(false)
+			b.SetState(tt.state)
+			if got := autoConnectControlState(&b, tt.preferRemote); got != tt.want {
+				t.Errorf("autoConnectControlState(%v, %v) = %v, want %v", tt.state, tt.preferRemote, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAutoConnectImpliesRemote verifies there is no separate --remote switch:
+// auto-connect (flag, config key, or FC_AUTO_CONNECT) is what selects remote
+// control, and an FC started without it stays locally controlled. A stray
+// --remote / remote: is ignored for backward compatibility.
+func TestAutoConnectImpliesRemote(t *testing.T) {
+	t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+	isolateLaunchEnv(t)
+
+	cfg, handled, err := parseCLIArgs([]string{"--auto-connect"})
+	if err != nil || handled {
+		t.Fatalf("unexpected handled=%v err=%v", handled, err)
+	}
+	if !cfg.autoConnect || !cfg.remote {
+		t.Errorf("--auto-connect should set autoConnect and imply remote: %+v", cfg)
+	}
+
+	cfg, _, err = parseCLIArgs(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.remote || cfg.autoConnect {
+		t.Errorf("defaults should be local control (no auto-connect): %+v", cfg)
+	}
+
+	// A leftover --remote flag no longer does anything on its own.
+	cfg, _, err = parseCLIArgs([]string{"--remote"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.autoConnect || cfg.remote {
+		t.Errorf("bare --remote should be ignored now: %+v", cfg)
+	}
+
+	dir := t.TempDir()
+	writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\n")
+	conf, err := ufaconfig.Load("federation-command", dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg, _, err = parseCLIArgsWithConfig(nil, conf)
+	if err != nil {
+		t.Fatalf("parseCLIArgsWithConfig: %v", err)
+	}
+	if !cfg.autoConnect || !cfg.remote {
+		t.Errorf("auto-connect: true in config should imply remote: %+v", cfg)
+	}
+}
+
+// TestParseCLIArgsEnvOverrides verifies the FC_* environment variables (set by
+// local-representative when it auto-launches FC through a terminal wrapper)
+// configure the LR connection, sitting above the config file and below CLI flags.
+func TestParseCLIArgsEnvOverrides(t *testing.T) {
+	isolateLaunchEnv(t)
+	t.Run("FC_AUTO_CONNECT implies remote and sets the address", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_AUTO_CONNECT", "1")
+		t.Setenv("FC_LR_HOST", "reprhost")
+		t.Setenv("FC_LR_PORT", "8091")
+		cfg, handled, err := parseCLIArgs(nil)
+		if err != nil || handled {
+			t.Fatalf("unexpected handled=%v err=%v", handled, err)
+		}
+		if !cfg.autoConnect || !cfg.remote {
+			t.Errorf("FC_AUTO_CONNECT did not set autoConnect+remote: %+v", cfg)
+		}
+		if cfg.lrAddr != "reprhost:8091" {
+			t.Errorf("lrAddr = %q, want reprhost:8091", cfg.lrAddr)
+		}
+	})
+
+	t.Run("FC_AUTO_CONNECT=off keeps local control", func(t *testing.T) {
+		dir := t.TempDir()
+		writeConfigFile(t, filepath.Join(dir, "federation-command.yaml"), "auto-connect: true\n")
+		conf, err := ufaconfig.Load("federation-command", dir)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		t.Setenv("FC_AUTO_CONNECT", "off")
+		cfg, _, err := parseCLIArgsWithConfig(nil, conf)
+		if err != nil {
+			t.Fatalf("parseCLIArgsWithConfig: %v", err)
+		}
+		if cfg.autoConnect || cfg.remote {
+			t.Errorf("FC_AUTO_CONNECT=off should override auto-connect: true from the config file: %+v", cfg)
+		}
+	})
+
+	t.Run("CLI flag beats env", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_AUTO_CONNECT", "0")
+		cfg, _, err := parseCLIArgs([]string{"--auto-connect"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.autoConnect || !cfg.remote {
+			t.Errorf("--auto-connect flag should win over FC_AUTO_CONNECT=0: %+v", cfg)
+		}
+	})
+
+	t.Run("FC_DEV_MODE cascades a launching LR's dev mode", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_DEV_MODE", "1")
+		cfg, _, err := parseCLIArgs(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.devMode {
+			t.Errorf("FC_DEV_MODE=1 should set devMode: %+v", cfg)
+		}
+	})
+
+	t.Run("dev-mode CLI flag beats env", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_DEV_MODE", "0")
+		cfg, _, err := parseCLIArgs([]string{"--dev-mode"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !cfg.devMode {
+			t.Errorf("--dev-mode flag should win over FC_DEV_MODE=0: %+v", cfg)
+		}
+	})
+
+	t.Run("bad FC_LR_PORT is an error", func(t *testing.T) {
+		t.Setenv("UFA_CONFIG_DIR", t.TempDir())
+		t.Setenv("FC_LR_PORT", "not-a-port")
+		if _, _, err := parseCLIArgs(nil); err == nil {
+			t.Fatal("expected an error for a non-numeric FC_LR_PORT")
+		}
+	})
+}
+
+// TestEnableDisableAutoConnect verifies the persistent auto-connect toggle
+// (Step3Prompt.md Revision I) is a first-class state, settable independent
+// of any single connection attempt: enabling it arms both the toggle and the
+// background retry loop, and disabling it clears both.
+func TestEnableDisableAutoConnect(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082"}
+
+	if cmd := m.enableAutoConnect(); cmd == nil {
+		t.Fatalf("expected enableAutoConnect to return a command that kicks off the retry loop")
+	}
+	if !m.autoConnectEnabled || !m.autoConnect {
+		t.Fatalf("expected enableAutoConnect to arm both the persistent toggle and the retry loop, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
+
+	// Enabling again while already retrying is a no-op for the retry loop.
+	if cmd := m.enableAutoConnect(); cmd != nil {
+		t.Fatalf("expected a redundant enable while already retrying to return nil")
+	}
+
+	if cmd := m.disableAutoConnect(); cmd == nil {
+		t.Fatalf("expected disableAutoConnect to return a blinker-reset command while cancelling a running retry")
+	}
+	if m.autoConnectEnabled || m.autoConnect {
+		t.Fatalf("expected disableAutoConnect to clear both flags, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
+	}
+
+	// Disabling again with nothing running is a safe no-op.
+	if cmd := m.disableAutoConnect(); cmd != nil {
+		t.Fatalf("expected a redundant disable to return nil")
+	}
+}
+
+// TestEnableAutoConnectNoopWhenAlreadyConnected verifies enabling the toggle
+// while already connected only arms the persistent flag -- it doesn't start
+// a redundant retry loop.
+func TestEnableAutoConnectNoopWhenAlreadyConnected(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082", reprClient: &representable.Client{}}
+
+	if cmd := m.enableAutoConnect(); cmd != nil {
+		t.Fatalf("expected enableAutoConnect to be a no-op (nil command) while already connected")
+	}
+	if !m.autoConnectEnabled {
+		t.Fatalf("expected the persistent toggle to be armed")
+	}
+	if m.autoConnect {
+		t.Fatalf("expected the transient retry-loop flag to stay false while already connected")
+	}
+}
+
+// TestAutoConnectStatusLine verifies the status line reflects the toggle and
+// current connection phase, since it's the sole output of the bare
+// "auto-connect" / "ufa fc auto-connect" commands.
+func TestAutoConnectStatusLine(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082"}
+	if got := m.autoConnectStatusLine(); !strings.Contains(got, "disabled") {
+		t.Errorf("expected 'disabled' in status line before enabling, got %q", got)
+	}
+
+	m.enableAutoConnect()
+	if got := m.autoConnectStatusLine(); !strings.Contains(got, "retrying") {
+		t.Errorf("expected 'retrying' in status line while the loop runs, got %q", got)
+	}
+}
+
+// TestDisconnectReprClearsAutoConnect verifies an explicit, operator-driven
+// disconnect (^C) terminates auto-connect entirely (Step3Prompt.md Revision
+// I: "Intentionally disconnect terminates auto-connect"), including
+// cancelling a retry loop that was still in progress.
+func TestDisconnectReprClearsAutoConnect(t *testing.T) {
+	m := appModel{lrAddr: "localhost:8082", listenerStop: make(chan struct{})}
+	m.enableAutoConnect()
+
+	m.disconnectRepr()
+
+	if m.autoConnectEnabled || m.autoConnect {
+		t.Fatalf("expected disconnectRepr to clear both auto-connect flags, got enabled=%v running=%v", m.autoConnectEnabled, m.autoConnect)
 	}
 }

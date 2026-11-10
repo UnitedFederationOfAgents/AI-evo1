@@ -1,0 +1,49 @@
+# A built-in declarative tool (see ../../README.md "Declarative tools"):
+# dtt's own engine reads or asserts the document, for statements of every
+# provider at once -- the others are each one provider's.
+format: dtt-v1
+name: declare
+description: Read or assert a DTT document whose statements use any of dtt's providers together (github, git, filesystem, aws, localrep, slopspace, timestamp, delay and dtt.calls) -- a demo that makes GitHub repositories and then drives a control sequence on them, or one that makes a slopspace and has an agent work in it, say -- and return the image of what was measured. Asserting changes a field only from empty, from what from_image saw, or (force) from anything; delete removes what an assert would make.
+describe: "declare {mode}"
+inputs:
+  - name: document
+    type: text
+    help: the DTT document (statements of any provider); or give document_file
+  - name: document_file
+    type: path
+    help: a file holding the DTT document, relative to where dtt runs (or absolute); files the document names (source_file) are found beside it
+  - name: variables
+    type: text
+    help: values for the document's variables, name=value on each line (or a JSON object); the rest take their defaults
+  - name: mode
+    choices: [read, assert, delete]
+    default: read
+    help: read only measures; assert also makes the changes; delete removes what an assert would make
+  - name: from_image
+    type: text
+    help: an earlier image (its JSON, or the path of its file) -- a field still as it saw it may change
+  - name: force
+    type: bool
+    default: "false"
+    help: true to change asserted fields whatever they hold (from "*")
+outputs:
+  values:
+    - name: changed
+      help: how many fields were changed
+    - name: held
+      help: how many asserted fields held a value they may not be changed from
+    - name: unchanged
+      help: how many asserted fields already held what was asserted
+    - name: would_change
+      help: in read mode, how many fields an assert would change
+    - name: objects
+      help: how many objects the image holds
+    - name: image_json
+      help: the image itself, as JSON -- every field of every selected object, as the run left it
+  files:
+    - name: image
+      help: the image, as JSON
+entrypoint:
+  runtime: exec
+  script: run.sh
+  timeout: 60m

@@ -1,0 +1,89 @@
+# DTT example specification -- slopspace dog to cat: a slopspace, a dog story in its files, and an agent making it a cat story, waited for and uploaded to the preferred file cache (see ../../../README.md "Slopspaces and agent work").
+#
+# One phase. It makes a slopspace named for the time, dog-to-cat-<unix>,
+# writes dog-story.md into its files, then has an agent edit that file into
+# a story about a cat. The agent's work is a work execution: dispatched and
+# waited for in band, so the execution is done once the agent is. The
+# slopspace is deployed for the agent while it works and returned after, and
+# the image's dog-story.md (measured again once the asserts are made) holds
+# what the agent left: the cat story. Once the work is done, the story is
+# uploaded to the preferred file cache (this host's own: its
+# local-representative's files tab) as dog-to-cat-<unix>.md.
+#
+# It needs dungeon-keeper's worker (agent-worker) and local-representative
+# running on this host, and waits for any other slopspace deployed for the
+# worker (a condoc's, say) to be returned first. A cached file is swept an
+# hour after it's uploaded unless it's held or persisted in the files tab.
+# Deleting with the assert's image deletes the slopspace and the uploaded
+# story; the work, done, is kept.
+#
+#   dtt read   examples/specifications/slopspace-dog-to-cat
+#   dtt assert examples/specifications/slopspace-dog-to-cat
+#   dtt delete examples/specifications/slopspace-dog-to-cat --image <the assert's image, in images/>
+
+variables:
+  agent:
+    default: claude
+    help: the agent that does the work
+  model:
+    default: ""
+    help: the agent's model; empty for its own default
+  wait:
+    default: 1800
+    help: seconds to wait for the agent to finish
+
+timestamp:
+  select: now
+  alias: started
+
+slopspace.spaces:
+  select:
+    key: dog-to-cat-${{started.unix}}
+  alias: space
+  assert:
+    exists: true
+
+slopspace.files:
+  select:
+    space: ${{space.key}}
+    path: dog-story.md
+  alias: story
+  assert:
+    content: |
+      # Pepper Waits
+
+      Every afternoon at four, Pepper the beagle sat by the front door with
+      her tail thumping the floor. She knew the sound of the school bus before
+      anyone else in the house, and when it hissed to a stop she barked twice
+      -- once for hello, once for hurry up.
+
+      One rainy Tuesday the bus was late. Pepper waited anyway, nose pressed
+      to the glass, until a small yellow raincoat came running up the path.
+      She fetched her favourite slobbery tennis ball as a welcome-home
+      present, and the two of them went straight out into the puddles.
+
+slopspace.work.executions:
+  select:
+    space: ${{space.key}}
+    key: dog-to-cat-${{started.unix}}
+  alias: rewrite
+  after: story
+  assert:
+    prompt: |
+      writespaces/files/dog-story.md, in your working directory, is a short
+      story about a dog. Edit that file in place so that it is a story about
+      a cat instead: keep its length, its shape and its warmth, but change
+      the dog, and everything doggish about her, into a cat. Change only
+      that file, and don't rename it.
+    agent: ${{var.agent}}
+    model: ${{var.model}}
+    wait: ${{var.wait}}
+
+localrep.files:
+  select:
+    name: dog-to-cat-${{started.unix}}.md
+    cache: preferred
+  alias: uploaded
+  after: rewrite
+  assert:
+    copy_of: ${{story.abspath}}

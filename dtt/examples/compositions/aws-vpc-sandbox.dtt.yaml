@@ -1,0 +1,34 @@
+# DTT example -- AWS, a new VPC and its subnet (see ../../README.md "Declarative tools").
+#
+# Create the ufa-sandbox VPC, with one subnet, if it doesn't exist. The VPC
+# is selected by its Name tag: AWS gives it an id only when it is made, so
+# the tag (put on it when it is made) is what finds it again on the next run.
+# Subnets are nested under the VPC they belong to, each selected by its CIDR
+# block.
+#
+# cidr_block and a subnet's availability_zone can't change once made:
+# asserting another value fails the run. A select matching several VPCs
+# asserts each of them. exists: false deletes (subnets first), by the from
+# rule, so it needs a from value, the image or force.
+#
+#   dtt read examples/compositions/aws-vpc-sandbox.dtt.yaml
+#   dtt run aws --arg document_file=examples/compositions/aws-vpc-sandbox.dtt.yaml --arg mode=assert
+
+aws.accounts.current.regions.us-east-1.ec2.vpcs:
+  select:
+    tags:
+      Name: ufa-sandbox
+  assert:
+    exists: true
+    cidr_block: 10.42.0.0/16
+    enable_dns_hostnames: "true"
+    tags:
+      managed-by: dtt
+    subnets:
+      - select:
+          cidr_block: 10.42.1.0/24
+        state:
+          availability_zone: us-east-1a
+          tags:
+            Name: ufa-sandbox-a
+            managed-by: dtt

@@ -1,0 +1,66 @@
+# Diagram -- how diagrammographer exports a video (dynamic, 5 steps).
+#
+# The video export (frontend/src/exports.ts, exportVideo) draws every step
+# from the canvas's SVG as 30 frames a second, the dots moving as they do on
+# the canvas, plays the frames on a hidden canvas and records it.
+
+diagrammographer.diagrams:
+  select:
+    name: diagram-exports
+  assert:
+    title: Exporting a video
+    description: The video export, step by step. The PNG, GIF and web exports start the same way, from the canvas's SVG.
+    size: [740, 360]
+    nodes:
+      dtt:
+        label: DTT document
+        shape: cylinder
+        at: [40, 60]
+        size: [150, 70]
+      canvas:
+        label: canvas SVG
+        shape: round
+        color: "#2d4a6b"
+        at: [300, 67]
+      frames:
+        label: frame images
+        at: [540, 67]
+      recorder:
+        label: recording canvas
+        at: [530, 250]
+        size: [170, 56]
+      mediarecorder:
+        label: MediaRecorder
+        at: [300, 250]
+      webm:
+        label: .webm file
+        shape: cylinder
+        at: [40, 243]
+        size: [150, 70]
+    edges:
+      - from: dtt
+        to: canvas
+        label: draws
+      - from: canvas
+        to: frames
+        label: 45 per step
+      - from: frames
+        to: recorder
+        label: 30 fps
+      - from: recorder
+        to: mediarecorder
+        label: stream
+      - from: mediarecorder
+        to: webm
+        label: saves
+    steps:
+      - caption: The DTT document is drawn on the canvas as an SVG.
+        highlight: [dtt, dtt->canvas, canvas]
+      - caption: Each step is drawn as 45 frames, its dots moving along the lit edges.
+        highlight: [canvas, canvas->frames, frames]
+      - caption: The frames play on a hidden canvas, 30 a second.
+        highlight: [frames, frames->recorder, recorder]
+      - caption: MediaRecorder records the canvas's stream as it plays.
+        highlight: [recorder, recorder->mediarecorder, mediarecorder]
+      - caption: The browser saves the recording as a .webm file.
+        highlight: [mediarecorder, mediarecorder->webm, webm]

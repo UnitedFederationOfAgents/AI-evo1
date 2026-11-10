@@ -1,0 +1,3227 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Menlo', 'Monaco', 'Consolas', monospace;
+  font-size: 13px;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  /* dvh tracks the mobile browser's actual visible viewport; vh is a
+     fallback for browsers that don't support it. See condoccer/index.css. */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Dev mode (--dev-mode, see docs/DevMode.md): an easily recognisable green
+   border around the whole app, reusing the "healthy"/"connected" green
+   palette rather than introducing a new accent color. An outline (not
+   border) so it never nudges the layout. Revision A: the original 1px/45%
+   outline was too subtle, so it became a thick, fully-opaque outline plus an
+   inner glow. Revision B: still too easy to miss, so the outline/glow now use
+   the brighter #6ec96e (already used elsewhere for "connect"/"launch" accent
+   text) instead of the darker #4ec94e, the glow is bigger and more opaque,
+   and a fixed "DEV MODE" tag is pinned to the top of the viewport so it's
+   visible even when the outline itself is scrolled out of view. Revision G:
+   now that the outline uses such a bright green, it reads clearly at half
+   the thickness, so it dropped from 4px to 2px. */
+.app-dev-mode {
+  outline: 2px solid #6ec96e;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 24px rgba(110, 201, 110, 0.65);
+}
+
+.app-dev-mode::before {
+  content: 'DEV MODE';
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #6ec96e;
+  color: #0d1f0d;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 10px;
+  border-radius: 0 0 4px 4px;
+  pointer-events: none;
+}
+
+.mode-mismatch-banner {
+  flex-shrink: 0;
+  background: #2a1f14;
+  color: #d1a24e;
+  border-bottom: 1px solid #4a3a1e;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* ---- Agent-coordinator connection bar ---- */
+
+.ac-panel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #3c3c3c;
+  padding: 5px 12px;
+  flex-shrink: 0;
+  height: 34px;
+}
+
+.ac-panel-connected {
+  background: #141e14;
+}
+
+.ac-panel-connecting {
+  background: #1e1c14;
+}
+
+.ac-connecting {
+  font-size: 12px;
+  color: #d1a24e;
+  flex: 1;
+  animation: ac-connecting-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes ac-connecting-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.ac-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
+.ac-addr {
+  font-size: 12px;
+  color: #4ec94e;
+  flex: 1;
+}
+
+.ac-input {
+  background: #111;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  width: 120px;
+  outline: none;
+}
+
+.ac-input-port {
+  width: 60px;
+}
+
+.ac-input::placeholder { color: #555; }
+.ac-input:focus { border-color: #555; }
+
+.ac-sep {
+  color: #555;
+  font-size: 13px;
+}
+
+.ac-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ac-btn-connect {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.ac-btn-connect:hover {
+  background: #2e5a2e;
+}
+
+.ac-btn-disconnect {
+  background: #3a1a1a;
+  border: 1px solid #7a2e2e;
+  color: #c96e6e;
+  margin-left: auto;
+}
+
+.ac-btn-disconnect:hover {
+  background: #5a2e2e;
+}
+
+/* Auto-connect toggle (Step3Prompt.md Revision I): a first-class state
+   rendered alongside every ACConnectionPanel variant, mirroring
+   .sys-auto-rebuild's checkbox styling. */
+.ac-auto-connect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* ---- Tab bar ---- */
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  height: 40px;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.app-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  margin-right: 8px;
+}
+
+.tabs {
+  display: flex;
+  flex: 1;
+  height: 100%;
+}
+
+.tab {
+  position: relative;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 0 16px;
+  height: 100%;
+  cursor: pointer;
+  transition: color 0.1s;
+  white-space: nowrap;
+}
+
+.tab:hover { color: #ccc; }
+
+.tab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+}
+
+/* Files tab picker's "something is highlighted" indicator (Step5SubstepR
+   Revision E). Double-clicking it jumps to the first highlighted file. */
+.tab-highlight-dot {
+  position: absolute;
+  top: 6px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d7c22b;
+  cursor: pointer;
+}
+
+.conn-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.conn-dot-ok  { background: #4ec94e; }
+.conn-dot-err { background: #cc4444; }
+/* Recently-started halo (see ConnDot in App.tsx): agent-coordinator's
+   .topo-node-fresh green ring and glow, for the first 10 minutes after LR
+   launched. */
+.conn-dot-fresh { box-shadow: 0 0 0 2px rgba(78, 201, 110, 0.55), 0 0 10px 2px rgba(78, 201, 110, 0.45); }
+
+/* Quick-feedback version string + screenshot button (Step1SubstepCPrompt.md)
+   -- sit immediately left of the nav arrows, in that order (version, then
+   camera icon). */
+.header-version-tag {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.screenshot-btn {
+  background: none;
+  border: none;
+  color: #666;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 3px;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.screenshot-btn svg { width: 100%; height: 100%; display: block; }
+
+.screenshot-btn.screenshot-btn-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.screenshot-btn.screenshot-btn-active:hover { background: #333; }
+
+/* Mic-availability indicator (Step2Prompt.md) -- sits beside the camera
+   icon, illuminated once agent-coordinator reports at least one
+   the-conversationalist instance available on any connected host. Mirrors
+   screenshot-btn's sizing/palette, but it's a passive indicator (no
+   hover/active-cursor state) rather than a control -- the actual
+   mic-to-transcribe action lives on condoccer's own text inputs. Mirrors
+   agent-coordinator's copy of the same rules. */
+.mic-indicator {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.mic-indicator svg { width: 100%; height: 100%; display: block; }
+
+.mic-indicator.mic-indicator-active { color: #6fcf8f; }
+
+/* Forward/back nav arrows (Step5Prompt.md Revision M) -- sit in the upper
+   right corner alongside the connection dot. */
+.nav-arrows {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.nav-arrow-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: default;
+}
+
+.nav-arrow-btn.nav-arrow-active {
+  color: #ccc;
+  cursor: pointer;
+}
+
+.nav-arrow-btn.nav-arrow-active:hover { background: #333; }
+
+/* ---- Main pane ---- */
+
+.main-pane {
+  flex: 1;
+  min-height: 0; /* flexbox shrink-to-fit fix -- see condoccer/index.css */
+  overflow: auto;
+  padding: 40px;
+}
+
+/* Embedded-app tabs (condoccer/sessions/convo -- see .embed-status-bar and
+   EMBED_TABS in App.tsx, Step1Prompt.md Revision A): the nested app's own UI
+   should fill the whole tab pane rather than sit in a padded, header-topped
+   box, so this drops main-pane's padding entirely and lets .embed-frame
+   flex to fill what's left. */
+.main-pane-embed {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+.service-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.service-name {
+  font-size: 22px;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+.service-empty {
+  font-size: 14px;
+  color: #888888;
+}
+
+.service-empty-embed {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px;
+}
+
+.embed-frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #1e1e1e;
+}
+
+/* Slim meta-status bar for embedded-app tabs, standing in for the
+   service-name/health-indicator header those tabs no longer render inline
+   (see .main-pane-embed above) -- keeps a sliver of "is this healthy" status
+   visible under the tab bar without taking space back from the nested UI. */
+.embed-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 12px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.health-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.health-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.health-healthy .health-dot  { background: #4ec94e; }
+.health-healthy .health-label { color: #4ec94e; }
+
+.health-unhealthy .health-dot  { background: #cc4444; }
+.health-unhealthy .health-label { color: #cc4444; }
+
+.fc-session-tag {
+  font-size: 11px;
+  font-weight: 400;
+  color: #888;
+  background: #262626;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 1px 8px;
+}
+
+/* ---- FC control panel ---- */
+
+.fc-status {
+  font-size: 13px;
+}
+
+.fc-status-disconnected {
+  color: #555;
+  font-style: italic;
+}
+
+/* Unified panel: output log on top, optional input below */
+
+.fc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Output log — always visible when connected */
+
+.fc-output {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 13px;
+}
+
+.fc-log-empty {
+  color: #555;
+  font-style: italic;
+}
+
+.fc-log-line {
+  padding: 2px 0;
+  color: #d4d4d4;
+}
+
+.fc-log-prompt {
+  color: #5bb8ff;
+  margin-right: 6px;
+  user-select: none;
+}
+
+.fc-log-state {
+  padding: 5px 0;
+  color: #555;
+  font-style: italic;
+  font-size: 11px;
+  text-align: center;
+}
+
+.fc-log-output {
+  padding: 1px 0 1px 14px;
+  color: #888;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Remote control: command input — shown only in remote-control mode */
+
+.fc-command-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.fc-cmd-prompt {
+  color: #5bb8ff;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.fc-cmd-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.fc-cmd-input::placeholder { color: #555; }
+
+.fc-cmd-send {
+  background: #1a3a5c;
+  border: 1px solid #2e5c8a;
+  border-radius: 3px;
+  color: #5bb8ff;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.fc-cmd-send:hover { background: #2e5c8a; }
+
+/* FC instance picker (condocs/initialRobotImpls/Step3Prompt.md) -- one pill
+   per connected instance, its dot coloured by control state. */
+
+.fc-instances {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.fc-instances-label {
+  font-size: 11px;
+  color: #666;
+  margin-right: 4px;
+}
+
+.fc-instance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 12px;
+  color: #bbb;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.fc-instance:hover { border-color: #555; }
+
+.fc-instance-active {
+  border-color: #2e5c8a;
+  background: #1a2a3a;
+  color: #d4d4d4;
+}
+
+.fc-instance-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #555;
+}
+
+.fc-instance-remote-control .fc-instance-dot { background: #4ec94e; }
+.fc-instance-local-control .fc-instance-dot { background: #d1c48f; }
+
+.fc-instance-session {
+  font-size: 10px;
+  color: #777;
+}
+
+/* ---- Control tab (local-representative/control.go) ---- */
+
+.ctl-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+}
+
+.ctl-subtabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid #3c3c3c;
+}
+
+.ctl-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.ctl-subtab-active {
+  color: #d4d4d4;
+  border-bottom-color: #007acc;
+}
+
+.ctl-empty {
+  color: #888;
+  font-style: italic;
+}
+
+.ctl-hint {
+  font-size: 11px;
+  color: #777;
+}
+
+.ctl-hint-warn {
+  color: #e0a83e;
+}
+
+.ctl-seq {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ctl-seq-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ctl-seq-name {
+  font-weight: 600;
+  color: #d4d4d4;
+  flex: 1;
+}
+
+.ctl-seq-desc {
+  font-size: 12px;
+  color: #888;
+}
+
+.ctl-run-status {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ctl-run-running { color: #5bb8ff; }
+.ctl-run-success { color: #4ec94e; }
+.ctl-run-error { color: #cc4444; }
+.ctl-run-cancelled { color: #9c9c9c; }
+
+.ctl-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ctl-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ctl-step-icon {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  color: #555;
+}
+
+.ctl-step-running .ctl-step-icon { color: #5bb8ff; }
+.ctl-step-success .ctl-step-icon { color: #4ec94e; }
+.ctl-step-error .ctl-step-icon { color: #cc4444; }
+
+.ctl-step-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.ctl-step-label { color: #d4d4d4; }
+.ctl-step-skipped .ctl-step-label,
+.ctl-step-pending .ctl-step-label { color: #888; }
+
+.ctl-step-detail {
+  font-size: 11px;
+  color: #666;
+}
+
+.ctl-step-msg {
+  font-size: 11px;
+  color: #9c9c9c;
+  overflow-wrap: anywhere;
+}
+
+.ctl-step-error .ctl-step-msg { color: #c96e6e; }
+
+.ctl-step-time {
+  font-size: 11px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.ctl-values {
+  font-size: 11px;
+  color: #9c9c9c;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.ctl-value-label { color: #666; }
+
+.ctl-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid #5a7fa8;
+  border-radius: 4px;
+  background: #1c2530;
+}
+
+.ctl-prompt-msg {
+  flex: 1;
+  font-size: 12px;
+  color: #d4d4d4;
+  overflow-wrap: anywhere;
+}
+
+.ctl-output {
+  font-size: 12px;
+  color: #d4d4d4;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.ctl-output-head {
+  font-size: 11px;
+  color: #666;
+  text-transform: uppercase;
+}
+
+.ctl-output-value { color: #8fc98f; font-family: monospace; }
+
+.ctl-recordings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+}
+
+.ctl-recording-head {
+  font-size: 11px;
+  color: #9c9c9c;
+  overflow-wrap: anywhere;
+}
+
+.ctl-recording-head a { color: #5bb8ff; }
+
+.ctl-recording-video {
+  width: 100%;
+  max-height: 480px;
+  background: #000;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+}
+
+.ctl-save {
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+}
+
+.ctl-save-link {
+  font-size: 11px;
+  color: #5bb8ff;
+  overflow-wrap: anywhere;
+}
+
+.ctl-run-error-msg {
+  font-size: 12px;
+  color: #cc4444;
+  overflow-wrap: anywhere;
+}
+
+/* v1's runner / definer / composer (ControlV1.tsx) */
+.ctl-v1 { display: flex; flex-direction: column; gap: 10px; }
+.ctl-v1-views .ctl-subtab { font-size: 11px; padding: 3px 10px; }
+.ctl-v1-view { display: flex; flex-direction: column; gap: 10px; }
+.ctl-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-section { display: flex; flex-direction: column; gap: 6px; border: 1px solid #2a2a2a; border-radius: 4px; padding: 8px 10px; }
+.ctl-section-title { font-size: 11px; font-weight: 600; color: #9c9c9c; text-transform: uppercase; letter-spacing: 0.04em; }
+.ctl-field { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.ctl-field-name { width: 130px; flex-shrink: 0; color: #888; overflow-wrap: anywhere; }
+.ctl-field > .ctl-input, .ctl-field > .ctl-row { flex: 1; }
+.ctl-input, .ctl-select, .ctl-textarea {
+  background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 3px; color: #d4d4d4;
+  font-family: inherit; font-size: 12px; padding: 3px 6px; min-width: 0;
+}
+.ctl-input { flex: 1; }
+.ctl-input-name { flex: 0 0 120px; }
+.ctl-input-bad { border-color: #7a2e2e; }
+.ctl-select { max-width: 100%; }
+.ctl-textarea { width: 100%; box-sizing: border-box; font-family: monospace; resize: vertical; }
+.ctl-btn {
+  background: #3c3c3c; border: 1px solid #555; border-radius: 3px; color: #ccc;
+  font-family: inherit; font-size: 11px; padding: 2px 10px; cursor: pointer;
+}
+.ctl-btn:hover:not(:disabled) { background: #4a4a4a; }
+.ctl-btn:disabled { opacity: 0.5; cursor: default; }
+.ctl-icon-btn { padding: 2px 6px; }
+.ctl-controls { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.ctl-controls .ctl-row { align-self: stretch; }
+.ctl-instrs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ctl-instr { display: flex; flex-direction: column; gap: 4px; border-left: 2px solid #3c3c3c; padding-left: 8px; }
+.ctl-num { color: #666; font-size: 12px; min-width: 20px; }
+.ctl-step-action { flex: 1; color: #d4d4d4; font-size: 12px; }
+.ctl-step-do { margin: 2px 0 0; padding-left: 16px; font-size: 11px; color: #777; overflow-wrap: anywhere; }
+.ctl-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9c9c9c; }
+.ctl-ok { font-size: 12px; color: #4ec94e; }
+.ctl-yaml-box { display: flex; flex-direction: column; gap: 6px; }
+.ctl-help { font-size: 11px; color: #888; }
+.ctl-help summary { cursor: pointer; }
+.ctl-help code { color: #c8c8a0; }
+.ctl-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border-top: 1px solid #2a2a2a; padding-top: 8px; }
+
+/* Recording blocks: slim bars to the right of the steps (Step4Prompt.md).
+   The step list is a grid -- steps, a column per lane, the ⏺ buttons -- and
+   each bar one element spanning its steps' rows, gaps and all (Revision A). */
+.ctl-rec-grid { display: grid; column-gap: 3px; }
+.ctl-comp-step { display: flex; gap: 8px; min-width: 0; }
+.ctl-comp-step > .ctl-instr { flex: 1; min-width: 0; }
+.ctl-steps.ctl-rec-grid > .ctl-step { min-width: 0; }
+.ctl-rec-bar { position: relative; margin: 2px 0; min-height: 8px; border-radius: 5px; opacity: 0.8; }
+.ctl-rec-bar-click { cursor: pointer; }
+.ctl-rec-bar-selected { opacity: 1; box-shadow: 0 0 0 1px #fff; }
+.ctl-rec-grip { position: absolute; left: -2px; right: -2px; height: 8px; cursor: ns-resize; border-radius: 4px; }
+.ctl-rec-grip-from { top: -2px; }
+.ctl-rec-grip-to { bottom: -2px; }
+.ctl-rec-bar:hover .ctl-rec-grip, .ctl-rec-bar-selected .ctl-rec-grip { background: rgba(255, 255, 255, 0.55); }
+.ctl-rec-bar.ctl-rec-st-pending, .ctl-rec-bar.ctl-rec-st-starting { opacity: 0.35; }
+.ctl-rec-bar.ctl-rec-st-recording { opacity: 1; animation: ctl-rec-pulse 1.2s ease-in-out infinite; }
+.ctl-rec-bar.ctl-rec-st-saving { opacity: 0.6; }
+.ctl-rec-bar.ctl-rec-st-saved { opacity: 1; }
+.ctl-rec-bar.ctl-rec-st-error { opacity: 0.5; box-shadow: inset 0 0 0 2px #cc4444; }
+.ctl-rec-bar.ctl-rec-st-skipped { opacity: 0.15; }
+@keyframes ctl-rec-pulse { 50% { opacity: 0.55; } }
+.ctl-rec-add-cell { padding-left: 5px; }
+.ctl-rec-add {
+  align-self: flex-start; width: 18px; height: 18px; padding: 0; margin-left: 2px;
+  background: none; border: 1px dashed #555; border-radius: 3px; color: #cc4444; font-size: 9px; line-height: 1; cursor: pointer;
+}
+.ctl-rec-add:hover:not(:disabled) { border-color: #cc4444; }
+.ctl-rec-add:disabled { opacity: 0.3; cursor: default; }
+.ctl-rec-swatch { display: inline-block; flex-shrink: 0; width: 9px; height: 14px; border-radius: 3px; }
+.ctl-rec-edit { padding: 2px 4px; border-radius: 3px; }
+.ctl-rec-edit-selected { background: #2a2d2e; }
+.ctl-rec-edit .ctl-select { flex: 0 0 auto; }
+.ctl-rec-legend { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: #9c9c9c; }
+.ctl-rec-legend-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctl-rec-status { color: #888; }
+.ctl-rec-status.ctl-rec-st-recording { color: #cc4444; }
+.ctl-rec-status.ctl-rec-st-saved { color: #4ec94e; }
+.ctl-rec-status.ctl-rec-st-error { color: #cc4444; }
+.ctl-rec-msg { color: #777; overflow-wrap: anywhere; }
+
+/* ---- Ridealong panel ---- */
+
+.ra-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #111;
+  border: 1px solid #4a2e6e;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.ra-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ra-icon { font-size: 15px; }
+
+.ra-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #b388ff;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ra-file {
+  font-size: 12px;
+  color: #666;
+  font-style: italic;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ra-progress {
+  font-size: 11px;
+  color: #888;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 10px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.ra-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.ra-step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  min-height: 18px;
+}
+
+.ra-step-marker { flex-shrink: 0; }
+
+.ra-step-marker-prev  { color: #555; }
+.ra-step-marker-current { color: #ffe066; font-size: 13px; }
+.ra-step-marker-next  { color: #555; }
+
+.ra-step-prev .ra-step-text  { color: #555; }
+.ra-step-current .ra-step-text { color: #ffe066; font-weight: 600; }
+.ra-step-next .ra-step-text  { color: #555; }
+
+.ra-step-empty { font-style: italic; }
+
+.ra-exit-code {
+  color: #e05c5c;
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.ra-countdown {
+  color: #ffe066;
+  font-size: 11px;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+
+.ra-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ra-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ra-btn {
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #aaa;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+
+.ra-btn:hover {
+  background: #2a2a2a;
+  border-color: #555;
+  color: #d4d4d4;
+}
+
+.ra-btn-primary {
+  background: #1a3a1a;
+  border-color: #2e7a2e;
+  color: #6ec96e;
+}
+
+.ra-btn-primary:hover {
+  background: #2e5a2e;
+  border-color: #4ec94e;
+}
+
+.ra-btn-danger {
+  background: #3a1a1a;
+  border-color: #7a2e2e;
+  color: #c96e6e;
+}
+
+.ra-btn-danger:hover {
+  background: #5a2e2e;
+  border-color: #c94e4e;
+}
+
+.ra-btn-active {
+  background: #2a1a4a;
+  border-color: #6a3e9a;
+  color: #b388ff;
+}
+
+.ra-btn-active:hover {
+  background: #3a2a5a;
+  border-color: #9a5ecc;
+}
+
+.ra-btn-waypoint {
+  background: #1a2a3a;
+  border-color: #2e5c8a;
+  color: #5bb8ff;
+}
+
+.ra-btn-waypoint:hover {
+  background: #2e3a4a;
+  border-color: #4e8cca;
+}
+
+.ra-waypoints {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ra-waypoints-label {
+  font-size: 11px;
+  color: #555;
+  flex-shrink: 0;
+}
+
+.ra-custom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+.ra-cmd-prompt {
+  color: #b388ff;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.ra-cmd-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.ra-cmd-input::placeholder { color: #444; }
+
+.ra-observe-hint {
+  font-size: 11px;
+  color: #555;
+  font-style: italic;
+  text-align: center;
+  padding: 2px 0;
+}
+
+/* ---- Condoc panel ---- */
+
+.condoc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #111;
+  border: 1px solid #1e4a2e;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.condoc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.condoc-icon { font-size: 15px; }
+
+.condoc-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #6ec96e;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.condoc-name {
+  font-size: 12px;
+  color: #666;
+  font-style: italic;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.condoc-status {
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.condoc-phase {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.condoc-step {
+  font-size: 11px;
+  color: #888;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 10px;
+  padding: 1px 8px;
+  flex-shrink: 0;
+}
+
+.condoc-phase-label {
+  font-size: 13px;
+  color: #6ec96e;
+  font-weight: 600;
+}
+
+.condoc-msg {
+  font-size: 11px;
+  color: #888;
+  font-style: italic;
+}
+
+/* ---- System panel ---- */
+
+.sys-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 720px;
+}
+
+.sys-panel-empty {
+  color: #888;
+  font-style: italic;
+}
+
+.sys-fc-control {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid #3c3c3c;
+  color: #bbb;
+}
+
+.sys-fc-control-remote-control {
+  border-color: #2e5a2e;
+  color: #8fd18f;
+}
+
+.sys-fc-control-local-control {
+  border-color: #6a5a2e;
+  color: #d1c48f;
+}
+
+.sys-table {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sys-row {
+  display: grid;
+  grid-template-columns: 1fr 80px 90px 120px 110px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid #2a2a2a;
+  font-size: 12px;
+}
+
+.sys-row:last-child { border-bottom: none; }
+
+.sys-row-head {
+  background: #252526;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.sys-row-none {
+  display: block;
+  color: #666;
+  font-style: italic;
+  padding: 10px 12px;
+}
+
+.sys-row-failed { background: #241717; }
+/* double-click opens the app's tab (Step1SubstepCPrompt.md) -- no text selection */
+.sys-row-openable { cursor: pointer; user-select: none; }
+.sys-row-openable:hover { background: #262626; }
+
+.sys-col { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sys-col-name {
+  color: #d4d4d4;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  overflow: visible;
+  white-space: normal;
+}
+.sys-col-name-main {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sys-col-pid { color: #9c9c9c; }
+.sys-col-detail { color: #9c9c9c; }
+
+.sys-self-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 400;
+  color: #007acc;
+  border: 1px solid #245a7a;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.sys-dev-tag {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #6ec96e;
+  background: #1a3a1a;
+  border: 1px solid #6ec96e;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.sys-version-tag {
+  font-size: 10px;
+  font-weight: 400;
+  color: #666;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sys-session-tag {
+  font-size: 10px;
+  font-weight: 400;
+  color: #888;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sys-col-status { font-weight: 600; }
+.sys-status-running { color: #4ec94e; }
+.sys-status-exited { color: #9c9c9c; }
+.sys-status-failed { color: #cc4444; }
+
+.sys-col-actions { text-align: right; }
+
+.sys-btn {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.sys-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.sys-btn-terminate {
+  background: #3a1a1a;
+  border: 1px solid #7a2e2e;
+  color: #c96e6e;
+}
+
+.sys-btn-terminate:hover { background: #5a2e2e; }
+
+.sys-btn-restart {
+  background: #1a2a3a;
+  border: 1px solid #2e5a7a;
+  color: #6ea6c9;
+}
+
+.sys-btn-restart:hover:not(:disabled) { background: #2e4a5a; }
+
+/* A newer build has landed on disk since this process started -- orange,
+   matching .sys-btn-rebuild-dirty's "worth your attention" treatment. */
+.sys-btn-restart-update {
+  background: #3a2a14;
+  border: 1px solid #a06a1e;
+  color: #e0a83e;
+}
+
+.sys-btn-restart-update:hover:not(:disabled) { background: #5a4420; }
+
+/* ---- Dev-repo watcher (--dev-repo, see docs/DevMode.md) ---- */
+
+.sys-repo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #111;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+
+.sys-repo-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sys-repo-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.sys-repo-root {
+  color: #9c9c9c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.sys-repo-head {
+  color: #666;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.sys-repo-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.sys-btn-rebuild {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.sys-btn-rebuild:hover:not(:disabled) { background: #2e5a2e; }
+
+/* Dirty repo: orange, per the prompt -- distinct from the plain green
+   "HEAD moved" rebuild state. */
+.sys-btn-rebuild-dirty {
+  background: #3a2a14;
+  border: 1px solid #a06a1e;
+  color: #e0a83e;
+}
+
+.sys-btn-rebuild-dirty:hover:not(:disabled) { background: #5a4420; }
+
+/* Manual rebuild: neutral grey when repo is clean but no rebuild is currently needed (not rebuild_ready),
+   distinct from the plain green "needed" state and orange "dirty" state. */
+.sys-btn-rebuild-manual {
+  background: #2c2c2c;
+  border: 1px solid #4a4a4a;
+  color: #bbb;
+}
+
+.sys-btn-rebuild-manual:hover:not(:disabled) {
+  background: #3a3a3a;
+  color: #eee;
+}
+
+.sys-auto-rebuild {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+}
+
+/* Auto-rebuild's 90s debounce countdown (Step3Prompt.md Revision E) --
+   shown next to the auto-rebuild toggle while it's waiting for changes to
+   settle before building. */
+.sys-repo-auto-pending {
+  font-size: 11px;
+  color: #e0a83e;
+  font-style: italic;
+}
+
+.sys-repo-error {
+  font-size: 11px;
+  color: #e05c5c;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The .ufabuild request readout. */
+.sys-repo-ufabuild {
+  font-size: 11px;
+  color: #9c9c9c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* External paths registered for watching beside the dev-repo (extwatch.go,
+   privateRepoOpsImpls Step6Prompt.md Revision C): one row per path, then a
+   path box and "watch" button. */
+.sys-ext {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sys-ext-row .sys-repo-root { flex: 0 1 auto; }
+
+.sys-ext-state {
+  font-size: 11px;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.sys-ext-dirty { color: #e0a83e; }
+.sys-ext-note { color: #e05c5c; font-style: italic; }
+
+/* A plug-in dev repo's link to its registration in the plugins tab
+   (Revision E). */
+.sys-ext-reg-link { background: none; border: none; padding: 0; font: inherit; color: #4fa3e0; cursor: pointer; }
+.sys-ext-reg-link:hover { text-decoration: underline; }
+
+.sys-ext-input {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  background: #1a1a1a;
+  color: #ccc;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
+/* "dev branch" readout + switch control (Step1SubstepCPrompt.md Revision B). */
+.sys-branch {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sys-branch-name {
+  color: #9c9c9c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.sys-branch-select {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  background: #1a1a1a;
+  color: #ccc;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 2px 4px;
+}
+
+/* Same green as .sys-btn-rebuild (Step1SubstepCPrompt.md Revision C). */
+.sys-btn-branch {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.sys-btn-branch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* Plain grey for the branch picker's "cancel". */
+.sys-btn-neutral {
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #ccc;
+}
+
+.sys-btn-neutral:hover:not(:disabled) { background: #4a4a4a; }
+
+/* ---- System tab "trough" (Step5Prompt.md Revision L) ---- */
+
+.sys-trough {
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #111;
+}
+
+.sys-trough-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-family: inherit;
+  font-size: 11px;
+  color: #aaa;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sys-trough-line:disabled { cursor: default; color: #666; }
+
+.sys-trough-chevron { flex-shrink: 0; color: #666; }
+
+.sys-trough-ts { flex-shrink: 0; color: #666; }
+
+.sys-trough-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sys-trough-empty { font-style: italic; color: #666; }
+
+.sys-trough-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #888;
+  background: #252526;
+  border-radius: 8px;
+  padding: 0 6px;
+}
+
+.sys-trough-list {
+  max-height: 160px;
+  overflow-y: auto;
+  border-top: 1px solid #2a2a2a;
+}
+
+.sys-trough-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #c96e6e;
+  border-bottom: 1px solid #202020;
+}
+
+.sys-trough-entry:last-child { border-bottom: none; }
+
+.sys-launch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sys-launch-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 4px;
+}
+
+.sys-btn-launch {
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  color: #6ec96e;
+}
+
+.sys-btn-launch:hover:not(:disabled) { background: #2e5a2e; }
+
+/* A sub-app tab whose app isn't running: a launch button in the middle of
+   the tab (LaunchPanel). */
+.launch-panel { min-height: 240px; }
+.launch-panel-inner { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.launch-panel-msg { font-size: 14px; color: #888; }
+.launch-panel-btn { font-size: 13px; padding: 6px 18px; }
+.launch-panel-note { font-size: 12px; color: #c9a227; }
+
+/* "providers" section (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md):
+   always present, one sub-section per provider this host holds credentials
+   for -- yellow border when they don't work. Mirrors agent-coordinator's. */
+.sys-providers { display: flex; flex-direction: column; gap: 10px; background: #111; border: 1px solid #3c3c3c; border-radius: 4px; padding: 10px 12px; }
+.sys-providers-header { font-size: 11px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-providers-none { font-size: 12px; color: #666; font-style: italic; }
+.sys-provider { display: flex; flex-direction: column; gap: 6px; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 10px; }
+.sys-provider-failed { border-color: #d6b62e; }
+.sys-provider-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: #d4d4d4; }
+.sys-provider-icon { display: flex; align-items: center; color: #d4d4d4; }
+.sys-provider-status { margin-left: auto; font-size: 11px; font-weight: 400; }
+.sys-provider-status-ok { color: #4ec94e; }
+.sys-provider-status-failed { color: #d6b62e; }
+.sys-provider-status-checking { color: #888; font-style: italic; }
+.sys-provider-row { display: flex; flex-direction: column; gap: 2px; }
+.sys-provider-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; }
+.sys-provider-value { font-size: 12px; color: #d4d4d4; overflow-wrap: anywhere; }
+.sys-provider-placeholder { color: #555; font-style: italic; }
+.sys-provider-error { color: #d6b62e; }
+/* The "connect" control (Step1SubstepEPrompt.md). */
+.sys-providers-heading { display: flex; align-items: center; gap: 8px; }
+.sys-providers-heading .sys-btn { margin-left: auto; }
+.sys-provider-connect { display: flex; align-items: center; gap: 6px; }
+.sys-provider-connect .sys-branch-select { flex: 0 0 auto; }
+.sys-provider-token { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; background: #1a1a1a; color: #ccc; border: 1px solid #3c3c3c; border-radius: 3px; padding: 2px 6px; }
+/* "agents & models" (Step1SubstepEPrompt.md Revision B) reuses the providers styles. */
+.sys-agents-checked { font-size: 11px; color: #555; }
+.sys-agent-tag { font-size: 10px; font-weight: 400; color: #888; border: 1px solid #3c3c3c; border-radius: 3px; padding: 0 4px; }
+.sys-agent-models { display: flex; flex-wrap: wrap; gap: 4px; }
+.sys-agent-model { font-size: 11px; color: #d4d4d4; background: #2a2a2a; border: 1px solid #3c3c3c; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-missing { font-size: 12px; color: #666; font-style: italic; }
+/* "agent operations" (AgentOps.tsx) also reuses them. */
+.agent-ops-count { font-size: 11px; color: #555; }
+.sys-providers-heading .agent-ops-up { margin-left: 0; }
+.agent-op { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; color: #d4d4d4; }
+.agent-op-done { color: #777; }
+.agent-op-dot { width: 7px; height: 7px; border-radius: 50%; background: #4a9eff; align-self: center; }
+.agent-op-done .agent-op-dot { background: #555; }
+.agent-op-agent { font-weight: 600; }
+.agent-op-session { color: #888; }
+.agent-op-time { margin-left: auto; font-size: 11px; color: #888; }
+/* The full-page view's text sub-tab: calls on the left, details on the right. */
+.agent-ops-split { display: flex; gap: 12px; align-items: flex-start; }
+.agent-ops-list { flex: 0 0 40%; display: flex; flex-direction: column; gap: 2px; }
+.agent-op-pick { cursor: pointer; padding: 3px 6px; border-radius: 3px; }
+.agent-op-pick:hover { background: #2a2d2e; }
+.agent-op-sel { background: #094771; }
+.agent-ops-details { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #d4d4d4; border-left: 1px solid #3c3c3c; padding-left: 12px; }
+.agent-ops-label { margin-top: 6px; font-size: 11px; color: #888; text-transform: uppercase; }
+.agent-ops-pre { margin: 0; font-family: monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; background: #1a1a1a; padding: 6px; }
+/* Revision D: "show-dev" toggle + "connect" beside "re-inspect". */
+.sys-agents-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Revision F: "show-dev" in the same green as .sys-btn-rebuild, brighter while on. */
+.sys-agents-showdev { display: flex; align-items: center; gap: 4px; font-size: 11px; cursor: pointer; background: #1a3a1a; border: 1px solid #2e7a2e; color: #6ec96e; border-radius: 3px; padding: 1px 6px; }
+.sys-agents-showdev:hover { background: #2e5a2e; }
+.sys-agents-showdev:has(input:checked) { background: #2e5a2e; border-color: #4caf50; color: #9be29b; }
+.sys-agents-showdev input { accent-color: #2e7a2e; margin: 0; }
+
+/* ---- Main pane with optional right-hand detail pane (files tab) ---- */
+
+.main-pane-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.main-pane-inner .service-view {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- Files panel ---- */
+
+.files-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.files-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px dashed #3c3c3c;
+  border-radius: 6px;
+  padding: 24px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.files-dropzone:hover {
+  border-color: #555;
+  background: #1e1e1e;
+}
+
+.files-dropzone-active {
+  border-color: #007acc;
+  background: #14283a;
+}
+
+.files-dropzone-text {
+  font-size: 13px;
+  color: #aaa;
+}
+
+.files-dropzone-hint {
+  font-size: 11px;
+  color: #666;
+}
+
+.files-dropzone-input {
+  display: none;
+}
+
+/* "new text file" button (Step2Prompt.md Revision J) -- sits right below the
+   dropzone, same width, so it reads as a second way to add a file rather
+   than a buried action. */
+.files-new-btn {
+  background: #262626;
+  border: 1px dashed #3c3c3c;
+  border-radius: 6px;
+  color: #aaa;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 10px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.files-new-btn:hover:not(:disabled) { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
+.files-new-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* "new file from clipboard" (Step4SubstepDPrompt.md Revision D) shares the
+   row with "new text file", half each. */
+.files-new-row {
+  display: flex;
+  gap: 8px;
+}
+
+.files-new-row .files-new-btn { flex: 1; }
+
+.files-clip-error {
+  color: #e06a6a;
+  font-size: 12px;
+}
+
+.files-empty {
+  color: #888;
+  font-style: italic;
+  font-size: 13px;
+}
+
+.files-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 12px;
+}
+
+.files-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 10px 6px;
+  cursor: pointer;
+  font-family: inherit;
+  color: #d4d4d4;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.files-item:hover {
+  background: #2a2a2a;
+  border-color: #555;
+}
+
+.files-item-active {
+  border-color: #007acc;
+  background: #14283a;
+}
+
+/* Highlighting (Step5SubstepRPrompt.md): a yellow ring circling the box,
+   independent of (and layered outside) the active-selection border above. */
+.files-item-highlighted {
+  box-shadow: 0 0 0 2px #d7c22b;
+}
+
+/* Marked up (Step1SubstepCPrompt.md Revision F): a bright orange border --
+   an in-progress markup-dialog session is open on this file. Independent of
+   (and can combine with) the highlighted ring above -- each uses its own
+   box-shadow layer, comma-separated when both apply. */
+.files-item-markedup {
+  box-shadow: 0 0 0 2px #ff6a00;
+}
+
+.files-item-highlighted.files-item-markedup {
+  box-shadow: 0 0 0 2px #d7c22b, 0 0 0 4px #ff6a00;
+}
+
+.file-icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+}
+
+.file-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* File-details-dialog cache state: orange while short-term cached, yellow
+   once held (72h), green once persisted to the host-store. */
+.file-state-cached { color: #d9822b; }
+.file-state-held { color: #d7c22b; }
+.file-state-persisted { color: #4caf6e; }
+
+.files-item-name {
+  font-size: 11px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- File detail pane ---- */
+
+.file-detail-pane {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.file-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.file-detail-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.file-detail-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.file-detail-close:hover { color: #d4d4d4; }
+
+.file-detail-icon {
+  display: flex;
+  justify-content: center;
+}
+
+.file-detail-icon .file-icon {
+  width: 40px;
+  height: 40px;
+}
+
+.file-detail-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.file-detail-label {
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.file-detail-value {
+  font-size: 12px;
+  color: #d4d4d4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-detail-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.file-detail-enter {
+  flex: 1;
+  background: #14283a;
+  border: 1px solid #245a7a;
+  border-radius: 3px;
+  color: #5bb8ff;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-enter:hover { background: #1e3a52; border-color: #4e8cca; }
+
+.file-detail-download {
+  flex: 1;
+  background: #1a3a1a;
+  border: 1px solid #2e7a2e;
+  border-radius: 3px;
+  color: #6ec96e;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+  text-decoration: none;
+}
+
+.file-detail-download:hover { background: #2e5a2e; }
+
+.file-detail-hold {
+  flex: 1;
+  background: #3a341a;
+  border: 1px solid #7a6a2e;
+  border-radius: 3px;
+  color: #d7c22b;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-hold:hover { background: #5a4e2e; border-color: #c4b04e; }
+.file-detail-hold:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-highlight {
+  flex: 1;
+  background: #2a2a1a;
+  border: 1px solid #5a5a2e;
+  border-radius: 3px;
+  color: #999;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-highlight:hover { background: #3a3a2a; border-color: #7a7a4e; }
+.file-detail-highlight:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-highlight-active {
+  background: #3a341a;
+  border-color: #d7c22b;
+  color: #d7c22b;
+}
+
+.file-detail-highlight-active:hover { background: #5a4e2e; }
+
+.file-detail-markup {
+  flex: 1;
+  background: #2a1e14;
+  border: 1px solid #7a4e2e;
+  border-radius: 3px;
+  color: #ff9d5c;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-markup:hover { background: #4a2e1a; border-color: #c47a4e; }
+
+.file-detail-markup-active {
+  background: #4a2e14;
+  border-color: #ff6a00;
+  color: #ff6a00;
+}
+
+.file-detail-markup-active:hover { background: #5a3a1a; }
+
+.file-detail-delete {
+  flex: 1;
+  background: #3a1a1a;
+  border: 1px solid #7a2e2e;
+  border-radius: 3px;
+  color: #e06a6a;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-delete:hover { background: #5a2e2e; border-color: #c44e4e; }
+.file-detail-delete:disabled { opacity: 0.5; cursor: default; }
+
+/* The integrations subsection: what another tab can do with this file
+   (FileIntegrations), set off below the standard actions. */
+.file-detail-integrations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px dashed #2e4a5a;
+  padding-top: 8px;
+}
+
+.file-detail-integrations-label {
+  color: #777;
+  font-size: 11px;
+}
+
+.file-detail-integrate {
+  flex: 1;
+  background: #142a24;
+  border: 1px solid #2e7a5e;
+  border-radius: 3px;
+  color: #5cd6a8;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-detail-integrate:hover { background: #1e4a3a; border-color: #4ec49a; }
+.file-detail-integrate:disabled { opacity: 0.5; cursor: default; }
+
+.file-detail-integrate-status {
+  font-size: 11px;
+  color: #5cd6a8;
+  overflow-wrap: anywhere;
+}
+
+.file-detail-integrate-error { color: #e06a6a; }
+
+/* ---- File viewer ---- */
+
+.file-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 900px;
+}
+
+.file-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.file-viewer-back {
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #aaa;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.file-viewer-back:hover { background: #2a2a2a; border-color: #555; color: #d4d4d4; }
+
+.file-viewer-name {
+  font-size: 13px;
+  color: #d4d4d4;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-viewer-body {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  padding: 20px;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.file-viewer-image {
+  max-width: 100%;
+  max-height: 70vh;
+  border-radius: 4px;
+}
+
+.file-viewer-text {
+  align-self: stretch;
+  max-height: 70vh;
+  overflow: auto;
+  font-size: 12px;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.file-viewer-empty {
+  color: #888;
+  font-style: italic;
+  font-size: 13px;
+}
+
+/* ---- Markup dialog (Step1SubstepCPrompt.md Revision F) ---- */
+
+.markup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.markup-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  padding: 16px;
+  max-width: min(94vw, 1100px);
+  max-height: 94vh;
+}
+
+.markup-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.markup-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #ff9d5c;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.markup-filename {
+  font-size: 13px;
+  color: #d4d4d4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.markup-canvas-wrap {
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  min-height: 200px;
+  min-width: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  flex: 1;
+}
+
+.markup-canvas {
+  max-width: min(88vw, 1000px);
+  max-height: 62vh;
+  cursor: crosshair;
+}
+
+.markup-status {
+  color: #888;
+  font-style: italic;
+  font-size: 13px;
+}
+
+.markup-status-error {
+  color: #e06a6a;
+}
+
+.markup-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.markup-tools {
+  display: flex;
+  gap: 6px;
+}
+
+.markup-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #aaa;
+  cursor: pointer;
+  padding: 5px;
+}
+
+.markup-tool-btn svg { width: 100%; height: 100%; }
+
+.markup-tool-btn:hover { background: #2e2e2e; border-color: #555; color: #d4d4d4; }
+
+.markup-tool-active {
+  background: #14283a;
+  border-color: #4e8cca;
+  color: #5bb8ff;
+}
+
+.markup-palette {
+  display: flex;
+  gap: 6px;
+}
+
+.markup-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid #3c3c3c;
+  cursor: pointer;
+  padding: 0;
+}
+
+.markup-swatch:hover { border-color: #777; }
+
+.markup-swatch-active {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px #007acc;
+}
+
+.markup-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.markup-btn {
+  flex: 1;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 7px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.markup-btn:hover { background: #2e2e2e; border-color: #555; }
+.markup-btn:disabled { opacity: 0.5; cursor: default; }
+
+.markup-btn-cancel { color: #e06a6a; }
+.markup-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+
+.markup-btn-copy { color: #6ec96e; }
+.markup-btn-copy:hover:not(:disabled) { background: #1a3a1a; border-color: #2e7a2e; }
+
+.markup-btn-commit { color: #ff9d5c; }
+.markup-btn-commit:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+/* ---- New text file dialog (Step2Prompt.md Revision J) ----
+   Same overlay/dialog shell convention as .markup-overlay/.markup-dialog
+   above, kept as its own class pair (rather than reused) since the two
+   dialogs are otherwise unrelated. */
+
+.new-file-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.new-file-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  padding: 16px;
+  width: min(94vw, 480px);
+}
+
+.new-file-name-input {
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+}
+
+.new-file-body-input {
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+  resize: vertical;
+  min-height: 160px;
+}
+
+.new-file-name-input:focus,
+.new-file-body-input:focus {
+  outline: none;
+  border-color: #555;
+}
+
+.new-file-error {
+  color: #e06a6a;
+  font-size: 12px;
+}
+
+.new-file-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.new-file-btn {
+  flex: 1;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 7px 0;
+  cursor: pointer;
+  text-align: center;
+}
+
+.new-file-btn:hover { background: #2e2e2e; border-color: #555; }
+.new-file-btn:disabled { opacity: 0.5; cursor: default; }
+
+.new-file-btn-cancel { color: #e06a6a; }
+.new-file-btn-cancel:hover { background: #3a1a1a; border-color: #7a2e2e; }
+
+.new-file-btn-create { color: #ff9d5c; }
+.new-file-btn-create:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+/* Clipboard naming dialog's preview (Step4SubstepDPrompt.md Revision D). */
+.clip-file-image {
+  max-width: 100%;
+  max-height: 260px;
+  object-fit: contain;
+  align-self: center;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  background: #262626;
+}
+
+.clip-file-text {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  color: #bbb;
+  font-size: 12px;
+  padding: 7px 9px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.clip-file-size {
+  color: #888;
+  font-size: 11px;
+}
+
+/* The detected text format beside the dialog title (Revision E). */
+.clip-file-format {
+  color: #888;
+  font-weight: normal;
+}
+
+/* ---- The Conversationalist mic-capture (Step2Prompt.md Revision J) ----
+   Mirrors condoccer/index.css's own copy of these same rules -- see
+   App.tsx's field-with-mic/.mic-btn/TCCaptureOverlay for the markup they
+   back. field-with-mic wraps the new-text-file dialog's body textarea so
+   MicButton sits beside it rather than overlapping the textarea's own resize
+   handle; the field itself keeps its existing class-driven styling, since
+   this only adds a flex sibling. MicButton renders nothing until TC is
+   available, so field-with-mic is present even when there's nothing to see
+   beside the field. */
+
+.field-with-mic {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+}
+
+.field-with-mic > input,
+.field-with-mic > textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.mic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  padding: 3px;
+  background: #2d2d2d;
+  color: #999;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.mic-btn svg { width: 100%; height: 100%; display: block; }
+
+.mic-btn:hover { background: #333; color: #d4d4d4; border-color: #555; }
+
+/* TCCaptureOverlay -- the floating panel hosting the-conversationalist's own
+   capture-mode iframe while a dictation is in progress (App.tsx). */
+
+.tc-capture-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.tc-capture-panel {
+  width: 420px;
+  max-width: 90vw;
+  height: 320px;
+  max-height: 80vh;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.tc-capture-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: #252526;
+  border-bottom: 1px solid #3c3c3c;
+  font-size: 12px;
+  color: #ccc;
+}
+
+.tc-capture-close {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.tc-capture-close:hover { color: #fff; }
+
+.tc-capture-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #141414;
+}
+
+/* ---- Mobile (same decoupled, CSS-only approach as condoccer/index.css) ----
+ *
+ * This page is already a single scrolling column (no split scroll region /
+ * fixed footer like condoccer), so no min-height:0 fix is needed here. The
+ * remaining problems are purely sizing: fixed padding built for desktop, a
+ * tab row and a process table that don't fit narrow widths, and a
+ * side-by-side files/detail layout with no room to be side-by-side.
+ */
+
+@media (max-width: 760px) {
+  .main-pane {
+    padding: 16px;
+  }
+
+  .main-pane-embed {
+    padding: 0;
+  }
+
+  .ac-panel {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: 6px;
+  }
+
+  .tab-bar {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tabs {
+    flex-shrink: 0;
+  }
+
+  /* A ScrollTabs row scrolls itself, so it has to keep to the bar's width:
+     at its full width it can't scroll, and its overscroll-behavior stops a
+     drag on it from scrolling the bar instead. */
+  .tabs.tabs-scroll {
+    flex-shrink: 1;
+  }
+
+  /* The main tab bar: the title and controls leave no room for the tabs on
+     a phone, so the tabs get a full-width row of their own under them,
+     dragged sideways to reach the rest. */
+  .tab-bar-main {
+    flex-wrap: wrap;
+    height: auto;
+    row-gap: 0;
+  }
+
+  .tab-bar-main > .tabs-scroll {
+    order: 1;
+    flex: 1 0 100%;
+    height: 40px;
+  }
+
+  .tab {
+    padding: 0 12px;
+  }
+
+  button {
+    min-height: 34px;
+  }
+
+  /* Files tab: grid + detail pane stack instead of sitting side by side. */
+  .main-pane-inner {
+    flex-direction: column;
+  }
+
+  .file-detail-pane {
+    width: 100%;
+  }
+
+  /* Process table: scroll horizontally rather than dropping/squeezing
+     columns, so every column (including the terminate button) stays reachable. */
+  .sys-table {
+    overflow-x: auto;
+  }
+
+  .sys-row {
+    min-width: 480px;
+  }
+
+  .file-viewer-header {
+    flex-wrap: wrap;
+  }
+}
+
+/* "select from host" file picker (HostFilePicker.tsx, Step4Prompt.md
+   Revision F) -- the same block in LR's, AC's and condoccer's index.css. */
+.hfp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  padding: 24px;
+}
+
+.hfp-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #1e1e1e;
+  border: 1px solid #3c3c3c;
+  border-radius: 8px;
+  padding: 14px;
+  width: min(94vw, 620px);
+  max-height: 86vh;
+  color: #d4d4d4;
+  font-size: 12px;
+}
+
+.hfp-header { display: flex; align-items: center; justify-content: space-between; }
+.hfp-title { font-weight: 600; color: #ff9d5c; }
+.hfp-close {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+.hfp-close:hover { color: #fff; }
+
+.hfp-path-row { display: flex; align-items: center; gap: 6px; }
+.hfp-path-input {
+  flex: 1;
+  min-width: 0;
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 5px 7px;
+}
+.hfp-path-input:focus { outline: none; border-color: #ff6a00; }
+.hfp-hidden-toggle { display: flex; align-items: center; gap: 4px; color: #999; white-space: nowrap; }
+
+.hfp-btn {
+  background: #262626;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.hfp-btn:hover:not(:disabled) { background: #2e2e2e; border-color: #555; }
+.hfp-btn:disabled { opacity: 0.45; cursor: default; }
+.hfp-btn-primary { color: #ff9d5c; }
+.hfp-btn-primary:hover:not(:disabled) { background: #4a2e14; border-color: #ff6a00; }
+
+.hfp-error { color: #f48771; white-space: pre-wrap; }
+
+.hfp-list {
+  flex: 1;
+  min-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  background: #1a1a1a;
+}
+.hfp-empty { padding: 10px; color: #777; }
+.hfp-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.hfp-entry:hover { background: #2a2a2a; }
+.hfp-entry-dir .hfp-entry-name { color: #9cdcfe; }
+.hfp-entry-selected { background: #4a2e14; }
+.hfp-entry-selected:hover { background: #5a3818; }
+.hfp-entry-icon { width: 16px; text-align: center; }
+.hfp-entry-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hfp-entry-size { color: #888; font-size: 11px; white-space: nowrap; }
+
+.hfp-footer { display: flex; align-items: center; gap: 8px; }
+.hfp-selection { flex: 1; min-width: 0; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---- Worker tab (dungeon-keeper's signals -- see worker.go) ---- */
+
+.worker-panel { display: flex; flex-direction: column; gap: 12px; }
+.worker-meta { font-size: 12px; color: #888; }
+
+.worker-submit { display: flex; gap: 8px; align-items: stretch; }
+.worker-prompt {
+  flex: 1;
+  min-width: 0;
+  background: #141414;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.worker-prompt::placeholder { color: #555; }
+.worker-prompt:disabled { opacity: 0.6; }
+.worker-submit-btn {
+  background: #1a3a5c;
+  border: 1px solid #2e5c8a;
+  border-radius: 3px;
+  color: #d4d4d4;
+  padding: 0 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.worker-submit-btn:disabled { opacity: 0.5; cursor: default; }
+.worker-error { color: #cc4444; font-size: 13px; }
+
+.worker-signals { display: flex; flex-direction: column; gap: 4px; }
+.worker-signal { background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; }
+.worker-signal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 6px 10px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.worker-signal-head:hover { background: #1e1e1e; }
+.worker-signal-more { color: #5bb8ff; font-size: 12px; }
+.worker-signal-status { width: 80px; flex-shrink: 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.worker-status-processing .worker-signal-status { color: #5bb8ff; }
+.worker-status-completed .worker-signal-status { color: #4ec94e; }
+.worker-status-failed .worker-signal-status { color: #cc4444; }
+.worker-signal-prompt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-signal-when { flex-shrink: 0; font-size: 11px; color: #666; }
+
+.worker-signal-body { display: flex; flex-direction: column; gap: 8px; padding: 4px 10px 10px; border-top: 1px solid #2a2a2a; }
+.worker-signal-detail { font-size: 11px; color: #777; }
+.worker-signal-comment { font-size: 12px; color: #aaa; }
+.worker-status-failed .worker-signal-comment { color: #cc4444; }
+.worker-signal-text {
+  margin: 0;
+  padding: 8px;
+  background: #1a1a1a;
+  border-radius: 3px;
+  color: #bbb;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.worker-signal-output { color: #d4d4d4; }
+
+.worker-slopspace-in-use { border-color: #2d5a7a; }
+.worker-slopspace-in-use .worker-signal-status { color: #5bb8ff; }
+.worker-slopspace-deployed .worker-signal-status { color: #e0a83e; }
+.worker-slopspace-repos { color: #777; font-size: 12px; }
+.worker-slopspace-head { cursor: pointer; }
+.worker-slopspace-head:hover { background: #1e1e1e; }
+.worker-slopspace-selected { border-color: #5c8a2e; }
+
+/* The slopspace sub-tab's manual control panel -- see dungeon-keeper/slopctl.go */
+.worker-slopctl { display: flex; flex-direction: column; gap: 8px; padding: 10px; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; }
+.worker-slopctl-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.worker-slopctl-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.worker-slopctl-label { width: 110px; flex-shrink: 0; font-size: 12px; color: #888; }
+.worker-slopctl-check { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #aaa; cursor: pointer; }
+.worker-slopctl-work { display: flex; flex-direction: column; gap: 6px; }
+.worker-slopctl-input {
+  min-width: 0;
+  background: #1a1a1a;
+  border: 1px solid #3c3c3c;
+  border-radius: 3px;
+  padding: 4px 8px;
+  color: #d4d4d4;
+  font-family: inherit;
+  font-size: 13px;
+}
+.worker-slopctl-input:disabled { opacity: 0.5; }
+.worker-slopctl-pick, .worker-slopctl-grow { flex: 1; }
+.worker-slopctl-command { font-family: inherit; resize: vertical; min-height: 2.5em; }
+.worker-slopctl-path { font-family: monospace; }
+.worker-slopctl .worker-submit-btn { padding: 4px 12px; }
+.worker-slopctl-danger { background: #4a1e1e; border-color: #8a2e2e; }
+.worker-slopctl-ok { color: #4ec94e; font-size: 13px; }
+
+/* DTT proposals and "view files" on the slopspace sub-tab -- see
+   SlopspaceDTT.tsx. The human, and what's submitted to them, is green. */
+.worker-dtt-banner { font-size: 12px; color: #4ec94e; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.worker-dtt-badge { font-size: 11px; color: #4ec94e; border: 1px solid #2f7a2f; border-radius: 3px; padding: 0 5px; margin-right: 6px; white-space: nowrap; }
+.worker-dtt-review { display: flex; flex-direction: column; gap: 8px; padding: 8px; border: 1px dashed #4ec94e; border-radius: 4px; background: #0f1a10; }
+.worker-dtt-title { color: #4ec94e; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.worker-dtt-list { display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow-y: auto; }
+.worker-dtt-item { font-family: monospace; color: #ccc; }
+.worker-dtt-kind { display: inline-block; min-width: 3.5em; font-size: 11px; color: #888; }
+.worker-dtt-write { color: #e0a855; }
+.worker-slopctl .worker-dtt-accept { background: #1e3a1e; border-color: #2f7a2f; }
+/* One proposal's own ✓ / ✗ (Revision M) */
+.worker-dtt-row { display: flex; align-items: center; gap: 8px; }
+.worker-dtt-row .worker-dtt-item { flex: 1; min-width: 0; text-align: left; word-break: break-all; }
+.worker-dtt-one { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.worker-dtt-row .worker-dtt-one .worker-submit-btn { padding: 0 6px; font-size: 11px; }
+/* Entered scopes (Revision L) -- the same ↑ as condoccer's .nav-up-btn */
+.worker-files-up { align-self: flex-start; background: none; border: none; color: #666; font-size: 11px; cursor: pointer; padding: 0; font-family: inherit; }
+.worker-files-up:hover:not(:disabled) { color: #999; }
+.worker-files-scope { font-family: monospace; font-size: 13px; color: #ccc; font-weight: 600; word-break: break-all; }
+.worker-files-list { display: flex; flex-direction: column; gap: 1px; max-height: 360px; overflow-y: auto; font-family: monospace; }
+.worker-files-entry { display: flex; justify-content: space-between; gap: 16px; color: #ccc; font-family: monospace; padding: 1px 4px; }
+.worker-files-entry:hover { background: #1f1f1f; }
+.worker-files-dir { color: #5bb8ff; }
+.worker-files-size { color: #777; white-space: nowrap; }
+.worker-files-content { max-height: 480px; overflow: auto; }
+
+/* The worker tab's visual sub-tab -- see WorkerVisual.tsx */
+.wv { display: flex; flex-direction: column; gap: 8px; }
+.wv-toolbar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #888; }
+.wv-toolbar .worker-submit-btn { padding: 2px 10px; }
+.wv-spacer { flex: 1; }
+.wv-zoom { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+.wv-legend { display: inline-flex; align-items: center; gap: 6px; }
+.wv-swatch { display: inline-block; width: 14px; height: 10px; border: 1.5px solid; border-radius: 2px; }
+.wv-swatch-line { height: 0; border-width: 1.5px 0 0; border-radius: 0; }
+.wv-main { display: flex; align-items: stretch; background: #141414; border: 1px solid #3c3c3c; border-radius: 4px; min-height: 200px; }
+.wv-labels { position: relative; width: 120px; flex-shrink: 0; border-right: 1px solid #2a2a2a; }
+.wv-label { position: absolute; left: 0; right: 0; padding: 14px 8px 0; font-size: 12px; color: #aaa; border-top: 1px solid #2a2a2a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wv-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+.wv-svg { display: block; }
+.wv-grid { stroke: #232323; }
+.wv-tick { fill: #666; font-size: 10px; }
+.wv-lane-edge { stroke: #2a2a2a; }
+.wv-lane-sep { stroke: #333; }
+.wv-now { stroke: #888; stroke-dasharray: 2 3; }
+.wv-click { cursor: pointer; }
+.wv-sub { fill: #10243a; }
+.wv-sub-pending { fill: #141414; stroke-dasharray: 3 2; }
+.wv-sub-processing { fill: #1a3a5c; }
+.wv-review-waiting { animation: ctl-rec-pulse 2s ease-in-out infinite; }
+.wv-review-mark { font-size: 13px; font-weight: bold; pointer-events: none; }
+.wv-sub-failed { fill: #3a1414; }
+.wv-sub:hover { fill: #22486e; }
+.wv-details { width: 280px; flex-shrink: 0; border-left: 1px solid #2a2a2a; padding: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 70vh; overflow-y: auto; }
+.wv-details-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #888; }
+.wv-detail-body { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.wv-detail-kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px; }
+.wv-field { display: flex; gap: 8px; }
+.wv-field-label { width: 72px; flex-shrink: 0; font-size: 11px; color: #777; }
+.wv-detail-body > .wv-field-label { width: auto; margin-top: 6px; }
+.wv-field-value { min-width: 0; color: #d4d4d4; word-break: break-all; }
+.wv-field-value .worker-signal-status { width: auto; }
+.wv-link { background: none; border: none; padding: 0; color: #5bb8ff; font-family: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.wv-link:hover { text-decoration: underline; }
+.wv-work-list { display: flex; flex-direction: column; gap: 3px; }
+.wv-work-item { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Tools tab (Tools.tsx, local-representative/tools.go) -- the same in
+   local-representative's and agent-coordinator's frontends. */
+.tools-status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #c8c8c8; }
+.tools-dot { width: 8px; height: 8px; border-radius: 50%; background: #666; flex-shrink: 0; }
+.tools-dot-ok { background: #4ec94e; }
+.tools-dot-checking { background: #5bb8ff; }
+.tools-dot-failed { background: #cc4444; }
+.tools-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.tools-grow { flex: 1; }
+.tools-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #2d2d2d; color: #9c9c9c; border: 1px solid #3c3c3c; }
+.tools-badge-ok { color: #4ec94e; border-color: #2f5f2f; }
+.tools-badge-no { color: #cc8844; border-color: #6a4a2a; }
+.tools-line { font-size: 12px; color: #9c9c9c; overflow-wrap: anywhere; }
+.tools-line b { color: #c8c8c8; font-weight: 600; }
+.tools-problem { color: #c96e6e; }
+.tools-detail { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.tools-table { border-collapse: collapse; font-size: 12px; }
+.tools-table td { padding: 2px 10px 2px 0; vertical-align: top; color: #9c9c9c; }
+.tools-table td:first-child { color: #d4d4d4; font-family: monospace; white-space: nowrap; }
+.tools-pre { margin: 0; padding: 6px 8px; background: #161616; border: 1px solid #2a2a2a; border-radius: 4px; font-size: 11px; color: #c8c8c8; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.tools-run .ctl-step-body { flex: 1; }
+.tools-value { font-family: monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tools-calls { display: flex; gap: 12px; align-items: flex-start; min-height: 0; }
+.tools-calls-bar { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 3px; padding-right: 10px; border-right: 1px solid #2a2a2a; max-height: 75vh; overflow-y: auto; }
+.tools-calls-bar .ctl-section-title { margin-top: 6px; }
+.tools-calls-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 3px 6px; background: none; border: 1px solid transparent; border-radius: 4px; color: #c8c8c8; font-family: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.tools-calls-item:hover { background: #252525; }
+.tools-calls-item-active { background: #2d2d2d; border-color: #3c3c3c; }
+.tools-calls-item-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tools-calls-item-sub { font-size: 10px; color: #808080; }
+.tools-calls-main { flex: 1; min-width: 0; }
+.tools-calls-examples > summary { cursor: pointer; user-select: none; }
+.tools-calls-examples-list { display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
+.tools-icon { display: inline-block; width: 1.3em; text-align: center; }
+.tools-visual { display: flex; flex-direction: column; gap: 8px; }
+.tools-visual-graph { overflow: auto; max-height: 60vh; background: #161616; border: 1px solid #2a2a2a; border-radius: 4px; }
+.tools-visual-edge { fill: none; stroke: #3c3c3c; stroke-width: 1.5; }
+.tools-visual-edge-done { stroke: #4f7a5f; }
+.tools-visual-node { cursor: pointer; }
+.tools-visual-node rect { stroke-width: 2; }
+.tools-visual-node text { font-family: inherit; pointer-events: none; }
+.tools-visual-icon { font-size: 22px; }
+.tools-visual-label { font-size: 11px; fill: #c8c8c8; }
+.tools-visual-sub { font-size: 9px; fill: #808080; }
+.tools-visual-pending rect { fill: #262626; stroke: #4a4a4a; }
+.tools-visual-pending .tools-visual-icon { opacity: 0.35; filter: grayscale(1); }
+.tools-visual-running rect { fill: #3a3416; stroke: #d7ba3d; animation: tools-visual-pulse 1.2s ease-in-out infinite; }
+.tools-visual-ok rect { fill: #1d3326; stroke: #3fa66b; }
+.tools-visual-failed rect { fill: #3a1d1c; stroke: #d0504a; }
+.tools-visual-selected rect { stroke-width: 3.5; }
+@keyframes tools-visual-pulse { 50% { stroke-opacity: 0.4; } }
+.tools-visual-phase rect { fill: #1c1c1c; stroke: #2f2f2f; stroke-dasharray: 4 3; }
+.tools-visual-phase text { font-size: 10px; fill: #8a8a8a; text-transform: uppercase; letter-spacing: 0.06em; }
+.tools-visual-phase-running rect { stroke: #6e6230; }
+.tools-visual-phase-ok rect { stroke: #2f5a40; }
+.tools-visual-phase-failed rect { stroke: #6e2f2c; }
+.tools-visual-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 11px; color: #9c9c9c; align-items: center; }
+.tools-visual-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 2px solid; margin-right: 4px; vertical-align: -1px; }
+.tools-visual-swatch.tools-visual-pending { background: #262626; border-color: #4a4a4a; }
+.tools-visual-swatch.tools-visual-running { background: #3a3416; border-color: #d7ba3d; }
+.tools-visual-swatch.tools-visual-ok { background: #1d3326; border-color: #3fa66b; }
+.tools-visual-swatch.tools-visual-failed { background: #3a1d1c; border-color: #d0504a; }
+
+/* ---- Top-level plugins tab (PluginsShell, condocs/privateRepoOpsImpls/
+   Step3Prompt.md Revisions B and C): its own tab bar of external plug-ins
+   over a full pane, like the top-level sub-app bar over an embedded tab. ---- */
+.plugins-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.plugins-shell .tab-bar-nested { background: #1e1e1e; height: 30px; padding: 0 12px; }
+.plugins-shell .tab-bar-nested .tab { font-size: 12px; padding: 0 12px; }
+.plugins-shell .tab-bar-nested .tabs { flex: 1; }
+.plugins-shell-tab { display: inline-flex; align-items: center; gap: 6px; }
+.plugins-shell-none { align-self: center; font-size: 12px; color: #555; font-style: italic; }
+.plugins-shell-pane { display: flex; flex: 1; min-height: 0; }
+.plugins-shell-actions { display: flex; align-items: center; gap: 8px; }
+.plugins-shell-trust { font-size: 10px; text-transform: uppercase; color: #dcdcaa; }
+.plugins-shell-btn { background: #2d2d2d; border: 1px solid #3c3c3c; color: #c8c8c8; }
+.plugins-shell-btn:hover:not(:disabled) { background: #3a3a3a; }
+.plugins-shell-btn-approve { background: #1e3a2e; border-color: #2e6a4a; color: #4ec9b0; font-size: 12px; padding: 4px 14px; }
+.plugins-shell-btn-approve:hover:not(:disabled) { background: #26503c; }
+.plugins-shell-error { padding: 4px 12px; font-size: 12px; color: #f48771; background: #2a1a1a; }
+.plugins-shell-approve { display: flex; flex-direction: column; align-items: center; gap: 10px; max-width: 640px; margin: 0 auto; text-align: center; }
+
+/* PluginIcon: a plug-in's manifest icon, or its initials. An SVG loaded as
+   an <img> can't inherit the page's colour, so icons sit on a light chip.
+   Mirrors agent-coordinator's index.css. */
+.plugin-icon {
+  display: inline-block; flex-shrink: 0; vertical-align: middle; object-fit: contain;
+  box-sizing: border-box; padding: 1px; background: #d4d4d4; border-radius: 3px;
+}
+.plugin-icon-none {
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #2d2d2d; border-radius: 3px; color: #888; font-family: monospace; line-height: 1;
+}
+.tab-dim { opacity: 0.5; }
+
+/* PluginIcon with mask (a version 2 manifest's icon_mask, Step3Prompt.md
+   Revision E): the icon's shape drawn in the surrounding text colour. */
+.plugin-icon-mask {
+  display: inline-block; flex-shrink: 0; vertical-align: middle; background-color: currentColor;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+  -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain;
+}
+
+/* A hosted-UI sub-app's top-level tab with its manifest icon (Revision E). */
+.tab-with-icon { display: inline-flex; align-items: center; gap: 6px; }
+
+/* ScrollTabs (Revision E): a row of tabs that scrolls sideways under the
+   mouse wheel instead of overflowing the bar, its scrollbar hidden, with a
+   fade on the edge that has more tabs past it. */
+.tabs-scroll {
+  position: relative; min-width: 0; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; overscroll-behavior-x: contain;
+}
+.tabs-scroll::-webkit-scrollbar { display: none; }
+.tabs-scroll > .tab { flex-shrink: 0; }
+.tabs-more-right { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.tabs-more-left { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 28px), transparent); }
+.tabs-more-left.tabs-more-right { -webkit-mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to right, transparent, #000 28px, #000 calc(100% - 28px), transparent); }
+
+/* The plugins tab's registration sub-tab (Revision E): always at the far
+   left, divided from the registered plug-ins' tabs. */
+.plugins-shell-reg-tab { flex-shrink: 0; font-style: italic; }
+.plugins-shell-divider { flex-shrink: 0; width: 1px; align-self: stretch; margin: 6px 4px; background: #3c3c3c; }
+.plugins-reg { flex: 1; overflow: auto; padding: 12px 18px; font-size: 13px; color: #c8c8c8; }
+.plugins-reg-section { margin-bottom: 18px; max-width: 900px; }
+.plugins-reg-section h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }
+.plugins-reg-section p { margin: 0 0 8px; color: #9c9c9c; line-height: 1.45; }
+.plugins-reg-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.plugins-reg-status { font-size: 12px; color: #9c9c9c; }
+.plugins-reg-last { margin-top: 6px; font-size: 12px; color: #9c9c9c; }
+.plugins-reg-last-error { color: #f48771; }
+.plugins-reg-form { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.plugins-reg-form input { background: #1e1e1e; border: 1px solid #3c3c3c; color: #d4d4d4; padding: 4px 8px; font-size: 12px; font-family: inherit; border-radius: 3px; }
+.plugins-reg-form input:invalid:not(:placeholder-shown) { border-color: #a1260d; }
+.plugins-reg-none { font-size: 12px; color: #555; font-style: italic; }
+.plugins-reg-table { border-collapse: collapse; font-size: 12px; }
+.plugins-reg-table th { text-align: left; font-weight: normal; color: #777; padding: 2px 12px 4px 0; }
+.plugins-reg-table td { padding: 3px 12px 3px 0; vertical-align: middle; }
+.plugins-reg-st-online { color: #4ec9b0; }
+.plugins-reg-st-offline { color: #ce9178; }
+.plugins-reg-st-pending { color: #dcdcaa; }
+/* The plug-in dev repo registration a system tab "registration" link opened
+   on (privateRepoOpsImpls Step6Prompt.md Revision E): briefly lit. */
+.plugins-reg-focused { animation: plugins-reg-focus 2.4s ease-out; }
+@keyframes plugins-reg-focus {
+  0%, 40% { background: #264f78; }
+  100% { background: transparent; }
+}
+.plugins-reg-meta { font-size: 12px; color: #777; }
+.plugins-reg-host { margin: 0 0 6px; font-size: 13px; color: #d4d4d4; }
+
+/* ---- Demo tab (Demo.tsx; PrivateRepoOps Step 4, Revision E) ---- */
+.demo-panel { display: flex; flex-direction: column; gap: 16px; }
+.demo-section { display: flex; flex-direction: column; gap: 8px; }
+.demo-heading { display: flex; align-items: center; gap: 10px; }
+.demo-header { font-size: 11px; color: #888; text-transform: uppercase; }
+.demo-count { font-size: 11px; color: #555; }
+.demo-apps { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px; }
+.demo-app { display: grid; grid-template-columns: auto 1fr auto; column-gap: 8px; align-items: center; background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 6px 10px; font-size: 12px; }
+.demo-app-open { cursor: pointer; }
+.demo-app-open:hover { border-color: #555; }
+.demo-app-dot { width: 8px; height: 8px; border-radius: 50%; background: #666; }
+.demo-app-up .demo-app-dot { background: #4ec94e; }
+.demo-app-down .demo-app-dot { background: #cc4444; }
+.demo-app-name { color: #d4d4d4; font-weight: 600; }
+.demo-app-status { font-size: 11px; color: #777; }
+.demo-app-up .demo-app-status { color: #4ec94e; }
+.demo-app-down .demo-app-status { color: #cc4444; }
+.demo-app-role { grid-column: 2 / 4; font-size: 11px; color: #888; }
+.demo-list { display: flex; flex-direction: column; gap: 6px; }
+.demo-card { background: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 6px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+.demo-card-open { border-color: #555; }
+.demo-card-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.demo-card-body { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; border-top: 1px solid #2c2c2c; }
+.demo-desc { white-space: pre-wrap; color: #aaa; font-size: 11px; }
+.demo-origin { font-size: 10px; padding: 0 6px; border-radius: 8px; background: #2a2a2a; color: #888; }
+.demo-origin-configured { background: #23324a; color: #8ab4e8; }
+.demo-origin-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.demo-sut-same { background: #3a2f1a; color: #e0b870; }
+.demo-phases { display: flex; flex-wrap: wrap; gap: 4px; }
+.demo-phase { font-size: 11px; padding: 1px 8px; border-radius: 3px; border-left: 3px solid #666; background: #262626; color: #ccc; }
+.demo-phase-lead-in { border-left-color: #4ec94e; }
+.demo-phase-subject { border-left-color: #569cd6; }
+.demo-phase-tear-down { border-left-color: #e0a83e; }
+.demo-phase-compose { border-left-color: #b180d7; }
+.demo-phase-done { background: #1f3020; }
+.demo-phase-failed { background: #3a1e1e; }
+.demo-phase-not-run { opacity: 0.5; }
+.demo-vars { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 10px; }
+.demo-var { display: flex; align-items: center; gap: 6px; }
+.demo-var-name { font-size: 11px; color: #888; min-width: 80px; }
+.demo-var input, .demo-dup-name { flex: 1; background: #252526; border: 1px solid #3c3c3c; color: #d4d4d4; font-size: 12px; padding: 2px 6px; }
+.demo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.demo-dup-name { flex: 0 1 160px; }
+.demo-source { max-height: 320px; overflow: auto; background: #151515; padding: 6px; font-size: 11px; margin: 0; }
+.demo-renders { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; }
+.demo-renders a { color: #8ab4e8; }
+.demo-renders a.demo-render-unkept { color: #e0b060; }
+.demo-record-running .demo-app-dot { background: #e0a83e; }
+.demo-record-ok .demo-app-dot { background: #4ec94e; }
+.demo-record-failed .demo-app-dot, .demo-record-interrupted .demo-app-dot { background: #cc4444; }
+.demo-phase-running { background: #3a321e; }
+.demo-entry-link { cursor: pointer; }
+.demo-entry-link:hover { color: #fff; }
+.demo-var-for { font-size: 10px; color: #666; }
+.demo-renders a.demo-render-primary, .demo-renders .demo-render-primary { color: #f0d060; font-weight: 600; }
+.demo-shots { display: flex; flex-wrap: wrap; gap: 8px; }
+.demo-shots img { max-width: 220px; max-height: 140px; border: 1px solid #3c3c3c; display: block; }
+.demo-question { width: 100%; min-height: 56px; box-sizing: border-box; background: #252526; border: 1px solid #3c3c3c; color: #d4d4d4; font-size: 12px; padding: 4px 6px; font-family: inherit; }
+.demo-review-output { white-space: pre-wrap; max-height: 480px; }
+/* The demo tab's proposals sub-tab (DemoProposals.tsx). */
+.demo-prop-title { flex: 1 1 240px; background: #252526; border: 1px solid #3c3c3c; color: #d4d4d4; font-size: 12px; padding: 2px 6px; }
+.demo-prop-part { display: flex; flex-direction: column; gap: 2px; }
+.demo-prop-long { min-height: 120px; }
+/* Revision H: a tile per proposal, and the selected one's details. */
+.demo-prop-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 6px 0; }
+.demo-prop-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 6px; background: #252526; border: 1px solid #3c3c3c; border-top: 3px solid #3c3c3c; border-radius: 4px; cursor: pointer; text-align: center; min-width: 0; }
+.demo-prop-tile:hover { background: #2a2d2e; }
+.demo-prop-tile-open { border-color: #8ab4e8; }
+.demo-prop-tile-creating { border-top-color: #d7ba7d; }
+.demo-prop-tile-created { border-top-color: #4ec9b0; }
+.demo-prop-tile-failed { border-top-color: #f48771; }
+.demo-prop-tile .demo-count { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.demo-prop-icon { width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #888; }
+.demo-prop-icon img { max-width: 48px; max-height: 48px; }
+.demo-prop-tile-title { font-size: 12px; color: #d4d4d4; font-weight: 600; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.demo-prop-files { margin: 2px 0 0; padding-left: 18px; font-family: monospace; font-size: 11px; color: #c8c8c8; }
+/* The demo tab's protosurf area (Protosurf.tsx). */
+.ps-areas, .ps-modes { border-bottom: none; }
+.ps-map { display: flex; flex-direction: column; gap: 6px; }
+.ps-path { flex: 0 1 280px; }
+.ps-trail { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.ps-crumb { color: #d4d4d4; }
+.ps-crumb-link { color: #8ab4e8; cursor: pointer; }
+.ps-crumb-link:hover { text-decoration: underline; }
+.ps-crumb-sep { color: #666; margin: 0 2px; }
+.ps-trail .demo-count { margin-left: 8px; }
+.ps-hover { font-size: 11px; color: #aaa; min-height: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ps-box { width: 100%; overflow: hidden; }
+.ps-svg { display: block; background: #1e1e1e; }
+.ps-dir { cursor: zoom-in; }
+.ps-dir-box { stroke: #4a4a4a; stroke-width: 1; }
+.ps-depth-0 { fill: #262626; }
+.ps-depth-1 { fill: #232323; }
+.ps-depth-2, .ps-depth-3 { fill: #212121; }
+.ps-dir-label { fill: #c8c8c8; font-size: 10px; pointer-events: none; }
+.ps-tile { stroke: #1e1e1e; stroke-width: 1; cursor: zoom-in; }
+.ps-tile-dim { opacity: 0.2; }
+.ps-tile-hover { stroke: #ffffff; stroke-width: 1.5; }
+/* Revision C: a demo's or suite's coverage picked out on the map. */
+.ps-tile-partial { fill-opacity: 0.5; }
+.ps-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 3px 6px; background: #2a2a2a; border-left: 3px solid #d95926; }
+.demo-map-mark { font-size: 10px; padding: 0 6px; border-radius: 8px; background: #3a2a20; color: #f0a070; cursor: pointer; }
+.demo-map-mark:hover { color: #fff; }
+.demo-phase-mapped { outline: 1px solid #d95926; }
+.ps-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 11px; color: #aaa; }
+.ps-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.ps-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; }
+.ps-legend-table { border-collapse: collapse; font-size: 11px; color: #aaa; }
+.ps-legend-table td { padding: 1px 8px 1px 0; }
+.ps-legend-row { cursor: pointer; }
+.ps-legend-row:hover .ps-legend-name, .ps-legend-on .ps-legend-name { color: #d4d4d4; }
+.ps-legend-on { background: #2a2a2a; }
+.ps-legend-num { text-align: right; font-variant-numeric: tabular-nums; }

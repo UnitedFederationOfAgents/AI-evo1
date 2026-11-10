@@ -1,0 +1,49 @@
+# Diagram -- how a browser reaches diagrammographer (static).
+#
+# diagrammographer says hello to local-representative as a plug-in; after
+# that a browser reaches it at /apps/dg/ on local-representative, or at
+# /host/<id>/apps/dg/ on agent-coordinator, which relays to that host.
+
+diagrammographer.diagrams:
+  select:
+    name: dg-plugin-path
+  assert:
+    title: Reaching the diagram tab
+    description: The plug-in hello, and the two ways a browser frames dg.
+    size: [820, 380]
+    nodes:
+      browser:
+        label: browser
+        shape: circle
+        at: [40, 142]
+        size: [96, 96]
+      ac:
+        label: agent-coordinator
+        at: [300, 40]
+        size: [190, 56]
+      lr:
+        label: local-representative
+        at: [300, 280]
+        size: [190, 56]
+      dg:
+        label: diagrammographer
+        shape: round
+        color: "#2d4a6b"
+        at: [600, 280]
+        size: [180, 56]
+    edges:
+      - from: dg
+        to: lr
+        label: plug-in hello
+      - from: lr
+        to: dg
+        label: ":8091"
+      - from: browser
+        to: lr
+        label: /apps/dg/
+      - from: browser
+        to: ac
+        label: /host/<id>/apps/dg/
+      - from: ac
+        to: lr
+        label: relays

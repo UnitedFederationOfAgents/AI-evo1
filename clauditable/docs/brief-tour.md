@@ -24,7 +24,7 @@ export AGENT_SESSION=tour-session
 ```
 
 ```ridealong
-unset IS_CLAUDITABLE
+unset CLAUDITABLE_ALREADY_ACTIVE
 ```
 
 ## Basic Usage
@@ -32,11 +32,14 @@ unset IS_CLAUDITABLE
 Wrap any command for recording:
 
 ```ridealong
-AGENT_RECORDS_PATH=/tmp/clauditable-tour AGENT_SESSION=tour-session env -u IS_CLAUDITABLE ./clauditable echo "Hello, recorded world"
+AGENT_RECORDS_PATH=/tmp/clauditable-tour AGENT_SESSION=tour-session env -u CLAUDITABLE_ALREADY_ACTIVE ./clauditable echo "Hello, recorded world"
 ```
 
 ## Record Structure
 
+Sessions live under `<AGENT_RECORDS_PATH>/sessions/<session>/` (older
+installs kept them directly under `<AGENT_RECORDS_PATH>/`; clauditable moves
+them into `sessions/` on its next run, or on `clauditable migrate-sessions`).
 After execution, the session directory contains:
 
 - `session.jsonl` - Consolidated JSON lines with metadata
@@ -45,13 +48,13 @@ After execution, the session directory contains:
 View the session directory:
 
 ```ridealong
-ls -la /tmp/clauditable-tour/tour-session/
+ls -la /tmp/clauditable-tour/sessions/tour-session/
 ```
 
 View the session.jsonl entries:
 
 ```ridealong
-cat /tmp/clauditable-tour/tour-session/session.jsonl
+cat /tmp/clauditable-tour/sessions/tour-session/session.jsonl
 ```
 
 Example session.jsonl entry:
@@ -63,7 +66,7 @@ Example session.jsonl entry:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AGENT_RECORDS_PATH` | Base directory for records | `/host-agent-files/agent-records` |
+| `AGENT_RECORDS_PATH` | Records root (sessions under `sessions/`, plus `dtt-calls/` and `invocations/`) | `/host-agent-files/agent-records` |
 | `AGENT_SESSION` | Session identifier | Current date (YYYY-MM-DD) |
 | `UFA_AGENT` | Agent name to record | Empty |
 | `UFA_MODEL` | Model name to record | Empty |
@@ -71,7 +74,7 @@ Example session.jsonl entry:
 
 ## Double-Wrap Prevention
 
-clauditable sets `IS_CLAUDITABLE=true` in the environment. If this is already set, it passes through without recording to prevent duplicate entries.
+clauditable sets `CLAUDITABLE_ALREADY_ACTIVE=true` in the environment. If this is already set, it passes through without recording to prevent duplicate entries.
 
 ## Testing
 

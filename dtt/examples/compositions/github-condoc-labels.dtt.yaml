@@ -1,0 +1,30 @@
+# DTT example -- github, many PRs by pattern (see ../../README.md "Declarative tools").
+#
+# Label every open condoc PR, and request a reviewer. The select names a
+# pattern instead of one branch, so it matches every open PR into main whose
+# head is condoc/<anything>/main -- none at all is fine -- and never
+# creates one.
+#
+# labels and reviewers are lists asserted member by member: has: adds the
+# members it names and leaves the others alone. A member to add was absent,
+# so empty, and is always added; removing one (lacks:, or a whole list
+# without it) needs a from value naming it, the image having seen it, or
+# force.
+#
+#   dtt read examples/compositions/github-condoc-labels.dtt.yaml
+#   dtt run github --arg document_file=examples/compositions/github-condoc-labels.dtt.yaml --arg mode=assert
+
+github.users.user-1.repos.AI-sandboxing:
+  alias: the-repo
+
+the-repo:
+  assert:
+    prs:
+      select:
+        from: condoc/*/main        # every open PR whose head matches
+        to: main
+      state:
+        labels:
+          has: [condoc, needs-review]   # add these, leave others alone
+        reviewers:
+          has: [user-1]

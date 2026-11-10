@@ -1,0 +1,80 @@
+# local-representative control library: shut a local-system-under-test demo
+# down, undoing dtt-demo-prepare, for dtt's localrep-demo-shutdown example
+# (../localrep-demo-shutdown.dtt.yaml), which imports it into the library of
+# the node it targets and runs it there.
+#
+# It starts the robot (ianar) if it isn't running and wakes the screen, has
+# the robot delete the demo page the preparation put on the desktop (file:
+# demo-<time>.html; one already gone counts as deleted), then switch back to
+# the first workspace with the keyboard (super+home, GNOME's "switch to
+# first workspace"). GNOME's dynamic workspaces remove an empty workspace
+# once it's left, so leaving the demo's empty one removes it, and nothing
+# has to find it first. Every step is safe to run again: the page stays
+# deleted, and super+home on the first workspace does nothing. The node's
+# screen is recorded from the deletion to the end (steps 3-5). Every action
+# is its own (dtt-demo-shut-*), so importing this replaces none of the
+# library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-demo-shut-robot
+    name: Start the robot if it isn't running
+    description: launch the robot (ianar) as the system tab does if it isn't running, and wait for it to connect
+    do:
+      - {op: ensure-app, app: robot}
+  - id: dtt-demo-shut-wake
+    name: Unlock and wake the screen
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+      - {op: robot.ensure-awake}
+  - id: dtt-demo-shut-file
+    name: Delete the demo page with the robot
+    description: "robot: delete the demo page from the desktop, if it's still there"
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+    do:
+      - {op: robot.delete-file, path: "{{file}}", missing_ok: "true"}
+      - {op: output, label: file, value: "{{file}}"}
+  - id: dtt-demo-shut-workspace
+    name: Switch back to the first workspace with the robot
+    description: "robot: press switch-to-first-workspace, leaving the demo's empty workspace for GNOME to remove"
+    controls:
+      - name: keys
+        label: First-workspace keys
+        default: super+home
+    do:
+      - {op: robot.key, keys: "{{keys}}"}
+      - {op: robot.wait, duration: 1s}
+  - id: dtt-demo-shut-hold
+    name: Hold the first workspace
+    description: "robot: hold the first workspace for the recording"
+    do:
+      - {op: robot.wait, duration: 2s}
+      - {op: output, label: demo, value: "{{this_node}}: the demo page is gone, and the node is back on its first workspace"}
+sequences:
+  - id: dtt-demo-shutdown
+    name: "Demo: shut a local system under test down"
+    description: Start the robot if need be and wake the screen, delete the demo page (demo-<time>.html) if it's still there, and have the robot switch back to the first workspace, so GNOME removes the demo's empty one -- with this node's screen recorded while the robot works.
+    controls:
+      - name: file
+        label: Demo page
+        default: "~/Desktop/demo-{{timestamp}}.html"
+        help: the demo page dtt-demo-prepare put on the desktop (~ is the node user's home); dtt's examples name it demo-<unix seconds>.html
+      - name: keys
+        label: First-workspace keys
+        default: super+home
+        help: pressed once to switch to the first workspace (GNOME's "switch to first workspace"), leaving the demo's
+    steps:
+      - action: dtt-demo-shut-robot
+      - action: dtt-demo-shut-wake
+      - action: dtt-demo-shut-file
+        with:
+          file: "{{file}}"
+      - action: dtt-demo-shut-workspace
+        with:
+          keys: "{{keys}}"
+      - action: dtt-demo-shut-hold
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 5, label: "demo shutdown"}

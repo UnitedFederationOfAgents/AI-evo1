@@ -1,0 +1,94 @@
+# local-representative control library: the robot's hello world, for dtt's
+# localrep-robot-hello example (../localrep-robot-hello.dtt.yaml), which
+# imports it into the library of the node it targets and runs it there.
+#
+# It launches a new federation-command, marks it over the remote interface,
+# has the robot find it by the marker and take local control, type
+# echo "<message>" and check the output came back, then hand it back --
+# with the node's screen recorded across the robot's part (steps 3-6).
+# Every action is its own (dtt-hello-*), so importing this replaces none of
+# the library's other actions.
+format: lr-control-v1
+actions:
+  - id: dtt-hello-unlock
+    name: Unlock the screen if it is locked
+    description: "robot: unlock this node's screen through logind if it is locked, and wake it if it has blanked"
+    do:
+      - {op: robot.unlock-screen}
+  - id: dtt-hello-launch-fc
+    name: Launch a new federation-command instance
+    description: launch federation-command as the system tab does, then wait for the new instance to connect in remote control; saved as fc
+    do:
+      - {op: launch-fc, save_as: fc}
+  - id: dtt-hello-mark
+    name: Echo a marker through the remote interface
+    description: send an echo of a marker ending in random characters to that instance only, and wait for its output; saved as marker
+    controls:
+      - name: instance
+        label: federation-command instance
+        default: "{{fc}}"
+    do:
+      - {op: random, save_as: marker_token, length: "6"}
+      - {op: set, save_as: marker, value: "dtt hello - {{marker_token}}"}
+      - {op: fc-send, fc: "{{instance}}", command: 'echo "{{marker}}"', expect: "{{marker}}"}
+  - id: dtt-hello-take-local
+    name: Find the terminal with the robot and take local control
+    description: "robot: click the line reading the marker, press right; then check the instance reports local control"
+    controls:
+      - name: instance
+        label: federation-command instance
+        default: "{{fc}}"
+    do:
+      - {op: fc-require-window, fc: "{{instance}}"}
+      - {op: robot.ensure-awake}
+      - {op: robot.click-text, text: "{{marker}}", exact: "true", pick: bottom, timeout: 10s}
+      - {op: robot.key, keys: right}
+      - {op: fc-expect-state, fc: "{{instance}}", state: local-control, hint: "the robot pressed right but the click may have focused another window"}
+  - id: dtt-hello-type
+    name: Type the hello world with the robot
+    description: "robot: clear the command line, type echo \"<message>\" and press Enter; then check the instance printed the message, and bring it back as the run's output"
+    controls:
+      - name: instance
+        label: federation-command instance
+        default: "{{fc}}"
+      - name: message
+        label: Message
+        default: hello world!
+    do:
+      - {op: robot.key, keys: "end ctrl+u"}
+      - {op: robot.type, text: 'echo "{{message}}"'}
+      - {op: robot.key, keys: enter}
+      - {op: fc-expect-output, fc: "{{instance}}", text: "{{message}}", hint: "the robot typed the echo, but its output didn't come back"}
+      - {op: output, label: echoed, value: "{{message}}"}
+  - id: dtt-hello-give-back
+    name: Put the terminal back into remote control
+    description: "robot: press left; then check the instance reports remote control"
+    controls:
+      - name: instance
+        label: federation-command instance
+        default: "{{fc}}"
+    do:
+      - {op: robot.key, keys: left}
+      - {op: fc-expect-state, fc: "{{instance}}", state: remote-control, hint: "the robot pressed left but the terminal stayed in local control"}
+sequences:
+  - id: dtt-robot-hello
+    name: "Robot: hello world, recorded"
+    description: Launch a new federation-command, have the robot find it, take local control, echo a message and hand it back, with this node's screen recorded while the robot works.
+    controls:
+      - name: message
+        label: Message
+        default: hello world!
+        help: what the robot echoes
+    steps:
+      - action: dtt-hello-unlock
+      - action: dtt-hello-launch-fc
+      - action: dtt-hello-mark
+        label: 'Echo "dtt hello - <random-chars>" through the remote interface'
+      - action: dtt-hello-take-local
+      - action: dtt-hello-type
+        label: 'Type echo "<message>" with the robot'
+        with:
+          message: "{{message}}"
+      - action: dtt-hello-give-back
+    recordings:
+      - {node: "{{this_node}}", from: 3, to: 6, label: "robot hello world"}

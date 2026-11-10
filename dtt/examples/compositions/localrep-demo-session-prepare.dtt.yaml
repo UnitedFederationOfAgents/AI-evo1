@@ -1,0 +1,108 @@
+# DTT example -- localrep, open a session demo's windows on a prepared node (see ../../README.md "The localrep tool").
+#
+# It takes node, the node to open them on, as agent-coordinator names it
+# ("" by default, for this node); at, the unix seconds the node was
+# prepared at (localrep-demo-prepare's time); and ac_url, agent-coordinator's
+# URL as the node's browser reaches it ("" by default: asked of this node's
+# local-representative, as localrep.coordinator finds it). It imports the
+# control sequence in resources/demo-session-prepare.control.yaml into that
+# node's library and runs it there: it starts the robot (ianar) if it isn't
+# running, wakes the screen and makes sure session-manager is running; then,
+# on the demo's workspace, it opens a new federation-command terminal,
+# which the robot tiles to the left half of the screen (super+left), and,
+# through it, a new Chrome window of its own (a throwaway profile,
+# /tmp/dtt-demo-session-<at>, zoomed to 1.5x so the robot can read it) on
+# agent-coordinator, which the robot tiles to the right half (super+right).
+# The robot waits for agent-coordinator's page, types the node's
+# session-manager page through agent-coordinator
+# (<ac_url>/host/<node>/sessions/) into the address bar and waits for it,
+# leaving the terminal and session-manager side by side. The node's screen
+# is recorded while it works. Then composer, on this node, puts a title card,
+# the recording and a closing card together into a WebM in the files tab.
+#
+# The run's fc output (${{sprep-run.output.fc}}) names the terminal: the
+# session shutdown (localrep-demo-session-shutdown) closes the browser
+# through it, then the terminal. The run and the composition are named by
+# at (demo-session-prep-<at>), so one preparation opens the windows once:
+# asserting again does nothing. at defaults to now; on its own, give the
+# preparation's time. The session demos (localrep-demo-session,
+# localrep-demo-session-full) give it.
+# Deleting, with the assert's image, removes the sequence and the
+# composition (the run has happened, so it's kept); it doesn't close the
+# windows -- the session shutdown does.
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar, session-manager and federation-command
+# built beside it, a terminal for federation-command to open in, and
+# google-chrome (browser says how to start another). Here: compose
+# launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-session-prepare.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-session-prepare.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt delete examples/compositions/localrep-demo-session-prepare.dtt.yaml --var node=<node> --var at=<the same> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to open the session demo's windows on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the run, the composition and the browser's profile
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as the node's browser reaches it (http://host:port); empty to ask this node's local-representative
+  browser:
+    default: google-chrome
+    help: the browser command on the node (google-chrome, chromium, ...)
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.coordinator:
+  select:
+    url: ${{var.ac_url}}
+  alias: ac
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-session-prep
+    node: ${{var.node}}
+  alias: sprep-seq
+  assert:
+    source_file: resources/demo-session-prepare.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-session-prep
+    key: demo-session-prep-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: sprep-run
+  assert:
+    controls:
+      url: ${{ac.url}}
+      profile: /tmp/dtt-demo-session-${{the-time.unix}}
+      browser: ${{var.browser}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-session-prep-${{the-time.unix}}
+  alias: sprep-comp
+  assert:
+    composition: |
+      {
+        "name": "Session demo prep on ${{sprep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Opening agent-coordinator, session-manager and a terminal on ${{sprep-seq.node}}", "color": "#ffffff", "background": "#1e5f4a"},
+          {"kind": "media", "file_id": "${{sprep-run.recording.file_id}}", "file_name": "${{sprep-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{sprep-run.output.demo}}", "color": "#1a1a1a", "background": "#a0e0c0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

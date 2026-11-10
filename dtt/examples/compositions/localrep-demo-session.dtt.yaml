@@ -1,0 +1,120 @@
+# DTT example -- localrep, a session demo on a local system under test, composed of four others (see ../../README.md "Calls and phases").
+#
+# It takes node, the node to give the demo on, as agent-coordinator names it
+# ("" by default, for this node), and ac_url, agent-coordinator's URL as
+# that node's browser reaches it ("" by default: asked of this node's
+# local-representative). It is a composition, like localrep-demo-complete:
+# it calls four other examples (dtt.calls), one after another, each in its
+# own phase. Phase prepare calls localrep-demo-prepare: wake the node, put
+# the demo page on its desktop and switch to an empty workspace. Phase
+# session-prepare calls localrep-demo-session-prepare: make sure
+# session-manager is running, open a new federation-command terminal and a
+# new Chrome window on agent-coordinator, and have the robot take it to the
+# node's session-manager. Phase session-shut-down calls
+# localrep-demo-session-shutdown, given the session prep's terminal (its
+# run's fc output): close that Chrome and the terminal. Phase shut-down
+# calls localrep-demo-shutdown: delete the page and switch back to the first
+# workspace, so GNOME removes the demo's. Each of the four makes its own
+# composer composition (demo-prep-<time>, demo-session-prep-<time>,
+# demo-session-shutdown-<time>, demo-shutdown-<time>) of its own recording.
+# Then a fifth phase, compose, has composer put the four renders together,
+# between a title card and a closing card, into one more composition,
+# demo-session-<time>, rendered into a WebM in the files tab.
+#
+# All four calls are given this document's time (at), so they share the
+# demo page, the browser's profile and the names of their runs and
+# compositions; each assert gives a new demo. The image reports each phase
+# (phases), and a phase that fails stops the ones after it -- a failed
+# session prep leaves the node prepared, for the shutdown on its own (and
+# perhaps windows to close by hand). Deleting, with the assert's image,
+# deletes through each call too: the four sequences and all five
+# compositions (the runs have happened, so they're kept).
+#
+# It needs what the four calls need: local-representative connected to
+# agent-coordinator on the node, with ianar, session-manager and
+# federation-command built beside it; GNOME with dynamic workspaces; a
+# terminal for federation-command to open in; google-chrome. Here: compose
+# launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-session.dtt.yaml --var node=<node>
+#   dtt assert examples/compositions/localrep-demo-session.dtt.yaml --var node=<node>
+#   dtt delete examples/compositions/localrep-demo-session.dtt.yaml --var node=<node> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to give the demo on, as agent-coordinator names it; empty for this node
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as the node's browser reaches it (http://host:port); empty to ask this node's local-representative
+
+timestamp:
+  select: now
+  alias: the-time
+
+dtt.calls:
+  select:
+    document: localrep-demo-prepare.dtt.yaml
+  alias: prep
+  phase: prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-session-prepare.dtt.yaml
+  alias: sprep
+  phase: session-prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      ac_url: ${{var.ac_url}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-session-shutdown.dtt.yaml
+  alias: sshut
+  phase: session-shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{sprep.by_alias.sprep-run.output.fc}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-shutdown.dtt.yaml
+  alias: shut
+  phase: shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+localrep.compositions:
+  select:
+    id: demo-session-${{the-time.unix}}
+  alias: session-comp
+  phase: compose
+  assert:
+    composition: |
+      {
+        "name": "Session demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "A session demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1a1a1a"},
+          {"kind": "media", "file_id": "${{prep.by_alias.prep-comp.render.file_id}}", "file_name": "${{prep.by_alias.prep-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{sprep.by_alias.sprep-comp.render.file_id}}", "file_name": "${{sprep.by_alias.sprep-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{sshut.by_alias.sshut-comp.render.file_id}}", "file_name": "${{sshut.by_alias.sshut-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{shut.by_alias.shut-comp.render.file_id}}", "file_name": "${{shut.by_alias.shut-comp.render.name}}"},
+          {"kind": "title", "duration": 2, "text": "Prepared, opened, closed and shut down", "color": "#1a1a1a", "background": "#e0e0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

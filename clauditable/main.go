@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 	"unsafe"
 
 	"clauditable/pkg/records"
+	ufahostid "ufa-hostid"
+	ufaversion "ufa-version"
 )
 
 // openPTY opens a PTY master/slave pair. Returns (master, slave, error).
@@ -61,14 +64,17 @@ func isTerminal(fd uintptr) bool {
 // Environment variable names
 const (
 	EnvAgentRecordsPath        = "AGENT_RECORDS_PATH"
+	EnvAgentRecordsArchivePath = "AGENT_RECORDS_ARCHIVE_PATH"
 	EnvAgentSession            = "AGENT_SESSION"
-	EnvAgentConsolidateRecords = "AGENT_CONSOLIDATE_RECORDS"
+	EnvUFAHost                 = "UFA_HOST"
+	EnvUFAHead                 = "UFA_HEAD"
 	EnvUFAAgent                = "UFA_AGENT"
 	EnvUFAModel                = "UFA_MODEL"
 	EnvUFAMetadata             = "UFA_METADATA"
+	EnvUFAEventType            = "UFA_EVENT_TYPE" // Overrides the event_type eventTypeFor would pick
 	EnvUFAVerbosityManagement  = "UFA_VERBOSITY_MANAGEMENT"
 	EnvUFAVerbosityAfterLine   = "UFA_VERBOSITY_AFTER_LINE"
-	EnvIsClauditable           = "IS_CLAUDITABLE" // Used to prevent double-wrapping
+	EnvClauditableAlreadyActive = "CLAUDITABLE_ALREADY_ACTIVE" // Set by clauditable for its children to prevent double-wrapping
 
 	DefaultRecordsPath = "/host-agent-files/agent-records"
 
@@ -78,21 +84,63 @@ const (
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: clauditable <command> [args...]")
+		fmt.Fprintln(os.Stderr, "       clauditable archive | get-default-session | new-session <name> | rename-session <new-name>")
+		fmt.Fprintln(os.Stderr, "       clauditable add-note [text...] | add-resource [-name <name>] <path> | migrate-sessions | --version")
 		os.Exit(1)
 	}
 
-	// Check for double-wrapping: if IS_CLAUDITABLE is already set, pass through
-	// without recording to prevent duplicate logging
-	if os.Getenv(EnvIsClauditable) == "true" {
-		// Already in clauditable context, pass through directly
+	// --version: print version and exit instead of wrapping a command
+	if os.Args[1] == "--version" {
+		fmt.Println(ufaversion.Version)
+		return
+	}
+
+	// archive subcommand: move all sessions to archive directory
+	if os.Args[1] == "archive" {
+		os.Exit(runArchive())
+	}
+
+	// get-default-session: ensure today's default session exists, print its ID
+	if os.Args[1] == "get-default-session" {
+		os.Exit(runGetDefaultSession())
+	}
+
+	// new-session <name>: create a new named session, print its ID
+	if os.Args[1] == "new-session" {
+		os.Exit(runNewSession(os.Args[2:]))
+	}
+
+	// rename-session <new-name>: update the name field in the current session's session.yaml
+	if os.Args[1] == "rename-session" {
+		os.Exit(runRenameSession(os.Args[2:]))
+	}
+
+	// add-note [text...]: attach a note to the current session (text from stdin when no args)
+	if os.Args[1] == "add-note" {
+		os.Exit(runAddNote(os.Args[2:], os.Stdin))
+	}
+
+	// add-resource [-name <name>] <path>: attach a file to the current session
+	if os.Args[1] == "add-resource" {
+		os.Exit(runAddResource(os.Args[2:]))
+	}
+
+	// migrate-sessions: move legacy <records>/<session> directories under
+	// <records>/sessions/ (see layout.go), print how many were moved
+	if os.Args[1] == "migrate-sessions" {
+		os.Exit(runMigrateSessions())
+	}
+
+	// If a parent clauditable already set the guard, pass through without recording.
+	if os.Getenv(EnvClauditableAlreadyActive) == "true" {
 		cmdName := os.Args[1]
 		cmdArgs := os.Args[2:]
 		verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
 		os.Exit(runPassthrough(cmdName, cmdArgs, verbosity))
 	}
 
-	// Set IS_CLAUDITABLE for child processes to detect
-	os.Setenv(EnvIsClauditable, "true")
+	// Mark the environment so nested clauditable invocations pass through.
+	os.Setenv(EnvClauditableAlreadyActive, "true")
 
 	// Extract command and args
 	cmdName := os.Args[1]
@@ -100,12 +148,71 @@ func main() {
 
 	// Get configuration from environment
 	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	// Bring any session still directly under the records root into
+	// <root>/sessions/ before we look for ours (one ReadDir when there's none).
+	migrateLegacySessionsOrWarn(recordsPath)
 	session := getSession()
-	consolidate := getConsolidateRecords()
+	host := os.Getenv(EnvUFAHost)
+	if host == "" {
+		host = ufahostid.GetHostID()
+	}
+	head := os.Getenv(EnvUFAHead)
 	agent := os.Getenv(EnvUFAAgent)
 	model := os.Getenv(EnvUFAModel)
 	metadata := parseMetadata(os.Getenv(EnvUFAMetadata))
 	verbosity := newVerbosityRelay(os.Getenv(EnvUFAVerbosityManagement), os.Getenv(EnvUFAVerbosityAfterLine))
+
+	// Ensure session directory exists at dispatch time
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), session)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to create session directory: %v\n", err)
+	}
+	// Only today's default session (which this host always owns) is created
+	// on the fly here, with its pretty "<date> Default <host>" name. Any other
+	// session must already have been created by new-session or pulled in by a
+	// set-session: writing a session.yaml for it here would claim it for this
+	// host, which is how a session used on a second host used to fork.
+	if session == defaultSessionID() {
+		_ = writeSessionYAMLIfAbsent(sessionDir, session, defaultSessionName())
+	}
+	// Decided once, before anything is written: the owner writes
+	// session.jsonl and {ts}-*.txt; any other host its own secondary log and
+	// {ts}-<host>-*.txt (see sessionlog.go).
+	target := writeTargetFor(sessionDir)
+
+	// Write the writing file at dispatch time — signals that a writer is starting.
+	// Its first line is "<unix ts> <agent> <model>" ("-" for an unset one), which
+	// local-representative's "agent operations" reads (agentops.go); the
+	// dispatched command follows.
+	startTime := time.Now()
+	unixTimestamp := startTime.Unix()
+	prefix := recordPrefix(unixTimestamp, target.tag)
+	dispatchCommand := cmdName
+	if len(cmdArgs) > 0 {
+		dispatchCommand = cmdName + " " + strings.Join(cmdArgs, " ")
+	}
+	writingFilePath := filepath.Join(sessionDir, prefix+"-writing.txt")
+	if err := os.WriteFile(writingFilePath, []byte(fmt.Sprintf("%d %s %s\n%s\n", unixTimestamp, dashIfEmpty(agent), dashIfEmpty(model), dispatchCommand)), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write writing file: %v\n", err)
+	}
+
+	// Wait 200ms to detect concurrent starters, then determine primary/secondary role
+	time.Sleep(200 * time.Millisecond)
+	isPrimary := checkIsPrimary(sessionDir, unixTimestamp)
+	if !isPrimary {
+		secondaryPath := filepath.Join(sessionDir, prefix+"-s-writing.txt")
+		if err := os.Rename(writingFilePath, secondaryPath); err == nil {
+			writingFilePath = secondaryPath
+		}
+	}
+
+	if verbosity.enabled {
+		writtenPath := filepath.Join(sessionDir, prefix+"-raw.txt")
+		if !isPrimary {
+			writtenPath = filepath.Join(sessionDir, prefix+"-s-raw.txt")
+		}
+		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", writtenPath)
+	}
 
 	// Prepare the command
 	cmd := exec.Command(cmdName, cmdArgs...)
@@ -113,12 +220,11 @@ func main() {
 	// Capture buffers
 	var stdoutBuf, stderrBuf strings.Builder
 
-	startTime := time.Now()
-	rawRecordPath := expectedRawRecordPath(recordsPath, session, startTime.Unix())
-	if verbosity.enabled {
-		fmt.Fprintf(os.Stdout, "Verbose output saved to %s\n\n", rawRecordPath)
-	}
+	cmdStartTime := time.Now()
 	var err error
+	// Set once the child has started: SIGINT/SIGTERM sent to us go to the
+	// child instead of killing us, so the record is still written.
+	stopForwarding := func() {}
 
 	// When our stdout is a terminal, use a PTY for the child's stdout so that
 	// programs like git detect they're writing to a terminal and enable colors.
@@ -139,6 +245,7 @@ func main() {
 				os.Exit(1)
 			}
 			pts.Close() // parent doesn't need the slave after the child starts
+			stopForwarding = forwardSignals(cmd)
 
 			// Relay PTY output to our terminal and capture for the record.
 			// PTY line discipline converts \n → \r\n; strip the extra \r for storage.
@@ -177,6 +284,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
 			os.Exit(1)
 		}
+		stopForwarding = forwardSignals(cmd)
 
 		done := make(chan struct{}, 2)
 		go func() {
@@ -202,7 +310,8 @@ func main() {
 	}
 
 	err = cmd.Wait()
-	duration := time.Since(startTime)
+	stopForwarding()
+	duration := time.Since(cmdStartTime)
 
 	exitCode := 0
 	if err != nil {
@@ -220,11 +329,12 @@ func main() {
 	}
 
 	// Create record using the pkg/records package
-	unixTimestamp := startTime.Unix()
 	record := records.Record{
 		Event: records.Event{
 			Timestamp:  startTime.Format(time.RFC3339),
-			EventType:  "command_execution",
+			EventType:  eventTypeFor(agent, os.Getenv(EnvUFAEventType)),
+			Host:       host,
+			Head:       head,
 			Agent:      agent,
 			Model:      model,
 			DurationMs: duration.Milliseconds(),
@@ -236,22 +346,52 @@ func main() {
 		Stderr:  stderrBuf.String(),
 	}
 
-	// Write the records
-	recordPath, err := writeRecord(recordsPath, session, unixTimestamp, &record)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write record: %v\n", err)
+	// Write the written file (completion marker) and remove the writing file
+	if _, err := writeWrittenFile(sessionDir, unixTimestamp, target.tag, isPrimary, &record); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write written file: %v\n", err)
 	} else {
-		record.Event.RecordPath = recordPath
-
-		// Consolidate if enabled
-		if consolidate {
-			if err := consolidateRecords(recordsPath, session); err != nil {
+		os.Remove(writingFilePath)
+		// Primary collects all secondary written files and adds everything to
+		// this host's log (session.jsonl on the owner)
+		if isPrimary {
+			if err := consolidatePrimaryToJSONL(recordsPath, session, unixTimestamp, target); err != nil {
 				fmt.Fprintf(os.Stderr, "clauditable: warning: failed to consolidate records: %v\n", err)
+			}
+		}
+		// dtt_call and ai_invocation records also get a copy under the
+		// records root (<root>/dtt-calls, <root>/invocations -- see layout.go),
+		// naming the session record by its final (consolidated) file name.
+		if copyDir := recordCopyDir(record.Event.EventType); copyDir != "" {
+			sessionRecord := recordPrefix(unixTimestamp, target.tag) + "-raw.txt"
+			if _, err := writeRecordCopy(recordsPath, copyDir, session, sessionRecord, unixTimestamp, record); err != nil {
+				fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write %s copy: %v\n", copyDir, err)
 			}
 		}
 	}
 
 	os.Exit(exitCode)
+}
+
+// eventTypeFor picks a wrapped command's event_type. override (UFA_EVENT_TYPE)
+// wins when set. Otherwise the run is an AI invocation when an agent was named
+// (UFA_AGENT): ambiguous-agent and federation-command's agent paths set it to
+// the agent, and federation-command sets "none" for its plain shell commands.
+func eventTypeFor(agent, override string) string {
+	if override = strings.TrimSpace(override); override != "" {
+		return override
+	}
+	if agent != "" && agent != "none" {
+		return records.EventTypeAIInvocation
+	}
+	return records.EventTypeCommandExecution
+}
+
+// dashIfEmpty keeps a writing file's header fields space-separable.
+func dashIfEmpty(s string) string {
+	if s = strings.Join(strings.Fields(s), "_"); s == "" {
+		return "-"
+	}
+	return s
 }
 
 // getEnvOrDefault returns the environment variable value or the default
@@ -287,6 +427,40 @@ func newVerbosityRelay(mode, afterLine string) *verbosityRelay {
 	}
 }
 
+// forwardSignals relays SIGINT and SIGTERM received by clauditable to cmd's
+// (already started) process instead of letting them kill clauditable, so a
+// cancelled command still ends with its record written. The returned func
+// stops forwarding; call it once cmd.Wait has returned.
+//
+// A Ctrl-C typed at a terminal reaches the child directly (it shares our
+// process group), so SIGINT is only absorbed then, not sent again: an
+// interactive agent would read a second SIGINT as "quit now".
+func forwardSignals(cmd *exec.Cmd) (stop func()) {
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	interactive := isTerminal(os.Stdin.Fd())
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case sig := <-sigs:
+				if sig == syscall.SIGINT && interactive {
+					continue
+				}
+				if cmd.Process != nil {
+					cmd.Process.Signal(sig)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		signal.Stop(sigs)
+		close(done)
+	}
+}
+
 func runPassthrough(cmdName string, cmdArgs []string, verbosity *verbosityRelay) int {
 	cmd := exec.Command(cmdName, cmdArgs...)
 	cmd.Stdin = os.Stdin
@@ -294,7 +468,13 @@ func runPassthrough(cmdName string, cmdArgs []string, verbosity *verbosityRelay)
 	if verbosity == nil || !verbosity.enabled {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
+		if err := cmd.Start(); err != nil {
+			return 1
+		}
+		stop := forwardSignals(cmd)
+		err := cmd.Wait()
+		stop()
+		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				return exitErr.ExitCode()
 			}
@@ -317,6 +497,8 @@ func runPassthrough(cmdName string, cmdArgs []string, verbosity *verbosityRelay)
 		fmt.Fprintf(os.Stderr, "clauditable: failed to start command: %v\n", err)
 		return 1
 	}
+	stop := forwardSignals(cmd)
+	defer stop()
 
 	done := make(chan struct{}, 2)
 	go func() {
@@ -378,35 +560,65 @@ func (r *verbosityRelay) write(out *os.File, p []byte) {
 }
 
 func expectedRawRecordPath(recordsPath, session string, timestamp int64) string {
-	return filepath.Join(recordsPath, session, fmt.Sprintf("%d-raw.txt", timestamp))
+	return filepath.Join(sessionsRoot(recordsPath), session, fmt.Sprintf("%d-raw.txt", timestamp))
 }
 
-// getSession returns the session identifier
-// Uses AGENT_SESSION if set, otherwise uses current date (auto-updates daily)
-// Note: Uses local time with proper timezone handling to avoid "tomorrow" date bugs
+// getSession returns the session identifier.
+// If AGENT_SESSION is unset or "default", uses today's default session for this
+// host (YYYY-MM-DD-<host>-default).
 func getSession() string {
-	if session := os.Getenv(EnvAgentSession); session != "" {
+	if session := os.Getenv(EnvAgentSession); session != "" && session != "default" {
 		return session
 	}
-	// Use local time but truncate to start of day to ensure consistency
-	now := time.Now()
-	localDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	return localDate.Format("2006-01-02")
+	return defaultSessionID()
 }
 
-// getConsolidateRecords returns whether record consolidation is enabled
-// Defaults to true
-func getConsolidateRecords() bool {
-	value := os.Getenv(EnvAgentConsolidateRecords)
-	if value == "" {
-		return true
+// defaultSessionName returns today's default session's human-readable display
+// name ("<date> Default <host>") -- see runGetDefaultSession. Shared with the
+// dispatch-time writeSessionYAMLIfAbsent fallback below so that whichever
+// clauditable invocation happens to be first to create the day's default
+// session.yaml (get-default-session, or a plain dispatched command racing
+// ahead of it) still gets the pretty name instead of the bare session ID
+// (condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision D).
+func defaultSessionName() string {
+	return time.Now().Format("2006-01-02") + " Default " + ufahostid.GetHostID()
+}
+
+// defaultSessionID returns today's default session identifier for this host
+// (YYYY-MM-DD-<host>-default). This is day-granular, not per-invocation, so
+// that every instance started on the same day on the same host resolves to the
+// one session already created for that day instead of piling up a fresh one
+// each time. Concurrent first-creators of the day all compute this same ID and
+// converge on it via ensureSession/writeSessionYAMLIfAbsent's create-if-absent
+// semantics. The host is part of the ID (not just the name) so that hosts whose
+// records are synced together each land on their own default session
+// (condocs/initialRobotImpls/Step3SubstepCPrompt.md). The "-default" suffix is
+// kept last since it is what marks the ID as a reserved daily default.
+func defaultSessionID() string {
+	return defaultSessionIDFor(time.Now(), ufahostid.GetHostID())
+}
+
+// defaultSessionIDFor builds the default session ID for the given day and host.
+func defaultSessionIDFor(day time.Time, hostID string) string {
+	return day.Format("2006-01-02") + "-" + sanitizeHostIDForSession(hostID) + "-default"
+}
+
+// sanitizeHostIDForSession makes a host ID safe to embed in a session ID (which
+// is also a directory name): anything outside [A-Za-z0-9._-] becomes '-'.
+func sanitizeHostIDForSession(hostID string) string {
+	var b strings.Builder
+	for _, r := range hostID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
 	}
-	// Parse as boolean, defaulting to true on error
-	b, err := strconv.ParseBool(value)
-	if err != nil {
-		return true
+	if s := strings.Trim(b.String(), ".-"); s != "" {
+		return s
 	}
-	return b
+	return "unknown"
 }
 
 // parseMetadata parses the UFA_METADATA environment variable
@@ -444,112 +656,251 @@ func parseMetadata(s string) map[string]string {
 	return result
 }
 
-// writeRecord writes both the session log entry and the raw file
-// Returns the record path (used for both the consolidated entry and raw file reference)
-func writeRecord(recordsPath, session string, timestamp int64, record *records.Record) (string, error) {
-	sessionDir := filepath.Join(recordsPath, session)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create session directory: %w", err)
+// recordTimestamp returns the timestamp a record file name starts with, given
+// the suffix it ends with: "{ts}{suffix}" on the owner, "{ts}-<host>{suffix}"
+// on any other host (see sessionlog.go).
+func recordTimestamp(name, suffix string) (int64, bool) {
+	prefix, ok := strings.CutSuffix(name, suffix)
+	if !ok {
+		return 0, false
 	}
-
-	tsStr := fmt.Sprintf("%d", timestamp)
-	recordFile := filepath.Join(sessionDir, tsStr)
-	rawFile := filepath.Join(sessionDir, tsStr+"-raw.txt")
-
-	// Set record path in the event for reference (used for both purposes)
-	record.Event.RecordPath = recordFile
-
-	// Write the session log entry (will be consolidated later)
-	sessionLogContent := record.FormatSessionLog()
-	if err := os.WriteFile(recordFile, []byte(sessionLogContent), 0644); err != nil {
-		return "", fmt.Errorf("failed to write record file: %w", err)
+	tsStr, tag, hasTag := strings.Cut(prefix, "-")
+	if (hasTag && tag == "") || !isUnixTimestamp(tsStr) {
+		return 0, false
 	}
-
-	// Write the raw file (not consolidated, kept as permanent record)
-	rawContent := record.FormatRawFile()
-	if err := os.WriteFile(rawFile, []byte(rawContent), 0644); err != nil {
-		// Record file was written, log warning but don't fail
-		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write raw file: %v\n", err)
-	}
-
-	return recordFile, nil
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	return ts, err == nil
 }
 
-// consolidateRecords collects all unix-timestamp format logs and appends them to session.jsonl
-func consolidateRecords(recordsPath, session string) error {
-	sessionDir := filepath.Join(recordsPath, session)
-	sessionLog := filepath.Join(sessionDir, "session.jsonl")
-
-	// Read directory entries
+// checkIsPrimary returns true if no other primary writing file with a lower timestamp
+// exists in sessionDir. The first writer (lowest timestamp) becomes primary;
+// later concurrent starters become secondary.
+func checkIsPrimary(sessionDir string, ourTimestamp int64) bool {
 	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		// Look for primary writing files: end with -writing.txt but NOT -s-writing.txt
+		if strings.HasSuffix(name, "-s-writing.txt") {
+			continue
+		}
+		ts, ok := recordTimestamp(name, "-writing.txt")
+		if !ok || ts == ourTimestamp {
+			continue
+		}
+		if ts < ourTimestamp {
+			return false // older primary exists → we are secondary
+		}
+	}
+	return true
+}
+
+// writeWrittenFile writes the completed record as the "written file" at completion time.
+// Primaries produce {timestamp}-raw.txt; secondaries produce {timestamp}-s-raw.txt.
+// tag goes between the timestamp and the suffix -- "" on the session's owner,
+// "-<host>" on any other host (see sessionlog.go).
+// The record's RecordPath is set to the written file path before formatting.
+//
+// The producer of the raw/s-raw file always handles its own raw-->processed step
+// immediately afterward (see writeProcessedFile), rather than leaving that work for
+// whichever process later happens to run primary consolidation.
+func writeWrittenFile(sessionDir string, timestamp int64, tag string, isPrimary bool, record *records.Record) (string, error) {
+	suffix := "-raw.txt"
+	if !isPrimary {
+		suffix = "-s-raw.txt"
+	}
+	filePath := filepath.Join(sessionDir, recordPrefix(timestamp, tag)+suffix)
+	record.Event.RecordPath = filePath
+	content := record.FormatWrittenFile()
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		return "", fmt.Errorf("failed to write written file: %w", err)
+	}
+
+	if err := writeProcessedFile(sessionDir, timestamp, tag, isPrimary, content); err != nil {
+		// The raw/s-raw file (the permanent record) is already written; a failure
+		// to also produce the processed file is a warning, not a fatal error.
+		fmt.Fprintf(os.Stderr, "clauditable: warning: failed to write processed file: %v\n", err)
+	}
+
+	return filePath, nil
+}
+
+// writeProcessedFile applies auto-maintenance (secret redaction, loading-bar stripping,
+// truncation) to a just-produced raw/s-raw file's content and writes {timestamp}-processed.txt
+// for a primary, or {timestamp}-s-processed.txt for a secondary (with tag after the timestamp,
+// as in writeWrittenFile). Keeping the "-s-" infix on a secondary's processed file (rather than
+// writing straight to its final {timestamp}-processed.txt name) is what lets a later
+// consolidation tell "already processed, not yet folded into the session log" apart from
+// "fully consolidated". "-s-" files are never synced to other hosts (see
+// local-representative/sessions.go's syncableSessionFile). Each call processes exactly one file
+// on behalf of its own producer, so it is always the first (and only) file in its batch and
+// emits a no-op header when nothing needed processing.
+func writeProcessedFile(sessionDir string, timestamp int64, tag string, isPrimary bool, writtenContent string) error {
+	processedContent, headers := records.ApplyAutoMaintenance(writtenContent, true)
+	processedFileContent := records.FormatProcessedFile(processedContent, headers)
+	suffix := "-processed.txt"
+	if !isPrimary {
+		suffix = "-s-processed.txt"
+	}
+	processedPath := filepath.Join(sessionDir, recordPrefix(timestamp, tag)+suffix)
+	return os.WriteFile(processedPath, []byte(processedFileContent), 0644)
+}
+
+// consolidatePrimaryToJSONL is called by the primary on completion. It folds its own
+// record (via its already-produced {primaryTs}-processed.txt) and every secondary's
+// already-processed record currently sitting in the session directory
+// ({ts}-s-processed.txt, written by that record's own producer via writeProcessedFile)
+// into this host's session log (target.logPath: session.jsonl on the owner, the
+// host's secondary log elsewhere -- see sessionlog.go), in timestamp order, in a
+// single locked append. Only files carrying this host's tag are considered.
+//
+// Folding from {ts}-s-processed.txt rather than {ts}-s-raw.txt (unlike the primary's
+// own always-local -raw.txt) picks up a local secondary's concurrent invocation on
+// this same host (which also leaves a sibling {ts}-s-raw.txt next to its
+// {ts}-s-processed.txt, promoted to {ts}-raw.txt below), and also an -s-processed.txt
+// with no -s-raw.txt sibling. No one-time auto-maintenance (redaction, etc.) ever runs
+// again here: it only ever runs once, at raw.txt-->processed.txt time, by a record's
+// own producer. If a processed file is unexpectedly missing but its raw/s-raw
+// counterpart is available locally, it is produced here as a fallback so
+// consolidation never skips it.
+func consolidatePrimaryToJSONL(recordsPath, session string, primaryTimestamp int64, target sessionWriteTarget) error {
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), session)
+
+	dirEntries, err := os.ReadDir(sessionDir)
 	if err != nil {
 		return fmt.Errorf("failed to read session directory: %w", err)
 	}
 
-	// Find all unix-timestamp files (numeric filenames, not -raw.txt files)
-	var timestampFiles []string
-	for _, entry := range entries {
+	// tsWithTag accepts name only when it's one of this host's own record
+	// files: "{ts}{target.tag}{suffix}".
+	tsWithTag := func(name, suffix string) (int64, bool) {
+		ts, ok := recordTimestamp(name, suffix)
+		if !ok || name != recordPrefix(ts, target.tag)+suffix {
+			return 0, false
+		}
+		return ts, true
+	}
+	sProcessedByTS := make(map[int64]string)
+	sRawByTS := make(map[int64]string)
+	for _, entry := range dirEntries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if name == "session.jsonl" {
-			continue
-		}
-		// Skip -raw.txt files (they are not consolidated)
-		if strings.HasSuffix(name, "-raw.txt") {
-			continue
-		}
-		// Check if filename is a valid unix timestamp (all digits)
-		if isUnixTimestamp(name) {
-			timestampFiles = append(timestampFiles, name)
+		if ts, ok := tsWithTag(name, "-s-processed.txt"); ok {
+			sProcessedByTS[ts] = filepath.Join(sessionDir, name)
+		} else if ts, ok := tsWithTag(name, "-s-raw.txt"); ok {
+			sRawByTS[ts] = filepath.Join(sessionDir, name)
 		}
 	}
 
-	if len(timestampFiles) == 0 {
-		return nil
+	// foldEntry describes one record to append to session.jsonl: where to read its
+	// already-processed session-log text from (processedPath), a raw fallback to
+	// reprocess from if that's missing/unreadable, and what to rename once folded.
+	type foldEntry struct {
+		ts             int64
+		processedPath  string // "" means "reconstruct from rawFallback"
+		rawFallback    string // raw content to reprocess from if processedPath is empty/unreadable
+		sProcessedPath string // {ts}-s-processed.txt to promote to {ts}-processed.txt once folded, if any
+		sRawPath       string // {ts}-s-raw.txt to promote to {ts}-raw.txt once folded, if any
 	}
 
-	// Sort by timestamp (numeric order)
-	sort.Slice(timestampFiles, func(i, j int) bool {
-		ti, _ := strconv.ParseInt(timestampFiles[i], 10, 64)
-		tj, _ := strconv.ParseInt(timestampFiles[j], 10, 64)
-		return ti < tj
+	finalName := func(ts int64, suffix string) string {
+		return filepath.Join(sessionDir, recordPrefix(ts, target.tag)+suffix)
+	}
+	entries := []foldEntry{{
+		ts:            primaryTimestamp,
+		processedPath: finalName(primaryTimestamp, "-processed.txt"),
+		rawFallback:   finalName(primaryTimestamp, "-raw.txt"),
+	}}
+
+	seen := map[int64]bool{primaryTimestamp: true}
+	addSecondary := func(ts int64) {
+		if seen[ts] {
+			return
+		}
+		seen[ts] = true
+		e := foldEntry{ts: ts}
+		if p, ok := sProcessedByTS[ts]; ok {
+			e.processedPath = p
+			e.sProcessedPath = p
+		}
+		if r, ok := sRawByTS[ts]; ok {
+			e.sRawPath = r
+			e.rawFallback = r
+		}
+		entries = append(entries, e)
+	}
+	for ts := range sProcessedByTS {
+		addSecondary(ts)
+	}
+	for ts := range sRawByTS {
+		addSecondary(ts)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].ts < entries[j].ts
 	})
 
-	// Open session.jsonl for appending
-	f, err := os.OpenFile(sessionLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open session.jsonl: %w", err)
-	}
-	defer f.Close()
-
-	// Process each timestamp file
-	for _, tsFile := range timestampFiles {
-		filePath := filepath.Join(sessionDir, tsFile)
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			continue // Skip files we can't read
+	// Everything is gathered first and appended in one locked write; the
+	// "-s-" files are only promoted once that write has landed.
+	var logContent strings.Builder
+	var promotions [][2]string
+	noOpEligible := true
+	for _, e := range entries {
+		var processedFileContent []byte
+		readErr := os.ErrNotExist
+		if e.processedPath != "" {
+			processedFileContent, readErr = os.ReadFile(e.processedPath)
 		}
-
-		// Write the content directly to session.jsonl
-		// The content is already in the correct format (JSON line + plaintext)
-		if _, err := f.Write(data); err != nil {
-			return fmt.Errorf("failed to write to session.jsonl: %w", err)
-		}
-
-		// Ensure there's a blank line between entries for readability
-		if !strings.HasSuffix(string(data), "\n\n") {
-			if !strings.HasSuffix(string(data), "\n") {
-				f.Write([]byte("\n"))
+		if readErr != nil {
+			if e.rawFallback == "" {
+				// A remote-origin secondary with no local raw counterpart and
+				// no processed file either (a broken transfer) -- nothing to
+				// reconstruct from locally; skip it until a future
+				// consolidation sees it.
+				continue
 			}
-			f.Write([]byte("\n"))
+			data, rerr := os.ReadFile(e.rawFallback)
+			if rerr != nil {
+				continue
+			}
+			content, headers := records.ApplyAutoMaintenance(string(data), noOpEligible)
+			noOpEligible = false
+			fallback := records.FormatProcessedFile(content, headers)
+			os.WriteFile(finalName(e.ts, "-processed.txt"), []byte(fallback), 0644)
+			processedFileContent = []byte(fallback)
+			e.sProcessedPath = "" // already written straight to the final name -- nothing to rename
 		}
 
-		// Delete the original file
-		os.Remove(filePath)
+		sessionLogContent := records.ExtractSessionLogFromWrittenFile(string(processedFileContent))
+		logContent.WriteString(sessionLogContent)
+		if !strings.HasSuffix(sessionLogContent, "\n\n") {
+			if !strings.HasSuffix(sessionLogContent, "\n") {
+				logContent.WriteString("\n")
+			}
+			logContent.WriteString("\n")
+		}
+
+		if e.sProcessedPath != "" {
+			promotions = append(promotions, [2]string{e.sProcessedPath, finalName(e.ts, "-processed.txt")})
+		}
+		if e.sRawPath != "" {
+			promotions = append(promotions, [2]string{e.sRawPath, finalName(e.ts, "-raw.txt")})
+		}
 	}
 
+	if logContent.Len() == 0 {
+		return nil
+	}
+	if err := appendSessionLog(target.logPath, []byte(logContent.String())); err != nil {
+		return fmt.Errorf("failed to append to %s: %w", filepath.Base(target.logPath), err)
+	}
+	for _, p := range promotions {
+		os.Rename(p[0], p[1])
+	}
 	return nil
 }
 
@@ -564,4 +915,204 @@ func isUnixTimestamp(s string) bool {
 		}
 	}
 	return true
+}
+
+// runGetDefaultSession ensures today's default session exists and prints its ID.
+func runGetDefaultSession() int {
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	migrateLegacySessionsOrWarn(recordsPath)
+	sessionID := defaultSessionID()
+	name := defaultSessionName()
+	if err := ensureSession(recordsPath, sessionID, name); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable get-default-session: %v\n", err)
+		return 1
+	}
+	fmt.Println(sessionID)
+	return 0
+}
+
+// runNewSession creates a new named session and prints its ID.
+// Expects args = [name words...].
+func runNewSession(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: clauditable new-session <name>")
+		return 1
+	}
+	name := strings.Join(args, " ")
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	migrateLegacySessionsOrWarn(recordsPath)
+	sessionID := generateSessionID(name)
+	if strings.HasSuffix(sessionID, "-default") {
+		fmt.Fprintf(os.Stderr, "clauditable new-session: session IDs ending in '-default' are reserved\n")
+		return 1
+	}
+	if err := ensureSession(recordsPath, sessionID, name); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable new-session: %v\n", err)
+		return 1
+	}
+	fmt.Println(sessionID)
+	return 0
+}
+
+// generateSessionID produces a filesystem-safe ID from a human-readable name.
+func generateSessionID(name string) string {
+	slug := slugify(name)
+	if slug == "" {
+		slug = "session"
+	}
+	return fmt.Sprintf("%s_%s", time.Now().Format("2006-01-02_15-04-05"), slug)
+}
+
+// slugify converts a human-readable name to a lowercase, hyphen-separated slug
+// suitable for filesystem use (max 40 chars).
+func slugify(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	prevDash := true
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteRune('-')
+			prevDash = true
+		}
+	}
+	result := strings.TrimRight(b.String(), "-")
+	if len(result) > 40 {
+		result = strings.TrimRight(result[:40], "-")
+	}
+	return result
+}
+
+// ensureSession creates the session directory (under sessionsRoot) and
+// session.yaml if they don't exist.
+func ensureSession(recordsPath, sessionID, name string) error {
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), sessionID)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("failed to create session directory: %w", err)
+	}
+	return writeSessionYAMLIfAbsent(sessionDir, sessionID, name)
+}
+
+// writeSessionYAMLIfAbsent writes session.yaml only when it doesn't already
+// exist. owner records the host that created the session (see
+// condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C) --
+// never rewritten afterward, so it stays pinned to whichever host actually
+// made the directory even if another host later renames or takes over it.
+func writeSessionYAMLIfAbsent(sessionDir, sessionID, name string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	if _, err := os.Stat(yamlPath); err == nil {
+		return nil
+	}
+	content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+		sessionID, name, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
+	return os.WriteFile(yamlPath, []byte(content), 0644)
+}
+
+// runRenameSession updates the name field in the current session's session.yaml.
+func runRenameSession(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: clauditable rename-session <new-name>")
+		return 1
+	}
+	newName := strings.Join(args, " ")
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	migrateLegacySessionsOrWarn(recordsPath)
+	sessionID := getSession()
+	sessionDir := filepath.Join(sessionsRoot(recordsPath), sessionID)
+	if err := updateSessionYAMLName(sessionDir, sessionID, newName); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable rename-session: %v\n", err)
+		return 1
+	}
+	fmt.Printf("session renamed to: %s\n", newName)
+	return 0
+}
+
+// updateSessionYAMLName writes the new name into session.yaml, creating the file if needed.
+func updateSessionYAMLName(sessionDir, sessionID, newName string) error {
+	yamlPath := filepath.Join(sessionDir, "session.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		content := fmt.Sprintf("id: %s\nname: %s\nowner: %s\ncreated: %s\n",
+			sessionID, newName, ufahostid.GetHostID(), time.Now().Format(time.RFC3339))
+		return os.WriteFile(yamlPath, []byte(content), 0644)
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "name: ") {
+			lines[i] = "name: " + newName
+			found = true
+			break
+		}
+	}
+	if !found {
+		newLines := make([]string, 0, len(lines)+1)
+		idInserted := false
+		for _, line := range lines {
+			newLines = append(newLines, line)
+			if !idInserted && strings.HasPrefix(line, "id: ") {
+				newLines = append(newLines, "name: "+newName)
+				idInserted = true
+			}
+		}
+		if !idInserted {
+			newLines = append(newLines, "name: "+newName)
+		}
+		lines = newLines
+	}
+	return os.WriteFile(yamlPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+// runArchive moves all session directories from AGENT_RECORDS_PATH/sessions
+// to AGENT_RECORDS_ARCHIVE_PATH/<datetime>/<session> (legacy sessions still
+// directly under the root are migrated into sessions/ first). The dtt-calls
+// and invocations copies stay where they are. Returns an exit code.
+func runArchive() int {
+	recordsPath := getEnvOrDefault(EnvAgentRecordsPath, DefaultRecordsPath)
+	archiveBase := getEnvOrDefault(EnvAgentRecordsArchivePath, recordsPath+"-archive")
+	migrateLegacySessionsOrWarn(recordsPath)
+	sessionsPath := sessionsRoot(recordsPath)
+
+	entries, err := os.ReadDir(sessionsPath)
+	if err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "clauditable archive: failed to read sessions path %q: %v\n", sessionsPath, err)
+		return 1
+	}
+
+	var sessions []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			sessions = append(sessions, entry.Name())
+		}
+	}
+
+	if len(sessions) == 0 {
+		fmt.Println("clauditable archive: no sessions to archive")
+		return 0
+	}
+
+	archiveDir := filepath.Join(archiveBase, time.Now().Format("2006-01-02_15-04-05"))
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "clauditable archive: failed to create archive directory %q: %v\n", archiveDir, err)
+		return 1
+	}
+
+	exitCode := 0
+	for _, session := range sessions {
+		src := filepath.Join(sessionsPath, session)
+		dst := filepath.Join(archiveDir, session)
+		if err := os.Rename(src, dst); err != nil {
+			fmt.Fprintf(os.Stderr, "clauditable archive: failed to move session %q: %v\n", session, err)
+			exitCode = 1
+		}
+	}
+
+	if exitCode == 0 {
+		fmt.Printf("Archived %d session(s) to %s\n", len(sessions), archiveDir)
+	} else {
+		fmt.Printf("Archived with errors — %d session(s) targeted, destination: %s\n", len(sessions), archiveDir)
+	}
+	return exitCode
 }

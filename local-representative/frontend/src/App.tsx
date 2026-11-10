@@ -1,0 +1,4940 @@
+import { useState, useEffect, useCallback, useRef, useMemo, useContext, createContext } from 'react'
+import type { ServiceStatus, StatusMsg, FCStateMsg, FCLogMsg, FCInstanceInfo, FCInstancesMsg, ControlStateMsg, ControlLibraryMsg, ControlLibReply, ControlLibRequest, RidealongStateMsg, CondocStateMsg, ACStateMsg, ProcInfo, SystemStateMsg, ConnectionInfo, AgentsState, FileInfo, FilesStateMsg, ModeMismatchMsg, RepoStateMsg, TCAvailabilityMsg, ConvoStateMsg, WorkerStateMsg, WorkerSignalInfo, WorkerReplyMsg, SlopspaceInfo, WorkerSlopspaceRequest, WorkerSlopspaceReply, PluginInfo, PluginsStateMsg, UIManifest } from './types'
+import { ProposalReview, SlopspaceFiles } from './SlopspaceDTT'
+import { noteTCStart } from './tcannounce'
+import { ControlV1 } from './ControlV1'
+import { HostFilePicker } from './HostFilePicker'
+import type { ControlV1Props } from './ControlV1'
+import { detectTextFormat } from './textformat'
+import { WorkerVisual } from './WorkerVisual'
+import type { WorkFocus } from './WorkerVisual'
+import { AgentOps } from './AgentOps'
+import { ToolsPanel } from './Tools'
+import type { ToolsStateMsg, ToolsReply, ToolsRequest } from './Tools'
+import { DemoPanel } from './Demo'
+import type { DemoAppStatus } from './Demo'
+
+// Every managed sub-application has a same-named tab. demo, plugins,
+// control, tools, system and files are LR's own: they belong to no managed
+// app, so they're not in EMBED_TABS or LAUNCHABLE_APPS. demo puts several
+// sub-apps together (see DemoPanel); plugins holds external plug-ins behind
+// its own tab bar (see PluginsShell); the first-party sub-apps keep their
+// own tabs here.
+const TABS =['federation-command', 'condocv2', 'convo', 'sessions', 'robot', 'compose', 'dg', 'demo', 'plugins', 'control', 'tools', 'worker', 'system', 'files'] as const
+type Tab = typeof TABS[number]
+
+// isTab narrows a name to one of the dashboard's tabs. Given an app name
+// (e.g. a ProcInfo.name) it says whether that app has a tab to open: every
+// managed sub-application does, and none is named after one of LR's own
+// tabs (demo, control, tools, system, files).
+function isTab(name: string): name is Tab {
+  return (TABS as readonly string[]).includes(name)
+}
+
+// Tab text, where it differs from the tab's (app) name: diagrammographer's
+// app id is dg, but its tab reads "diagram".
+const TAB_LABELS: Partial<Record<Tab, string>> = { dg: 'diagram' }
+
+// Tabs whose content is another app's own UI, embedded via same-origin
+// iframe (condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step1Prompt.md Revision A: "nested UI" tabs). These skip the service-name
+// heading and health-indicator every other tab gets and instead get a full
+// tab pane for the iframe plus a slim status bar under the tab bar, so the
+// embedded app's own UI (including its own "DEV MODE" border, when that
+// sub-app runs in dev mode) fills the space instead of floating in a
+// padded, header-topped box.
+const EMBED_TABS: ReadonlySet<Tab> = new Set(['condocv2', 'sessions', 'convo', 'robot', 'compose', 'dg'])
+
+// Screen-history nav arrows (condocs/initialDistributedDevelopmentImpls/
+// Step5Prompt.md Revision M): how many recently-visited tabs we keep around
+// for back/forward. A pragmatic starting value -- see useScreenHistory below.
+const NAV_HISTORY_MAX = 20
+
+// Applications the system tab offers a launch button for. `multi` apps are
+// N-per-host (launch stays enabled while instances run); others are singletons.
+// `excludes` mirrors local-representative's launchSpec.excludes (procman.go):
+// launch is disabled while any of those apps is running.
+const LAUNCHABLE_APPS: { name: string; multi: boolean; excludes?: string[] }[] = [
+  { name: 'federation-command', multi: true },
+  { name: 'condocv2', multi: false },
+  { name: 'sessions', multi: false },
+  { name: 'convo', multi: false },
+  { name: 'robot', multi: false },
+  { name: 'compose', multi: false },
+  { name: 'dg', multi: false },
+  { name: 'worker', multi: false },
+]
+
+interface LogEntry {
+  kind: 'cmd' | 'output' | 'state'
+  text: string
+}
+
+// The FC instance an fc-* message without an fc field is about: an older
+// federation-command connected under the bare app name.
+const FC_DEFAULT_KEY = 'federation-command'
+
+function fcStateLabel(state: string): string {
+  return state === '' ? '-- disconnected --'
+    : state === 'remote-control' ? '-- remote control --'
+    : state === 'local-control' ? '-- local control --'
+    : `-- ${state} --`
+}
+
+function useStatusWS() {
+  const [connected, setConnected] = useState(false)
+  const [services, setServices] = useState<ServiceStatus[]>([])
+  // Every connected federation-command instance, and each one's log, keyed
+  // by instance -- see local-representative/fcinstances.go.
+  const [fcInstances, setFcInstances] = useState<FCInstanceInfo[]>([])
+  const [fcLogs, setFcLogs] = useState<Record<string, LogEntry[]>>({})
+  const [controlState, setControlState] = useState<ControlStateMsg | null>(null)
+  // The control tab's library and the replies to its requests, by request
+  // id -- see local-representative/controllib.go.
+  const [controlLibrary, setControlLibrary] = useState<ControlLibraryMsg | null>(null)
+  const [controlReplies, setControlReplies] = useState<Record<string, ControlLibReply>>({})
+  const controlReqSeq = useRef(0)
+  const [acState, setAcState] = useState<ACStateMsg>({ connected: false })
+  const [systemState, setSystemState] = useState<SystemStateMsg | null>(null)
+  const [repoState, setRepoState] = useState<RepoStateMsg>({ watched: false, dirty: false, rebuild_ready: false, building: false, auto_rebuild: false })
+  const [filesState, setFilesState] = useState<FilesStateMsg | null>(null)
+  // Peer name -> current mismatch disclosure -- see docs/DevMode.md. A
+  // mismatched peer only ever exchanges health information with this LR.
+  const [modeMismatches, setModeMismatches] = useState<Record<string, ModeMismatchMsg>>({})
+  // Aggregate "is a the-conversationalist instance available on any host",
+  // relayed down from agent-coordinator -- see tcavailability.go and
+  // Step2Prompt.md. Drives the mic icon beside the camera/screenshot icon.
+  const [tcAvailable, setTCAvailable] = useState(false)
+  // The worker tab: what dungeon-keeper last reported, and the answer to
+  // the last prompt submitted from it -- see local-representative/worker.go.
+  const [workerState, setWorkerState] = useState<WorkerStateMsg | null>(null)
+  const [workerReply, setWorkerReply] = useState<WorkerReplyMsg | null>(null)
+  // ...and how the slopspace sub-tab's last manual control op went.
+  const [slopspaceReply, setSlopspaceReply] = useState<WorkerSlopspaceReply | null>(null)
+  // The tools tab: the catalog and recent runs, and the replies to its
+  // requests by request id -- see local-representative/tools.go.
+  const [toolsState, setToolsState] = useState<ToolsStateMsg | null>(null)
+  const [toolsReplies, setToolsReplies] = useState<Record<string, ToolsReply>>({})
+  const toolsReqSeq = useRef(0)
+  // This LR's plug-in registry -- see plugins.go. The embedded sub-app tabs
+  // are framed through /apps/<appId>/ once their app is online in it (see
+  // appFrameSrc).
+  const [plugins, setPlugins] = useState<PluginInfo[]>([])
+  // The whole snapshot, for the plugins tab's registration sub-tab.
+  const [pluginsState, setPluginsState] = useState<PluginsStateMsg | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fcStateRef = useRef<Record<string, string>>({})
+
+  // fc names the instance to send to; LR picks its default one without it.
+  const sendCommand = useCallback((cmd: string, fc?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'command',
+        payload: { cmd, fc },
+      }))
+    }
+  }, [])
+
+  const sendRidealongCommand = useCallback((action: string, fc?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'ridealong-command',
+        payload: { action, fc },
+      }))
+    }
+  }, [])
+
+  // Control tab -- see local-representative/control.go.
+  const runControl = useCallback((sequence: string, controls: Record<string, string>, recordOverride?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setControlReplies(prev => {
+        const next = { ...prev }
+        delete next.run
+        return next
+      })
+      wsRef.current.send(JSON.stringify({ type: 'control-run', payload: { sequence, controls, record_override: recordOverride } }))
+    }
+  }, [])
+
+  // requestControl sends a definer/composer request and returns the id its
+  // "control-reply" will carry. Unsent (not connected), it fails at once.
+  const requestControl = useCallback((r: ControlLibRequest): string => {
+    const req = `c${++controlReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-lib', payload: { ...r, req } }))
+    } else {
+      setControlReplies(prev => ({ ...prev, [req]: { req, op: r.op, success: false, error: 'not connected' } }))
+    }
+    return req
+  }, [])
+
+  const cancelControl = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-cancel', payload: {} }))
+    }
+  }, [])
+
+  const continueControl = useCallback((run: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'control-continue', payload: { run } }))
+    }
+  }, [])
+
+  const connectToAC = useCallback((host: string, port: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'connect-ac',
+        payload: { host, port },
+      }))
+    }
+  }, [])
+
+  const disconnectFromAC = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'disconnect-ac', payload: {} }))
+    }
+  }, [])
+
+  // setAutoConnectAC toggles the persistent auto-connect state: on, it arms
+  // the background retry loop at host/port (falling back to the last-used
+  // target server-side when omitted) and keeps it armed across a successful
+  // connection, so a later unintentional disconnect resumes the cycle on its
+  // own; off, it only cancels a retry in progress -- disconnecting an active
+  // connection is still a separate, explicit action (see disconnectFromAC).
+  const setAutoConnectAC = useCallback((enabled: boolean, host?: string, port?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-connect-ac', payload: { enabled, host, port } }))
+    }
+  }, [])
+
+  const launchApp = useCallback((name: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'launch-app', payload: { name } }))
+    }
+  }, [])
+
+  const terminateApp = useCallback((id: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'terminate-app', payload: { id } }))
+    }
+  }, [])
+
+  // Restarts this local-representative process itself — only expected to
+  // come back up when it is loader-managed (see ProcInfo.loader_managed);
+  // the system tab greys the control out otherwise.
+  const restartApp = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'restart-app', payload: {} }))
+    }
+  }, [])
+
+  // Dev-repo watcher controls (--dev-repo, see docs/DevMode.md): rebuildRepo
+  // builds the changed sub-apps ('make update-dev-binaries') at the watched repo's root; setAutoRebuild
+  // toggles whether that happens automatically whenever it becomes possible.
+  const rebuildRepo = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'rebuild-app', payload: {} }))
+    }
+  }, [])
+
+  const setAutoRebuild = useCallback((enabled: boolean) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-rebuild', payload: { enabled } }))
+    }
+  }, [])
+
+  // Checks out a different branch in the watched dev-repo -- the "dev
+  // branch" switch control (Step1SubstepCPrompt.md Revision B).
+  const switchBranch = useCallback((branch: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'switch-branch', payload: { branch } }))
+    }
+  }, [])
+
+  // Registers (or drops) a directory beside the dev-repo for watching --
+  // e.g. ../HyenaExternalUfaPlugin (privateRepoOpsImpls Step6Prompt.md
+  // Revision C). With plugin set it is registered as a plug-in dev repo
+  // (Revision D): pulled, built from .ufabuild requests, and its plug-in
+  // approved here; appId '' derives the app id from the directory's name.
+  const watchExternal = useCallback((path: string, watch: boolean, plugin = false, appId = '') => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(watch
+        ? { type: 'watch-external', payload: { path, plugin, app_id: appId } }
+        : { type: 'unwatch-external', payload: { path } }))
+    }
+  }, [])
+
+  // Writes a .ufabuild request for a plug-in dev repo's current HEAD.
+  const buildExternal = useCallback((path: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'build-external', payload: { path } }))
+    }
+  }, [])
+
+  // The providers section's "connect"/"disconnect" controls
+  // (Step1SubstepEPrompt.md): hand this LR a credential to use -- only a
+  // GitHub PAT so far -- or have it forget one it was handed.
+  const connectProvider = useCallback((provider: string, token: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'connect-provider', payload: { provider, token } }))
+    }
+  }, [])
+  const disconnectProvider = useCallback((provider: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'disconnect-provider', payload: { provider } }))
+    }
+  }, [])
+
+  // The "agents & models" section's "re-inspect" control
+  // (Step1SubstepEPrompt.md Revision B).
+  const inspectAgents = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'inspect-agents' }))
+    }
+  }, [])
+
+  // Toggles whether this LR restarts itself the instant an update becomes
+  // available, instead of waiting for the "update and restart" button --
+  // see docs/DevMode.md "Loader".
+  const setAutoUpdate = useCallback((enabled: boolean) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set-auto-update', payload: { enabled } }))
+    }
+  }, [])
+
+  const submitWork = useCallback((prompt: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setWorkerReply(null)
+      wsRef.current.send(JSON.stringify({ type: 'worker-submit', payload: { prompt } }))
+    } else {
+      setWorkerReply({ ok: false, error: 'not connected' })
+    }
+  }, [])
+
+  // requestTools sends a tools tab request and returns the id its
+  // "tools-reply" will carry. Unsent (not connected), it fails at once.
+  const requestTools = useCallback((r: ToolsRequest): string => {
+    const req = `t${++toolsReqSeq.current}`
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'tools-request', payload: { ...r, req } }))
+    } else {
+      setToolsReplies(prev => ({ ...prev, [req]: { req, op: r.op, ok: false, error: 'not connected' } }))
+    }
+    return req
+  }, [])
+
+  const controlSlopspace = useCallback((req: WorkerSlopspaceRequest) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setSlopspaceReply(null)
+      wsRef.current.send(JSON.stringify({ type: 'worker-slopspace', payload: req }))
+    } else {
+      setSlopspaceReply({ op: req.op, id: req.id, ok: false, error: 'not connected' })
+    }
+  }, [])
+
+  // File upload is a plain HTTP POST (not a websocket command) so the browser
+  // can stream the multipart body directly to /api/files.
+  const uploadFiles = useCallback(async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList)
+    if (files.length === 0) return
+    const form = new FormData()
+    for (const f of files) form.append('file', f)
+    try {
+      const resp = await fetch('/api/files', { method: 'POST', body: form })
+      if (!resp.ok) {
+        console.error('file upload failed:', resp.status, await resp.text())
+      }
+    } catch (err) {
+      console.error('file upload failed:', err)
+    }
+  }, [])
+
+  // "select from host": a JSON POST /api/files copies files already on this
+  // host into the host-cache (local-representative/hostfiles.go); folders
+  // are zipped into it. Returns the error to show, if any.
+  const importHostFiles = useCallback(async (paths: string[], folders: string[] = []): Promise<string | null> => {
+    try {
+      const resp = await fetch('/api/files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host_paths: paths, host_folders: folders }),
+      })
+      return resp.ok ? null : (await resp.text()).trim() || `import failed (${resp.status})`
+    } catch (err) {
+      return String(err)
+    }
+  }, [])
+
+  const connect = useCallback(() => {
+    const ws = new WebSocket(`ws://${window.location.host}/ws`)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      setConnected(true)
+      // The server resends a full mode-mismatch snapshot on connect; drop any
+      // stale entries from a mismatch that cleared while we were offline.
+      setModeMismatches({})
+    }
+
+    ws.onclose = () => {
+      setConnected(false)
+      retryRef.current = setTimeout(connect, 2000)
+    }
+
+    ws.onerror = () => ws.close()
+
+    ws.onmessage = (ev: MessageEvent) => {
+      try {
+        const msg = JSON.parse(ev.data as string) as { type: string; payload: unknown }
+        switch (msg.type) {
+          case 'status':
+            setServices((msg.payload as StatusMsg).services)
+            break
+          case 'fc-state': {
+            // Only marks transitions in that instance's log -- its current
+            // state comes with fc-instances.
+            const p = msg.payload as FCStateMsg
+            const key = p.fc || FC_DEFAULT_KEY
+            const newSt = p.state === 'disconnected' ? '' : p.state
+            const prevSt = fcStateRef.current[key] ?? ''
+            fcStateRef.current[key] = newSt
+            if (prevSt !== newSt) {
+              setFcLogs(prev => ({ ...prev, [key]: [...(prev[key] ?? []), { kind: 'state', text: fcStateLabel(newSt) }] }))
+            }
+            break
+          }
+          case 'fc-log': {
+            const p = msg.payload as FCLogMsg
+            const key = p.fc || FC_DEFAULT_KEY
+            const entry: LogEntry = { kind: p.kind === 'output' ? 'output' : 'cmd', text: p.line }
+            setFcLogs(prev => ({ ...prev, [key]: [...(prev[key] ?? []).slice(-199), entry] }))
+            break
+          }
+          case 'fc-instances':
+            // Ridealong and condoc state arrive per instance in here too.
+            setFcInstances((msg.payload as FCInstancesMsg).instances ?? [])
+            break
+          case 'control-state':
+            setControlState(msg.payload as ControlStateMsg)
+            break
+          case 'control-library':
+            setControlLibrary(msg.payload as ControlLibraryMsg)
+            break
+          case 'control-reply': {
+            const p = msg.payload as ControlLibReply
+            setControlReplies(prev => ({ ...prev, [p.req || p.op]: p }))
+            break
+          }
+          case 'ac-state':
+            setAcState(msg.payload as ACStateMsg)
+            break
+          case 'system-state': {
+            const payload = msg.payload as SystemStateMsg
+            setSystemState(payload)
+            // A rebuild+restart (see docs/DevMode.md, --dev-repo) is
+            // invisible to an already-open tab -- the reconnect above is the
+            // only signal it gets. Compare the server's own reported
+            // version against this bundle's build-time version and reload
+            // if they differ; skip under the Vite dev server, where HMR
+            // already keeps the tab current and the two are never expected
+            // to match (see BrowserRefreshStrategy.md).
+            if (!import.meta.env.DEV && payload.self.version && payload.self.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+            break
+          }
+          case 'repo-state':
+            setRepoState(msg.payload as RepoStateMsg)
+            break
+          case 'files-state':
+            setFilesState(msg.payload as FilesStateMsg)
+            break
+          case 'mode-mismatch': {
+            const payload = msg.payload as ModeMismatchMsg
+            setModeMismatches(prev => {
+              const next = { ...prev }
+              if (payload.mismatched) next[payload.peer] = payload
+              else delete next[payload.peer]
+              return next
+            })
+            break
+          }
+          case 'tc-availability': {
+            const payload = msg.payload as TCAvailabilityMsg
+            setTCAvailable(payload.available)
+            break
+          }
+          case 'convo-state':
+            // Speak "application running" when this host's TC starts or
+            // restarts -- see tcannounce.ts.
+            noteTCStart('local', (msg.payload as ConvoStateMsg).started_at)
+            break
+          case 'worker-state':
+            setWorkerState(msg.payload as WorkerStateMsg)
+            break
+          case 'worker-reply':
+            setWorkerReply(msg.payload as WorkerReplyMsg)
+            break
+          case 'worker-slopspace-reply':
+            setSlopspaceReply(msg.payload as WorkerSlopspaceReply)
+            break
+          case 'tools-state':
+            setToolsState(msg.payload as ToolsStateMsg)
+            break
+          case 'tools-reply': {
+            const p = msg.payload as ToolsReply
+            setToolsReplies(prev => ({ ...prev, [p.req || p.op]: p }))
+            break
+          }
+          case 'plugins-state':
+            setPlugins((msg.payload as PluginsStateMsg).plugins ?? [])
+            setPluginsState(msg.payload as PluginsStateMsg)
+            break
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    connect()
+    return () => {
+      if (retryRef.current) clearTimeout(retryRef.current)
+      wsRef.current?.close()
+    }
+  }, [connect])
+
+  return {
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies, acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply, toolsState, toolsReplies, plugins, pluginsState,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC, launchApp, terminateApp, restartApp, uploadFiles, importHostFiles,
+    rebuildRepo, setAutoRebuild, switchBranch, watchExternal, buildExternal, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace, requestTools,
+  }
+}
+
+// FCInstancePicker lists every connected federation-command instance on the
+// federation-command tab; the panels below it follow the selected one.
+function FCInstancePicker({
+  instances,
+  selected,
+  onSelect,
+}: {
+  instances: FCInstanceInfo[]
+  selected: string | null
+  onSelect: (key: string) => void
+}) {
+  if (instances.length === 0) return null
+  return (
+    <div className="fc-instances">
+      <span className="fc-instances-label">
+        {instances.length} instance{instances.length === 1 ? '' : 's'}
+      </span>
+      {instances.map(inst => (
+        <button
+          key={inst.key}
+          className={`fc-instance fc-instance-${inst.state || 'none'}${inst.key === selected ? ' fc-instance-active' : ''}`}
+          onClick={() => onSelect(inst.key)}
+          title={`${inst.key}${inst.head ? ` (head ${inst.head})` : ''} — ${inst.state || 'no state yet'}`}
+        >
+          <span className="fc-instance-dot" />
+          {inst.label}
+          {inst.session && <span className="fc-instance-session">{inst.session}</span>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ---- Control tab (local-representative/control.go) ----
+
+const CONTROL_SUBTABS = ['v1'] as const
+type ControlSubTab = typeof CONTROL_SUBTABS[number]
+
+// ControlPanel is the control tab: its v1 sub-tab is ControlV1 (shared with
+// agent-coordinator's frontend), over this LR's own library.
+function ControlPanel(props: Omit<ControlV1Props, 'fileUrl' | 'node' | 'hostApi'>) {
+  const [sub, setSub] = useState<ControlSubTab>('v1')
+  return (
+    <div className="ctl-panel">
+      <div className="ctl-subtabs">
+        {CONTROL_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'v1' && (
+        <>
+          <div className="ctl-hint">
+            The robot finds a terminal by reading the screen: its window has to be visible, not behind
+            another, and no other view of federation-command's output (its tab here or in
+            agent-coordinator) should be showing on that desktop.
+          </div>
+          <ControlV1 {...props} fileUrl={fileRawUrl} node="this node" hostApi="" />
+        </>
+      )}
+    </div>
+  )
+}
+
+function FCCommandPanel({
+  fcState,
+  fcLog,
+  sendCommand,
+}: {
+  fcState: string
+  fcLog: LogEntry[]
+  sendCommand: (cmd: string) => void
+}) {
+  const [input, setInput] = useState('')
+  const logEndRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [fcLog])
+
+  const submit = () => {
+    const cmd = input.trim()
+    if (!cmd) return
+    sendCommand(cmd)
+    setInput('')
+  }
+
+  if (fcState === '') {
+    return <div className="fc-status fc-status-disconnected">not connected</div>
+  }
+
+  return (
+    <div className="fc-panel">
+      <div className="fc-output">
+        {fcLog.length === 0
+          ? <span className="fc-log-empty">waiting for activity…</span>
+          : fcLog.map((entry, i) =>
+              entry.kind === 'state'
+                ? <div key={i} className="fc-log-state">{entry.text}</div>
+                : entry.kind === 'output'
+                ? <div key={i} className="fc-log-output">{entry.text}</div>
+                : <div key={i} className="fc-log-line">
+                    <span className="fc-log-prompt">$</span> {entry.text}
+                  </div>
+            )
+        }
+        <div ref={logEndRef} />
+      </div>
+      {fcState === 'remote-control' && (
+        <div className="fc-command-area">
+          <span className="fc-cmd-prompt">$</span>
+          <input
+            className="fc-cmd-input"
+            type="text"
+            value={input}
+            placeholder="enter command to run on federation-command…"
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') submit()
+            }}
+            autoFocus
+          />
+          <button className="fc-cmd-send" onClick={submit}>run</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const WORKER_SUBTABS = ['direct', 'slopspace', 'visual'] as const
+type WorkerSubTab = typeof WORKER_SUBTABS[number]
+
+// WorkerPanel is the worker tab, split in three: direct is a temporary
+// prompt box that hands prompt-only work to this host's dungeon-keeper, and
+// the work signals it reports, newest first; slopspace lists this host's
+// slopspaces, whether a local agent is using one, and a manual control
+// panel for them -- see local-representative/worker.go; visual draws both
+// as swimlanes over time (see WorkerVisual.tsx).
+function WorkerPanel({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+  slopspaceReply,
+  onControlSlopspace,
+  focus,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+  slopspaceReply: WorkerSlopspaceReply | null
+  onControlSlopspace: (req: WorkerSlopspaceRequest) => void
+  focus: WorkFocus | null
+}) {
+  const [sub, setSub] = useState<WorkerSubTab>(focus ? 'visual' : 'direct')
+  // A work submission asked for (condocv2's agent box) is on the visual.
+  useEffect(() => {
+    if (focus) setSub('visual')
+  }, [focus?.seq])
+  // The direct sub-tab's slopspace filter (dTT-IntegrationImpls Step 1,
+  // Revision K): null shows every signal.
+  const [directSlopspace, setDirectSlopspace] = useState<string | null>(null)
+  return (
+    <div className="worker-panel">
+      {state && (
+        <div className="worker-meta">
+          dungeon-keeper {state.worker_id} · {state.agent_type} · {state.busy ? 'working' : 'idle'}
+        </div>
+      )}
+      <div className="ctl-subtabs">
+        {WORKER_SUBTABS.map(t => (
+          <button key={t} className={`ctl-subtab${sub === t ? ' ctl-subtab-active' : ''}`} onClick={() => setSub(t)}>
+            {t}
+          </button>
+        ))}
+      </div>
+      {sub === 'direct' && (
+        <WorkerDirectView
+          healthy={healthy}
+          state={state}
+          reply={reply}
+          onSubmit={onSubmit}
+          slopspace={directSlopspace}
+          onSlopspace={setDirectSlopspace}
+        />
+      )}
+      {sub === 'slopspace' && (
+        <WorkerSlopspaceView
+          healthy={healthy}
+          state={state}
+          reply={slopspaceReply}
+          onControl={onControlSlopspace}
+          onShowWork={id => {
+            setDirectSlopspace(id)
+            setSub('direct')
+          }}
+        />
+      )}
+      {sub === 'visual' && <WorkerVisual state={state} focus={focus} />}
+    </div>
+  )
+}
+
+// slopspaceWork is the work signals that ran, or will run, in slopspace id
+// (Revision J). A signal only names its slopspace once it starts; until
+// then, slopspace work for the agent type it's deployed to will run in it.
+// s is the slopspace as last reported, if it still is.
+function slopspaceWork(signals: WorkerSignalInfo[], id: string, s?: SlopspaceInfo): WorkerSignalInfo[] {
+  return signals.filter(sig => sig.slopspace_id
+    ? sig.slopspace_id === id
+    : !!s && sig.work_type === 'slopspace' && s.deployed && sig.agent_type === s.agent_type && (sig.status === 'pending' || sig.status === 'processing'))
+}
+
+// WorkerDirectView is the worker tab's direct sub-tab: the prompt box and
+// the work signals, optionally only those for one slopspace (Revision K).
+function WorkerDirectView({
+  healthy,
+  state,
+  reply,
+  onSubmit,
+  slopspace,
+  onSlopspace,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerReplyMsg | null
+  onSubmit: (prompt: string) => void
+  slopspace: string | null
+  onSlopspace: (id: string | null) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  const [openId, setOpenId] = useState<string | null>(null)
+
+  const submit = () => {
+    const text = prompt.trim()
+    if (!text || !healthy) return
+    onSubmit(text)
+    setPrompt('')
+  }
+
+  const all = state?.signals ?? []
+  const slopspaces = state?.slopspaces ?? []
+  const signals = slopspace ? slopspaceWork(all, slopspace, slopspaces.find(s => s.id === slopspace)) : all
+  // The filter's choices: every reported slopspace, plus the filtered one if
+  // it's no longer reported.
+  const choices = slopspace && !slopspaces.some(s => s.id === slopspace) ? [...slopspaces.map(s => s.id), slopspace] : slopspaces.map(s => s.id)
+  return (
+    <>
+      <div className="worker-submit">
+        <textarea
+          className="worker-prompt"
+          value={prompt}
+          rows={3}
+          placeholder={healthy ? 'prompt for the worker (runs prompt-only, in /tmp)… Ctrl+Enter to submit' : 'the worker is not running — launch it from the system tab'}
+          onChange={e => setPrompt(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit()
+          }}
+          disabled={!healthy}
+        />
+        <button className="worker-submit-btn" onClick={submit} disabled={!healthy || !prompt.trim()}>submit</button>
+      </div>
+      {reply?.error && <div className="worker-error">{reply.error}</div>}
+      {(choices.length > 0 || slopspace) && (
+        <div className="worker-slopctl-line">
+          <span className="worker-slopctl-label">slopspace</span>
+          <select className="worker-slopctl-input worker-slopctl-pick" value={slopspace ?? ''} onChange={e => onSlopspace(e.target.value || null)}>
+            <option value="">all work</option>
+            {choices.map(id => <option key={id} value={id}>only {id.slice(0, 8)}</option>)}
+          </select>
+          {slopspace && <button className="worker-submit-btn" onClick={() => onSlopspace(null)}>show all</button>}
+        </div>
+      )}
+      {signals.length === 0
+        ? <div className="service-empty">{slopspace ? `no work signals for slopspace ${slopspace.slice(0, 8)} (only the most recent are listed)` : 'no work signals yet'}</div>
+        : (
+          <div className="worker-signals">
+            {signals.map(sig => (
+              <WorkerSignalRow
+                key={sig.id || sig.file}
+                signal={sig}
+                open={openId === (sig.id || sig.file)}
+                onToggle={() => setOpenId(openId === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+              />
+            ))}
+          </div>
+        )}
+    </>
+  )
+}
+
+// WorkerSlopspaceView is the worker tab's slopspace sub-tab: this host's
+// slopspaces as dungeon-keeper last reported them, in use first, and below
+// them the manual control panel. Clicking a row picks it for the panel.
+function WorkerSlopspaceView({
+  healthy,
+  state,
+  reply,
+  onControl,
+  onShowWork,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg | null
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+  onShowWork: (id: string) => void
+}) {
+  const [selected, setSelected] = useState<string | null>(null)
+  // "view files" (Revision H): the slopspace being browsed, and where to start.
+  const [files, setFiles] = useState<{ id: string; path: string } | null>(null)
+  // A create picks the new slopspace.
+  useEffect(() => {
+    if (reply?.ok && reply.op === 'create' && reply.id) setSelected(reply.id)
+  }, [reply])
+  if (!state) return <div className="service-empty">the worker hasn't reported yet</div>
+  if (!state.slopspaces) return <div className="service-empty">this worker is too old to report its slopspaces — rebuild it</div>
+  const slopspaces = state.slopspaces
+  const inUse = slopspaces.filter(s => s.in_use)
+  const reviewing = slopspaces.filter(s => s.pending_proposals?.length)
+  const filesOf = files && slopspaces.find(s => s.id === files.id)
+  // While its files are entered (Revision L) the viewer takes the sub-tab's
+  // place, like zooming into a condoc; the rest stays mounted (hidden) so the
+  // control panel keeps what's typed into it.
+  return (
+    <>
+      {filesOf && files && (
+        <SlopspaceFiles
+          slopspace={filesOf}
+          start={files.path}
+          upLabel={`slopspace ${filesOf.id.slice(0, 8)}`}
+          healthy={healthy}
+          reply={reply}
+          onControl={onControl}
+          onUp={() => setFiles(null)}
+        />
+      )}
+      <div hidden={!!filesOf}>
+      <div className="worker-meta">
+        {inUse.length > 0
+          ? `in use by a local agent: ${inUse.map(s => `${s.id.slice(0, 8)} (${s.agent_type})`).join(', ')}`
+          : 'no slopspace is in use by a local agent'}
+      </div>
+      {reviewing.length > 0 && (
+        <div className="worker-dtt-banner">
+          DTT proposals awaiting your review: {reviewing.map(s => (
+            <button key={s.id} className="wv-link" onClick={() => setSelected(s.id)}>{s.id.slice(0, 8)}</button>
+          ))}
+        </div>
+      )}
+      {slopspaces.length === 0
+        ? <div className="service-empty">no slopspaces on this host</div>
+        : (
+          <div className="worker-signals">
+            {slopspaces.map(s => (
+              <WorkerSlopspaceRow
+                key={s.id}
+                slopspace={s}
+                selected={s.id === selected}
+                onSelect={() => setSelected(s.id === selected ? null : s.id)}
+              />
+            ))}
+            {!!state.slopspaces_omitted && <div className="worker-signal-detail">…and {state.slopspaces_omitted} older not shown</div>}
+          </div>
+        )}
+      <WorkerSlopspaceControl
+        healthy={healthy}
+        state={state}
+        selected={slopspaces.find(s => s.id === selected) ?? null}
+        onSelect={setSelected}
+        reply={reply}
+        onControl={onControl}
+        onViewFiles={(id, path) => setFiles({ id, path })}
+        onShowWork={onShowWork}
+      />
+      </div>
+    </>
+  )
+}
+
+const WORKER_AGENT_TYPES = ['agent-worker', 'heuristic-request']
+
+// How many of a slopspace's work signals the manual control panel lists.
+const WORK_ROWS = 3
+
+// WorkerSlopspaceControl is the slopspace sub-tab's manual control panel
+// (SlopspaceSlopspaceCondocs Step 1 Substep B, Revision A). Each button is
+// one call on dungeon-keeper's slopspace Manager -- the same interface
+// condocv2 and the `dungeon-keeper slopspace` CLI use -- run by this host's
+// dungeon-keeper (see dungeon-keeper/slopctl.go). It refuses anything on a
+// slopspace a local agent is working in.
+function WorkerSlopspaceControl({
+  healthy,
+  state,
+  selected: sel,
+  onSelect,
+  reply,
+  onControl,
+  onViewFiles,
+  onShowWork,
+}: {
+  healthy: boolean
+  state: WorkerStateMsg
+  selected: SlopspaceInfo | null
+  onSelect: (id: string | null) => void
+  reply: WorkerSlopspaceReply | null
+  onControl: (req: WorkerSlopspaceRequest) => void
+  onViewFiles: (id: string, path: string) => void
+  onShowWork: (id: string) => void
+}) {
+  const [agentType, setAgentType] = useState(state.agent_type || WORKER_AGENT_TYPES[0])
+  const [repo, setRepo] = useState('')
+  const [branch, setBranch] = useState('')
+  const [writeRepo, setWriteRepo] = useState('')
+  const [message, setMessage] = useState('')
+  const [command, setCommand] = useState('')
+  const [pending, setPending] = useState<string | null>(null)
+  // The last op's answer -- kept here, as browsing files (whose answers the
+  // file viewer takes) clears the shared reply.
+  const [shown, setShown] = useState<WorkerSlopspaceReply | null>(null)
+  // Whether the next deploy offers DTT proposals (dTT-IntegrationImpls Step 1,
+  // Revision J), starting from the picked slopspace's own setting.
+  const [dttProposals, setDTTProposals] = useState(true)
+  const [openSignal, setOpenSignal] = useState<string | null>(null)
+  useEffect(() => {
+    setDTTProposals(sel?.dtt_proposals ?? true)
+  }, [sel?.id, sel?.dtt_proposals])
+
+  // The answer ends the wait. A dungeon-keeper from before the panel never
+  // answers, so give up eventually; add-repo clones and write pushes can
+  // take a while. A queued command clears the box.
+  useEffect(() => {
+    if (!reply || reply.op === 'files') return
+    setPending(null)
+    setShown(reply)
+    if (reply.ok && reply.op === 'command') setCommand('')
+  }, [reply])
+  useEffect(() => {
+    if (!pending) return
+    const t = setTimeout(() => setPending(null), 120_000)
+    return () => clearTimeout(t)
+  }, [pending])
+
+  const send = (req: WorkerSlopspaceRequest) => {
+    setPending(req.op)
+    onControl(req)
+  }
+  const id = sel?.id
+  const busy = !healthy || !!pending
+  const locked = busy || !sel || sel.in_use
+  const repos = sel?.repos ?? []
+  const stored = !!sel && !sel.deployed
+  // Returned with DTT proposals not yet answered (Revision H): no deploying
+  // until they are.
+  const reviewPending = !!sel?.pending_proposals?.length
+  // Where its spaces are right now: the deploy location while deployed, else
+  // its directory under the slopspaces dir (which keeps its metadata either way).
+  const path = sel ? (sel.deployed ? sel.deploy_path : sel.path) ?? '' : ''
+  // A command (Revision B) queues a slopspace work signal for this worker's
+  // agent, which runs it in the deployed slopspace; it shows on the direct
+  // sub-tab with the other signals.
+  const commandable = !locked && !!sel && sel.deployed && sel.agent_type === state.agent_type
+  const sendCommand = () => {
+    const text = command.trim()
+    if (!commandable || !text) return
+    send({ op: 'command', id, prompt: text })
+  }
+  // The direct sub-tab's work signals for this slopspace (Revision J), the
+  // newest WORK_ROWS of them; More... opens the rest on the direct sub-tab,
+  // filtered to it (Revision K).
+  const work = sel ? slopspaceWork(state.signals ?? [], sel.id, sel) : []
+
+  return (
+    <div className="worker-slopctl">
+      <div className="worker-slopctl-title">manual control</div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">slopspace</span>
+        <select className="worker-slopctl-input worker-slopctl-pick" value={id ?? ''} onChange={e => onSelect(e.target.value || null)}>
+          <option value="">— pick one (or click a row) —</option>
+          {(state.slopspaces ?? []).map(s => (
+            <option key={s.id} value={s.id}>
+              {s.id.slice(0, 8)} · {s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'}{s.repos?.length ? ` · ${s.repos.join(', ')}` : ''}
+            </option>
+          ))}
+        </select>
+        <button className="worker-submit-btn" disabled={busy} onClick={() => send({ op: 'create' })}>+ create</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">path</span>
+        <input
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-path"
+          readOnly
+          value={path}
+          placeholder={!sel ? 'pick a slopspace' : 'rebuild dungeon-keeper to see paths'}
+          onFocus={e => e.target.select()}
+          disabled={!sel}
+        />
+        <button className="worker-submit-btn" disabled={!healthy || !sel} onClick={() => id && onViewFiles(id, '')}>view files</button>
+      </div>
+      {sel?.deployed && sel.path && <div className="worker-meta">deployed — stored at {sel.path} when returned</div>}
+      {sel?.in_use &&<div className="worker-meta">a local agent is working in this slopspace — wait for its turn to finish</div>}
+      {sel && reviewPending && (
+        <ProposalReview
+          slopspace={sel}
+          disabled={locked}
+          workerAgentType={state.agent_type}
+          healthy={healthy}
+          reply={reply}
+          onSend={send}
+          onControl={onControl}
+        />
+      )}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">lifecycle</span>
+        <select className="worker-slopctl-input" value={agentType} onChange={e => setAgentType(e.target.value)} disabled={locked || !stored || reviewPending}>
+          {WORKER_AGENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <label
+          className="worker-slopctl-check"
+          title="deploy with writespaces/dtt-requests, where the agent may propose DTT documents for you to review on return"
+        >
+          <input
+            type="checkbox"
+            checked={dttProposals}
+            onChange={e => setDTTProposals(e.target.checked)}
+            disabled={locked || !stored || reviewPending}
+          />
+          DTT proposals
+        </label>
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || reviewPending}
+          title={reviewPending ? 'review its DTT proposals first' : ''}
+          onClick={() => send({ op: 'deploy', id, agent_type: agentType, dtt_proposals: dttProposals })}
+        >deploy</button>
+        <button className="worker-submit-btn" disabled={locked || stored} onClick={() => send({ op: 'return', id })}>return</button>
+        <button
+          className="worker-submit-btn worker-slopctl-danger"
+          disabled={locked}
+          onClick={() => {
+            if (window.confirm(`Delete slopspace ${id}? Anything not pushed from its writespaces is lost.`)) send({ op: 'delete', id })
+          }}
+        >delete</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">add repo</span>
+        <input className="worker-slopctl-input" placeholder="owner/name" value={repo} onChange={e => setRepo(e.target.value)} disabled={locked || !stored} />
+        <input className="worker-slopctl-input" placeholder="new branch" value={branch} onChange={e => setBranch(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || !/^[^/\s]+\/[^/\s]+$/.test(repo.trim()) || !branch.trim()}
+          onClick={() => send({ op: 'add-repo', id, repo: repo.trim(), branch: branch.trim() })}
+        >add</button>
+      </div>
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">commit &amp; push</span>
+        <select className="worker-slopctl-input" value={writeRepo} onChange={e => setWriteRepo(e.target.value)} disabled={locked || !stored}>
+          <option value="">every repo</option>
+          {repos.map(r => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input className="worker-slopctl-input worker-slopctl-grow" placeholder="commit message (optional)" value={message} onChange={e => setMessage(e.target.value)} disabled={locked || !stored} />
+        <button
+          className="worker-submit-btn"
+          disabled={locked || !stored || repos.length === 0}
+          onClick={() => send({ op: 'write', id, repo: repos.includes(writeRepo) ? writeRepo : undefined, message: message.trim() || undefined })}
+        >write</button>
+      </div>
+      {sel?.deployed && !sel.in_use && <div className="worker-meta">adding repos and writing need it returned first</div>}
+      <div className="worker-slopctl-line">
+        <span className="worker-slopctl-label">command</span>
+        <textarea
+          className="worker-slopctl-input worker-slopctl-grow worker-slopctl-command"
+          rows={2}
+          placeholder={commandable ? `prompt for the ${sel?.agent_type} agent, run in this slopspace… Ctrl+Enter to send` : 'deploy the slopspace to send it a command'}
+          value={command}
+          onChange={e => setCommand(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendCommand()
+          }}
+          disabled={!commandable}
+        />
+        <button className="worker-submit-btn" disabled={!commandable || !command.trim()} onClick={sendCommand}>send</button>
+      </div>
+      {sel?.deployed && !sel.in_use && sel.agent_type !== state.agent_type && (
+        <div className="worker-meta">deployed for {sel.agent_type}, but this worker runs {state.agent_type} agents — commands need it deployed for {state.agent_type}</div>
+      )}
+      {sel?.deployed && sel.dtt_proposals !== undefined && (
+        <div className="worker-meta">deployed {sel.dtt_proposals ? 'with' : 'without'} DTT proposals</div>
+      )}
+      {sel && (
+        <div className="worker-slopctl-work">
+          <span className="worker-slopctl-label">work here</span>
+          {work.length === 0
+            ? <div className="worker-signal-detail">no work from the direct tab has run in this slopspace (it lists the most recent only)</div>
+            : (
+              <div className="worker-signals">
+                {work.slice(0, WORK_ROWS).map(sig => (
+                  <WorkerSignalRow
+                    key={sig.id || sig.file}
+                    signal={sig}
+                    open={openSignal === (sig.id || sig.file)}
+                    onToggle={() => setOpenSignal(openSignal === (sig.id || sig.file) ? null : (sig.id || sig.file))}
+                  />
+                ))}
+                {work.length > WORK_ROWS && (
+                  <div className="worker-signal">
+                    <button
+                      className="worker-signal-head worker-signal-more"
+                      onClick={() => id && onShowWork(id)}
+                      title={`${work.length - WORK_ROWS} more — show them on the direct tab`}
+                    >More...</button>
+                  </div>
+                )}
+              </div>
+            )}
+        </div>
+      )}
+      {pending && <div className="worker-meta">{pending}: waiting for dungeon-keeper…</div>}
+      {!pending && shown && (shown.ok
+        ? <div className="worker-slopctl-ok">{shown.op}{shown.id ? ` ${shown.id.slice(0, 8)}` : ''}: {shown.detail || 'done'}</div>
+        : <div className="worker-error">{shown.op ? `${shown.op}: ` : ''}{shown.error}</div>)}
+    </div>
+  )
+}
+
+function WorkerSlopspaceRow({ slopspace: s, selected, onSelect }: { slopspace: SlopspaceInfo; selected: boolean; onSelect: () => void }) {
+  const status = s.in_use ? 'in use' : s.deployed ? 'deployed' : 'stored'
+  const repos = s.repos ?? []
+  const proposals = (s.pending_proposals?.length ?? 0) + (s.proposals_omitted ?? 0)
+  return (
+    <div className={`worker-signal worker-slopspace-${status.replace(' ', '-')}${selected ? ' worker-slopspace-selected' : ''}`}>
+      <div className="worker-signal-head worker-slopspace-head" onClick={onSelect} title="pick for manual control">
+        <span className="worker-signal-status">{status}</span>
+        {proposals > 0 && <span className="worker-dtt-badge" title="DTT proposals awaiting your review">{proposals} to review</span>}
+        <span className="worker-signal-prompt" title={s.id}>
+          {s.id}
+          {repos.length > 0 && <span className="worker-slopspace-repos"> · {repos.join(', ')}</span>}
+        </span>
+        <span className="worker-signal-when">
+          {s.deployed && s.agent_type ? `${s.agent_type} · ` : ''}
+          {s.iteration} deploy{s.iteration === 1 ? '' : 's'} · created {new Date(s.created_at).toLocaleString()}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function WorkerSignalRow({ signal, open, onToggle }: { signal: WorkerSignalInfo; open: boolean; onToggle: () => void }) {
+  const when = new Date(signal.created_at).toLocaleString()
+  return (
+    <div className={`worker-signal worker-status-${signal.status}`}>
+      <button className="worker-signal-head" onClick={onToggle} title={signal.file}>
+        <span className="worker-signal-status">{signal.status}</span>
+        <span className="worker-signal-prompt">{signal.prompt}</span>
+        <span className="worker-signal-when">{when}</span>
+      </button>
+      {open && (
+        <div className="worker-signal-body">
+          <div className="worker-signal-detail">
+            {signal.role} · {signal.work_type}{signal.work_location ? ` in ${signal.work_location}` : ''}
+            {signal.mode ? ` · ${signal.mode}` : ''}
+            {signal.agent ? ` · ${signal.agent}` : ''}{signal.model ? ` (${signal.model})` : ''}
+          </div>
+          <pre className="worker-signal-text">{signal.prompt}</pre>
+          {signal.comment && <div className="worker-signal-comment">{signal.comment}</div>}
+          {signal.output
+            ? (
+              <>
+                {signal.output_trimmed && <div className="worker-signal-detail">output is long — showing only the end</div>}
+                <pre className="worker-signal-text worker-signal-output">{signal.output}</pre>
+              </>
+            )
+            : signal.output_trimmed
+              ? <div className="worker-signal-detail">output is too long to show here — it's in the signal file {signal.file}</div>
+              : <div className="worker-signal-detail">{signal.status === 'pending' || signal.status === 'processing' ? 'no output yet' : 'no output'}</div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RidealongPanel({
+  state,
+  fcState,
+  sendRidealongCommand,
+}: {
+  state: RidealongStateMsg
+  fcState: string
+  sendRidealongCommand: (action: string) => void
+}) {
+  const [customCmd, setCustomCmd] = useState('')
+  const canControl = fcState === 'remote-control'
+
+  const totalSteps = state.total_steps ?? 0
+  const currentIndex = state.current_index ?? 0
+  const stepLabel = totalSteps > 0 ? `${currentIndex + 1} / ${totalSteps}` : ''
+
+  const submitCustom = () => {
+    const text = customCmd.trim()
+    if (!text) return
+    sendRidealongCommand(`custom:${text}`)
+    setCustomCmd('')
+  }
+
+  return (
+    <div className="ra-panel">
+      <div className="ra-header">
+        <span className="ra-icon">🚔</span>
+        <span className="ra-title">ridealong</span>
+        <span className="ra-file">{state.title}</span>
+        {stepLabel && <span className="ra-progress">{stepLabel}</span>}
+      </div>
+
+      <div className="ra-steps">
+        {state.prev_cmd ? (
+          <div className="ra-step ra-step-prev">
+            <span className="ra-step-marker ra-step-marker-prev">▸</span>
+            <span className="ra-step-text">{state.prev_cmd}</span>
+            {(state.prev_exit_code ?? 0) !== 0 && (
+              <span className="ra-exit-code">[{state.prev_exit_code}]</span>
+            )}
+          </div>
+        ) : (
+          <div className="ra-step ra-step-prev">
+            <span className="ra-step-text ra-step-empty">(no previous step)</span>
+          </div>
+        )}
+        <div className="ra-step ra-step-current">
+          <span className="ra-step-marker ra-step-marker-current">✦</span>
+          <span className="ra-step-text">{state.current_cmd}</span>
+          {state.autoplay && state.countdown && (
+            <span className="ra-countdown">{state.countdown}</span>
+          )}
+        </div>
+        <div className="ra-step ra-step-next">
+          <span className="ra-step-marker ra-step-marker-next">▸</span>
+          <span className="ra-step-text">{state.next_cmd === '<end>' ? '<end>' : state.next_cmd}</span>
+        </div>
+      </div>
+
+      {canControl && (
+        <div className="ra-controls">
+          <div className="ra-actions">
+            <button
+              className="ra-btn ra-btn-primary"
+              onClick={() => sendRidealongCommand('execute')}
+              title="Execute current step"
+            >
+              execute
+            </button>
+            <button
+              className={`ra-btn ${state.autoplay ? 'ra-btn-active' : ''}`}
+              onClick={() => sendRidealongCommand('autoplay')}
+              title="Toggle autoplay"
+            >
+              {state.autoplay ? 'stop autoplay' : 'autoplay'}
+            </button>
+            <button
+              className="ra-btn ra-btn-danger"
+              onClick={() => sendRidealongCommand('exit')}
+              title="Exit ridealong"
+            >
+              exit
+            </button>
+          </div>
+
+          {state.waypoints && state.waypoints.length > 0 && (
+            <div className="ra-waypoints">
+              <span className="ra-waypoints-label">waypoints:</span>
+              {state.waypoints.map(wp => (
+                <button
+                  key={wp}
+                  className="ra-btn ra-btn-waypoint"
+                  onClick={() => sendRidealongCommand(`waypoint:${wp}`)}
+                >
+                  {wp}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="ra-custom">
+            <span className="ra-cmd-prompt">$</span>
+            <input
+              className="ra-cmd-input"
+              type="text"
+              value={customCmd}
+              placeholder="insert custom command…"
+              onChange={e => setCustomCmd(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') submitCustom() }}
+            />
+            <button className="ra-btn" onClick={submitCustom}>run</button>
+          </div>
+        </div>
+      )}
+
+      {!canControl && (
+        <div className="ra-observe-hint">observing — switch to remote control to drive</div>
+      )}
+    </div>
+  )
+}
+
+function CondocPanel({
+  state,
+  fcState,
+}: {
+  state: CondocStateMsg
+  fcState: string
+}) {
+  const canControl = fcState === 'remote-control'
+  const stepLabel = state.step_num ? `step ${state.step_num}` : ''
+
+  return (
+    <div className="condoc-panel">
+      <div className="condoc-header">
+        <span className="condoc-icon">📄</span>
+        <span className="condoc-title">condoc</span>
+        {state.name && <span className="condoc-name">{state.name}</span>}
+      </div>
+      <div className="condoc-status">
+        <div className="condoc-phase">
+          {stepLabel && <span className="condoc-step">{stepLabel}</span>}
+          <span className="condoc-phase-label">{state.phase}</span>
+        </div>
+        {state.status_msg && (
+          <div className="condoc-msg">{state.status_msg}</div>
+        )}
+      </div>
+      {!canControl && (
+        <div className="ra-observe-hint">observing — switch to remote control to drive</div>
+      )}
+    </div>
+  )
+}
+
+function ACConnectionPanel({
+  acState,
+  onConnect,
+  onDisconnect,
+  onSetAutoConnect,
+}: {
+  acState: { connected: boolean; host?: string; port?: string; connecting?: boolean; auto_connect?: boolean }
+  onConnect: (host: string, port: string) => void
+  onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
+}) {
+  const [host, setHost] = useState(acState.host ?? 'localhost')
+  const [port, setPort] = useState(acState.port ?? '8084')
+
+  // auto-connect toggle: a first-class state independent of the current
+  // connection, so it's rendered alongside every panel variant (see Revision
+  // I of Step3Prompt.md) -- checking it arms the background retry loop and
+  // keeps it armed across a successful connection; unchecking it only stops a
+  // retry in progress, not an already-live connection (use disconnect below
+  // for that, which also unchecks this).
+  const autoConnectToggle = (
+    <label className="ac-auto-connect" title="keep reaching for agent-coordinator: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off">
+      <input
+        type="checkbox"
+        checked={acState.auto_connect ?? false}
+        onChange={e => onSetAutoConnect(e.target.checked, host, port)}
+      />
+      auto-connect
+    </label>
+  )
+
+  if (acState.connected) {
+    return (
+      <div className="ac-panel ac-panel-connected">
+        <span className="ac-label">agent-coordinator</span>
+        <span className="ac-addr">{acState.host}:{acState.port}</span>
+        {autoConnectToggle}
+        <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>disconnect</button>
+      </div>
+    )
+  }
+
+  if (acState.connecting) {
+    return (
+      <div className="ac-panel ac-panel-connecting">
+        <span className="ac-label">agent-coordinator</span>
+        <span className="ac-connecting">auto-connecting… {acState.host}:{acState.port}</span>
+        {autoConnectToggle}
+        <button className="ac-btn ac-btn-disconnect" onClick={onDisconnect}>cancel</button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="ac-panel">
+      <span className="ac-label">agent-coordinator</span>
+      <input
+        className="ac-input"
+        type="text"
+        value={host}
+        placeholder="host"
+        onChange={e => setHost(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') onConnect(host, port) }}
+      />
+      <span className="ac-sep">:</span>
+      <input
+        className="ac-input ac-input-port"
+        type="text"
+        value={port}
+        placeholder="port"
+        onChange={e => setPort(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') onConnect(host, port) }}
+      />
+      <button className="ac-btn ac-btn-connect" onClick={() => onConnect(host, port)}>connect</button>
+      {autoConnectToggle}
+    </div>
+  )
+}
+
+function formatUptime(startedAt: number, nowSec: number): string {
+  if (!startedAt) return '—'
+  const secs = Math.max(0, nowSec - startedAt)
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
+}
+
+function SystemProcRow({
+  proc,
+  nowSec,
+  onTerminate,
+  onRestart,
+  onSetAutoUpdate,
+  onOpen,
+}: {
+  proc: ProcInfo
+  nowSec: number
+  onTerminate?: (id: string) => void
+  onRestart?: () => void
+  onSetAutoUpdate?: (enabled: boolean) => void
+  onOpen?: () => void // double-click: go to this app's own tab (Step1SubstepCPrompt.md)
+}) {
+  const detail = proc.status === 'running'
+    ? formatUptime(proc.started_at, nowSec)
+    : `exit ${proc.exit_code}`
+
+  const label = proc.managed && proc.instance > 0
+    ? `${proc.name} #${proc.instance}`
+    : proc.name
+
+  return (
+    <div
+      className={`sys-row sys-row-${proc.status}${onOpen ? ' sys-row-openable' : ''}`}
+      onDoubleClick={onOpen}
+      title={onOpen ? 'double-click to open its tab' : undefined}
+    >
+      <span className="sys-col sys-col-name">
+        <span className="sys-col-name-main">
+          {label}
+          {!proc.managed && <span className="sys-self-tag">this process</span>}
+          {proc.dev_mode && <span className="sys-dev-tag" title="launched with --dev-mode">dev</span>}
+        </span>
+        {proc.version && (
+          <span className="sys-version-tag" title="build version">{proc.version}</span>
+        )}
+        {proc.session && (
+          <span className="sys-session-tag" title="active session">{proc.session}</span>
+        )}
+      </span>
+      <span className="sys-col sys-col-pid">{proc.pid > 0 ? proc.pid : '—'}</span>
+      <span className={`sys-col sys-col-status sys-status-${proc.status}`}>{proc.status}</span>
+      <span className="sys-col sys-col-detail" title={proc.detail}>{detail}</span>
+      <span className="sys-col sys-col-actions">
+        {proc.managed && onTerminate && (
+          <button
+            className="sys-btn sys-btn-terminate"
+            onClick={() => onTerminate(proc.instance_id)}
+          >
+            {proc.status === 'running' ? 'terminate' : 'dismiss'}
+          </button>
+        )}
+        {!proc.managed && onRestart && (
+          <button
+            className={`sys-btn sys-btn-restart${proc.update_available ? ' sys-btn-restart-update' : ''}`}
+            disabled={!proc.loader_managed}
+            title={proc.loader_managed
+              ? (proc.update_available
+                ? 'a newer build has landed on disk — terminate this process so ufa-loader relaunches it with the new binary'
+                : 'terminate this process so ufa-loader relaunches it with the identical config')
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+            onClick={onRestart}
+          >
+            {proc.update_available ? 'update and restart' : 'restart'}
+          </button>
+        )}
+        {!proc.managed && onSetAutoUpdate && (
+          <label
+            className="sys-auto-rebuild"
+            title={proc.loader_managed
+              ? 'restart automatically the instant an update becomes available, instead of waiting for the button above'
+              : 'not loader-managed — run under ufa-loader (see make run-loader) to enable'}
+          >
+            <input
+              type="checkbox"
+              disabled={!proc.loader_managed}
+              checked={!!proc.auto_update}
+              onChange={e => onSetAutoUpdate(e.target.checked)}
+            />
+            auto-update
+          </label>
+        )}
+      </span>
+    </div>
+  )
+}
+
+// TroughEntry is one line in the system tab's "trough" (see Trough below) --
+// condocs/initialDistributedDevelopmentImpls/Step5Prompt.md Revision L.
+interface TroughEntry {
+  id: number
+  ts: number // Date.now(), when the notification was recorded
+  text: string
+}
+
+// TROUGH_MAX_ENTRIES caps how much history the trough keeps -- it's a live,
+// session-scoped notification log (not persisted; a refresh starts it fresh),
+// not an audit trail, so old entries are simply dropped off the front.
+const TROUGH_MAX_ENTRIES = 50
+
+let troughIdSeq = 0
+
+// useTrough appends a new trough entry each time `error` changes to a new,
+// non-empty value -- right now that's only ever RepoStateMsg.last_error after
+// a failed rebuild, per the prompt's "print errors or notifications when
+// things happen like a failure during rebuild", but the trough itself is
+// generic (any future error/notification source can feed it the same way).
+function useTrough(error: string | undefined): TroughEntry[] {
+  const [entries, setEntries] = useState<TroughEntry[]>([])
+  const lastSeen = useRef<string | undefined>(undefined)
+
+  useEffect(() => {
+    if (error && error !== lastSeen.current) {
+      setEntries(prev => [
+        ...prev.slice(-(TROUGH_MAX_ENTRIES - 1)),
+        { id: ++troughIdSeq, ts: Date.now(), text: `rebuild failed — ${error}` },
+      ])
+    }
+    lastSeen.current = error
+  }, [error])
+
+  return entries
+}
+
+// Trough is "an expandable-and-then-scrollable single line at the bottom of
+// the main pane where we can print errors or notifications when things
+// happen" (Step5Prompt.md Revision L). Collapsed, it's just the most recent
+// entry on one line; clicking it expands into a scrollable list of
+// everything recorded this session, newest first.
+function Trough({ entries }: { entries: TroughEntry[] }) {
+  const [expanded, setExpanded] = useState(false)
+  const latest = entries[entries.length - 1]
+
+  return (
+    <div className={`sys-trough${expanded ? ' sys-trough-expanded' : ''}`}>
+      <button
+        className="sys-trough-line"
+        onClick={() => setExpanded(e => !e)}
+        disabled={entries.length === 0}
+        title={entries.length === 0 ? 'no notifications yet' : expanded ? 'collapse' : 'expand for full history'}
+      >
+        <span className="sys-trough-chevron">{expanded ? '▾' : '▸'}</span>
+        {latest ? (
+          <>
+            <span className="sys-trough-ts">{new Date(latest.ts).toLocaleTimeString()}</span>
+            <span className="sys-trough-text">{latest.text}</span>
+          </>
+        ) : (
+          <span className="sys-trough-empty">no notifications</span>
+        )}
+        {entries.length > 1 && <span className="sys-trough-count">{entries.length}</span>}
+      </button>
+      {expanded && (
+        <div className="sys-trough-list">
+          {entries.slice().reverse().map(e => (
+            <div key={e.id} className="sys-trough-entry">
+              <span className="sys-trough-ts">{new Date(e.ts).toLocaleTimeString()}</span>
+              <span className="sys-trough-text">{e.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// RepoWatchPanel is the system tab's dev-repo watcher widget (--dev-repo, see
+// docs/DevMode.md): the rebuild button turns orange and reads "dirty" while
+// the watched repo has uncommitted changes -- but stays disabled, since
+// rebuilding a dirty tree would silently bake in unreviewed changes. It's
+// selectable, plain, and reads "rebuild" only once HEAD has moved since the
+// last build with the repo clean; otherwise it's disabled. Rendered only
+// when LR was actually launched with --dev-repo.
+function RepoWatchPanel({
+  repoState,
+  onRebuild,
+  onSetAutoRebuild,
+  onSwitchBranch,
+  onWatchExternal,
+  onBuildExternal,
+  onShowPluginRegistration,
+  managed,
+  onLaunch,
+}: {
+  repoState: RepoStateMsg
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch: (branch: string) => void
+  onWatchExternal: (path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  onBuildExternal: (path: string) => void
+  onShowPluginRegistration: (appId: string) => void
+  managed: ProcInfo[]
+  onLaunch: (name: string) => void
+}) {
+  if (!repoState.watched) return null
+
+  const isDirty = !!repoState.dirty
+  const isBuilding = !!repoState.building
+  const isReady = !!repoState.rebuild_ready
+  const disabled = isBuilding || isDirty
+  const label = isBuilding ? 'building…' : isDirty ? 'dirty' : 'rebuild'
+  const btnClass = `sys-btn sys-btn-rebuild${
+    isDirty
+      ? ' sys-btn-rebuild-dirty'
+      : !isReady && !isBuilding
+      ? ' sys-btn-rebuild-manual'
+      : ''
+  }`
+  const title = isDirty
+    ? 'uncommitted changes — commit or revert to enable rebuilding'
+    : isBuilding
+    ? 'a rebuild is running'
+    : isReady
+    ? `a .ufabuild request (${repoState.ufabuild_request}) — ${coreBuildPlanText(repoState)}`
+    : 'no .ufabuild request since the last successful build — click to rebuild manually'
+
+  return (
+    <div className="sys-repo-panel">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-repo</span>
+        <span className="sys-repo-root" title={repoState.root}>{repoState.root}</span>
+        {repoState.head && <span className="sys-repo-head">{repoState.head}</span>}
+      </div>
+      <div className="sys-repo-controls">
+        <button
+          className={btnClass}
+          disabled={disabled}
+          onClick={onRebuild}
+          title={title}
+        >
+          {label}
+        </button>
+        <label
+          className="sys-auto-rebuild"
+          title="build a .ufabuild request automatically -- waits 90s after the last request lands to avoid rebuilding on every commit in a burst"
+        >
+          <input
+            type="checkbox"
+            checked={repoState.auto_rebuild}
+            onChange={e => onSetAutoRebuild(e.target.checked)}
+          />
+          auto-rebuild
+        </label>
+        {repoState.auto_rebuild_pending && (
+          <span className="sys-repo-auto-pending" title="auto-rebuild is waiting for changes to settle -- bumped back to 90s each time a new request lands">
+            rebuilding in {repoState.auto_rebuild_seconds ?? 0}s
+          </span>
+        )}
+      </div>
+      {repoState.last_error && (
+        <div className="sys-repo-error" title={repoState.last_error}>last rebuild failed — see LR's log</div>
+      )}
+      <div className="sys-repo-ufabuild" title="the dev branch is pulled every 5s; a pulled commit carrying a [condocv2-xxxx] tag writes a gitignored .ufabuild request, and only a request builds">
+        .ufabuild: {repoState.ufabuild_request ? `request for ${repoState.ufabuild_request}` : repoState.ufabuild_note || 'no request'}
+      </div>
+      <CoreBuildLines repoState={repoState} />
+      <BranchSwitcher repoState={repoState} onSwitch={onSwitchBranch} />
+      <ExternalWatches repoState={repoState} managed={managed} onWatch={onWatchExternal} onBuild={onBuildExternal} onLaunch={onLaunch} onShowRegistration={onShowPluginRegistration} />
+    </div>
+  )
+}
+
+// coreBuildPlanText says what building the pending .ufabuild request would
+// do: the core repo rebuilds only the sub-apps its commits changed, with
+// make update-dev-binaries (local-representative/ufaplan.go).
+function coreBuildPlanText(repoState: RepoStateMsg): string {
+  if (repoState.build_plan_note) return repoState.build_plan_note
+  if (repoState.build_plan?.length) return `runs make update-dev-binaries for ${repoState.build_plan.join(', ')}, then restarts just those`
+  return 'runs make update-dev-binaries for the sub-apps it changed'
+}
+
+// CoreBuildLines are the dev-repo panel's per-sub-app build lines, under
+// ".ufabuild:": "next build:" what the pending request would rebuild,
+// "building:" what the running build covers, and "last build:" what the
+// last one built and restarted.
+function CoreBuildLines({ repoState }: { repoState: RepoStateMsg }) {
+  const covers = repoState.build_full ? 'every sub-app (full deploy-dev-binaries)' : repoState.build_apps?.join(', ')
+  return (
+    <>
+      {repoState.ufabuild_request && (
+        <div className="sys-repo-ufabuild" title="the sub-apps whose inputs (own dir, local go.mod replaces) changed since each was last built">
+          next build: {repoState.build_plan_note || repoState.build_plan?.join(', ') || '…'}
+        </div>
+      )}
+      {repoState.building && covers && (
+        <div className="sys-repo-ufabuild" title="the sub-apps this build covers -- also shown building on agent-coordinator's timeline">
+          building: {covers}
+        </div>
+      )}
+      {!repoState.building && (covers || repoState.restart_note) && (
+        <div className="sys-repo-ufabuild" title={repoState.restart_note}>
+          last build: {covers || 'nothing'}{repoState.restart_note ? ` — ${repoState.restart_note}` : ''}
+        </div>
+      )}
+    </>
+  )
+}
+
+// ExternalWatches is the dev-repo panel's "external" section
+// (privateRepoOpsImpls Step6Prompt.md Revision C): directories beside the
+// watched repo -- first, the HyenaExternalUfaPlugin checkout at
+// ../HyenaExternalUfaPlugin -- registered for watching, each with its git
+// state and an "unwatch", then a path box (relative to the dev-repo's root,
+// or absolute) and "watch". "plugin dev repo" (Revision D) registers the
+// path -- ../HyenaExternalUfaPlugin when the box is empty, so that takes one
+// press -- as a plug-in dev repo: pulled, built by 'make
+// deploy-dev-binaries' whenever condoc-tagged commits come in (via a
+// gitignored .ufabuild request; "build" writes one by hand), and its plug-in
+// approved here. The app id box overrides the one derived from the
+// directory's name. Each plug-in dev repo's "registration" link (Revision E)
+// opens the plugins tab at the registration made for it. Its plug-in is a
+// managed app under its app id (Revision F): "launch" starts it from the
+// build deployed to /AI-evo1-dev/plugin, offered while no instance runs, and
+// each build restarts a running one; it is terminated from the managed list.
+const defaultPluginDevRepo = '../HyenaExternalUfaPlugin'
+
+function ExternalWatches({ repoState, managed, onWatch, onBuild, onLaunch, onShowRegistration }: {
+  repoState: RepoStateMsg
+  managed: ProcInfo[]
+  onWatch: (path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  onBuild: (path: string) => void
+  onLaunch: (name: string) => void
+  onShowRegistration: (appId: string) => void
+}) {
+  const [path, setPath] = useState('')
+  const [appId, setAppId] = useState('')
+  const externals = repoState.externals ?? []
+  const runningInstance = (app?: string) =>
+    app ? managed.find(p => p.name === app && p.status === 'running') : undefined
+  const submit = (plugin: boolean) => {
+    const p = path.trim() || (plugin ? defaultPluginDevRepo : '')
+    if (!p) return
+    onWatch(p, true, plugin, plugin ? appId.trim() : '')
+    setPath('')
+    setAppId('')
+  }
+
+  return (
+    <div className="sys-ext">
+      {externals.map(e => (
+        <div key={e.abs}>
+          <div className="sys-repo-info sys-ext-row">
+            <span className="sys-repo-label">{e.plugin ? 'plug-in' : 'external'}</span>
+            <span className="sys-repo-root" title={e.abs}>{e.path}</span>
+            <span className="sys-ext-state" title={e.note || (e.changed_at ? `last changed ${new Date(e.changed_at * 1000).toLocaleString()}` : 'unchanged since LR began watching it')}>
+              {e.note ? (
+                <span className="sys-ext-note">{e.note}</span>
+              ) : (
+                <>
+                  {e.branch || '(detached)'} {e.head}
+                  {e.dirty && <span className="sys-ext-dirty"> dirty</span>}
+                  {e.changed_at ? ` · changed ${new Date(e.changed_at * 1000).toLocaleTimeString()}` : ''}
+                </>
+              )}
+            </span>
+            {e.plugin && (
+              <button
+                className="sys-btn sys-btn-branch"
+                disabled={!!e.building || !e.git}
+                onClick={() => onBuild(e.path)}
+                title="write a .ufabuild request for the current HEAD, which runs make deploy-dev-binaries there"
+              >
+                {e.building ? 'building…' : 'build'}
+              </button>
+            )}
+            {e.plugin && e.app_id && !runningInstance(e.app_id) && (
+              <button
+                className="sys-btn sys-btn-launch"
+                disabled={!e.deployed || !!e.building}
+                onClick={() => onLaunch(e.app_id!)}
+                title={e.deployed
+                  ? `launch ${e.app_id} from ${e.bin} as a managed app; each build restarts it`
+                  : `nothing deployed at ${e.bin ?? 'the plug-in dir'} yet: build it first`}
+              >
+                launch
+              </button>
+            )}
+            <button className="sys-btn sys-btn-neutral" onClick={() => onWatch(e.path, false)} title="stop watching this path">
+              unwatch
+            </button>
+          </div>
+          {e.plugin && (
+            <div className="sys-repo-ufabuild" title={[e.plugin_note, e.pull_note, e.launch_note].filter(Boolean).join(' · ')}>
+              {e.app_id ? (
+                <button
+                  className="sys-ext-reg-link"
+                  onClick={() => onShowRegistration(e.app_id!)}
+                  title={`open the plugins tab at ${e.app_id}'s registration on this host${e.plugin_note ? ` (${e.plugin_note})` : ''}`}
+                >
+                  {e.app_id} — registration ↗
+                </button>
+              ) : null}
+              {' · '}
+              {e.building
+                ? 'building'
+                : e.ufabuild
+                ? `.ufabuild: ${e.ufabuild}`
+                : e.built_head
+                ? `built ${e.built_head}${e.build_at ? ` at ${new Date(e.build_at * 1000).toLocaleTimeString()}` : ''}`
+                : 'waiting for a condoc-tagged commit'}
+              {' · '}
+              {runningInstance(e.app_id)
+                ? `running as ${runningInstance(e.app_id)!.instance_id}`
+                : e.deployed ? 'not launched' : 'not deployed'}
+              {e.pull_note && <span className="sys-ext-note"> · {e.pull_note}</span>}
+            </div>
+          )}
+          {e.plugin && e.build_error && (
+            <div className="sys-repo-error" title={e.build_error}>last build failed: {e.build_error}</div>
+          )}
+        </div>
+      ))}
+      <div className="sys-repo-controls">
+        <input
+          className="sys-ext-input"
+          value={path}
+          placeholder={defaultPluginDevRepo}
+          onChange={e => setPath(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit(false) }}
+        />
+        <input
+          className="sys-ext-input"
+          value={appId}
+          placeholder="app id (plug-in dev repo; optional)"
+          onChange={e => setAppId(e.target.value)}
+        />
+        <button
+          className="sys-btn sys-btn-branch"
+          disabled={!path.trim()}
+          onClick={() => submit(false)}
+          title="register this directory (relative to the dev-repo's root, or absolute) as an external path to watch -- watched only, never pulled or built"
+        >
+          watch
+        </button>
+        <button
+          className="sys-btn sys-btn-branch"
+          onClick={() => submit(true)}
+          title={`register this directory (${defaultPluginDevRepo} if the box is empty) as a plug-in dev repo: its upstream is pulled, condoc-tagged commits write a gitignored .ufabuild request that runs make deploy-dev-binaries there, and its plug-in's app id is approved on this host`}
+        >
+          plugin dev repo
+        </button>
+      </div>
+      {repoState.external_error && (
+        <div className="sys-repo-error" title={repoState.external_error}>last external path change failed: {repoState.external_error}</div>
+      )}
+    </div>
+  )
+}
+
+// BranchSwitcher is the dev-repo panel's "dev branch" readout plus its
+// "switch" control (Step1SubstepCPrompt.md Revision B): shows the branch
+// being watched and, once "switch" is pressed, a picker over the available
+// branches with a confirming "switch" and a "cancel". Disabled for the same
+// reasons LR's switchBranch refuses server-side (dirty, building), so those
+// surface up front.
+function BranchSwitcher({ repoState, onSwitch }: { repoState: RepoStateMsg; onSwitch: (branch: string) => void }) {
+  const [picking, setPicking] = useState(false)
+  const [choice, setChoice] = useState('')
+  const branches = repoState.branches ?? []
+  const blocker = repoState.dirty ? 'uncommitted changes — commit or revert to enable switching'
+    : repoState.building ? 'a rebuild is running'
+    : null
+  const disabled = !!blocker || branches.length === 0
+
+  const open = () => {
+    const current = repoState.branch
+    setChoice(current && branches.includes(current) ? current : branches[0] ?? '')
+    setPicking(true)
+  }
+  const confirm = () => {
+    if (choice) onSwitch(choice)
+    setPicking(false)
+  }
+
+  return (
+    <div className="sys-branch">
+      <div className="sys-repo-info">
+        <span className="sys-repo-label">dev-branch</span>
+        {picking ? (
+          <select className="sys-branch-select" value={choice} onChange={e => setChoice(e.target.value)}>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <span className="sys-branch-name" title={repoState.branch}>{repoState.branch || '(detached)'}</span>
+        )}
+      </div>
+      <div className="sys-repo-controls">
+        {picking ? (
+          <>
+            <button className="sys-btn sys-btn-branch" disabled={disabled || !choice} onClick={confirm} title={`check out ${choice || 'the chosen branch'}`}>
+              switch
+            </button>
+            <button className="sys-btn sys-btn-neutral" onClick={() => setPicking(false)}>cancel</button>
+          </>
+        ) : (
+          <button
+            className="sys-btn sys-btn-branch"
+            disabled={disabled}
+            onClick={open}
+            title={blocker ?? (branches.length === 0 ? 'no branches reported' : 'pick a branch to check out and watch instead')}
+          >
+            switch
+          </button>
+        )}
+      </div>
+      {repoState.switch_error && (
+        <div className="sys-repo-error" title={repoState.switch_error}>last branch switch failed: {repoState.switch_error}</div>
+      )}
+    </div>
+  )
+}
+
+// LaunchPanel fills a sub-app's tab while that app isn't up on this host
+// (dTT-IntegrationImpls Step 1, Revision O): a launch button in the middle
+// of the tab instead of only a pointer to the system tab. It launches the
+// same way the system tab's button does, and is held off the same way --
+// while an instance is already running (it just hasn't connected yet) or an
+// app it excludes is running. managed is null until the first system-state.
+function LaunchPanel({ name, managed, onLaunch }: {
+  name: string
+  managed: ProcInfo[] | null
+  onLaunch: (name: string) => void
+}) {
+  const running = (app: string) => (managed ?? []).some(p => p.name === app && p.status === 'running')
+  const spec = LAUNCHABLE_APPS.find(a => a.name === name)
+  const blocker = spec?.excludes?.find(running)
+  const starting = running(name)
+  // Set on click and cleared once this app's processes change (it started,
+  // or failed to), so a double click doesn't launch twice.
+  const [requested, setRequested] = useState(false)
+  const procKey = (managed ?? []).filter(p => p.name === name).map(p => `${p.instance_id}:${p.status}`).join(',')
+  useEffect(() => setRequested(false), [name, procKey])
+
+  return (
+    <div className="service-empty service-empty-embed launch-panel">
+      <div className="launch-panel-inner">
+        <div className="launch-panel-msg">
+          {starting ? `${name} is running on this host but hasn't connected yet…` : `${name} is not running on this host`}
+        </div>
+        {spec && !starting && (
+          <button
+            className="sys-btn sys-btn-launch launch-panel-btn"
+            disabled={managed === null || requested || blocker !== undefined}
+            onClick={() => { setRequested(true); onLaunch(name) }}
+          >
+            {requested ? `launching ${name}…` : `launch ${name}`}
+          </button>
+        )}
+        {blocker !== undefined && !starting && (
+          <div className="launch-panel-note">can't run alongside {blocker} — terminate it from the system tab first</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SystemPanel({
+  state,
+  fcInstances,
+  repoState,
+  onLaunch,
+  onTerminate,
+  onRestart,
+  onRebuild,
+  onSetAutoRebuild,
+  onSwitchBranch,
+  onWatchExternal,
+  onBuildExternal,
+  onShowPluginRegistration,
+  onSetAutoUpdate,
+  onConnectProvider,
+  onDisconnectProvider,
+  onInspectAgents,
+  onOpenTab,
+  plugins,
+  onOpenPlugin,
+}: {
+  state: SystemStateMsg | null
+  fcInstances: FCInstanceInfo[]
+  repoState: RepoStateMsg
+  onLaunch: (name: string) => void
+  onTerminate: (id: string) => void
+  onRestart: () => void
+  onRebuild: () => void
+  onSetAutoRebuild: (enabled: boolean) => void
+  onSwitchBranch: (branch: string) => void
+  onWatchExternal: (path: string, watch: boolean, plugin?: boolean, appId?: string) => void
+  onBuildExternal: (path: string) => void
+  onShowPluginRegistration: (appId: string) => void
+  onSetAutoUpdate: (enabled: boolean) => void
+  onConnectProvider: (provider: string, token: string) => void
+  onDisconnectProvider: (provider: string) => void
+  onInspectAgents: () => void
+  onOpenTab: (tab: Tab) => void
+  plugins: PluginInfo[]
+  onOpenPlugin: (appId: string) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const troughEntries = useTrough(repoState.last_error)
+  // Drilled into "agent operations"' full-page view (its "↑ system" leaves).
+  const [opsPage, setOpsPage] = useState(false)
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  if (!state) {
+    return <div className="sys-panel sys-panel-empty">waiting for system state…</div>
+  }
+  if (opsPage) {
+    return <div className="sys-panel"><AgentOps ops={state.agent_ops} nowSec={nowSec} onUp={() => setOpsPage(false)} /></div>
+  }
+
+  const runningCount = (name: string) =>
+    state.managed.filter(p => p.name === name && p.status === 'running').length
+
+  // A managed app's row opens its own tab on double-click: a first-party
+  // sub-app's top-level tab, or an external plug-in's tab under plugins
+  // (a plug-in's process is named after its app id -- procman.go's launch
+  // specs, extlaunch.go's devPluginSpec).
+  const isPluginApp = (name: string) =>
+    plugins.some(p => p.app_id === name && p.trust !== 'first-party')
+    || (repoState.externals ?? []).some(e => e.plugin && e.app_id === name)
+  const openRow = (name: string) =>
+    isTab(name) ? () => onOpenTab(name as Tab)
+    : isPluginApp(name) ? () => onOpenPlugin(name)
+    : undefined
+
+  const fcRunning = runningCount('federation-command') > 0
+  const fcControl = (st: string) =>
+    st === 'remote-control' ? 'remote'
+    : st === 'local-control' ? 'local'
+    : 'not connected'
+  // One line per connected instance; a single "not connected" line while
+  // launched instances have yet to connect.
+  const fcRows = fcInstances.length > 0
+    ? fcInstances.map(inst => ({ key: inst.key, label: `federation-command ${inst.label}`, state: inst.state }))
+    : [{ key: '', label: 'federation-command', state: '' }]
+
+  return (
+    <div className="sys-panel">
+      <RepoWatchPanel repoState={repoState} onRebuild={onRebuild} onSetAutoRebuild={onSetAutoRebuild} onSwitchBranch={onSwitchBranch} onWatchExternal={onWatchExternal} onBuildExternal={onBuildExternal} onShowPluginRegistration={onShowPluginRegistration} managed={state.managed ?? []} onLaunch={onLaunch} />
+      {fcRunning && fcRows.map(row => (
+        <div key={row.key} className={`sys-fc-control sys-fc-control-${row.state || 'none'}`}>
+          {row.label} control: <strong>{fcControl(row.state)}</strong>
+          {fcControl(row.state) !== 'remote' && ' — expected remote in a machine-driven chain'}
+        </div>
+      ))}
+      <div className="sys-table">
+        <div className="sys-row sys-row-head">
+          <span className="sys-col sys-col-name">process</span>
+          <span className="sys-col sys-col-pid">pid</span>
+          <span className="sys-col sys-col-status">status</span>
+          <span className="sys-col sys-col-detail">uptime</span>
+          <span className="sys-col sys-col-actions" />
+        </div>
+        <SystemProcRow proc={state.self} nowSec={nowSec} onRestart={onRestart} onSetAutoUpdate={onSetAutoUpdate} />
+        {state.managed.map(p => (
+          <SystemProcRow
+            key={p.instance_id}
+            proc={p}
+            nowSec={nowSec}
+            onTerminate={onTerminate}
+            onOpen={openRow(p.name)}
+          />
+        ))}
+        {state.managed.length === 0 && (
+          <div className="sys-row sys-row-none">no managed applications</div>
+        )}
+      </div>
+
+      <div className="sys-launch">
+        <span className="sys-launch-label">launch</span>
+        {LAUNCHABLE_APPS.map(({ name, multi, excludes }) => {
+          const n = runningCount(name)
+          const blocker = excludes?.find(other => runningCount(other) > 0)
+          return (
+            <button
+              key={name}
+              className="sys-btn sys-btn-launch"
+              disabled={(!multi && n > 0) || blocker !== undefined}
+              title={blocker !== undefined ? `can't run alongside ${blocker} — terminate it first` : undefined}
+              onClick={() => onLaunch(name)}
+            >
+              {multi
+                ? (n > 0 ? `${name} (+1 · ${n} running)` : name)
+                : (n > 0 ? `${name} (running)` : blocker !== undefined ? `${name} (${blocker} running)` : name)}
+            </button>
+          )
+        })}
+      </div>
+      <ProvidersPanel connections={state.connections} onConnect={onConnectProvider} onDisconnect={onDisconnectProvider} />
+      <AgentsPanel
+        agents={state.agents}
+        nowSec={nowSec}
+        onInspect={onInspectAgents}
+        onConnect={onConnectProvider}
+        onDisconnect={onDisconnectProvider}
+      />
+      <AgentOps ops={state.agent_ops} nowSec={nowSec} onOpen={() => setOpsPage(true)} />
+      <Trough entries={troughEntries} />
+    </div>
+  )
+}
+
+/* ---- Provider connectivity (condocs/slopspaceCondocsImpls/Step1SubstepCPrompt.md) --
+   mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
+
+const PROVIDER_LABELS: Record<string, string> = { aws: 'AWS', github: 'GitHub', claude: 'Claude' }
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider
+}
+
+function connectionStatusLabel(status: string): string {
+  return status === 'ok' ? 'connected' : status === 'failed' ? 'not working' : 'checking…'
+}
+
+function ProviderIcon({ provider }: { provider: string }) {
+  if (provider === 'github') {
+    return (
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    )
+  }
+  if (provider === 'aws') {
+    return (
+      <svg viewBox="0 0 28 16" width="24" height="14" aria-hidden="true">
+        <text x="14" y="9" textAnchor="middle" fontSize="9" fontWeight="700" fill="currentColor" fontFamily="sans-serif">aws</text>
+        <path d="M5 11.5 Q14 16 23 11.5" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" />
+        <path d="M20.6 10.6 L23.2 11.4 L22.3 13.8" fill="none" stroke="#e0a83e" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )
+  }
+  return <span>{providerLabel(provider)}</span>
+}
+
+// CONNECTABLE_PROVIDERS are the providers the "connect" control offers
+// (Step1SubstepEPrompt.md) -- connectivity.go's connectableProviders, with
+// how each is connected.
+interface ConnectOption { provider: string, method: string, placeholder: string }
+
+const CONNECTABLE_PROVIDERS: ConnectOption[] = [
+  { provider: 'github', method: 'PAT', placeholder: 'GitHub personal access token' },
+]
+
+// CONNECTABLE_AGENTS are the agents the "agents & models" section's
+// "connect" offers (Revision D) -- agents.go's agentAuthEnv. They travel as
+// a provider named after the agent.
+const CONNECTABLE_AGENTS: ConnectOption[] = [
+  { provider: 'claude', method: 'OAuth token', placeholder: 'CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)' },
+]
+
+// DEV_AGENTS are ambiguous-agent's test agents, hidden in "agents & models"
+// unless its "show-dev" toggle is on.
+const DEV_AGENTS: ReadonlySet<string> = new Set(['clod'])
+
+// ProviderConnectForm is the "connect" control: a provider (or agent)
+// picker and a masked credential field. Whitespace is rejected to match
+// agent-coordinator's copy, where the credential travels as one word of a
+// "__system:connect" command.
+function ProviderConnectForm({ options = CONNECTABLE_PROVIDERS, onConnect, onCancel }: {
+  options?: ConnectOption[]
+  onConnect: (provider: string, token: string) => void
+  onCancel: () => void
+}) {
+  const [provider, setProvider] = useState(options[0].provider)
+  const [token, setToken] = useState('')
+  const spec = options.find(p => p.provider === provider) ?? options[0]
+  const trimmed = token.trim()
+  const invalid = trimmed === '' || /\s/.test(trimmed)
+  const submit = () => {
+    if (invalid) return
+    onConnect(provider, trimmed)
+    setToken('')
+  }
+  return (
+    <form className="sys-provider-connect" onSubmit={e => { e.preventDefault(); submit() }}>
+      <select className="sys-branch-select" value={provider} onChange={e => setProvider(e.target.value)}>
+        {options.map(p => (
+          <option key={p.provider} value={p.provider}>{providerLabel(p.provider)} ({p.method})</option>
+        ))}
+      </select>
+      <input
+        className="sys-provider-token"
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={spec.placeholder}
+        value={token}
+        onChange={e => setToken(e.target.value)}
+        autoFocus
+      />
+      <button type="submit" className="sys-btn sys-btn-branch" disabled={invalid}
+        title={invalid && trimmed !== '' ? 'a token can\'t contain whitespace' : `use this ${spec.method} for ${providerLabel(provider)} on this host`}>
+        connect
+      </button>
+      <button type="button" className="sys-btn sys-btn-neutral" onClick={onCancel}>cancel</button>
+    </form>
+  )
+}
+
+// ProvidersPanel is the system tab's "providers" section: always shown, with
+// one sub-section per provider this host holds credentials for, plus the
+// "connect" control (Step1SubstepEPrompt.md). A provider connected through
+// it (source "connected") takes precedence over this host's environment
+// credentials and gets a "disconnect", which falls back to them.
+function ProvidersPanel({ connections, onConnect, onDisconnect }: {
+  connections?: ConnectionInfo[]
+  onConnect: (provider: string, token: string) => void
+  onDisconnect: (provider: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  return (
+    <div className="sys-providers">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">providers</span>
+        {!connecting && (
+          <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+            title="give this host credentials for a provider (GitHub PAT)">
+            connect
+          </button>
+        )}
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          onConnect={(provider, token) => { onConnect(provider, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {!connections || connections.length === 0 ? (
+        <div className="sys-providers-none">no provider credentials present</div>
+      ) : connections.map(c => (
+        <div key={c.provider} className={`sys-provider sys-provider-${c.status}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-icon"><ProviderIcon provider={c.provider} /></span>
+            <span className="sys-provider-name">{providerLabel(c.provider)}</span>
+            <span className={`sys-provider-status sys-provider-status-${c.status}`}>{connectionStatusLabel(c.status)}</span>
+            {c.source === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(c.provider)}
+                title="forget the connected credential (falls back to any in this host's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">principal</span>
+            <span className="sys-provider-value">
+              {c.principal || <span className="sys-provider-placeholder">{c.status === 'checking' ? 'not yet verified' : 'unknown'}</span>}
+            </span>
+          </div>
+          {c.source && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">credentials from</span>
+              <span className="sys-provider-value">{c.source}</span>
+            </div>
+          )}
+          {c.status === 'failed' && c.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{c.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ---- Agents & models (condocs/slopspaceCondocsImpls/Step1SubstepEPrompt.md Revision B) --
+   mirrors agent-coordinator/frontend/src/App.tsx's own copy ---- */
+
+// AgentsPanel is the system tab's "agents & models" section, below
+// "providers": the AI agents this host can run and their models, as the
+// ambiguous-agent layer reports them (ambiguous-agent --inspect, run by LR
+// -- see local-representative/agents.go). Installed agents get a card each;
+// the rest are listed on one line.
+//
+// Revision D adds a "connect" control for CONNECTABLE_AGENTS (Claude's
+// CLAUDE_CODE_OAUTH_TOKEN, which LR passes to every app it launches
+// afterwards) and a "show-dev" toggle, off by default, that the DEV_AGENTS
+// (clod) are hidden behind.
+function AgentsPanel({ agents, nowSec, onInspect, onConnect, onDisconnect }: {
+  agents?: AgentsState
+  nowSec: number
+  onInspect: () => void
+  onConnect: (agent: string, token: string) => void
+  onDisconnect: (agent: string) => void
+}) {
+  const [connecting, setConnecting] = useState(false)
+  const [showDev, setShowDev] = useState(false)
+  const hasDev = agents?.agents.some(a => DEV_AGENTS.has(a.name)) ?? false
+  const shown = agents?.agents.filter(a => showDev || !DEV_AGENTS.has(a.name)) ?? []
+  const installed = shown.filter(a => a.installed)
+  const missing = shown.filter(a => !a.installed)
+  const checking = !agents || agents.status === 'checking'
+  return (
+    <div className="sys-providers sys-agents">
+      <div className="sys-providers-heading">
+        <span className="sys-providers-header">agents &amp; models</span>
+        {agents?.checked_at ? <span className="sys-agents-checked">inspected {formatAgo(agents.checked_at, nowSec)}</span> : null}
+        <span className="sys-agents-controls">
+          {hasDev && (
+            <label className="sys-agents-showdev" title="also list ambiguous-agent's test agents (clod)">
+              <input type="checkbox" checked={showDev} onChange={e => setShowDev(e.target.checked)} />
+              show-dev
+            </label>
+          )}
+          {!connecting && (
+            <button className="sys-btn sys-btn-branch" onClick={() => setConnecting(true)}
+              title="give an agent on this host credentials (Claude OAuth token)">
+              connect
+            </button>
+          )}
+          <button className="sys-btn sys-btn-branch" onClick={onInspect} disabled={checking}
+            title="ask ambiguous-agent again which agents and models this host has">
+            {checking ? 'inspecting…' : 're-inspect'}
+          </button>
+        </span>
+      </div>
+      {connecting && (
+        <ProviderConnectForm
+          options={CONNECTABLE_AGENTS}
+          onConnect={(agent, token) => { onConnect(agent, token); setConnecting(false) }}
+          onCancel={() => setConnecting(false)}
+        />
+      )}
+      {agents?.status === 'failed' && (
+        <div className="sys-provider-row">
+          <span className="sys-provider-label">error</span>
+          <span className="sys-provider-value sys-provider-error">{agents.detail || 'inspection failed'}</span>
+        </div>
+      )}
+      {!agents ? (
+        <div className="sys-providers-none">not reported by this host</div>
+      ) : installed.length === 0 && agents.status !== 'checking' ? (
+        <div className="sys-providers-none">no agents available</div>
+      ) : installed.map(a => (
+        <div key={a.name} className={`sys-provider ${a.detail ? 'sys-provider-failed' : ''}`}>
+          <div className="sys-provider-title">
+            <span className="sys-provider-name">{a.name}</span>
+            {a.name === agents?.default_agent && <span className="sys-agent-tag">default</span>}
+            <span className="sys-provider-status sys-provider-status-ok">available</span>
+            {a.auth === 'connected' && (
+              <button className="sys-btn sys-btn-neutral" onClick={() => onDisconnect(a.name)}
+                title="forget the connected credential (falls back to any in LR's environment)">
+                disconnect
+              </button>
+            )}
+          </div>
+          {CONNECTABLE_AGENTS.some(c => c.provider === a.name) && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">auth</span>
+              <span className="sys-provider-value">
+                {a.auth === 'connected' ? 'connected — passed to apps launched from now on'
+                  : a.auth ? `${a.auth} (LR's environment)`
+                  : <span className="sys-provider-placeholder">none passed — relies on the agent's own login, if any</span>}
+              </span>
+            </div>
+          )}
+          {a.version && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">version</span>
+              <span className="sys-provider-value">{a.version}</span>
+            </div>
+          )}
+          {a.path && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">path</span>
+              <span className="sys-provider-value">{a.path}</span>
+            </div>
+          )}
+          <div className="sys-provider-row">
+            <span className="sys-provider-label">models</span>
+            {a.models && a.models.length > 0 ? (
+              <span className="sys-agent-models">
+                {a.models.map(m => (
+                  <span key={m} className="sys-agent-model">{m}{m === a.default_model ? ' (default)' : ''}</span>
+                ))}
+              </span>
+            ) : (
+              <span className="sys-provider-value">
+                <span className="sys-provider-placeholder">
+                  {a.model_selection ? 'none listed' : 'no model selection (uses its built-in default)'}
+                </span>
+              </span>
+            )}
+          </div>
+          {a.detail && (
+            <div className="sys-provider-row">
+              <span className="sys-provider-label">error</span>
+              <span className="sys-provider-value sys-provider-error">{a.detail}</span>
+            </div>
+          )}
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="sys-agents-missing">not installed: {missing.map(a => a.name).join(', ')}</div>
+      )}
+    </div>
+  )
+}
+
+/* ---- Files panel ---- */
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+function formatAgo(tsSec: number, nowSec: number): string {
+  const secs = Math.max(0, nowSec - tsSec)
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m ago`
+}
+
+function formatCountdown(expiresAtSec: number, nowSec: number): string {
+  const secs = expiresAtSec - nowSec
+  if (secs <= 0) return 'expiring…'
+  if (secs < 60) return `${secs}s left`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m left`
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m left`
+}
+
+// FILE_ICON_PATH is the very small wireframe (outline, not filled) icon set
+// the files tab supports: text, image, archive (a zippered page -- see
+// files.go's archiveExtensions), and a catch-all for everything else.
+// Each renders in `currentColor`, so FileIcon's state-driven CSS class is
+// what actually colors it (orange/yellow/green -- see FILE_STATE_CLASS).
+const FILE_ICON_PATH: Record<string, JSX.Element> = {
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h9l5 5v15a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M14 2v6h6" strokeLinecap="round" />
+      <path d="M8 13h8M8 17h8M8 9h3" strokeLinecap="round" />
+    </svg>
+  ),
+  image: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <circle cx="8.5" cy="9.5" r="1.5" />
+      <path d="M21 16.5 15.6 11a1 1 0 0 0-1.4 0L4 21" strokeLinecap="round" />
+    </svg>
+  ),
+  archive: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M6 2h12a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" />
+      <path d="M11 3h1M12 5h1M11 7h1M12 9h1M11 11h1" strokeLinecap="round" />
+      <rect x="10.25" y="13" width="3.5" height="5" rx="0.75" />
+      <path d="M12 15.5v0.5" strokeLinecap="round" />
+    </svg>
+  ),
+  other: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <path d="M12 2 3 7v10l9 5 9-5V7z" />
+      <path d="M3 7l9 5 9-5M12 12v10" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+// SEQUENCE_ICON_PATH replaces FILE_ICON_PATH's for a YAML file that
+// validates for import as a sequence (FileInfo.sequence -- see seqfiles.go):
+// a robot's head for a robot (IANAR sequence-v2) sequence, a flow of three
+// linked steps for a control-tab sequence.
+const SEQUENCE_ICON_PATH: Record<string, JSX.Element> = {
+  robot: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="4" y="7" width="16" height="12" rx="2" />
+      <circle cx="9" cy="12" r="1.5" />
+      <circle cx="15" cy="12" r="1.5" />
+      <path d="M9 16h6M12 7V4M2 11v4M22 11v4" strokeLinecap="round" />
+      <circle cx="12" cy="3" r="1" />
+    </svg>
+  ),
+  control: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+      <rect x="3" y="2.5" width="8" height="5" rx="1" />
+      <rect x="13" y="9.5" width="8" height="5" rx="1" />
+      <rect x="3" y="16.5" width="8" height="5" rx="1" />
+      <path d="M11 5h4v4.5M13 12H7v4.5" strokeLinecap="round" />
+    </svg>
+  ),
+}
+
+// FILE_STATE_CLASS drives the icon color the file-details dialog's
+// hold/persist actions describe: orange while short-term cached, yellow once
+// held, green once persisted to the host-store.
+const FILE_STATE_CLASS: Record<string, string> = {
+  cached: 'file-state-cached',
+  held: 'file-state-held',
+  persisted: 'file-state-persisted',
+}
+
+function FileIcon({ kind, state, sequence }: { kind: string; state?: string; sequence?: string }) {
+  const stateClass = FILE_STATE_CLASS[state ?? ''] ?? FILE_STATE_CLASS.cached
+  const seqIcon = sequence ? SEQUENCE_ICON_PATH[sequence] : undefined
+  return (
+    <span className={`file-icon file-icon-${seqIcon ? `seq-${sequence}` : kind} ${stateClass}`}>
+      {seqIcon ?? FILE_ICON_PATH[kind] ?? FILE_ICON_PATH.other}
+    </span>
+  )
+}
+
+// fileTypeLabel is the file-details "type" row: the kind, or which sequence
+// a sequence YAML imports as.
+function fileTypeLabel(file: FileInfo): string {
+  return file.sequence && SEQUENCE_ICON_PATH[file.sequence] ? `${file.sequence} sequence` : file.kind
+}
+
+// fileRawUrl/fileDownloadUrl address a host-cache file's bytes directly
+// (GET /api/files/<id>, added alongside the viewer/download widgets — see
+// local-representative/files.go's handleFileRaw). Inline is what the viewer
+// embeds/fetches; ?download=1 gets an attachment Content-Disposition so the
+// browser saves it instead of navigating to it.
+function fileRawUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`
+}
+
+function fileDownloadUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}?download=1`
+}
+
+// fileHoldUrl/filePersistUrl back the file-details dialog's "hold"/"persist"
+// buttons (POST, no body -- see local-representative/files.go's
+// handleFileHold/handleFilePersist). fileDeleteUrl backs its "delete" button
+// (DELETE, same address as fileRawUrl's GET).
+function fileHoldUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/hold`
+}
+
+function filePersistUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/persist`
+}
+
+// fileHighlightUrl backs the file-details dialog's "highlight" toggle (POST,
+// no body -- see local-representative/files.go's handleFileHighlight). A
+// plain flip, independent of hold/persist state -- see FileInfo.highlighted.
+function fileHighlightUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/highlight`
+}
+
+function fileDeleteUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}`
+}
+
+// fileImportUrl backs the file-details dialog's integrations -- "import"
+// and, with run, "import and run" (POST, no body -- see
+// local-representative/fileintegrations.go).
+function fileImportUrl(id: string, run: boolean): string {
+  return `/api/files/${encodeURIComponent(id)}/import${run ? '?run=1' : ''}`
+}
+
+// markup*Url back the markup dialog (Step1SubstepCPrompt.md Revision F) --
+// GET markupUrl fetches the in-progress composite if a session is already
+// open (404 otherwise, meaning "start from the plain original"), POST
+// markupUrl saves the composite after every completed stroke, and the three
+// action routes below back its "commit"/"cancel"/"copy" buttons -- see
+// local-representative/files.go's handleMarkupGet and friends.
+function markupUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup`
+}
+
+function markupCommitUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/commit`
+}
+
+function markupCancelUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/cancel`
+}
+
+function markupCopyUrl(id: string): string {
+  return `/api/files/${encodeURIComponent(id)}/markup/copy`
+}
+
+// isReservedFileName mirrors files.go's saveUploadedFile reserved-prefix
+// checks -- a friendlier client-side echo of a rejection the server would
+// otherwise give silently (a rejected file is just dropped from the response).
+function isReservedFileName(name: string): boolean {
+  return name.startsWith('.manifest_') || name.startsWith('.markup_')
+}
+
+const RESERVED_NAME_ERROR = "that name is reserved for the host-cache's own bookkeeping files"
+
+// NewTextFileDialog is the files tab's "new text file" button (Step2Prompt.md
+// Revision J: "add a 'new text file' button to the files tab ... accepts the
+// name and text (with optional voice input with mic icon when available)").
+// There's no dedicated "create file" API on the server -- this reuses the
+// very same multipart upload endpoint every drag-and-drop/browse upload
+// already goes through (handleFileUpload in files.go) by synthesizing a File
+// from the typed name and body client-side, the same trick the debug-log
+// panel's "save to file" button already uses.
+function NewTextFileDialog({
+  onCreate,
+  onClose,
+}: {
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState('')
+  const [body, setBody] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.txt`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([body], finalName, { type: 'text/plain' })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">new text file</span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          className="new-file-name-input"
+          placeholder="file name (e.g. notes.txt)"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          autoFocus
+        />
+        <div className="field-with-mic">
+          <textarea
+            className="new-file-body-input"
+            placeholder="file contents…"
+            value={body}
+            onChange={e => setBody(e.target.value)}
+            rows={10}
+          />
+          <MicButton onTranscript={text => setBody(prev => appendTranscript(prev, text))} />
+        </div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ClipboardContent is what the files tab's "new file from clipboard" button
+// (Step4SubstepDPrompt.md Revision D) found in the copy buffer: an image or
+// plain text, already as the Blob the upload will carry, plus the extension
+// its default name gets. For text that extension comes from
+// detectTextFormat (Revision E), e.g. "json" or "csv" rather than "txt".
+interface ClipboardContent {
+  kind: 'image' | 'text'
+  blob: Blob
+  ext: string
+  text?: string // kind 'text' only -- shown as the dialog's preview
+  format?: string // kind 'text' only -- the detected format's label, e.g. "JSON"
+}
+
+// CLIPBOARD_IMAGE_EXT is the image types taken from the copy buffer, in
+// preference order. Browsers' async clipboard API only ever hands back
+// image/png (whatever was copied gets re-encoded), but a paste event can
+// carry the others when a site or the OS puts them there as-is.
+const CLIPBOARD_IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/bmp': 'bmp',
+}
+
+// CLIPBOARD_POLL_MS is how often useClipboardState rechecks the copy buffer
+// while the page is focused. There's no "clipboard changed" event: focus and
+// this page's own copy/cut events catch most changes, and the poll catches
+// the rest (e.g. clipboard-manager or keyboard-shortcut changes made while
+// the page stays focused).
+const CLIPBOARD_POLL_MS = 3000
+
+function textClipboard(text: string): ClipboardContent {
+  const f = detectTextFormat(text)
+  return { kind: 'text', blob: new Blob([text], { type: f.mime }), ext: f.ext, text, format: f.label }
+}
+
+// clipboardSupported says whether the page may read the copy buffer itself
+// at all -- the async clipboard API exists only in a secure context (https
+// or localhost), so over plain http only a Ctrl+V paste event can get at it.
+function clipboardSupported(): boolean {
+  return !!(navigator.clipboard?.read || navigator.clipboard?.readText)
+}
+
+// readClipboard reads the copy buffer through the async clipboard API: the
+// first image item wins, then plain text. null means it's empty (or holds
+// only things we don't take, e.g. a copied file); it throws when the read
+// isn't allowed (no secure context, permission denied, page not focused).
+async function readClipboard(): Promise<ClipboardContent | null> {
+  const cb = navigator.clipboard
+  if (cb?.read) {
+    const items = await cb.read()
+    for (const item of items) {
+      const type = Object.keys(CLIPBOARD_IMAGE_EXT).find(t => item.types.includes(t))
+      if (type) return { kind: 'image', blob: await item.getType(type), ext: CLIPBOARD_IMAGE_EXT[type] }
+    }
+    for (const item of items) {
+      if (!item.types.includes('text/plain')) continue
+      const text = await (await item.getType('text/plain')).text()
+      if (text) return textClipboard(text)
+    }
+    return null
+  }
+  if (cb?.readText) {
+    const text = await cb.readText()
+    return text ? textClipboard(text) : null
+  }
+  throw new Error('clipboard API unavailable')
+}
+
+// clipboardFromPaste is readClipboard's counterpart for a paste event's
+// DataTransfer -- no permission needed, so it works even over plain http.
+function clipboardFromPaste(data: DataTransfer): ClipboardContent | null {
+  for (const item of Array.from(data.items)) {
+    if (item.kind !== 'file' || !CLIPBOARD_IMAGE_EXT[item.type]) continue
+    const f = item.getAsFile()
+    if (f) return { kind: 'image', blob: f, ext: CLIPBOARD_IMAGE_EXT[item.type] }
+  }
+  const text = data.getData('text/plain')
+  return text ? textClipboard(text) : null
+}
+
+// ClipboardState is what the "new file from clipboard" button knows about
+// the copy buffer: 'unknown' leaves it enabled (clicking it asks the browser),
+// 'empty' disables it, 'has' enables it.
+type ClipboardState = 'unknown' | 'empty' | 'has'
+
+// useClipboardState watches the copy buffer, but only once the browser has
+// already granted clipboard-read (Chromium, after the first click's prompt,
+// or for localhost). Without that grant a probe would pop a permission
+// prompt -- or, in Firefox/Safari, a "Paste" bubble -- on every check, so the
+// state just stays 'unknown'. The probe only lists the item types; it never
+// pulls the image/text bytes.
+function useClipboardState(): ClipboardState {
+  const [state, setState] = useState<ClipboardState>('unknown')
+  useEffect(() => {
+    if (!navigator.clipboard?.read || !navigator.permissions?.query) return
+    let cancelled = false
+    let granted = false
+    let perm: PermissionStatus | null = null
+    const probe = async () => {
+      if (!granted || document.visibilityState !== 'visible' || !document.hasFocus()) return
+      try {
+        const items = await navigator.clipboard.read()
+        const has = items.some(item => item.types.some(t => t === 'text/plain' || CLIPBOARD_IMAGE_EXT[t]))
+        if (!cancelled) setState(has ? 'has' : 'empty')
+      } catch {
+        // Focus lost mid-read or access revoked -- keep the last answer.
+      }
+    }
+    const onPerm = () => {
+      granted = perm?.state === 'granted'
+      if (granted) void probe()
+      else setState('unknown')
+    }
+    // 'clipboard-read' isn't in every TS lib's PermissionName union.
+    navigator.permissions.query({ name: 'clipboard-read' } as unknown as PermissionDescriptor)
+      .then(p => {
+        if (cancelled) return
+        perm = p
+        p.addEventListener('change', onPerm)
+        onPerm()
+      })
+      .catch(() => { /* Firefox/Safari don't know the name -- stay 'unknown' */ })
+    const onWake = () => { void probe() }
+    // "copy"/"cut" fire before the copy buffer is written, hence the delay.
+    const onCopy = () => { window.setTimeout(onWake, 100) }
+    window.addEventListener('focus', onWake)
+    document.addEventListener('visibilitychange', onWake)
+    document.addEventListener('copy', onCopy)
+    document.addEventListener('cut', onCopy)
+    const timer = window.setInterval(onWake, CLIPBOARD_POLL_MS)
+    return () => {
+      cancelled = true
+      perm?.removeEventListener('change', onPerm)
+      window.removeEventListener('focus', onWake)
+      document.removeEventListener('visibilitychange', onWake)
+      document.removeEventListener('copy', onCopy)
+      document.removeEventListener('cut', onCopy)
+      window.clearInterval(timer)
+    }
+  }, [])
+  return state
+}
+
+// clipboardDefaultName is the naming dialog's starting name, e.g.
+// "clipboard-20261010-142233.png" -- unique enough that accepting it as-is
+// never collides with the last paste.
+function clipboardDefaultName(ext: string): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `clipboard-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.${ext}`
+}
+
+// CLIPBOARD_TEXT_PREVIEW caps how much pasted text the naming dialog shows.
+const CLIPBOARD_TEXT_PREVIEW = 2000
+
+// ClipboardFileDialog names a file about to be created from the copy buffer.
+// It opens with the default name's stem (not its extension) selected, so
+// typing replaces just that; a name typed without any extension gets the
+// content's own one back. Like NewTextFileDialog it saves through the plain
+// upload endpoint.
+function ClipboardFileDialog({
+  content,
+  onCreate,
+  onClose,
+}: {
+  content: ClipboardContent
+  onCreate: (files: File[]) => void | Promise<void>
+  onClose: () => void
+}) {
+  const [name, setName] = useState(() => clipboardDefaultName(content.ext))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [imageUrl, setImageUrl] = useState<string | null>(null)
+  const nameRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    const el = nameRef.current
+    if (!el) return
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }, [])
+
+  useEffect(() => {
+    if (content.kind !== 'image') return
+    const url = URL.createObjectURL(content.blob)
+    setImageUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [content])
+
+  const handleCreate = async () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError('name is required')
+      return
+    }
+    if (isReservedFileName(trimmed)) {
+      setError(RESERVED_NAME_ERROR)
+      return
+    }
+    const finalName = trimmed.includes('.') ? trimmed : `${trimmed}.${content.ext}`
+    setBusy(true)
+    setError(null)
+    try {
+      await onCreate([new File([content.blob], finalName, { type: content.blob.type })])
+      onClose()
+    } catch {
+      setError('failed to create file')
+      setBusy(false)
+    }
+  }
+
+  const text = content.text ?? ''
+  return (
+    <div className="new-file-overlay" onClick={onClose}>
+      <div className="new-file-dialog" onClick={e => e.stopPropagation()}>
+        <div className="file-detail-header">
+          <span className="file-detail-title">
+            new {content.kind === 'image' ? 'image' : 'text'} file from clipboard
+            {content.format && <span className="clip-file-format"> · detected {content.format}</span>}
+          </span>
+          <button className="file-detail-close" onClick={onClose}>×</button>
+        </div>
+        <input
+          ref={nameRef}
+          className="new-file-name-input"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !busy) void handleCreate()
+            else if (e.key === 'Escape') onClose()
+          }}
+        />
+        {content.kind === 'image' ? (
+          imageUrl && <img className="clip-file-image" src={imageUrl} alt="clipboard image" />
+        ) : (
+          <pre className="clip-file-text">
+            {text.length > CLIPBOARD_TEXT_PREVIEW
+              ? `${text.slice(0, CLIPBOARD_TEXT_PREVIEW)}\n… (${text.length - CLIPBOARD_TEXT_PREVIEW} more characters)`
+              : text}
+          </pre>
+        )}
+        <div className="clip-file-size">{formatBytes(content.blob.size)}</div>
+        {error && <div className="new-file-error">{error}</div>}
+        <div className="new-file-actions">
+          <button type="button" className="new-file-btn new-file-btn-cancel" onClick={onClose} disabled={busy}>
+            cancel
+          </button>
+          <button type="button" className="new-file-btn new-file-btn-create" onClick={() => void handleCreate()} disabled={busy}>
+            {busy ? 'creating…' : 'create'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// isEditableTarget says a paste is meant for a text field, not the files tab.
+function isEditableTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false
+  return t.isContentEditable || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT'
+}
+
+function FilesPanel({
+  state,
+  selectedId,
+  onSelect,
+  onEnter,
+  onUpload,
+  onHostImport,
+}: {
+  state: FilesStateMsg | null
+  selectedId: string | null
+  onSelect: (id: string) => void
+  onEnter: (id: string) => void
+  onUpload?: (files: FileList | File[]) => void
+  onHostImport?: (paths: string[], folders?: string[]) => Promise<string | null> // the error, if any
+}) {
+  const [dragging, setDragging] = useState(false)
+  const [newFileOpen, setNewFileOpen] = useState(false)
+  const [hostPickOpen, setHostPickOpen] = useState(false)
+  const [clipContent, setClipContent] = useState<ClipboardContent | null>(null)
+  const [clipError, setClipError] = useState<string | null>(null)
+  const clipState = useClipboardState()
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const files = state?.files ?? []
+
+  const fromClipboard = async () => {
+    setClipError(null)
+    if (!clipboardSupported()) {
+      setClipError("this page can't read the clipboard over plain http — press Ctrl+V (⌘V) on this tab instead")
+      return
+    }
+    try {
+      const content = await readClipboard()
+      if (content) setClipContent(content)
+      else setClipError('the clipboard has no text or image in it')
+    } catch {
+      setClipError("couldn't read the clipboard — allow clipboard access for this page, or press Ctrl+V (⌘V) on this tab")
+    }
+  }
+
+  // Ctrl+V anywhere on the tab (outside a text field) opens the same naming
+  // dialog -- the one way in over plain http, and a shortcut everywhere else.
+  useEffect(() => {
+    if (!onUpload || newFileOpen || clipContent) return
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || !e.clipboardData) return
+      const content = clipboardFromPaste(e.clipboardData)
+      if (!content) return
+      e.preventDefault()
+      setClipError(null)
+      setClipContent(content)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [onUpload, newFileOpen, clipContent])
+
+  return (
+    <div className="files-panel">
+      {onUpload && (
+        <div
+          className={`files-dropzone${dragging ? ' files-dropzone-active' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={e => {
+            e.preventDefault()
+            setDragging(false)
+            if (e.dataTransfer.files.length > 0) onUpload(e.dataTransfer.files)
+          }}
+          onClick={() => inputRef.current?.click()}
+        >
+          <span className="files-dropzone-text">drag files here, or click to browse</span>
+          <span className="files-dropzone-hint">uploaded files are removed after 1 hour</span>
+          <input
+            ref={inputRef}
+            type="file"
+            multiple
+            className="files-dropzone-input"
+            onChange={e => {
+              if (e.target.files && e.target.files.length > 0) onUpload(e.target.files)
+              e.target.value = ''
+            }}
+          />
+        </div>
+      )}
+      {onUpload && (
+        <div className="files-new-row">
+          <button type="button" className="files-new-btn" onClick={() => setNewFileOpen(true)}>
+            + new text file
+          </button>
+          <button
+            type="button"
+            className="files-new-btn"
+            onClick={() => void fromClipboard()}
+            disabled={clipState === 'empty'}
+            title={clipState === 'empty' ? 'the clipboard is empty' : 'create a file from the text or image on the clipboard (or press Ctrl+V on this tab)'}
+          >
+            + new file from clipboard
+          </button>
+          {onHostImport && (
+            <button
+              type="button"
+              className="files-new-btn"
+              onClick={() => setHostPickOpen(true)}
+              title="copy files that are already on this host into the files tab"
+            >
+              + select from host
+            </button>
+          )}
+        </div>
+      )}
+      {clipError && <div className="files-clip-error">{clipError}</div>}
+      {newFileOpen && onUpload && (
+        <NewTextFileDialog onCreate={onUpload} onClose={() => setNewFileOpen(false)} />
+      )}
+      {hostPickOpen && onHostImport && (
+        <HostFilePicker
+          api=""
+          multiple
+          title="select from host"
+          onClose={() => setHostPickOpen(false)}
+          onPick={async paths => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport(paths))
+          }}
+          onZipFolder={async dir => {
+            setHostPickOpen(false)
+            setClipError(await onHostImport([], [dir]))
+          }}
+        />
+      )}
+      {clipContent && onUpload && (
+        <ClipboardFileDialog content={clipContent} onCreate={onUpload} onClose={() => setClipContent(null)} />
+      )}
+      {files.length === 0 ? (
+        <div className="files-empty">no files in the host-cache</div>
+      ) : (
+        <div className="files-grid">
+          {files.map(f => (
+            <button
+              key={f.id}
+              className={`files-item${selectedId === f.id ? ' files-item-active' : ''}${f.highlighted ? ' files-item-highlighted' : ''}${f.marked_up ? ' files-item-markedup' : ''}`}
+              onClick={() => onSelect(f.id)}
+              onDoubleClick={() => onEnter(f.id)}
+              title={f.name}
+            >
+              <FileIcon kind={f.kind} state={f.state} sequence={f.sequence} />
+              <span className="files-item-name">{f.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FileDetailPane({
+  file,
+  onClose,
+  onEnter,
+  onMarkup,
+  onOpenTab,
+}: {
+  file: FileInfo
+  onClose: () => void
+  onEnter: (id: string) => void
+  onMarkup: (id: string) => void
+  onOpenTab: (tab: Tab) => void
+}) {
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  // runAction hits one of the state-changing routes (hold/persist/delete):
+  // the files-tab listing itself refreshes via the next "files-state"
+  // broadcast, not from this response -- this just reports whether the
+  // request was accepted.
+  const runAction = useCallback(async (url: string, method: string): Promise<boolean> => {
+    setBusy(true)
+    try {
+      const resp = await fetch(url, { method })
+      if (!resp.ok) {
+        console.error('file action failed:', method, url, resp.status, await resp.text())
+        return false
+      }
+      return true
+    } catch (err) {
+      console.error('file action failed:', method, url, err)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  const handleHoldOrPersist = () => {
+    const url = file.state === 'held' ? filePersistUrl(file.id) : fileHoldUrl(file.id)
+    void runAction(url, 'POST')
+  }
+
+  const handleHighlight = () => {
+    void runAction(fileHighlightUrl(file.id), 'POST')
+  }
+
+  const handleDelete = () => {
+    if (!window.confirm(`Delete "${file.name}"? This can't be undone.`)) return
+    void runAction(fileDeleteUrl(file.id), 'DELETE').then(ok => { if (ok) onClose() })
+  }
+
+  return (
+    <div className="file-detail-pane">
+      <div className="file-detail-header">
+        <span className="file-detail-title">file details</span>
+        <button className="file-detail-close" onClick={onClose}>×</button>
+      </div>
+      <div className="file-detail-icon"><FileIcon kind={file.kind} state={file.state} sequence={file.sequence} /></div>
+      <div className="file-detail-rows">
+        <div className="file-detail-row">
+          <span className="file-detail-label">name</span>
+          <span className="file-detail-value" title={file.name}>{file.name}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">type</span>
+          <span className="file-detail-value">{fileTypeLabel(file)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">size</span>
+          <span className="file-detail-value">{formatBytes(file.size)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">uploaded</span>
+          <span className="file-detail-value">{formatAgo(file.uploaded_at, nowSec)}</span>
+        </div>
+        <div className="file-detail-row">
+          <span className="file-detail-label">{file.state === 'persisted' ? 'status' : 'expires'}</span>
+          <span className="file-detail-value">
+            {file.state === 'persisted' ? 'persisted — never expires' : formatCountdown(file.expires_at, nowSec)}
+          </span>
+        </div>
+      </div>
+      <div className="file-detail-actions">
+        <button className="file-detail-enter" onClick={() => onEnter(file.id)} title="Open the viewer">
+          view
+        </button>
+        <a
+          className="file-detail-download"
+          href={fileDownloadUrl(file.id)}
+          download={file.name}
+        >
+          download
+        </a>
+      </div>
+      {file.kind === 'image' && (
+        <div className="file-detail-actions">
+          <button
+            className={`file-detail-markup${file.marked_up ? ' file-detail-markup-active' : ''}`}
+            onClick={() => onMarkup(file.id)}
+            title={file.marked_up ? 'keep editing the in-progress markup' : 'draw arrows, rectangles, or text on this image'}
+          >
+            markup
+          </button>
+        </div>
+      )}
+      <div className="file-detail-actions">
+        <button
+          className={`file-detail-highlight${file.highlighted ? ' file-detail-highlight-active' : ''}`}
+          onClick={handleHighlight}
+          disabled={busy}
+          title="Mark this file at the LR/AC level"
+        >
+          {file.highlighted ? 'unhighlight' : 'highlight'}
+        </button>
+      </div>
+      <div className="file-detail-actions">
+        {file.state !== 'persisted' && (
+          <button className="file-detail-hold" onClick={handleHoldOrPersist} disabled={busy}>
+            {file.state === 'held' ? 'persist' : 'hold'}
+          </button>
+        )}
+        <button className="file-detail-delete" onClick={handleDelete} disabled={busy}>
+          delete
+        </button>
+      </div>
+      <FileIntegrations file={file} importUrl={fileImportUrl} onRunStarted={onOpenTab} />
+    </div>
+  )
+}
+
+// FileIntegrations is the file-details pane's subsection, below the standard
+// actions, for what another tab can do with the file (Revision G of
+// condocs/slopspaceSlopspaceCondocsImpls/Step1Prompt.md). So far that's a
+// sequence YAML's "import" into its tab's library and "import and run",
+// which also runs its first sequence with every control at its default. It
+// renders nothing for any other file. A plain import stays here, so several
+// files can be imported in a row; a started run hands over to onRunStarted
+// with the tab it shows in, to watch it (Revision H).
+function FileIntegrations({
+  file,
+  importUrl,
+  onRunStarted,
+}: {
+  file: FileInfo
+  importUrl: (id: string, run: boolean) => string
+  onRunStarted: (tab: 'robot' | 'control') => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null)
+  useEffect(() => setStatus(null), [file.id])
+  if (!file.sequence || !SEQUENCE_ICON_PATH[file.sequence]) return null
+  const tab = file.sequence === 'robot' ? 'robot' : 'control'
+
+  const doImport = async (run: boolean) => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const resp = await fetch(importUrl(file.id, run), { method: 'POST' })
+      if (!resp.ok) {
+        setStatus({ ok: false, text: (await resp.text()).trim() || `failed (${resp.status})` })
+        return
+      }
+      const body = (await resp.json()) as { message?: string }
+      setStatus({ ok: true, text: body.message ?? 'imported' })
+      if (run) onRunStarted(tab)
+    } catch (err) {
+      setStatus({ ok: false, text: String(err) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="file-detail-integrations">
+      <span className="file-detail-integrations-label">{tab} sequence integrations</span>
+      <div className="file-detail-actions">
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(false)}
+          disabled={busy}
+          title={`Import into the ${tab} tab's library`}
+        >
+          import
+        </button>
+        <button
+          className="file-detail-integrate"
+          onClick={() => void doImport(true)}
+          disabled={busy}
+          title="Import, then run its first sequence with every control at its default"
+        >
+          import and run
+        </button>
+      </div>
+      {status && (
+        <span className={`file-detail-integrate-status${status.ok ? '' : ' file-detail-integrate-error'}`}>
+          {status.text}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/* ---- File viewer ---- */
+
+// FileViewer is the files tab's "drill-down" page, reached by double-clicking
+// a grid item or the detail pane's "view" widget (reminiscent of
+// drilling into a condoc's substep). Images render inline; text is fetched and shown
+// as plain text; anything else falls back to a "use download" notice — this
+// tab's wireframe icon set is deliberately small (text/image/archive/other),
+// and its preview set smaller still (archives get the download notice too).
+function FileViewer({
+  fileId,
+  file,
+  onBack,
+}: {
+  fileId: string
+  file: FileInfo | null
+  onBack: () => void
+}) {
+  const [textContent, setTextContent] = useState<string | null>(null)
+  const [textError, setTextError] = useState<string | null>(null)
+  const rawUrl = fileRawUrl(fileId)
+
+  useEffect(() => {
+    setTextContent(null)
+    setTextError(null)
+    if (!file || file.kind !== 'text') return
+    let cancelled = false
+    fetch(rawUrl)
+      .then(resp => {
+        if (!resp.ok) throw new Error(`status ${resp.status}`)
+        return resp.text()
+      })
+      .then(text => { if (!cancelled) setTextContent(text) })
+      .catch(err => { if (!cancelled) setTextError(String(err)) })
+    return () => { cancelled = true }
+  }, [rawUrl, file?.kind])
+
+  return (
+    <div className="file-viewer">
+      <div className="file-viewer-header">
+        <button className="file-viewer-back" onClick={onBack}>← back</button>
+        <span className="file-viewer-name" title={file?.name ?? fileId}>{file?.name ?? fileId}</span>
+        {file && (
+          <a className="file-detail-download" href={fileDownloadUrl(fileId)} download={file.name}>
+            download
+          </a>
+        )}
+      </div>
+      <div className="file-viewer-body">
+        {!file ? (
+          <div className="file-viewer-empty">this file is no longer in the host-cache</div>
+        ) : file.kind === 'image' ? (
+          <img className="file-viewer-image" src={rawUrl} alt={file.name} />
+        ) : file.kind === 'text' ? (
+          textError ? (
+            <div className="file-viewer-empty">couldn't load preview: {textError}</div>
+          ) : (
+            <pre className="file-viewer-text">{textContent ?? 'loading…'}</pre>
+          )
+        ) : (
+          <div className="file-viewer-empty">no preview available for this file type — use download above</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ---- Markup dialog ---- */
+
+// MarkupTool is the markup dialog's small tool set (Step1SubstepCPrompt.md
+// Revision F): a click-drag arrow, a click-drag rectangle, and a click-to-place
+// text label. Each renders permanently into the canvas the instant its
+// stroke finishes (see MarkupDialog's pointer handlers) -- there's no
+// per-shape undo, just the flattened result, same MVP spirit as the rest of
+// the files tab.
+type MarkupTool = 'arrow' | 'rect' | 'text'
+
+// MARKUP_COLORS is the markup dialog's colour palette -- unlike the rest of
+// this file's grey-wireframe icon set, these render as-is (actual colour
+// swatches), since the whole point is to draw in a colour that stands out
+// against the screenshot underneath.
+const MARKUP_COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#0a84ff', '#af52de', '#ffffff', '#111111']
+
+const MARKUP_TOOL_ICON: Record<MarkupTool, JSX.Element> = {
+  arrow: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 20 18 6" />
+      <path d="M9 6h9v9" />
+    </svg>
+  ),
+  rect: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinejoin="round">
+      <rect x="4" y="6" width="16" height="12" rx="1" />
+    </svg>
+  ),
+  text: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 6h14M12 6v13" />
+    </svg>
+  ),
+}
+
+// canvasPoint converts a mouse event into canvas-backing-store coordinates,
+// accounting for the canvas being displayed smaller (via CSS) than its
+// natural-resolution backing store -- see MarkupDialog's `.markup-canvas`.
+function canvasPoint(e: React.MouseEvent<HTMLCanvasElement>, canvas: HTMLCanvasElement): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect()
+  const scaleX = canvas.width / rect.width
+  const scaleY = canvas.height / rect.height
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY }
+}
+
+function drawMarkupArrow(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  const headLen = Math.max(14, Math.hypot(x1 - x0, y1 - y0) * 0.18)
+  const angle = Math.atan2(y1 - y0, x1 - x0)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.fillStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.lineCap = 'round'
+  ctx.beginPath()
+  ctx.moveTo(x0, y0)
+  ctx.lineTo(x1, y1)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x1 - headLen * Math.cos(angle - Math.PI / 6), y1 - headLen * Math.sin(angle - Math.PI / 6))
+  ctx.lineTo(x1 - headLen * Math.cos(angle + Math.PI / 6), y1 - headLen * Math.sin(angle + Math.PI / 6))
+  ctx.closePath()
+  ctx.fill()
+  ctx.restore()
+}
+
+function drawMarkupRect(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, color: string) {
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(3, ctx.canvas.width * 0.005)
+  ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0))
+  ctx.restore()
+}
+
+// MarkupDialog is the "convenient markup system" opened from the file
+// details pane's "markup" button on any image (Step1SubstepCPrompt.md
+// Revision F). It loads whichever composite is furthest along -- the
+// in-progress sidecar if a session is already open (GET markupUrl), else the
+// plain original (rawUrl) -- draws directly onto a full-resolution canvas,
+// and autosaves the flattened result (POST markupUrl) after every completed
+// arrow/rectangle/text stroke, which is what leaves the file "marked up"
+// (see FileInfo.marked_up). "cancel"/"commit"/"copy" all close the dialog on
+// success; which of the three is used decides whether that in-progress work
+// is discarded, baked into the original file, or spun off into a duplicate.
+function MarkupDialog({
+  file,
+  rawUrl,
+  onClose,
+}: {
+  file: FileInfo
+  rawUrl: string
+  onClose: () => void
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null)
+  const snapshotRef = useRef<ImageData | null>(null)
+  const [ready, setReady] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [tool, setTool] = useState<MarkupTool>('arrow')
+  const [color, setColor] = useState(MARKUP_COLORS[0])
+  const [hasMarkup, setHasMarkup] = useState(file.marked_up)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+
+  // Seed the canvas: continue the in-progress composite if one exists,
+  // otherwise start fresh from the plain original.
+  useEffect(() => {
+    let cancelled = false
+    let objectUrl: string | null = null
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setReady(false)
+    setLoadError(null)
+
+    const draw = (src: string) => {
+      const img = new Image()
+      img.onload = () => {
+        if (cancelled) return
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        canvas.getContext('2d')!.drawImage(img, 0, 0)
+        setReady(true)
+      }
+      img.onerror = () => { if (!cancelled) setLoadError("couldn't load the image") }
+      img.src = src
+    }
+
+    fetch(markupUrl(file.id))
+      .then(resp => {
+        if (cancelled) return
+        if (resp.ok) {
+          setHasMarkup(true)
+          return resp.blob().then(b => {
+            if (cancelled) return
+            objectUrl = URL.createObjectURL(b)
+            draw(objectUrl)
+          })
+        }
+        draw(rawUrl)
+      })
+      .catch(() => { if (!cancelled) draw(rawUrl) })
+
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [file.id, rawUrl])
+
+  const saveComposite = useCallback(async () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.92))
+    if (!blob) return
+    const form = new FormData()
+    form.append('file', blob, 'markup.jpg')
+    try {
+      const resp = await fetch(markupUrl(file.id), { method: 'POST', body: form })
+      if (resp.ok) setHasMarkup(true)
+      else setActionError('failed to save markup')
+    } catch {
+      setActionError('failed to save markup')
+    }
+  }, [file.id])
+
+  const handlePointerDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!ready || busy) return
+    const canvas = canvasRef.current!
+    const pt = canvasPoint(e, canvas)
+    if (tool === 'text') {
+      const text = window.prompt('markup text:')
+      if (text) {
+        const ctx = canvas.getContext('2d')!
+        ctx.save()
+        ctx.fillStyle = color
+        ctx.font = `${Math.max(20, Math.round(canvas.width * 0.028))}px sans-serif`
+        ctx.textBaseline = 'top'
+        ctx.fillText(text, pt.x, pt.y)
+        ctx.restore()
+        void saveComposite()
+      }
+      return
+    }
+    snapshotRef.current = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
+    dragStartRef.current = pt
+  }
+
+  const handlePointerMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+    else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+  }
+
+  const handlePointerUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const start = dragStartRef.current
+    const snapshot = snapshotRef.current
+    if (!start || !snapshot) return
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
+    const pt = canvasPoint(e, canvas)
+    ctx.putImageData(snapshot, 0, 0)
+    const moved = Math.hypot(pt.x - start.x, pt.y - start.y) > 2
+    if (moved) {
+      if (tool === 'arrow') drawMarkupArrow(ctx, start.x, start.y, pt.x, pt.y, color)
+      else if (tool === 'rect') drawMarkupRect(ctx, start.x, start.y, pt.x, pt.y, color)
+    }
+    dragStartRef.current = null
+    snapshotRef.current = null
+    if (moved) void saveComposite()
+  }
+
+  const runAction = async (url: string) => {
+    setBusy(true)
+    setActionError(null)
+    try {
+      const resp = await fetch(url, { method: 'POST' })
+      if (resp.ok) onClose()
+      else setActionError('action failed')
+    } catch {
+      setActionError('action failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="markup-overlay">
+      <div className="markup-dialog">
+        <div className="markup-header">
+          <span className="markup-title">markup</span>
+          <span className="markup-filename" title={file.name}>{file.name}</span>
+        </div>
+        <div className="markup-canvas-wrap">
+          {!ready && !loadError && <div className="markup-status">loading…</div>}
+          {loadError && <div className="markup-status markup-status-error">{loadError}</div>}
+          <canvas
+            ref={canvasRef}
+            className="markup-canvas"
+            style={{ visibility: ready ? 'visible' : 'hidden' }}
+            onMouseDown={handlePointerDown}
+            onMouseMove={handlePointerMove}
+            onMouseUp={handlePointerUp}
+            onMouseLeave={handlePointerUp}
+          />
+        </div>
+        <div className="markup-toolbar">
+          <div className="markup-tools">
+            {(Object.keys(MARKUP_TOOL_ICON) as MarkupTool[]).map(t => (
+              <button
+                key={t}
+                className={`markup-tool-btn${tool === t ? ' markup-tool-active' : ''}`}
+                onClick={() => setTool(t)}
+                title={t}
+              >
+                {MARKUP_TOOL_ICON[t]}
+              </button>
+            ))}
+          </div>
+          <div className="markup-palette">
+            {MARKUP_COLORS.map(c => (
+              <button
+                key={c}
+                className={`markup-swatch${color === c ? ' markup-swatch-active' : ''}`}
+                style={{ background: c }}
+                onClick={() => setColor(c)}
+                title={c}
+              />
+            ))}
+          </div>
+        </div>
+        {actionError && <div className="markup-status markup-status-error">{actionError}</div>}
+        <div className="markup-actions">
+          <button className="markup-btn markup-btn-cancel" onClick={() => runAction(markupCancelUrl(file.id))} disabled={busy}>
+            cancel
+          </button>
+          <button
+            className="markup-btn markup-btn-copy"
+            onClick={() => runAction(markupCopyUrl(file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'create a file duplicate with the markup included' : 'draw something first'}
+          >
+            copy
+          </button>
+          <button
+            className="markup-btn markup-btn-commit"
+            onClick={() => runAction(markupCommitUrl(file.id))}
+            disabled={busy || !hasMarkup}
+            title={hasMarkup ? 'edit the markup into the image file directly' : 'draw something first'}
+          >
+            commit
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Browser pickup strategy (condocs/initialDistributedDevelopmentImpls/
+// BrowserPickupStrategy.md), Layer 2: sessionStorage survives a refresh,
+// stays scoped per-tab (so two LR tabs on different condocs don't clobber
+// each other), and clears when the tab actually closes rather than pinning
+// stale state forever -- the right lifetime for "resume where I was".
+function initialTab(): Tab {
+  const stored = sessionStorage.getItem('lr-active-tab')
+  return (TABS as readonly string[]).includes(stored ?? '') ? (stored as Tab) : 'federation-command'
+}
+
+// Small forward/back stack over the app's top-level navigation state
+// (Step5Prompt.md Revision M). Deliberately independent of the real browser
+// history -- this app never calls pushState (see BrowserPickupStrategy.md on
+// why nav already relies on replaceState/sessionStorage instead), so this is
+// purely an in-app "last N screens" stack, not a wrapper around back/forward
+// button clicks. `max` caps how many screens are remembered.
+function useScreenHistory<T>(
+  screen: T,
+  isEqual: (a: T, b: T) => boolean,
+  applyScreen: (screen: T) => void,
+  max: number,
+) {
+  const [hist, setHist] = useState(() => ({ stack: [screen], index: 0 }))
+
+  useEffect(() => {
+    setHist(prev => {
+      if (isEqual(prev.stack[prev.index], screen)) return prev // e.g. applyScreen just navigated us here
+      let stack = [...prev.stack.slice(0, prev.index + 1), screen]
+      let index = stack.length - 1
+      if (stack.length > max) {
+        const drop = stack.length - max
+        stack = stack.slice(drop)
+        index -= drop
+      }
+      return { stack, index }
+    })
+  }, [screen])
+
+  const canBack = hist.index > 0
+  const canForward = hist.index < hist.stack.length - 1
+
+  const back = () => {
+    if (!canBack) return
+    applyScreen(hist.stack[hist.index - 1])
+    setHist(prev => (prev.index <= 0 ? prev : { ...prev, index: prev.index - 1 }))
+  }
+
+  const forward = () => {
+    if (!canForward) return
+    applyScreen(hist.stack[hist.index + 1])
+    setHist(prev => (prev.index >= prev.stack.length - 1 ? prev : { ...prev, index: prev.index + 1 }))
+  }
+
+  return { canBack, canForward, back, forward }
+}
+
+// ConnDot is the header's top-right connection dot. For the first
+// FRESH_UPTIME_SECS after LR launched (startedAt, LR's start in unix seconds)
+// it wears the green freshness halo agent-coordinator's topology cards show
+// (privateRepoOpsImpls Step5Prompt.md Revision F) -- only while connected,
+// since a disconnected tab's startedAt may belong to a process that's gone.
+// A timer clears the halo when the window ends, so nothing has to tick every
+// second.
+const FRESH_UPTIME_SECS = 10 * 60
+
+function ConnDot({ connected, startedAt }: { connected: boolean; startedAt?: number }) {
+  const freshUntilMs = startedAt ? (startedAt + FRESH_UPTIME_SECS) * 1000 : 0
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    setNowMs(Date.now())
+    const remaining = freshUntilMs - Date.now()
+    if (remaining <= 0) return
+    const id = setTimeout(() => setNowMs(Date.now()), remaining + 50)
+    return () => clearTimeout(id)
+  }, [freshUntilMs])
+  const fresh = connected && nowMs < freshUntilMs
+  return (
+    <span
+      className={`conn-dot${connected ? ' conn-dot-ok' : ' conn-dot-err'}${fresh ? ' conn-dot-fresh' : ''}`}
+      title={connected ? (fresh ? 'connected — local-representative started less than 10 minutes ago' : 'connected') : 'disconnected'}
+    />
+  )
+}
+
+function NavArrows({ canBack, canForward, onBack, onForward }: {
+  canBack: boolean
+  canForward: boolean
+  onBack: () => void
+  onForward: () => void
+}) {
+  return (
+    <span className="nav-arrows">
+      <button
+        className={`nav-arrow-btn${canBack ? ' nav-arrow-active' : ''}`}
+        onClick={onBack}
+        disabled={!canBack}
+        title={canBack ? 'back' : 'no earlier screen'}
+      >
+        ←
+      </button>
+      <button
+        className={`nav-arrow-btn${canForward ? ' nav-arrow-active' : ''}`}
+        onClick={onForward}
+        disabled={!canForward}
+        title={canForward ? 'forward' : 'no later screen'}
+      >
+        →
+      </button>
+    </span>
+  )
+}
+
+// CAMERA_ICON is a grey-palette wireframe icon (Step1SubstepCPrompt.md),
+// matching FILE_ICON_PATH's outline style so the quick-feedback screenshot
+// button reads as part of the same icon family as the files tab.
+const CAMERA_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+    <path d="M9 4 7.5 6H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-3.5L15 4z" strokeLinecap="round" />
+    <circle cx="12" cy="13" r="3.5" />
+  </svg>
+)
+
+// captureScreenshot grabs a single frame of "the current display"
+// (Step1SubstepCPrompt.md) via the browser's screen-capture API rather than
+// rasterizing the DOM, so it genuinely captures whatever's on screen
+// (including, say, an embedded tab's own iframe content) without pulling in
+// a DOM-to-canvas dependency. The capture stream is stopped immediately
+// after the one frame is drawn -- this is a screenshot, not a recording.
+async function captureScreenshot(): Promise<File> {
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+  try {
+    const track = stream.getVideoTracks()[0]
+    const video = document.createElement('video')
+    video.srcObject = stream
+    await video.play()
+    // Give the first frame a tick to actually land before drawing it.
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    const canvas = document.createElement('canvas')
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    canvas.getContext('2d')!.drawImage(video, 0, 0)
+    track.stop()
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(b => (b ? resolve(b) : reject(new Error('canvas.toBlob returned null'))), 'image/png'),
+    )
+    return new File([blob], `screenshot-${Date.now()}.png`, { type: 'image/png' })
+  } finally {
+    stream.getTracks().forEach(t => t.stop())
+  }
+}
+
+// MIC_ICON follows the same grey-palette wireframe convention as CAMERA_ICON
+// (Step1SubstepCPrompt.md) so the mic-availability indicator reads as part of
+// the same icon family. Kept identical to agent-coordinator's copy -- see
+// App.tsx there -- and to condocv2's per-input mic button, which reuses this
+// same path. See
+// condocs/initialShellsSessionManagerAndTheConversationalistImpls/
+// Step2Prompt.md.
+const MIC_ICON = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+)
+
+// ---- The Conversationalist mic-capture, for per-field dictation ----
+//
+// Step2Prompt.md Revision J adds the files tab's "new text file" dialog, whose
+// body field gets the same mic-dictation affordance condocv2's inputs
+// already have. Mirrors condocv2's own copy of this block (App.tsx) almost
+// exactly, with one simplification: local-representative already reverse-
+// proxies the-conversationalist itself and is never embedded inside another
+// app's page, so tcCaptureURL has no sibling path to swap or remote
+// repr-host/port to resolve -- it's always same-origin. convoSrc is the
+// convo tab's own frame path (appFrameSrc: /apps/convo/, or the legacy
+// /convo/ proxy).
+function tcCaptureURL(convoSrc: string): string {
+  return `${window.location.origin}${convoSrc}?embed=capture`
+}
+
+interface TCCaptureContextValue {
+  available: boolean
+  capture: (onTranscript: (text: string) => void) => void
+}
+
+// Default value only matters if a MicButton somehow renders outside App's
+// own TCCaptureContext.Provider -- available: false keeps it inert.
+const TCCaptureContext = createContext<TCCaptureContextValue>({ available: false, capture: () => {} })
+
+// useTCCapture owns the one hidden-until-active iframe this app ever opens
+// into the-conversationalist, and the postMessage listener that receives its
+// transcript back. `available` gates every MicButton in the tree; `capture`
+// starts a capture, invoking its callback once (and only once) with the
+// final text.
+function useTCCapture(tcAvailable: boolean, convoSrc: string) {
+  const [captureURL, setCaptureURL] = useState<string | null>(null)
+  const onTranscriptRef = useRef<((text: string) => void) | null>(null)
+  const convoSrcRef = useRef(convoSrc)
+  convoSrcRef.current = convoSrc
+
+  const capture = useCallback((onTranscript: (text: string) => void) => {
+    onTranscriptRef.current = onTranscript
+    setCaptureURL(tcCaptureURL(convoSrcRef.current))
+  }, [])
+
+  const cancel = useCallback(() => {
+    onTranscriptRef.current = null
+    setCaptureURL(null)
+  }, [])
+
+  useEffect(() => {
+    if (!captureURL) return
+    let expectedOrigin: string
+    try {
+      expectedOrigin = new URL(captureURL).origin
+    } catch {
+      return
+    }
+    const onMessage = (ev: MessageEvent) => {
+      if (ev.origin !== expectedOrigin) return
+      const data = ev.data as { type?: string; text?: string } | undefined
+      if (data?.type === 'tc-transcript') {
+        onTranscriptRef.current?.(data.text ?? '')
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      } else if (data?.type === 'tc-transcript-cancel') {
+        onTranscriptRef.current = null
+        setCaptureURL(null)
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [captureURL])
+
+  return { available: tcAvailable, capture, captureURL, cancel }
+}
+
+// MicButton is the per-field affordance -- renders nothing while TC isn't
+// available. See the new-text-file dialog's body field, below, for its one
+// call site in this app so far.
+function MicButton({ onTranscript }: { onTranscript: (text: string) => void }) {
+  const { available, capture } = useContext(TCCaptureContext)
+  if (!available) return null
+  return (
+    <button
+      type="button"
+      className="mic-btn"
+      title="dictate with The Conversationalist"
+      onClick={() => capture(onTranscript)}
+    >
+      {MIC_ICON}
+    </button>
+  )
+}
+
+// appendTranscript is the shared "insert dictated text" behaviour every
+// MicButton call site uses: appended after any existing content, space-
+// separated, rather than overwriting it. Mirrors condocv2's own copy.
+function appendTranscript(prev: string, text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed) return prev
+  return prev.trim() ? `${prev.trim()} ${trimmed}` : trimmed
+}
+
+// TCCaptureOverlay hosts the actual iframe while a capture is in progress --
+// mirrors condocv2's own copy.
+function TCCaptureOverlay({ url, onCancel }: { url: string; onCancel: () => void }) {
+  return (
+    <div className="tc-capture-backdrop" onClick={onCancel}>
+      <div className="tc-capture-panel" onClick={e => e.stopPropagation()}>
+        <div className="tc-capture-panel-header">
+          <span>The Conversationalist</span>
+          <button type="button" className="tc-capture-close" onClick={onCancel} aria-label="Cancel dictation">×</button>
+        </div>
+        <iframe className="tc-capture-frame" src={url} title="the-conversationalist capture" allow="microphone" />
+      </div>
+    </div>
+  )
+}
+
+// TCAvailabilityIndicator sits beside the camera/screenshot icon in the
+// header: illuminated (mic-indicator-active) once agent-coordinator reports
+// at least one the-conversationalist instance available on any connected
+// host and this host's own instance can reach its transcription engine (see
+// tcavailability.go's getTCAvailability). Mirrors agent-coordinator's own copy -- a passive indicator, not a
+// control; the actual mic-to-transcribe action lives on condocv2's own text
+// inputs and, as of Step2Prompt.md Revision J, the files tab's new-text-file
+// dialog below -- both driven by the same tcAvailable this indicator reads.
+function TCAvailabilityIndicator({ available }: { available: boolean }) {
+  return (
+    <span
+      className={`mic-indicator${available ? ' mic-indicator-active' : ''}`}
+      title={available ? 'The Conversationalist is available' : "The Conversationalist transcription is not available on this host"}
+    >
+      {MIC_ICON}
+    </span>
+  )
+}
+
+// ScreenshotButton sits immediately left of the nav arrows. `enabled`
+// reflects whether there's at least one file store to save into -- see
+// callers for what that means in each app -- independent of `busy`, which
+// just covers the capture/upload round-trip so a slow save can't be
+// double-fired.
+function ScreenshotButton({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: () => void }) {
+  const active = enabled && !busy
+  return (
+    <button
+      className={`screenshot-btn${active ? ' screenshot-btn-active' : ''}`}
+      onClick={onClick}
+      disabled={!active}
+      title={enabled ? (busy ? 'saving screenshot…' : 'save a screenshot to the most-preferred file store') : 'no file store available'}
+    >
+      {CAMERA_ICON}
+    </button>
+  )
+}
+
+// manifestEntry is a UIManifest's entry page as a path under the plug-in's
+// own base path: "./" and "" both mean its root. Anything that could leave
+// the plug-in's tree (absolute, scheme, "..") is ignored.
+function manifestEntry(m?: UIManifest): string {
+  return pluginRelPath(m?.entry)
+}
+
+// pluginRelPath is a UIManifest URL (entry, icon) as a path under the
+// plug-in's own base path -- see manifestEntry.
+function pluginRelPath(u?: string): string {
+  const e = (u ?? '').replace(/^\.\//, '')
+  return e.startsWith('/') || e.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(e) ? '' : e
+}
+
+// pluginIconSrc is where a plug-in's manifest icon loads from here, or ''
+// when there is none to load (no icon, or the plug-in isn't routed).
+function pluginIconSrc(p: PluginInfo): string {
+  const icon = pluginRelPath(p.manifest?.icon)
+  return icon && p.status === 'online' ? p.base_path + icon : ''
+}
+
+// pluginIconMask says whether a plug-in's icon is monochrome, to be drawn in
+// the surrounding text colour: only a version 2 manifest can say so
+// (Step3Prompt.md Revision E). Older manifests' icons sit on a light chip.
+function pluginIconMask(p: PluginInfo): boolean {
+  return (p.manifest?.manifest_version ?? 0) >= 2 && Boolean(p.manifest?.icon_mask)
+}
+
+// PluginIcon shows a plug-in's manifest icon, or its initials when there is
+// no icon to load or it fails to. With mask the icon is drawn as a CSS mask
+// in currentColor rather than as a picture -- see pluginIconMask. Mirrors
+// agent-coordinator's copy.
+function PluginIcon({ src, label, size = 16, mask = false }: { src: string; label: string; size?: number; mask?: boolean }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    setFailed(false)
+    if (!src || !mask) return
+    // A mask has no onError of its own: probe the URL to fall back the same way.
+    const probe = new Image()
+    probe.onerror = () => setFailed(true)
+    probe.src = src
+    return () => { probe.onerror = null }
+  }, [src, mask])
+  if (!src || failed) {
+    return (
+      <span className="plugin-icon plugin-icon-none" style={{ width: size, height: size, fontSize: Math.max(8, size * 0.45) }} title={src ? `icon failed to load: ${src}` : 'no icon to load'}>
+        {label.slice(0, 2).toUpperCase()}
+      </span>
+    )
+  }
+  if (mask) {
+    const url = `url("${src.replace(/"/g, '%22')}")`
+    return <span className="plugin-icon-mask" style={{ width: size, height: size, WebkitMaskImage: url, maskImage: url }} />
+  }
+  return <img className="plugin-icon" src={src} alt="" width={size} height={size} onError={() => setFailed(true)} />
+}
+
+// AppTabIcon is a hosted-UI sub-app's manifest icon on its top-level tab
+// (Revision E), once that app is online in this LR's registry; nothing
+// before then, or for an older build that sends no hello.
+function AppTabIcon({ appId, plugins }: { appId: string; plugins: PluginInfo[] }) {
+  const p = plugins.find(p => p.app_id === appId && p.status === 'online')
+  const src = p ? pluginIconSrc(p) : ''
+  return src && p ? <PluginIcon src={src} label={appId} size={14} mask={pluginIconMask(p)} /> : null
+}
+
+// appTabTitle is a hosted-UI sub-app tab's tooltip: its version 2
+// manifest's description, when it has one.
+function appTabTitle(appId: string, plugins: PluginInfo[]): string | undefined {
+  const m = plugins.find(p => p.app_id === appId)?.manifest
+  return m && m.manifest_version >= 2 && m.description ? m.description : undefined
+}
+
+// ScrollTabs is a tab bar's row of tabs that scrolls sideways when it
+// doesn't fit (Revision E): the mouse wheel scrolls it, and a fade on either
+// edge shows there is more that way. The wheel listener is registered by
+// hand because React's onWheel is passive and couldn't stop the page from
+// scrolling too. When activeKey changes (a tab picked some other way, such
+// as the nav arrows) the active tab is scrolled into view. Mirrors
+// agent-coordinator's copy.
+function ScrollTabs({ children, className = '', activeKey }: { children: React.ReactNode; className?: string; activeKey?: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [edges, setEdges] = useState({ left: false, right: false })
+  useEffect(() => {
+    const el = ref.current
+    const tab = el?.querySelector<HTMLElement>('.tab-active')
+    if (!el || !tab) return
+    if (tab.offsetLeft < el.scrollLeft) el.scrollLeft = tab.offsetLeft
+    else if (tab.offsetLeft + tab.offsetWidth > el.scrollLeft + el.clientWidth) el.scrollLeft = tab.offsetLeft + tab.offsetWidth - el.clientWidth
+  }, [activeKey])
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => setEdges(prev => {
+      const left = el.scrollLeft > 1
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+      return prev.left === left && prev.right === right ? prev : { left, right }
+    })
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY
+      if (delta === 0) return
+      e.preventDefault()
+      el.scrollLeft += e.deltaMode === 1 ? delta * 16 : delta // lines -> pixels
+    }
+    update()
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('scroll', update, { passive: true })
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('scroll', update)
+      ro.disconnect()
+    }
+  }, [])
+  return (
+    <div
+      ref={ref}
+      className={`tabs tabs-scroll${edges.left ? ' tabs-more-left' : ''}${edges.right ? ' tabs-more-right' : ''}${className ? ` ${className}` : ''}`}
+    >
+      {children}
+    </div>
+  )
+}
+
+// appFrameSrc is where an embedded sub-app tab's iframe points
+// (condocs/privateRepoOpsImpls/Step3Prompt.md Revision B): the generic
+// /apps/<appId>/ route plus its manifest's entry once the app has said
+// hello and is online here (see plugins.go), else its legacy hand-written
+// /<appId>/ proxy -- a sub-app build that doesn't say hello yet.
+function appFrameSrc(appId: string, plugins: PluginInfo[]): string {
+  const p = plugins.find(p => p.app_id === appId && p.status === 'online')
+  return p ? p.base_path + manifestEntry(p.manifest) : `/${appId}/`
+}
+
+// PLUGIN_IFRAME_SANDBOX is the sandboxed tier's iframe flags --
+// representable.IframeSandbox, and see docs/PluginTrust.md. Never add
+// allow-same-origin: with it the frame could lift its own sandbox.
+const PLUGIN_IFRAME_SANDBOX = 'allow-scripts allow-forms'
+
+// setPluginApproval approves or revokes an external plug-in on this host --
+// plugins.go's handlePluginApproval. The new registry arrives as an ordinary
+// plugins-state broadcast; this only reports a failure.
+async function setPluginApproval(appId: string, approved: boolean): Promise<string | null> {
+  return postPluginDecision('/api/plugins/approval', { app_id: appId, approved })
+}
+
+// postPluginDecision POSTs one of this host's plug-in decisions (approval,
+// manual registration, register example -- plugins.go) and returns the
+// error text, or null. The result arrives as a plugins-state broadcast.
+async function postPluginDecision(path: string, body: object): Promise<string | null> {
+  try {
+    const resp = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    return resp.ok ? null : `${resp.status}: ${(await resp.text()).trim()}`
+  } catch (err) {
+    return String(err)
+  }
+}
+
+// PLUGINS_REGISTRATION is the plugins tab's registration sub-tab's key: it
+// can't collide with an app id, which never contains a colon.
+const PLUGINS_REGISTRATION = ':registration'
+
+const pluginTime = (ts?: number) => (ts ? new Date(ts * 1000).toLocaleString() : '?')
+
+// pluginStatusText is one registry entry's status as the registration
+// sub-tab shows it.
+function pluginStatusText(p: PluginInfo | undefined): string {
+  if (!p) return 'not seen yet'
+  const via = p.source === 'manual' ? 'polled' : 'connected'
+  switch (p.status) {
+    case 'online':
+      return `online (${via})`
+    case 'offline':
+      return p.disconnect_at ? `offline since ${pluginTime(p.disconnect_at)}` : 'not answering yet'
+    default:
+      return p.status
+  }
+}
+
+// PluginRegistration is the plugins tab's registration sub-tab on this
+// host's own dashboard (Step3Prompt.md Revision E): "register example" for
+// cats-ufa-plugin, and manual registration -- an app id and a loopback port
+// for a plug-in that doesn't (or can't yet) say hello itself. Both approve
+// the app id on this host. agent-coordinator can only show manual
+// registrations, but can press "register example" too (Revision F).
+//
+// The plug-in dev repos section (privateRepoOpsImpls Step6Prompt.md Revision
+// E) lists the registrations made by watching a path as a plug-in dev repo
+// from the system tab: that approved its app id here, and each row shows the
+// approval and the plug-in's registry status. focus scrolls to (and briefly
+// lights) one of those rows -- the system tab's "registration" link.
+interface PluginRegistrationFocus {
+  appId: string
+  seq: number // tells a repeat press from the last one
+}
+
+// PluginTabOpen is a request to open the plugins tab at one external
+// plug-in's own tab -- its managed row double-clicked in the system tab.
+// seq as PluginRegistrationFocus.
+interface PluginTabOpen {
+  appId: string
+  seq: number
+}
+
+function PluginRegistration({ state, plugins, repoState, focus }: {
+  state: PluginsStateMsg | null
+  plugins: PluginInfo[]
+  repoState: RepoStateMsg
+  focus: PluginRegistrationFocus | null
+}) {
+  const cfg = state?.config
+  const manual = cfg?.manual ?? []
+  const devRepos = (repoState.externals ?? []).filter(e => e.plugin && e.app_id)
+  const focusRef = useRef<HTMLTableRowElement>(null)
+  useEffect(() => {
+    focusRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [focus?.seq])
+  const exampleId = cfg?.example_app_id || 'cats-ufa-plugin'
+  const example = plugins.find(p => p.app_id === exampleId)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [form, setForm] = useState({ appId: '', port: '', name: '' })
+
+  const run = async (path: string, body: object, after?: () => void) => {
+    setBusy(true)
+    const text = await postPluginDecision(path, body)
+    setError(text)
+    setBusy(false)
+    if (!text) after?.()
+  }
+  const register = (e: React.FormEvent) => {
+    e.preventDefault()
+    run('/api/plugins/manual', { app_id: form.appId.trim(), http_port: form.port.trim(), display_name: form.name, registered: true },
+      () => setForm({ appId: '', port: '', name: '' }))
+  }
+  const unregister = (appId: string) => {
+    if (!window.confirm(`Remove ${appId}'s manual registration on this host? Its approval stays until you revoke it.`)) return
+    run('/api/plugins/manual', { app_id: appId, registered: false })
+  }
+
+  return (
+    <div className="plugins-reg">
+      {error && <div className="plugins-shell-error">{error}</div>}
+      <section className="plugins-reg-section">
+        <h3>example</h3>
+        <p>
+          Approves <code>{exampleId}</code>, the hello-world external plug-in, on this host and launches it from the dev
+          binaries on port {cfg?.example_port || '?'} (deploy-dev-binaries builds it). It then says hello and gets its
+          own tab here.
+        </p>
+        <div className="plugins-reg-row">
+          <button className="sys-btn plugins-shell-btn plugins-shell-btn-approve" disabled={busy} onClick={() => run('/api/plugins/example', {})}>
+            register example
+          </button>
+          <span className="plugins-reg-status">
+            {exampleId}: {pluginStatusText(example)}
+          </span>
+        </div>
+        {state?.example?.at ? (
+          <div className={`plugins-reg-last${state.example.error ? ' plugins-reg-last-error' : ''}`}>
+            last pressed {pluginTime(state.example.at)}: {state.example.result}
+            {state.example.error ? ` — ${state.example.error}` : ''}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="plugins-reg-section">
+        <h3>manual registration</h3>
+        <p>
+          For a plug-in that serves a manifest on this host's loopback but doesn't say hello. Registering approves it here
+          and serves it sandboxed at <code>/apps/&lt;app id&gt;/</code>. With no connection to say it's up, its manifest is
+          fetched every {cfg?.manual_poll_secs ?? '?'}s instead. If it later says hello itself, that connection takes over
+          while it lasts.
+        </p>
+        <form className="plugins-reg-form" onSubmit={register}>
+          <input placeholder="app id" value={form.appId} onChange={e => setForm(f => ({ ...f, appId: e.target.value }))} pattern="[a-z][a-z0-9\-]{0,31}" title="lowercase letters, digits and dashes, starting with a letter" required />
+          <input placeholder="port" value={form.port} onChange={e => setForm(f => ({ ...f, port: e.target.value }))} inputMode="numeric" pattern="[0-9]{1,5}" required />
+          <input placeholder="display name (optional)" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+          <button className="sys-btn plugins-shell-btn" type="submit" disabled={busy}>register</button>
+        </form>
+        {manual.length === 0 ? (
+          <div className="plugins-reg-none">no manual registrations on this host</div>
+        ) : (
+          <table className="plugins-reg-table">
+            <thead>
+              <tr><th>app id</th><th>port</th><th>name</th><th>registered</th><th>status</th><th>last check</th><th /></tr>
+            </thead>
+            <tbody>
+              {manual.map(m => {
+                const p = plugins.find(p => p.app_id === m.app_id)
+                return (
+                  <tr key={m.app_id}>
+                    <td><code>{m.app_id}</code></td>
+                    <td>{m.http_port}</td>
+                    <td>{m.display_name || '—'}</td>
+                    <td>{pluginTime(m.registered_at)}</td>
+                    <td className={`plugins-reg-st-${p?.status ?? 'none'}`} title={p?.manifest_error || undefined}>
+                      {pluginStatusText(p)}{p?.manifest_error ? ' ⚠' : ''}
+                    </td>
+                    <td>{p?.source === 'manual' && p.manifest_at ? pluginTime(p.manifest_at) : '—'}</td>
+                    <td><button className="sys-btn plugins-shell-btn" disabled={busy} onClick={() => unregister(m.app_id)}>unregister</button></td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="plugins-reg-section">
+        <h3>plug-in dev repos</h3>
+        <p>
+          Registered from the system tab's dev-repo panel ("plugin dev repo"): watching the path approves its plug-in's
+          app id here, and each build from a condoc-tagged commit approves it again.
+        </p>
+        {devRepos.length === 0 ? (
+          <div className="plugins-reg-none">no plug-in dev repos on this host</div>
+        ) : (
+          <table className="plugins-reg-table">
+            <thead>
+              <tr><th>app id</th><th>path</th><th>approved</th><th>status</th><th>last build</th></tr>
+            </thead>
+            <tbody>
+              {devRepos.map(e => {
+                const p = plugins.find(p => p.app_id === e.app_id)
+                const approved = (cfg?.external_approved ?? []).includes(e.app_id ?? '')
+                const focusSeq = focus && focus.appId === e.app_id ? focus.seq : null
+                return (
+                  <tr
+                    // Keyed by seq too, so a repeat press replays the highlight.
+                    key={focusSeq === null ? e.abs : `${e.abs}:${focusSeq}`}
+                    ref={focusSeq === null ? undefined : focusRef}
+                    className={focusSeq === null ? undefined : 'plugins-reg-focused'}
+                  >
+                    <td><code>{e.app_id}</code></td>
+                    <td title={e.abs}>{e.path}</td>
+                    <td className={approved ? 'plugins-reg-st-online' : 'plugins-reg-st-pending'} title={e.plugin_note || undefined}>
+                      {approved ? 'approved' : 'not approved'}
+                    </td>
+                    <td className={`plugins-reg-st-${p?.status ?? 'none'}`} title={p?.manifest_error || undefined}>
+                      {pluginStatusText(p)}{p?.manifest_error ? ' ⚠' : ''}
+                    </td>
+                    <td title={e.build_error || undefined}>
+                      {e.building ? 'building…' : e.build_error ? 'failed' : e.built_head ? `${e.built_head}${e.build_at ? ` at ${pluginTime(e.build_at)}` : ''}` : '—'}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="plugins-reg-section plugins-reg-meta">
+        approved external plug-ins on this host: {(cfg?.external_approved ?? []).join(', ') || 'none'}
+        {cfg?.approvals_path ? <> — kept in <code>{cfg.approvals_path}</code></> : ' — kept in memory only'}
+        {cfg?.approvals_error && <div className="plugins-reg-last-error">{cfg.approvals_error}</div>}
+      </section>
+    </div>
+  )
+}
+
+// PluginsShell is the top-level plugins tab (Step3Prompt.md Revisions B, C
+// and E): a tab bar like the top-level sub-app bar. Its far left is always
+// the registration sub-tab (PluginRegistration); past a divider, one tab
+// per external plug-in (anything not first-party) in this LR's registry. An
+// online one is framed in the sandboxed tier (docs/PluginTrust.md); a
+// pending one gets an "approve" button, since approval is made here, per
+// host. Mirrors agent-coordinator's copy, which can only show the decisions.
+//
+// focus (privateRepoOpsImpls Step6Prompt.md Revision E) switches to the
+// registration sub-tab each time a new one arrives, for PluginRegistration
+// to scroll to. open (a managed plug-in's row double-clicked in the system
+// tab) switches to that one plug-in's tab the same way.
+function PluginsShell({ plugins: all, state, repoState, focus, open }: {
+  plugins: PluginInfo[]
+  state: PluginsStateMsg | null
+  repoState: RepoStateMsg
+  focus: PluginRegistrationFocus | null
+  open: PluginTabOpen | null
+}) {
+  const plugins = all.filter(p => p.trust !== 'first-party')
+  const [selected, setSelected] = useState<string | null>(null)
+  useEffect(() => {
+    if (focus) setSelected(PLUGINS_REGISTRATION)
+  }, [focus?.seq])
+  useEffect(() => {
+    if (open) setSelected(open.appId)
+  }, [open?.seq])
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<{ appId: string; text: string } | null>(null)
+  // With no external plug-in to show, registration is the only pane.
+  const registration = selected === PLUGINS_REGISTRATION || plugins.length === 0
+  const current = registration ? null : plugins.find(p => p.app_id === selected) ?? plugins[0] ?? null
+  const label = (p: PluginInfo) => p.manifest?.short_name || p.manifest?.display_name || p.hello.display_name || p.app_id
+  const at = pluginTime
+
+  const decide = async (p: PluginInfo, approved: boolean) => {
+    if (!approved && !window.confirm(`Revoke ${p.app_id} on this host? Its tab stops loading until it is approved again.`)) return
+    setBusy(true)
+    const text = await setPluginApproval(p.app_id, approved)
+    setError(text ? { appId: p.app_id, text } : null)
+    setBusy(false)
+  }
+
+  return (
+    <div className="plugins-shell">
+      <div className="tab-bar tab-bar-nested">
+        <button
+          className={`tab plugins-shell-tab plugins-shell-reg-tab${registration ? ' tab-active' : ''}`}
+          onClick={() => setSelected(PLUGINS_REGISTRATION)}
+          title="register plug-ins on this host"
+        >
+          registration
+        </button>
+        <span className="plugins-shell-divider" />
+        <ScrollTabs>
+          {plugins.length === 0 ? (
+            <span className="plugins-shell-none">no external plug-ins</span>
+          ) : plugins.map(p => (
+            <button
+              key={p.app_id}
+              className={`tab plugins-shell-tab${current?.app_id === p.app_id ? ' tab-active' : ''}${p.status !== 'online' ? ' tab-dim' : ''}`}
+              onClick={() => setSelected(p.app_id)}
+              title={`${p.app_id} — ${p.status}${p.source === 'manual' ? ' (manually registered)' : ''}`}
+            >
+              <PluginIcon src={pluginIconSrc(p)} label={p.app_id} size={14} mask={pluginIconMask(p)} />
+              {label(p)}
+            </button>
+          ))}
+        </ScrollTabs>
+        {current && current.status !== 'pending' && (
+          <div className="plugins-shell-actions">
+            <span className="plugins-shell-trust" title="see docs/PluginTrust.md">{current.trust}</span>
+            <button className="sys-btn plugins-shell-btn" disabled={busy} onClick={() => decide(current, false)}>revoke</button>
+          </div>
+        )}
+      </div>
+      {error && current && error.appId === current.app_id && <div className="plugins-shell-error">{error.text}</div>}
+      <div className="plugins-shell-pane">
+        {registration ? (
+          <PluginRegistration state={state} plugins={all} repoState={repoState} focus={focus} />
+        ) : !current ? (
+          <div className="service-empty service-empty-embed">
+            External plug-ins appear here, one tab each, once they say hello to this local-representative.
+          </div>
+        ) : current.status === 'online' ? (
+          <iframe key={current.app_id} className="embed-frame" sandbox={PLUGIN_IFRAME_SANDBOX} src={current.base_path + manifestEntry(current.manifest)} title={current.app_id} />
+        ) : current.status === 'pending' ? (
+          <div className="service-empty service-empty-embed plugins-shell-approve">
+            <div>
+              <strong>{label(current)}</strong> ({current.app_id}, port {current.hello.http_port}) asked to be shown on this host.
+            </div>
+            <div>
+              Approving it routes it at {current.base_path} and frames it sandboxed: it runs with no origin of its own and
+              can't reach this dashboard, its storage or its APIs. The approval is kept on this host only.
+            </div>
+            <button className="sys-btn plugins-shell-btn plugins-shell-btn-approve" disabled={busy} onClick={() => decide(current, true)}>
+              {busy ? 'approving…' : `approve ${current.app_id}`}
+            </button>
+          </div>
+        ) : (
+          <div className="service-empty service-empty-embed">
+            {label(current)} ({current.app_id}) is {current.status}{current.status === 'offline' ? ` since ${at(current.disconnect_at)}` : ''}.
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab)
+  // Once the convo tab has been opened, its iframe stays mounted, hidden on
+  // the other tabs, so The Conversationalist can keep playing the clips a
+  // dtt makes with play through it -- run from the tools tab, say
+  // (the-conversationalist/pollyplay.go, dTT-IntegrationImpls/Step3Prompt.md
+  // Revision C).
+  const [convoKept, setConvoKept] = useState(() => activeTab === 'convo')
+  useEffect(() => {
+    if (activeTab === 'convo') setConvoKept(true)
+  }, [activeTab])
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [viewerFileId, setViewerFileId] = useState<string | null>(null)
+  // markupFile is snapshotted at the moment the dialog opens (rather than
+  // re-derived from the live filesState listing, like selectedFile/viewerFile
+  // below) so an in-flight files-state broadcast can't yank the dialog's
+  // target out from under an open editing session.
+  const [markupFile, setMarkupFile] = useState<FileInfo | null>(null)
+  const [screenshotBusy, setScreenshotBusy] = useState(false)
+  // A clicked agent box on condocv2's visual (PrivateRepoOps Step 4) asks
+  // for the worker tab's visual with its work submission selected; the
+  // visual finds it in the worker's slopspace history (WorkFocus). Only the
+  // embedded condocv2 frame is listened to.
+  //
+  // condocv2 resumes from its hash (#/condoc/<stem>/<text|visual>), and its
+  // frame remounts whenever the tab is left -- e.g.
+  // for the worker tab via its agent box, then back again -- so its hash is
+  // captured as it navigates and baked back into `src` as the frame mounts
+  // (PrivateRepoOps Step 4, Revision B). `src` never chases it: condocv2
+  // reads its hash once, on load.
+  //
+  // A rebuild-and-restart also remounts the frame without the tab being
+  // left: it drops while condocv2 isn't healthy, and its `src` can switch
+  // between the plug-in and legacy routes as it says hello again. So the
+  // hash is read afresh on each of those too, or it comes back to wherever
+  // the tab was first opened (Step6Prompt.md Revision H).
+  // (condocv2Hash itself is read below useStatusWS, which it depends on.)
+  const condocv2FrameRef = useRef<HTMLIFrameElement>(null)
+  const handleCondocv2Load = () => {
+    const win = condocv2FrameRef.current?.contentWindow
+    if (!win) return
+    const capture = () => sessionStorage.setItem('lr-condocv2-hash', win.location.hash)
+    win.addEventListener('hashchange', capture)
+    capture()
+  }
+  const [workFocus, setWorkFocus] = useState<WorkFocus | null>(null)
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin || e.source !== condocv2FrameRef.current?.contentWindow) return
+      const d = e.data
+      if (d?.type !== 'condocv2-open-work' || typeof d.at !== 'number') return
+      const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined)
+      setWorkFocus(f => ({ slopspace: str(d.slopspace), role: str(d.role), signal: str(d.signal), at: d.at, seq: (f?.seq ?? 0) + 1 }))
+      setActiveTab('worker')
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
+  const {
+    connected, services, fcInstances, fcLogs, controlState, controlLibrary, controlReplies,
+    acState, systemState, repoState, filesState, modeMismatches, tcAvailable, workerState, workerReply, slopspaceReply, toolsState, toolsReplies, plugins, pluginsState,
+    sendCommand, sendRidealongCommand, runControl, cancelControl, continueControl, requestControl, connectToAC, disconnectFromAC, setAutoConnectAC,
+    launchApp, terminateApp, restartApp, uploadFiles, importHostFiles, rebuildRepo, setAutoRebuild, switchBranch, watchExternal, buildExternal, setAutoUpdate, connectProvider, disconnectProvider, inspectAgents, submitWork, controlSlopspace, requestTools,
+  } = useStatusWS()
+
+  const condocv2Up = (services.find(s => s.name === 'condocv2')?.status ?? 'healthy') === 'healthy'
+  const condocv2Src = appFrameSrc('condocv2', plugins)
+  const condocv2Hash = useMemo(
+    () => (activeTab === 'condocv2' && condocv2Up ? sessionStorage.getItem('lr-condocv2-hash') ?? '' : ''),
+    [activeTab, condocv2Up, condocv2Src],
+  )
+
+  // The federation-command tab follows one instance at a time: the one
+  // picked (kept per browser tab), else the first.
+  const [selectedFC, setSelectedFC] = useState<string | null>(() => sessionStorage.getItem('lr-selected-fc'))
+  const fc = fcInstances.find(i => i.key === selectedFC) ?? fcInstances[0] ?? null
+  const selectFC = (key: string) => {
+    setSelectedFC(key)
+    sessionStorage.setItem('lr-selected-fc', key)
+  }
+
+  // Drives every MicButton in the tree (Step2Prompt.md Revision J) via
+  // TCCaptureContext, below -- see useTCCapture's doc comment.
+  const tcCapture = useTCCapture(tcAvailable, appFrameSrc('convo', plugins))
+
+  const devMode = systemState?.self.dev_mode ?? false
+  const mismatches = Object.values(modeMismatches)
+  const isEmbedTab = EMBED_TABS.has(activeTab)
+  const frameSrc = (appId: string) => appFrameSrc(appId, plugins)
+
+  // The federation-command tab's own session readout -- setFCSessionState
+  // (procman.go) already folds every connected FC instance's reported
+  // session into its system-state ProcInfo.Session (all of them get the
+  // same value; see that function's doc comment), but until now that only
+  // ever reached the system tab's per-row tag. Surface the same value
+  // right on the federation-command tab itself, next to its health
+  // indicator, so "what session is FC on" doesn't require a trip to system.
+  // See condocs/initialDistributedSessionsImpls/Step2Prompt.md Revision C.
+  // With several instances it's the selected one's own session.
+  const fcSession = fc?.session ?? systemState?.managed.find(p => p.name === 'federation-command' && p.session)?.session
+
+  const getStatus = (name: string): string => {
+    return services.find(s => s.name === name)?.status ?? 'healthy'
+  }
+
+  // notLaunched says whether a non-embedded sub-app's tab (worker,
+  // federation-command) should show LaunchPanel instead of its panel: no
+  // instance of it is running here at all. Unknown until the first
+  // system-state, when the panel shows as before.
+  const notLaunched = (name: string): boolean =>
+    LAUNCHABLE_APPS.some(a => a.name === name) &&
+    systemState != null &&
+    !(systemState.managed ?? []).some(p => p.name === name && p.status === 'running')
+  const managedProcs = systemState ? systemState.managed ?? [] : null
+
+  const selectedFile = activeTab === 'files' && !viewerFileId
+    ? filesState?.files.find(f => f.id === selectedFileId) ?? null
+    : null
+  const viewerFile = activeTab === 'files' && viewerFileId
+    ? filesState?.files.find(f => f.id === viewerFileId) ?? null
+    : null
+
+  // Files tab picker gets a yellow dot (Step5SubstepR Revision E) whenever a
+  // file is highlighted, so highlighting something is discoverable without
+  // having to keep the files tab open. Double-clicking the dot jumps
+  // straight to whichever file was highlighted first.
+  const firstHighlightedFile = filesState?.files.find(f => f.highlighted) ?? null
+
+  useEffect(() => {
+    sessionStorage.setItem('lr-active-tab', activeTab)
+  }, [activeTab])
+
+  const goToTab = (tab: Tab) => {
+    setActiveTab(tab)
+    setSelectedFileId(null)
+    setViewerFileId(null)
+  }
+
+  // A plug-in dev repo's "registration" link in the system tab
+  // (privateRepoOpsImpls Step6Prompt.md Revision E): the registration the
+  // plugins tab should open on and scroll to.
+  const [pluginFocus, setPluginFocus] = useState<PluginRegistrationFocus | null>(null)
+  // A managed plug-in's row double-clicked in the system tab: which
+  // plug-in's own tab the plugins tab should open on. Only one of the two
+  // requests is kept, so a stale one can't win when the tab remounts.
+  const [pluginOpen, setPluginOpen] = useState<PluginTabOpen | null>(null)
+  const showPluginRegistration = (appId: string) => {
+    setPluginOpen(null)
+    setPluginFocus({ appId, seq: Date.now() })
+    goToTab('plugins')
+  }
+  // A plug-in that hasn't said hello here yet (a plug-in dev repo's, before
+  // its first launch) has no tab of its own, so it opens on its
+  // registration instead.
+  const openPluginTab = (appId: string) => {
+    if (plugins.some(p => p.app_id === appId && p.trust !== 'first-party')) {
+      setPluginFocus(null)
+      setPluginOpen({ appId, seq: Date.now() })
+      goToTab('plugins')
+    } else {
+      showPluginRegistration(appId)
+    }
+  }
+
+  const goToFirstHighlighted = () => {
+    if (!firstHighlightedFile) return
+    setActiveTab('files')
+    setSelectedFileId(null)
+    setViewerFileId(firstHighlightedFile.id)
+  }
+
+  // "At least one file store available" (Step1SubstepCPrompt.md): LR always
+  // owns its own host-cache (defaultFileCacheDir in files.go), unlike AC
+  // which only ever reaches one by relaying through a selected host -- so
+  // here that's unconditionally true. uploadFiles below already prefers a
+  // cloud cache over the host-cache wherever one exists; today that's
+  // nowhere, so every screenshot lands in the host-cache.
+  const hasFileStore = true
+
+  const handleScreenshot = async () => {
+    if (screenshotBusy) return
+    setScreenshotBusy(true)
+    try {
+      const file = await captureScreenshot()
+      await uploadFiles([file])
+    } catch (err) {
+      console.error('screenshot failed:', err)
+    } finally {
+      setScreenshotBusy(false)
+    }
+  }
+
+  const nav = useScreenHistory(activeTab, (a, b) => a === b, goToTab, NAV_HISTORY_MAX)
+
+  return (
+    <TCCaptureContext.Provider value={{ available: tcCapture.available, capture: tcCapture.capture }}>
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {mismatches.length > 0 && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch — {mismatches.map(m => `${m.peer} (${m.peer_mode})`).join(', ')}:
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
+      <ACConnectionPanel
+        acState={acState}
+        onConnect={connectToAC}
+        onDisconnect={disconnectFromAC}
+        onSetAutoConnect={setAutoConnectAC}
+      />
+      <div className="tab-bar tab-bar-main">
+        <span className="app-title">local-representative</span>
+        <ScrollTabs activeKey={activeTab}>
+          {TABS.map(tab => (
+            <button
+              key={tab}
+              className={`tab${activeTab === tab ? ' tab-active' : ''}${EMBED_TABS.has(tab) ? ' tab-with-icon' : ''}`}
+              onClick={() => goToTab(tab)}
+              title={EMBED_TABS.has(tab) ? appTabTitle(tab, plugins) : undefined}
+            >
+              {EMBED_TABS.has(tab) && <AppTabIcon appId={tab} plugins={plugins} />}
+              {TAB_LABELS[tab] ?? tab}
+              {tab === 'files' && firstHighlightedFile && (
+                <span
+                  className="tab-highlight-dot"
+                  title="a file is highlighted — double-click to go to it"
+                  onClick={e => e.stopPropagation()}
+                  onDoubleClick={e => { e.stopPropagation(); goToFirstHighlighted() }}
+                />
+              )}
+            </button>
+          ))}
+        </ScrollTabs>
+        <span className="header-version-tag" title="build version">{__APP_VERSION__}</span>
+        <TCAvailabilityIndicator available={tcAvailable} />
+        <ScreenshotButton enabled={hasFileStore} busy={screenshotBusy} onClick={handleScreenshot} />
+        <NavArrows canBack={nav.canBack} canForward={nav.canForward} onBack={nav.back} onForward={nav.forward} />
+        <ConnDot connected={connected} startedAt={systemState?.self.started_at} />
+      </div>
+      {isEmbedTab && (
+        <div className={`embed-status-bar health-${getStatus(activeTab)}`}>
+          <span className="health-dot" />
+          <span className="health-label">{activeTab} — {getStatus(activeTab)}</span>
+        </div>
+      )}
+      <div className={`main-pane${isEmbedTab || activeTab === 'plugins' ? ' main-pane-embed' : ''}`}>
+        {convoKept && getStatus('convo') === 'healthy' && (
+          <iframe className="embed-frame" src={frameSrc('convo')} title="convo" hidden={activeTab !== 'convo'} />
+        )}
+        {isEmbedTab ? (
+          // Every sub-app's own UI is framed through the plug-in route,
+          // /apps/<appId>/, or its legacy proxy until it has said hello --
+          // see appFrameSrc.
+          getStatus(activeTab) === 'healthy' ? (
+            activeTab === 'condocv2' ? (
+              // condocv2's own UI (its Text and Visual condoc tabs).
+              <iframe
+                ref={condocv2FrameRef}
+                className="embed-frame"
+                src={`${frameSrc('condocv2')}${condocv2Hash}`}
+                title="condocv2"
+                onLoad={handleCondocv2Load}
+              />
+            ) : activeTab === 'sessions' ? (
+              <iframe className="embed-frame" src={frameSrc('sessions')} title="sessions" />
+            ) : activeTab === 'robot' ? (
+              <iframe className="embed-frame" src={frameSrc('robot')} title="robot" />
+            ) : activeTab === 'compose' ? (
+              <iframe className="embed-frame" src={frameSrc('compose')} title="compose" />
+            ) : activeTab === 'dg' ? (
+              // diagrammographer has no legacy /dg/ proxy to fall back on, so
+              // it's framed only once its hello has put it online here.
+              plugins.some(p => p.app_id === 'dg' && p.status === 'online') ? (
+                <iframe className="embed-frame" src={frameSrc('dg')} title="dg" />
+              ) : (
+                <div className="service-empty service-empty-embed">dg is connected; waiting for its plug-in hello…</div>
+              )
+            ) : null /* convo: the kept iframe above */
+          ) : (
+            <LaunchPanel name={activeTab} managed={managedProcs} onLaunch={launchApp} />
+          )
+        ) : activeTab === 'plugins' ? (
+          <PluginsShell plugins={plugins} state={pluginsState} repoState={repoState} focus={pluginFocus} open={pluginOpen} />
+        ) : (
+          <div className={`main-pane-inner${selectedFile ? ' with-detail' : ''}`}>
+            <div className="service-view">
+              <div className="service-name">{activeTab}</div>
+              {activeTab === 'system' ? (
+                <SystemPanel
+                  state={systemState}
+                  fcInstances={fcInstances}
+                  repoState={repoState}
+                  onLaunch={launchApp}
+                  onTerminate={terminateApp}
+                  onRestart={restartApp}
+                  onRebuild={rebuildRepo}
+                  onSetAutoRebuild={setAutoRebuild}
+                  onSwitchBranch={switchBranch}
+                  onWatchExternal={watchExternal}
+                  onBuildExternal={buildExternal}
+                  onShowPluginRegistration={showPluginRegistration}
+                  onSetAutoUpdate={setAutoUpdate}
+                  onConnectProvider={connectProvider}
+                  onDisconnectProvider={disconnectProvider}
+                  onInspectAgents={inspectAgents}
+                  onOpenTab={goToTab}
+                  plugins={plugins}
+                  onOpenPlugin={openPluginTab}
+                />
+              ) : activeTab === 'files' && viewerFileId ? (
+                <FileViewer
+                  fileId={viewerFileId}
+                  file={viewerFile}
+                  onBack={() => setViewerFileId(null)}
+                />
+              ) : activeTab === 'files' ? (
+                <FilesPanel
+                  state={filesState}
+                  selectedId={selectedFileId}
+                  onSelect={setSelectedFileId}
+                  onEnter={setViewerFileId}
+                  onUpload={uploadFiles}
+                  onHostImport={importHostFiles}
+                />
+              ) : activeTab === 'control' ? (
+                <ControlPanel
+                  connected={connected}
+                  state={controlState}
+                  lib={controlLibrary}
+                  replies={controlReplies}
+                  request={requestControl}
+                  robotHealthy={getStatus('robot') === 'healthy'}
+                  onRun={runControl}
+                  onCancel={cancelControl}
+                  onContinue={continueControl}
+                />
+              ) : activeTab === 'tools' ? (
+                <ToolsPanel
+                  connected={connected}
+                  state={toolsState}
+                  replies={toolsReplies}
+                  request={requestTools}
+                  fileUrl={fileRawUrl}
+                  hostApi=""
+                  node="this node"
+                />
+              ) : activeTab === 'demo' ? (
+                <DemoPanel
+                  scope="this node"
+                  appStatus={(app, own): DemoAppStatus => {
+                    if (own) return connected ? { kind: 'up', label: 'ready' } : { kind: 'unknown', label: 'unknown' }
+                    if (notLaunched(app)) return { kind: 'down', label: 'not launched' }
+                    const s = getStatus(app)
+                    return { kind: s === 'healthy' ? 'up' : s === 'unhealthy' ? 'down' : 'unknown', label: s }
+                  }}
+                  onOpenApp={app => { if (isTab(app)) goToTab(app) }}
+                  request={requestTools}
+                  replies={toolsReplies}
+                  connected={connected}
+                  fileUrl={fileRawUrl}
+                  nodes={controlState?.nodes ?? []}
+                  thisNode={controlState?.node ?? ''}
+                />
+              ) : (
+                <>
+                  <div className={`health-indicator health-${getStatus(activeTab)}`}>
+                    <span className="health-dot" />
+                    <span className="health-label">{getStatus(activeTab)}</span>
+                    {activeTab === 'federation-command' && fcSession && (
+                      <span className="fc-session-tag" title="active session">{fcSession}</span>
+                    )}
+                  </div>
+                  {notLaunched(activeTab) ? (
+                    <LaunchPanel name={activeTab} managed={managedProcs} onLaunch={launchApp} />
+                  ) : activeTab === 'worker' && (
+                    <WorkerPanel
+                      healthy={getStatus('worker') === 'healthy'}
+                      state={workerState}
+                      reply={workerReply}
+                      onSubmit={submitWork}
+                      slopspaceReply={slopspaceReply}
+                      onControlSlopspace={controlSlopspace}
+                      focus={workFocus}
+                    />
+                  )}
+                  {activeTab === 'federation-command' && !notLaunched(activeTab) && (
+                    <>
+                      <FCInstancePicker instances={fcInstances} selected={fc?.key ?? null} onSelect={selectFC} />
+                      {fc?.ridealong && (
+                        <RidealongPanel
+                          state={fc.ridealong}
+                          fcState={fc.state}
+                          sendRidealongCommand={action => sendRidealongCommand(action, fc.key)}
+                        />
+                      )}
+                      {fc?.condoc && !fc.ridealong && (
+                        <CondocPanel
+                          state={fc.condoc}
+                          fcState={fc.state}
+                        />
+                      )}
+                      <FCCommandPanel
+                        key={fc?.key ?? ''}
+                        fcState={fc?.state ?? ''}
+                        fcLog={fc ? fcLogs[fc.key] ?? [] : []}
+                        sendCommand={cmd => sendCommand(cmd, fc?.key)}
+                      />
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+            {selectedFile && (
+              <FileDetailPane
+                file={selectedFile}
+                onClose={() => setSelectedFileId(null)}
+                onEnter={setViewerFileId}
+                onMarkup={id => setMarkupFile(filesState?.files.find(f => f.id === id) ?? null)}
+                onOpenTab={goToTab}
+              />
+            )}
+          </div>
+        )}
+      </div>
+      {markupFile && (
+        <MarkupDialog
+          file={markupFile}
+          rawUrl={fileRawUrl(markupFile.id)}
+          onClose={() => setMarkupFile(null)}
+        />
+      )}
+      {tcCapture.captureURL && (
+        <TCCaptureOverlay url={tcCapture.captureURL} onCancel={tcCapture.cancel} />
+      )}
+    </div>
+    </TCCaptureContext.Provider>
+  )
+}

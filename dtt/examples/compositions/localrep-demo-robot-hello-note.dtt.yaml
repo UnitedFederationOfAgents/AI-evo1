@@ -1,0 +1,82 @@
+# DTT example -- localrep, the robot's hello world: write a note and read it back, on a prepared node (see ../../README.md "The localrep tool").
+#
+# It takes node, the node to run on, as agent-coordinator names it ("" by
+# default, for this node); at, the unix seconds the node was prepared at
+# (localrep-demo-prepare's time); and greeting, what the note says. It
+# imports the control sequence in resources/demo-robot-hello-note.control.yaml
+# into that node's library and runs it there: the robot writes
+# ~/Desktop/robot-hello-<at>.txt holding "<greeting> from <node>", opens it
+# in a Chrome window of its own, reads it back off the screen, has the
+# screen captured into the files tab, closes it, checks the file and
+# deletes it. The node's screen is recorded while the robot works. Then
+# composer, on this node, puts a title card, the recording and a closing
+# card together into a WebM in the files tab.
+#
+# The run and the composition are named by at (demo-rh-note-<at>), so one
+# preparation has one of these: asserting again does nothing. The local
+# representative's robot-hello-note demo calls it between
+# localrep-demo-prepare and localrep-demo-shutdown, with the same at.
+#
+# It needs, on the node: local-representative connected to
+# agent-coordinator, with ianar built beside it, a prepared (empty) demo
+# workspace, and google-chrome. Here: compose launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-robot-hello-note.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds>
+#   dtt assert examples/compositions/localrep-demo-robot-hello-note.dtt.yaml --var node=<node> --var at=<the preparation's unix seconds> --var greeting="hello world"
+
+variables:
+  node:
+    default: ""
+    help: the node to run on, as agent-coordinator names it; empty for this node
+  at:
+    default: now
+    help: when the node was prepared (localrep-demo-prepare's time, unix seconds), which names the note, the run and the composition
+  greeting:
+    default: hello world
+    help: what the robot's note says, before "from <node>"
+
+timestamp:
+  select: ${{var.at}}
+  alias: the-time
+
+localrep.control.sequences:
+  select:
+    id: dtt-demo-rh-note
+    node: ${{var.node}}
+  alias: rh-note-seq
+  assert:
+    source_file: resources/demo-robot-hello-note.control.yaml
+    from.source_file: "*"           # this sequence is ours: replace an older version of it
+
+localrep.control.runs:
+  select:
+    sequence: dtt-demo-rh-note
+    key: demo-rh-note-${{the-time.unix}}
+    node: ${{var.node}}
+  alias: rh-note-run
+  assert:
+    controls:
+      note: "~/Desktop/robot-hello-${{the-time.unix}}.txt"
+      greeting: ${{var.greeting}}
+    wait: 600
+
+localrep.compositions:
+  select:
+    id: demo-rh-note-${{the-time.unix}}
+  alias: rh-note-comp
+  assert:
+    composition: |
+      {
+        "name": "Robot hello (note) on ${{rh-note-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "Robot hello world on ${{rh-note-seq.node}}: a note, written and read back", "color": "#ffffff", "background": "#1e5f3a"},
+          {"kind": "media", "file_id": "${{rh-note-run.recording.file_id}}", "file_name": "${{rh-note-run.recording.name}}"},
+          {"kind": "title", "duration": 2, "text": "${{rh-note-run.output.hello}}", "color": "#1a1a1a", "background": "#60e0a0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600

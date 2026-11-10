@@ -1,0 +1,1420 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { HostFilePicker } from './HostFilePicker'
+import type {
+  AnnotationResultMsg,
+  ArchiveResultMsg,
+  ModeMismatchMsg,
+  ProcessedView,
+  PromptResultMsg,
+  ReprStatus,
+  ReprStatusMsg,
+  SelfInfoMsg,
+  SessionEntry,
+  SessionInfo,
+  SessionsMsg,
+  SessionSummary,
+  SessionView,
+} from './types'
+
+// ---- WebSocket hook ----
+//
+// Wires up the representable connect/disconnect widget, dev-mode banner,
+// and version-mismatch reload check shared by every sub-app in this repo
+// (see condocs/InitialShellsSessionManagerAndTheConversationalist.md), plus
+// (Revision I) Session Manager's first domain functionality: parity with
+// federation-command's "ufa session" sub-menu (list/new/set/describe/
+// rename/archive, see ../sessions.go) and a "view" mode that renders a
+// session's session.jsonl as a readable transcript.
+
+type Notice = { kind: 'error' | 'success'; message: string } | null
+
+// serverBase is the path this document was served under, so requests also
+// work when reverse-proxied beneath a prefix (/sessions/ via
+// local-representative, /host/<id>/sessions/ via agent-coordinator).
+function serverBase(): string {
+  const dir = window.location.pathname.replace(/\/[^/]*\.[^/]*$/, '/')
+  return dir.endsWith('/') ? dir.slice(0, -1) : dir
+}
+
+// resourceUrl is where an attached resource's content is served (see
+// ../annotations.go's handleResource).
+function resourceUrl(id: string, record: string): string {
+  return `${serverBase()}/api/resource?session=${encodeURIComponent(id)}&record=${encodeURIComponent(record)}`
+}
+
+// MAX_RESOURCE_BYTES mirrors ../annotations.go's maxResourceBytes.
+const MAX_RESOURCE_BYTES = 25 << 20
+
+function useSessionManagerWS() {
+  const [connected, setConnected] = useState(false)
+  const [reprStatus, setReprStatus] = useState<ReprStatus>('disconnected')
+  const [reprHost, setReprHost] = useState('')
+  const [reprPort, setReprPort] = useState('')
+  const [reprAutoConnect, setReprAutoConnect] = useState(false)
+  const [devMode, setDevMode] = useState(false)
+  const [version, setVersion] = useState('')
+  const [modeMismatch, setModeMismatch] = useState<ModeMismatchMsg | null>(null)
+
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [currentSessionId, setCurrentSessionId] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null)
+  const [sessionView, setSessionView] = useState<SessionView | null>(null)
+  const [notice, setNotice] = useState<Notice>(null)
+  // The latest add-note/add-resource outcome -- the annotate bar clears its
+  // input once its own submission comes back without an error.
+  const [annotationResult, setAnnotationResult] = useState<AnnotationResultMsg | null>(null)
+  // The latest prompt-box outcome -- the prompt bar shows it and clears its
+  // input once its prompt is queued.
+  const [promptResult, setPromptResult] = useState<PromptResultMsg | null>(null)
+  // selectedIdRef lets the message handler drop a "session-view" for a
+  // session that's no longer selected (e.g. one refreshed after a note was
+  // added just before switching away).
+  const selectedIdRef = useRef<string | null>(null)
+
+  // The transcript turn currently expanded into its full -processed file,
+  // or null at the transcript level. expandedRef lets the message handler
+  // drop a "processed-view" reply for a turn that's no longer expanded.
+  const [expanded, setExpanded] = useState<{ id: string; record: string } | null>(null)
+  const [processedView, setProcessedView] = useState<ProcessedView | null>(null)
+  const expandedRef = useRef<{ id: string; record: string } | null>(null)
+
+  const wsRef = useRef<WebSocket | null>(null)
+
+  const send = useCallback((type: string, payload: unknown) => {
+    wsRef.current?.send(JSON.stringify({ type, payload }))
+  }, [])
+
+  const connectRepr = useCallback(
+    (host: string, port: string) => {
+      send('connect', { host, port })
+    },
+    [send],
+  )
+
+  const disconnectRepr = useCallback(() => {
+    send('disconnect', {})
+  }, [send])
+
+  // setAutoConnectRepr toggles the persistent auto-connect state: on, it
+  // arms the retry cycle (starting a connect attempt at host/port if none is
+  // already underway) and keeps it armed across a successful connection, so
+  // a later unintentional disconnect resumes on its own; off, it only stops
+  // a retry in progress -- Disconnect above is still the separate, explicit
+  // action for dropping an active connection.
+  const setAutoConnectRepr = useCallback(
+    (enabled: boolean, host?: string, port?: string) => {
+      send('set-auto-connect', { enabled, host, port })
+    },
+    [send],
+  )
+
+  // expandEntry scopes the transcript down into one turn's full -processed
+  // file; collapseEntry goes back "up" to the transcript.
+  const expandEntry = useCallback(
+    (id: string, record: string) => {
+      const target = { id, record }
+      expandedRef.current = target
+      setExpanded(target)
+      setProcessedView(null)
+      send('view-processed', target)
+    },
+    [send],
+  )
+
+  const collapseEntry = useCallback(() => {
+    expandedRef.current = null
+    setExpanded(null)
+    setProcessedView(null)
+  }, [])
+
+  // selectSession picks a session for the detail pane and asks the server
+  // for both its describe-parity info and its readable transcript.
+  const selectSession = useCallback(
+    (id: string) => {
+      selectedIdRef.current = id
+      setSelectedId(id)
+      setSessionInfo(null)
+      setSessionView(null)
+      collapseEntry()
+      send('describe-session', { id })
+      send('view-session', { id })
+    },
+    [send, collapseEntry],
+  )
+
+  const newSession = useCallback(
+    (name: string) => {
+      send('new-session', { name })
+    },
+    [send],
+  )
+
+  const setCurrentSession = useCallback(
+    (id: string) => {
+      send('set-session', { id })
+    },
+    [send],
+  )
+
+  const renameSession = useCallback(
+    (id: string, name: string) => {
+      send('rename-session', { id, name })
+    },
+    [send],
+  )
+
+  const archiveSessions = useCallback(() => {
+    send('archive-sessions', {})
+  }, [send])
+
+  const addNote = useCallback(
+    (id: string, text: string) => {
+      send('add-note', { id, text })
+    },
+    [send],
+  )
+
+  // addResource reads file in the browser and sends it base64-encoded in a
+  // single message, so it's capped at MAX_RESOURCE_BYTES before reading.
+  const addResource = useCallback(
+    (id: string, file: File) => {
+      if (file.size > MAX_RESOURCE_BYTES) {
+        setNotice({ kind: 'error', message: `resource: ${file.name} is over ${MAX_RESOURCE_BYTES >> 20} MiB` })
+        return
+      }
+      const reader = new FileReader()
+      reader.onload = () => {
+        const url = String(reader.result)
+        send('add-resource', { id, name: file.name, content: url.slice(url.indexOf(',') + 1) })
+      }
+      reader.onerror = () => setNotice({ kind: 'error', message: `resource: couldn't read ${file.name}` })
+      reader.readAsDataURL(file)
+    },
+    [send],
+  )
+
+  // addHighlightedResources attaches every file highlighted in
+  // local-representative's files tab; addHostResources attaches files on
+  // its host, picked with HostFilePicker (see ../hostresources.go).
+  const addHighlightedResources = useCallback(
+    (id: string) => {
+      send('add-resource-highlighted', { id })
+    },
+    [send],
+  )
+
+  const addHostResources = useCallback(
+    (id: string, paths: string[]) => {
+      send('add-resource-host', { id, paths })
+    },
+    [send],
+  )
+
+  // promptSession queues prompt for the worker, run prompt-only under
+  // session id in a temp dir it removes afterwards (see ../prompt.go).
+  const promptSession = useCallback(
+    (id: string, prompt: string) => {
+      send('prompt-session', { id, prompt })
+    },
+    [send],
+  )
+
+  // Auto-select whichever session becomes current (e.g. right after "New")
+  // as long as nothing is already selected -- never hijacks an in-progress
+  // selection just because another tab changed the current session.
+  useEffect(() => {
+    if (currentSessionId && selectedId === null) {
+      selectSession(currentSessionId)
+    }
+  }, [currentSessionId, selectedId, selectSession])
+
+  useEffect(() => {
+    // Derive the WebSocket URL from the path this document was served
+    // under, so it also works when reverse-proxied beneath a prefix
+    // (/sessions/ via local-representative, /host/<id>/sessions/ via
+    // agent-coordinator).
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const wsUrl = `${proto}://${window.location.host}${serverBase()}/ws`
+
+    function connect() {
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => setConnected(true)
+
+      ws.onclose = () => {
+        setConnected(false)
+        setTimeout(connect, 2000)
+      }
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data) as { type: string; payload: unknown }
+          if (msg.type === 'repr-status') {
+            const p = msg.payload as ReprStatusMsg
+            setReprStatus(p.status)
+            if (p.host) setReprHost(p.host)
+            if (p.port) setReprPort(p.port)
+            setReprAutoConnect(!!p.auto_connect)
+          } else if (msg.type === 'self-info') {
+            const p = msg.payload as SelfInfoMsg
+            setDevMode(p.dev_mode)
+            setVersion(p.version)
+            // A rebuild+restart is invisible to an already-open tab -- the
+            // reconnect above is the only signal it gets. Compare the
+            // server's own reported version against this bundle's
+            // build-time version and reload if they differ; skip under the
+            // Vite dev server, where HMR already keeps the tab current.
+            if (!import.meta.env.DEV && p.version && p.version !== __APP_VERSION__) {
+              window.location.reload()
+            }
+          } else if (msg.type === 'mode-mismatch') {
+            const p = msg.payload as ModeMismatchMsg
+            setModeMismatch(p.mismatched ? p : null)
+          } else if (msg.type === 'sessions') {
+            const p = msg.payload as SessionsMsg
+            setSessions(p.sessions ?? [])
+            setCurrentSessionId(p.current ?? '')
+          } else if (msg.type === 'session-info') {
+            setSessionInfo(msg.payload as SessionInfo)
+          } else if (msg.type === 'session-view') {
+            const p = msg.payload as SessionView
+            if (p.id === selectedIdRef.current) setSessionView(p)
+          } else if (msg.type === 'annotation-result') {
+            const p = msg.payload as AnnotationResultMsg
+            setAnnotationResult(p)
+            if (p.error) {
+              setNotice({ kind: 'error', message: `${p.kind}: ${p.error}` })
+            } else {
+              setNotice({
+                kind: 'success',
+                message:
+                  p.kind === 'note'
+                    ? 'note added'
+                    : (p.records?.length ?? 0) > 1
+                      ? `resources ${p.name} added`
+                      : `resource ${p.name} added`,
+              })
+            }
+          } else if (msg.type === 'prompt-result') {
+            const p = msg.payload as PromptResultMsg
+            setPromptResult(p)
+            // A finished run added a turn: reload the transcript if it's the
+            // one on screen.
+            if (p.stage === 'done' && p.id === selectedIdRef.current) {
+              wsRef.current?.send(JSON.stringify({ type: 'view-session', payload: { id: p.id } }))
+            }
+          } else if (msg.type === 'processed-view') {
+            const p = msg.payload as ProcessedView
+            const cur = expandedRef.current
+            if (cur && cur.id === p.id && cur.record === p.record) {
+              setProcessedView(p)
+            }
+          } else if (msg.type === 'archive-result') {
+            const p = msg.payload as ArchiveResultMsg
+            if (p.error) {
+              setNotice({ kind: 'error', message: `archive: ${p.error}` })
+            } else if (p.count > 0) {
+              setNotice({ kind: 'success', message: `archived ${p.count} session(s) to ${p.path}` })
+              selectedIdRef.current = null
+              setSelectedId(null)
+              setSessionInfo(null)
+              setSessionView(null)
+              expandedRef.current = null
+              setExpanded(null)
+              setProcessedView(null)
+            } else {
+              setNotice({ kind: 'success', message: 'no sessions to archive' })
+            }
+          } else if (msg.type === 'error') {
+            setNotice({ kind: 'error', message: String(msg.payload) })
+          }
+        } catch {
+          // ignore malformed messages
+        }
+      }
+    }
+
+    connect()
+    return () => wsRef.current?.close()
+  }, [])
+
+  return {
+    connected,
+    reprStatus,
+    reprHost,
+    reprPort,
+    reprAutoConnect,
+    devMode,
+    version,
+    modeMismatch,
+    connectRepr,
+    disconnectRepr,
+    setAutoConnectRepr,
+    sessions,
+    currentSessionId,
+    selectedId,
+    sessionInfo,
+    sessionView,
+    expanded,
+    processedView,
+    notice,
+    annotationResult,
+    promptResult,
+    selectSession,
+    expandEntry,
+    collapseEntry,
+    newSession,
+    setCurrentSession,
+    renameSession,
+    archiveSessions,
+    addNote,
+    addResource,
+    addHighlightedResources,
+    addHostResources,
+    promptSession,
+  }
+}
+
+// ---- representable connect/disconnect widget ----
+
+const REPR_STATUS_LABELS: Record<ReprStatus, string> = {
+  disconnected: 'not connected to local-representative',
+  connecting: 'connecting to local-representative…',
+  connected: 'connected to local-representative',
+}
+
+interface ReprFooterProps {
+  status: ReprStatus
+  host: string
+  port: string
+  autoConnect: boolean
+  onConnect: (host: string, port: string) => void
+  onDisconnect: () => void
+  onSetAutoConnect: (enabled: boolean, host?: string, port?: string) => void
+}
+
+function ReprFooter({ status, host, port, autoConnect, onConnect, onDisconnect, onSetAutoConnect }: ReprFooterProps) {
+  const [hostInput, setHostInput] = useState(host)
+  const [portInput, setPortInput] = useState(port)
+
+  // Track the address the server reports (its --lr-host/--lr-port defaults,
+  // or whatever it's currently connected/connecting to) until the user edits
+  // the fields themselves.
+  useEffect(() => setHostInput(host), [host])
+  useEffect(() => setPortInput(port), [port])
+
+  const autoConnectToggle = (
+    <label
+      className="repr-footer-auto-connect"
+      title="keep reaching for local-representative: stays armed across a successful connection so an unintentional disconnect resumes the cycle on its own -- an explicit disconnect turns it off"
+    >
+      <input
+        type="checkbox"
+        checked={autoConnect}
+        onChange={(e) => onSetAutoConnect(e.target.checked, hostInput.trim(), portInput.trim())}
+      />
+      auto-connect
+    </label>
+  )
+
+  return (
+    <div className="repr-footer">
+      <div className="repr-footer-status">
+        <span className={`conn-dot ${status === 'connected' ? 'connected' : status === 'connecting' ? 'connecting' : 'disconnected'}`} />
+        <span className="repr-footer-label">{REPR_STATUS_LABELS[status]}</span>
+      </div>
+      {status === 'disconnected' ? (
+        <div className="repr-footer-form">
+          <input
+            className="repr-footer-input"
+            type="text"
+            placeholder="host"
+            value={hostInput}
+            onChange={(e) => setHostInput(e.target.value)}
+          />
+          <input
+            className="repr-footer-input repr-footer-input-port"
+            type="text"
+            placeholder="port"
+            value={portInput}
+            onChange={(e) => setPortInput(e.target.value)}
+          />
+          <button className="btn-secondary" onClick={() => onConnect(hostInput.trim(), portInput.trim())}>
+            Connect
+          </button>
+          {autoConnectToggle}
+        </div>
+      ) : (
+        <div className="repr-footer-form">
+          <span className="repr-footer-addr">{host}:{port}</span>
+          {autoConnectToggle}
+          <button className="btn-secondary" onClick={onDisconnect}>
+            Disconnect
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- Session list ("ufa session list" parity, plus new/archive) ----
+
+interface SessionListProps {
+  sessions: SessionSummary[]
+  currentId: string
+  selectedId: string | null
+  onSelect: (id: string) => void
+  onNew: (name: string) => void
+  onArchive: () => void
+}
+
+function SessionList({ sessions, currentId, selectedId, onSelect, onNew, onArchive }: SessionListProps) {
+  const [newName, setNewName] = useState('')
+  const [confirmArchive, setConfirmArchive] = useState(false)
+
+  const submitNew = () => {
+    onNew(newName.trim())
+    setNewName('')
+  }
+
+  return (
+    <div className="session-list-wrap">
+      <div className="session-list-toolbar">
+        <input
+          className="repr-footer-input"
+          type="text"
+          placeholder="new session name…"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && submitNew()}
+        />
+        <button className="btn-secondary" onClick={submitNew} title="ufa session new">
+          New
+        </button>
+      </div>
+      <div className="session-list">
+        {sessions.length === 0 ? (
+          <div className="session-list-empty">no sessions yet</div>
+        ) : (
+          sessions.map((s) => (
+            <button
+              key={s.id}
+              className={`session-row${s.id === selectedId ? ' selected' : ''}${s.remote ? ' session-row-remote' : ''}`}
+              onClick={() => onSelect(s.id)}
+              title={s.remote ? `${s.id} — discovered on ${s.host}, not yet pulled locally; selecting it will pull it` : s.id}
+            >
+              <span className={`session-row-current-dot${s.id === currentId ? ' is-current' : ''}`} title={s.id === currentId ? 'current session' : ''} />
+              <span className="session-row-name">{s.name || s.id}</span>
+              {s.remote ? (
+                <span className="session-row-meta session-row-remote-badge">remote · {s.host}</span>
+              ) : (
+                <span className="session-row-meta">{s.file_count}</span>
+              )}
+            </button>
+          ))
+        )}
+      </div>
+      <div className="session-list-toolbar session-list-toolbar-archive">
+        {confirmArchive ? (
+          <>
+            <span className="session-archive-confirm-label">archive all sessions?</span>
+            <button
+              className="btn-secondary btn-danger"
+              onClick={() => {
+                onArchive()
+                setConfirmArchive(false)
+              }}
+            >
+              Confirm
+            </button>
+            <button className="btn-secondary" onClick={() => setConfirmArchive(false)}>
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button
+            className="btn-secondary"
+            disabled={sessions.length === 0}
+            onClick={() => setConfirmArchive(true)}
+            title="ufa session archive"
+          >
+            Archive All
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---- Session detail pane (describe + rename + set-current + view) ----
+
+type DetailTab = 'details' | 'transcript'
+
+interface SessionDetailProps {
+  id: string
+  currentId: string
+  info: SessionInfo | null
+  view: SessionView | null
+  expanded: { id: string; record: string } | null
+  processedView: ProcessedView | null
+  annotationResult: AnnotationResultMsg | null
+  promptResult: PromptResultMsg | null
+  reprConnected: boolean
+  onSetCurrent: (id: string) => void
+  onRename: (id: string, name: string) => void
+  onExpand: (id: string, record: string) => void
+  onCollapse: () => void
+  onAddNote: (id: string, text: string) => void
+  onAddResource: (id: string, file: File) => void
+  onAddHighlighted: (id: string) => void
+  onAddFromHost: (id: string, paths: string[]) => void
+  onPrompt: (id: string, prompt: string) => void
+}
+
+function SessionDetail({
+  id,
+  currentId,
+  info,
+  view,
+  expanded,
+  processedView,
+  annotationResult,
+  promptResult,
+  reprConnected,
+  onSetCurrent,
+  onRename,
+  onExpand,
+  onCollapse,
+  onAddNote,
+  onAddResource,
+  onAddHighlighted,
+  onAddFromHost,
+  onPrompt,
+}: SessionDetailProps) {
+  // Opens on the transcript (Step5Prompt.md Revision E) so moving to a new
+  // session shows what happened in it without an extra click; whichever tab
+  // is picked afterwards sticks across selections since this component isn't
+  // keyed by id.
+  const [tab, setTab] = useState<DetailTab>('transcript')
+  const [renameInput, setRenameInput] = useState('')
+  const [renaming, setRenaming] = useState(false)
+
+  const nameField = info?.fields?.find(([k]) => k === 'name')?.[1] ?? ''
+  const isDefault = id.endsWith('-default')
+  const isCurrent = id === currentId
+
+  return (
+    <div className="session-detail">
+      <div className="session-detail-header">
+        <div className="session-detail-title">
+          <span className={`conn-dot ${isCurrent ? 'connected' : 'disconnected'}`} title={isCurrent ? 'current session' : 'not current'} />
+          {renaming ? (
+            <input
+              className="repr-footer-input session-rename-input"
+              autoFocus
+              value={renameInput}
+              onChange={(e) => setRenameInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && renameInput.trim()) {
+                  onRename(id, renameInput.trim())
+                  setRenaming(false)
+                } else if (e.key === 'Escape') {
+                  setRenaming(false)
+                }
+              }}
+            />
+          ) : (
+            <h2>{nameField || id}</h2>
+          )}
+        </div>
+        <div className="session-detail-actions">
+          {!isCurrent && (
+            <button className="btn-secondary" onClick={() => onSetCurrent(id)} title="ufa session set">
+              Set as Current
+            </button>
+          )}
+          {!isDefault && !renaming && (
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                setRenameInput(nameField)
+                setRenaming(true)
+              }}
+              title="ufa session rename"
+            >
+              Rename
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="session-detail-tabs">
+        <button className={`session-tab${tab === 'transcript' ? ' active' : ''}`} onClick={() => setTab('transcript')}>
+          View
+        </button>
+        <button className={`session-tab${tab === 'details' ? ' active' : ''}`} onClick={() => setTab('details')}>
+          Details
+        </button>
+      </div>
+
+      {tab === 'details' ? (
+        <div className="session-detail-body">
+          {info ? (
+            <table className="session-fields">
+              <tbody>
+                <tr>
+                  <td className="session-field-key">id</td>
+                  <td className="session-field-val">{info.id}</td>
+                </tr>
+                <tr>
+                  <td className="session-field-key">location</td>
+                  <td className="session-field-val">{info.location}</td>
+                </tr>
+                {(info.fields ?? []).map(([k, v]) => (
+                  <tr key={k}>
+                    <td className="session-field-key">{k}</td>
+                    <td className="session-field-val">{v}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="session-detail-loading">loading…</div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Hidden rather than unmounted while a turn is expanded, so going
+              back up lands at the same scroll position. */}
+          <div className={`session-transcript-scope${expanded ? ' is-hidden' : ''}`}>
+            <PromptBar
+              id={id}
+              result={promptResult}
+              reprConnected={reprConnected}
+              onPrompt={(prompt) => onPrompt(id, prompt)}
+            />
+            <AnnotateBar
+              id={id}
+              result={annotationResult}
+              reprConnected={reprConnected}
+              onAddNote={(text) => onAddNote(id, text)}
+              onAddResource={(file) => onAddResource(id, file)}
+              onAddHighlighted={() => onAddHighlighted(id)}
+              onAddFromHost={(paths) => onAddFromHost(id, paths)}
+            />
+            <SessionTranscript view={view} onExpand={(record) => onExpand(id, record)} />
+          </div>
+          {expanded && <ProcessedPane record={expanded.record} view={processedView} onUp={onCollapse} />}
+        </>
+      )}
+    </div>
+  )
+}
+
+// PromptBar sends a prompt to this host's worker, run prompt-only under this
+// session in a temp dir that's removed afterwards (see ../prompt.go). The box
+// clears once the worker has the prompt; the line under it follows that
+// prompt until it's done, when the transcript reloads with the new turn.
+// Ctrl+Enter sends it.
+function PromptBar({
+  id,
+  result,
+  reprConnected,
+  onPrompt,
+}: {
+  id: string
+  result: PromptResultMsg | null
+  reprConnected: boolean
+  onPrompt: (prompt: string) => void
+}) {
+  const [prompt, setPrompt] = useState('')
+  // pending is true while a sent prompt awaits its "queued" (or error).
+  const [pending, setPending] = useState(false)
+  const [status, setStatus] = useState<{ kind: 'running' | 'ok' | 'error'; text: string } | null>(null)
+
+  useEffect(() => {
+    if (!result || result.id !== id) return
+    if (result.stage === 'error') {
+      setPending(false)
+      setStatus({ kind: 'error', text: result.error || 'the prompt could not be queued' })
+    } else if (result.stage === 'queued') {
+      setPending(false)
+      setPrompt('')
+      setStatus({ kind: 'running', text: 'queued for the worker — the transcript reloads when it finishes' })
+    } else if (result.ok) {
+      setStatus({ kind: 'ok', text: 'the prompt finished' })
+    } else {
+      setStatus({ kind: 'error', text: `the prompt ${result.status || 'failed'}${result.comment ? `: ${result.comment}` : ''}` })
+    }
+  }, [result])
+
+  // A different session starts with an empty, idle bar.
+  useEffect(() => {
+    setPrompt('')
+    setPending(false)
+    setStatus(null)
+  }, [id])
+
+  const submit = () => {
+    if (!prompt.trim() || pending || !reprConnected) return
+    setPending(true)
+    setStatus(null)
+    onPrompt(prompt)
+  }
+
+  return (
+    <div className="prompt-bar">
+      <textarea
+        className="annotate-note-input"
+        placeholder={
+          reprConnected
+            ? 'prompt the worker in this session (prompt-only, in a temp dir)… Ctrl+Enter to send'
+            : 'connect to local-representative to prompt the worker'
+        }
+        rows={2}
+        value={prompt}
+        disabled={!reprConnected}
+        onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault()
+            submit()
+          }
+        }}
+      />
+      <div className="annotate-actions">
+        <button
+          className="btn-secondary"
+          disabled={!prompt.trim() || pending || !reprConnected}
+          onClick={submit}
+          title="run this prompt on the worker under this session (Ctrl+Enter)"
+        >
+          {pending ? 'Sending…' : 'Prompt'}
+        </button>
+        {status && <span className={`prompt-bar-status prompt-bar-status-${status.kind}`}>{status.text}</span>}
+      </div>
+    </div>
+  )
+}
+
+// AnnotateBar attaches a note (text) or a resource (a file) to the session,
+// recorded as the transcript's "note"/"resource" entries (see
+// ../annotations.go). The note box clears once its note comes back added;
+// Ctrl+Enter adds it. "Add Resource" opens a menu of sources: Highlighted (the files highlighted in
+// local-representative's files tab), a file uploaded from this browser's
+// machine, or files picked on local-representative's host (see
+// ../hostresources.go). The two local-representative sources need the
+// connection to it.
+function AnnotateBar({
+  id,
+  result,
+  reprConnected,
+  onAddNote,
+  onAddResource,
+  onAddHighlighted,
+  onAddFromHost,
+}: {
+  id: string
+  result: AnnotationResultMsg | null
+  reprConnected: boolean
+  onAddNote: (text: string) => void
+  onAddResource: (file: File) => void
+  onAddHighlighted: () => void
+  onAddFromHost: (paths: string[]) => void
+}) {
+  const [note, setNote] = useState('')
+  // pending is true while a submitted note awaits its "annotation-result".
+  const [pending, setPending] = useState(false)
+  // resourcePending is true while a Highlighted/From host request awaits
+  // its "annotation-result" -- fetching through local-representative can
+  // take a while.
+  const [resourcePending, setResourcePending] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [pickingHost, setPickingHost] = useState(false)
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!result || result.id !== id) return
+    if (result.kind === 'resource') {
+      setResourcePending(false)
+      return
+    }
+    if (!result.error) setNote('')
+    setPending(false)
+  }, [result])
+
+  // A different session starts with an empty, idle bar.
+  useEffect(() => {
+    setNote('')
+    setPending(false)
+    setResourcePending(false)
+    setMenuOpen(false)
+    setPickingHost(false)
+  }, [id])
+
+  // A click outside the menu, or Escape, closes it.
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
+
+  const lrTitle = reprConnected ? '' : ' -- connect to local-representative first'
+
+  const submitNote = () => {
+    if (!note.trim() || pending) return
+    setPending(true)
+    onAddNote(note)
+  }
+
+  return (
+    <div className="annotate-bar">
+      <textarea
+        className="annotate-note-input"
+        placeholder="add a note to this session…"
+        rows={2}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault()
+            submitNote()
+          }
+        }}
+      />
+      <div className="annotate-actions">
+        <button className="btn-secondary" disabled={!note.trim() || pending} onClick={submitNote} title="Ctrl+Enter">
+          Add Note
+        </button>
+        <div className="resource-menu-wrap" ref={menuRef}>
+          <button
+            className="btn-secondary"
+            disabled={resourcePending}
+            onClick={() => setMenuOpen((o) => !o)}
+            title={`attach files (each up to ${MAX_RESOURCE_BYTES >> 20} MiB) to this session`}
+          >
+            {resourcePending ? 'Adding…' : 'Add Resource ▾'}
+          </button>
+          {menuOpen && (
+            <div className="resource-menu">
+              <button
+                className="resource-menu-item"
+                disabled={!reprConnected}
+                title={`attach every file highlighted in local-representative's files tab${lrTitle}`}
+                onClick={() => {
+                  setMenuOpen(false)
+                  setResourcePending(true)
+                  onAddHighlighted()
+                }}
+              >
+                Highlighted
+              </button>
+              <button
+                className="resource-menu-item"
+                title="choose a file on this computer to upload"
+                onClick={() => {
+                  setMenuOpen(false)
+                  fileRef.current?.click()
+                }}
+              >
+                Browse files to upload…
+              </button>
+              <button
+                className="resource-menu-item"
+                disabled={!reprConnected}
+                title={`choose files on local-representative's host${lrTitle}`}
+                onClick={() => {
+                  setMenuOpen(false)
+                  setPickingHost(true)
+                }}
+              >
+                From host…
+              </button>
+            </div>
+          )}
+        </div>
+        {pickingHost && (
+          <HostFilePicker
+            api={serverBase()}
+            multiple
+            title="add resources from host"
+            onClose={() => setPickingHost(false)}
+            onPick={(paths) => {
+              setPickingHost(false)
+              setResourcePending(true)
+              onAddFromHost(paths)
+            }}
+          />
+        )}
+        <input
+          ref={fileRef}
+          type="file"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            e.target.value = ''
+            if (file) onAddResource(file)
+          }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ProcessedPane is one transcript turn expanded into its full -processed
+// file -- everything the transcript's capped preview leaves out. "↑
+// transcript" (or Escape) goes back up.
+function ProcessedPane({ record, view, onUp }: { record: string; view: ProcessedView | null; onUp: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (e.key === 'Escape' && !(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'))) {
+        onUp()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onUp])
+
+  return (
+    <div className="processed-pane">
+      <div className="processed-pane-header">
+        <button className="nav-up-btn" onClick={onUp} title="back to the transcript (Esc)">
+          ↑ transcript
+        </button>
+        <span className="processed-pane-file">{view?.file ?? `${record}-processed.txt`}</span>
+      </div>
+      {!view ? (
+        <div className="session-detail-loading">loading…</div>
+      ) : view.error ? (
+        <div className="session-transcript-warning">{view.error}</div>
+      ) : (
+        <ProcessedContent content={view.content} />
+      )}
+    </div>
+  )
+}
+
+// Separators/prefixes of a -processed file, mirroring clauditable/pkg/
+// records (WrittenFileSeparator, ResponseSeparator, Input/Output/
+// ErrorPrefix).
+const WRITTEN_RAW_SEPARATOR = '\n----------WRITTEN_RAW----------\n'
+const RESPONSE_SEPARATOR = '\n\n----------RESPONSE----------\n\n'
+const STDERR_MARKER = '[STDERR]\n'
+const BLOCK_PREFIXES: [string, 'in' | 'out' | 'err'][] = [
+  ['IN>> ', 'in'],
+  ['OUT>> ', 'out'],
+  ['ERR>> ', 'err'],
+]
+
+type ProcessedBlock = { kind: 'in' | 'out' | 'err'; text: string }
+
+interface ParsedProcessed {
+  event: Record<string, unknown> | null
+  processing: Record<string, unknown>[]
+  blocks: ProcessedBlock[]
+}
+
+// parseProcessed splits a -processed file (see clauditable's
+// FormatProcessedFile) into its event header, its auto-maintenance
+// processing headers, and command/response blocks with the IN>>/OUT>>/ERR>>
+// prefixes stripped. The written-raw section after WRITTEN_RAW is the full
+// command and response; the prefixed lines before it are only a capped
+// preview of the same, so they're used only when there is no raw section.
+function parseProcessed(content: string): ParsedProcessed {
+  const sep = content.indexOf(WRITTEN_RAW_SEPARATOR)
+  const log = sep >= 0 ? content.slice(0, sep) : content
+  const raw = sep >= 0 ? content.slice(sep + WRITTEN_RAW_SEPARATOR.length) : null
+
+  let event: Record<string, unknown> | null = null
+  const processing: Record<string, unknown>[] = []
+  const preview: ProcessedBlock[] = []
+  for (const line of log.split('\n')) {
+    if (line.startsWith('{')) {
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>
+        if (event === null && ('timestamp' in obj || 'event_type' in obj)) event = obj
+        else processing.push(obj)
+        continue
+      } catch {
+        // not JSON after all -- fall through to the prefix checks
+      }
+    }
+    const match = BLOCK_PREFIXES.find(([p]) => line.startsWith(p))
+    if (!match) continue
+    const [prefix, kind] = match
+    const text = line.slice(prefix.length)
+    const last = preview[preview.length - 1]
+    if (last && last.kind === kind) last.text += '\n' + text
+    else preview.push({ kind, text })
+  }
+
+  let blocks = preview
+  if (raw !== null) {
+    const r = raw.indexOf(RESPONSE_SEPARATOR)
+    const command = r >= 0 ? raw.slice(0, r) : raw
+    let response = r >= 0 ? raw.slice(r + RESPONSE_SEPARATOR.length) : ''
+    // FormatRawFile appends stderr after a "[STDERR]" line.
+    let stderr = ''
+    const e = response.startsWith(STDERR_MARKER) ? 0 : response.indexOf('\n' + STDERR_MARKER)
+    if (e >= 0) {
+      stderr = response.slice(e === 0 ? STDERR_MARKER.length : e + 1 + STDERR_MARKER.length)
+      response = response.slice(0, e)
+    }
+    blocks = [{ kind: 'in', text: command.trimEnd() }]
+    if (response.trim()) blocks.push({ kind: 'out', text: response.trimEnd() })
+    if (stderr.trim()) blocks.push({ kind: 'err', text: stderr.trimEnd() })
+  }
+  return { event, processing, blocks }
+}
+
+function formatHeaderValue(key: string, value: unknown): string {
+  if (key === 'duration_ms' && typeof value === 'number') {
+    return value >= 1000 ? `${(value / 1000).toFixed(1)}s (${value}ms)` : `${value}ms`
+  }
+  return typeof value === 'string' ? value : JSON.stringify(value)
+}
+
+const BLOCK_LABELS = { in: 'command', out: 'response', err: 'error' }
+
+// ProcessedContent renders a -processed file: its JSON event header as a
+// key/value table (processing headers beneath it), then the command and
+// response as colour-coded blocks instead of IN>>/OUT>> prefixed text.
+function ProcessedContent({ content }: { content: string }) {
+  const { event, processing, blocks } = parseProcessed(content)
+  return (
+    <div className="processed-pane-content">
+      {(event || processing.length > 0) && (
+        <table className="processed-header-table">
+          <tbody>
+            {event &&
+              Object.entries(event).map(([k, v]) => (
+                <tr key={k}>
+                  <th>{k}</th>
+                  <td
+                    className={
+                      k === 'exit_code' ? (v === 0 ? 'transcript-exit-ok' : 'transcript-exit-err') : undefined
+                    }
+                  >
+                    {formatHeaderValue(k, v)}
+                  </td>
+                </tr>
+              ))}
+            {processing.map((p, i) => {
+              const { processing_type, ...rest } = p
+              return (
+                <tr key={`p${i}`} className="processed-header-processing">
+                  <th>processing</th>
+                  <td>
+                    <span className="transcript-entry-tag">{String(processing_type ?? '?')}</span>
+                    {Object.entries(rest).map(([k, v]) => (
+                      <span key={k} className="processed-header-sub">
+                        {k} {formatHeaderValue(k, v)}
+                      </span>
+                    ))}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+      {blocks.map((b, i) => (
+        <div key={i} className={`transcript-block transcript-block-${b.kind}`}>
+          <div className="transcript-block-label">{BLOCK_LABELS[b.kind]}</div>
+          <pre>{b.text}</pre>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// SessionTranscript presents a session's session.jsonl in the "ice readable"
+// way Revision I asks for: one card per turn, timestamp/agent/model/
+// duration/exit-code header, then its input/output/error blocks -- instead
+// of the raw IN>>/OUT>>/ERR>> prefixed log text. A turn with a record ID gets
+// an "expand" control that opens its full -processed file (ProcessedPane).
+function SessionTranscript({ view, onExpand }: { view: SessionView | null; onExpand: (record: string) => void }) {
+  if (!view) {
+    return <div className="session-detail-body session-detail-loading">loading…</div>
+  }
+  const entries = view.entries ?? []
+  // sync_incomplete means local-representative couldn't reach one of the
+  // other LR-active hosts while refreshing this session just now -- the
+  // transcript below (even if non-empty) may be missing turns a reachable
+  // peer would have had (see types.ts's SessionView doc comment).
+  const warning = (
+    <>
+      {view.sync_incomplete && (
+        <div className="session-transcript-warning">
+          could not sync from one or more remote hosts just now -- this transcript may be stale or incomplete
+        </div>
+      )}
+      {(view.warnings ?? []).map((w, i) => (
+        <div key={i} className="session-transcript-warning">
+          {w}
+        </div>
+      ))}
+    </>
+  )
+  if (entries.length === 0) {
+    return (
+      <div className="session-detail-body">
+        {warning}
+        <span className="session-transcript-empty">no recorded turns in this session yet</span>
+      </div>
+    )
+  }
+  // Once more than one host has taken part, each turn says which it ran on.
+  const showHost = new Set(entries.map((e) => e.host).filter(Boolean)).size > 1
+  return (
+    <div className="session-transcript">
+      {warning}
+      {entries.map((e, i) => (
+        <TranscriptEntry key={i} sessionId={view.id} entry={e} showHost={showHost} onExpand={onExpand} />
+      ))}
+    </div>
+  )
+}
+
+// TranscriptEntry is one turn's card. Its type tag tells a command, an AI
+// invocation, a note and a resource apart; notes and resources aren't runs,
+// so they skip duration/exit, and a resource links to its content. A turn
+// carried on from another host's secondary log (not yet fused into the
+// owner's log) gets a dashed left edge and a "via <host>" tag. With showHost
+// (a session more than one host has taken part in), a host tag beside the
+// exit code names the host the turn ran on.
+function TranscriptEntry({
+  sessionId,
+  entry: e,
+  showHost,
+  onExpand,
+}: {
+  sessionId: string
+  entry: SessionEntry
+  showHost: boolean
+  onExpand: (record: string) => void
+}) {
+  const type = e.event_type ?? ''
+  const attached = type === 'note' || type === 'resource'
+  const classes = ['transcript-entry']
+  if (attached) classes.push(`transcript-entry-${type}`)
+  if (e.secondary_host) classes.push('transcript-entry-secondary')
+  return (
+    <div className={classes.join(' ')}>
+      <div className="transcript-entry-header">
+        <span className="transcript-entry-time">{e.timestamp}</span>
+        {e.secondary_host && (
+          <span
+            className="transcript-entry-tag transcript-secondary-tag"
+            title={`recorded on ${e.secondary_host}, which doesn't own this session; not yet merged into the owner's log`}
+          >
+            via {e.secondary_host}
+          </span>
+        )}
+        {type && (
+          <span className={`transcript-entry-tag transcript-type-tag transcript-type-${type}`} title={type}>
+            {EVENT_TYPE_LABELS[type] ?? type}
+          </span>
+        )}
+        {e.agent && e.agent !== 'none' && <span className="transcript-entry-tag">{e.agent}</span>}
+        {e.model && <span className="transcript-entry-tag">{e.model}</span>}
+        {!attached && (
+          <>
+            <span className="transcript-entry-tag">{e.duration_ms}ms</span>
+            <span className={`transcript-entry-tag ${e.exit_code === 0 ? 'transcript-exit-ok' : 'transcript-exit-err'}`}>
+              exit {e.exit_code}
+            </span>
+          </>
+        )}
+        {showHost && e.host && (
+          <span className="transcript-entry-tag transcript-host-tag" title={`ran on ${e.host}`}>
+            {e.host}
+          </span>
+        )}
+        {type === 'resource' && e.record && (
+          <a
+            className="transcript-expand-btn"
+            href={resourceUrl(sessionId, e.record)}
+            target="_blank"
+            rel="noreferrer"
+            title={`open ${e.metadata?.resource_file ?? 'the resource'}`}
+          >
+            ↗ open
+          </a>
+        )}
+        {e.record && !e.record_missing && (
+          <button
+            className="transcript-expand-btn"
+            onClick={() => onExpand(e.record!)}
+            title={`open ${e.record}-processed.txt -- the full turn, not just this preview`}
+          >
+            ⤢ expand
+          </button>
+        )}
+        {e.record && e.record_missing && (
+          <span
+            className="transcript-entry-tag transcript-record-missing"
+            title={`${e.record}-processed.txt isn't on this host yet`}
+          >
+            record not here
+          </span>
+        )}
+      </div>
+      {e.input && (
+        <div className="transcript-block transcript-block-in">
+          <div className="transcript-block-label">{INPUT_LABELS[type] ?? 'input'}</div>
+          <pre>{e.input}</pre>
+        </div>
+      )}
+      {e.output && (
+        <div className="transcript-block transcript-block-out">
+          <div className="transcript-block-label">output</div>
+          <pre>{e.output}</pre>
+        </div>
+      )}
+      {e.error && (
+        <div className="transcript-block transcript-block-err">
+          <div className="transcript-block-label">error</div>
+          <pre>{e.error}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// EVENT_TYPE_LABELS are the transcript's tags for clauditable's event types
+// (RECORD_SCHEMAS.md). Sessions recorded before ai_invocation existed show
+// their agent runs as "command" too.
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  command_execution: 'command',
+  ai_invocation: 'AI',
+  note: 'note',
+  resource: 'resource',
+}
+
+const INPUT_LABELS: Record<string, string> = {
+  note: 'note',
+  resource: 'resource',
+}
+
+export default function App() {
+  const {
+    connected,
+    reprStatus,
+    reprHost,
+    reprPort,
+    reprAutoConnect,
+    devMode,
+    version,
+    modeMismatch,
+    connectRepr,
+    disconnectRepr,
+    setAutoConnectRepr,
+    sessions,
+    currentSessionId,
+    selectedId,
+    sessionInfo,
+    sessionView,
+    expanded,
+    processedView,
+    notice,
+    annotationResult,
+    promptResult,
+    selectSession,
+    expandEntry,
+    collapseEntry,
+    newSession,
+    setCurrentSession,
+    renameSession,
+    archiveSessions,
+    addNote,
+    addResource,
+    addHighlightedResources,
+    addHostResources,
+    promptSession,
+  } = useSessionManagerWS()
+
+  return (
+    <div className={`app${devMode ? ' app-dev-mode' : ''}`}>
+      {modeMismatch && (
+        <div className="mode-mismatch-banner">
+          ⚠ dev/ops mode mismatch with local-representative ({modeMismatch.peer_mode}):
+          only health information is exchanged until this is resolved. See docs/DevMode.md.
+        </div>
+      )}
+      <div className="sidebar-wrap">
+        <div className="sidebar">
+          <div className="sidebar-header">
+            <h1>Session Manager</h1>
+            {version && <span className="app-version-tag">v{version.replace(/^v/, '')}</span>}
+          </div>
+          <SessionList
+            sessions={sessions}
+            currentId={currentSessionId}
+            selectedId={selectedId}
+            onSelect={selectSession}
+            onNew={newSession}
+            onArchive={archiveSessions}
+          />
+          <ReprFooter
+            status={reprStatus}
+            host={reprHost}
+            port={reprPort}
+            autoConnect={reprAutoConnect}
+            onConnect={connectRepr}
+            onDisconnect={disconnectRepr}
+            onSetAutoConnect={setAutoConnectRepr}
+          />
+        </div>
+      </div>
+      <div className="main-content">
+        {notice && (
+          <div className={`session-notice session-notice-${notice.kind}`}>{notice.message}</div>
+        )}
+        {selectedId ? (
+          <SessionDetail
+            id={selectedId}
+            currentId={currentSessionId}
+            info={sessionInfo}
+            view={sessionView}
+            expanded={expanded}
+            processedView={processedView}
+            annotationResult={annotationResult}
+            promptResult={promptResult}
+            reprConnected={reprStatus === 'connected'}
+            onSetCurrent={setCurrentSession}
+            onRename={renameSession}
+            onExpand={expandEntry}
+            onCollapse={collapseEntry}
+            onAddNote={addNote}
+            onAddResource={addResource}
+            onAddHighlighted={addHighlightedResources}
+            onAddFromHost={addHostResources}
+            onPrompt={promptSession}
+          />
+        ) : (
+          <div className="empty-state">
+            <div>
+              <span className={`conn-dot ${connected ? 'connected' : 'disconnected'}`} />
+              Select a session on the left, or create a new one, to get started.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}

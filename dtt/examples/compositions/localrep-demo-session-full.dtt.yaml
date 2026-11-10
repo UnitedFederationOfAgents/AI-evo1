@@ -1,0 +1,139 @@
+# DTT example -- localrep, a full session demo, hello world included, composed of five others (see ../../README.md "Calls and phases").
+#
+# It takes node, the node to give the demo on, as agent-coordinator names it
+# ("" by default, for this node), and ac_url, agent-coordinator's URL as
+# that node's browser reaches it ("" by default: asked of this node's
+# local-representative). It is localrep-demo-session with a hello world in
+# the middle: it calls five other examples (dtt.calls), one after another,
+# each in its own phase. Phase prepare calls localrep-demo-prepare: wake the
+# node, put the demo page on its desktop and switch to an empty workspace.
+# Phase session-prepare calls localrep-demo-session-prepare: make sure
+# session-manager is running, and open a new federation-command terminal
+# and, beside it, a new Chrome window on the node's session-manager. Phase
+# hello calls localrep-demo-session-hello, given the session prep's
+# terminal (its run's fc output): the terminal makes a session,
+# hello-world-<time>, with a note in it, which the robot finds in
+# session-manager; the robot adds a note in session-manager, which the
+# terminal finds in the session's records. Phase session-shut-down calls
+# localrep-demo-session-shutdown, given the same terminal: close that Chrome
+# and the terminal. Phase shut-down calls localrep-demo-shutdown: delete the
+# page and switch back to the first workspace, so GNOME removes the demo's.
+# Each of the five makes its own composer composition (demo-prep-<time>,
+# demo-session-prep-<time>, demo-session-hello-<time>,
+# demo-session-shutdown-<time>, demo-shutdown-<time>) of its own recording.
+# Then a sixth phase, compose, has composer put the five renders together,
+# between a title card and a closing card, into one more composition,
+# demo-session-full-<time>, rendered into a WebM in the files tab.
+#
+# All five calls are given this document's time (at), so they share the
+# demo page, the browser's profile, the hello-world session's name and the
+# names of their runs and compositions; each assert gives a new demo. The
+# image reports each phase (phases), and a phase that fails stops the ones
+# after it -- a failed hello leaves the session demo's windows open, for
+# localrep-demo-session-shutdown on its own (given at and the session
+# prep's fc), then localrep-demo-shutdown. Deleting, with the assert's
+# image, deletes through each call too: the five sequences and all six
+# compositions (the runs have happened, so they're kept; so is the
+# hello-world session).
+#
+# It needs what the five calls need: local-representative connected to
+# agent-coordinator on the node, with ianar, session-manager,
+# federation-command and clauditable built beside it; GNOME with dynamic
+# workspaces and its default tiling keys (super+left, super+right); a
+# terminal for federation-command to open in; google-chrome. Here: compose
+# launched and connected.
+#
+#   dtt read examples/compositions/localrep-demo-session-full.dtt.yaml --var node=<node>
+#   dtt assert examples/compositions/localrep-demo-session-full.dtt.yaml --var node=<node>
+#   dtt delete examples/compositions/localrep-demo-session-full.dtt.yaml --var node=<node> --image <the assert's image>
+
+variables:
+  node:
+    default: ""
+    help: the node to give the demo on, as agent-coordinator names it; empty for this node
+  ac_url:
+    default: ""
+    help: agent-coordinator's URL as the node's browser reaches it (http://host:port); empty to ask this node's local-representative
+
+timestamp:
+  select: now
+  alias: the-time
+
+dtt.calls:
+  select:
+    document: localrep-demo-prepare.dtt.yaml
+  alias: prep
+  phase: prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-session-prepare.dtt.yaml
+  alias: sprep
+  phase: session-prepare
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      ac_url: ${{var.ac_url}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-session-hello.dtt.yaml
+  alias: shello
+  phase: hello
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{sprep.by_alias.sprep-run.output.fc}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-session-shutdown.dtt.yaml
+  alias: sshut
+  phase: session-shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+      fc: ${{sprep.by_alias.sprep-run.output.fc}}
+
+dtt.calls:
+  select:
+    document: localrep-demo-shutdown.dtt.yaml
+  alias: shut
+  phase: shut-down
+  assert:
+    variables:
+      node: ${{var.node}}
+      at: ${{the-time.unix}}
+
+localrep.compositions:
+  select:
+    id: demo-session-full-${{the-time.unix}}
+  alias: full-comp
+  phase: compose
+  assert:
+    composition: |
+      {
+        "name": "Full session demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}",
+        "width": 1280,
+        "height": 720,
+        "video": [
+          {"kind": "title", "duration": 3, "text": "A full session demo on ${{prep.by_alias.prep-seq.node}} -- ${{the-time.human-readable}}", "color": "#ffffff", "background": "#1a1a1a"},
+          {"kind": "media", "file_id": "${{prep.by_alias.prep-comp.render.file_id}}", "file_name": "${{prep.by_alias.prep-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{sprep.by_alias.sprep-comp.render.file_id}}", "file_name": "${{sprep.by_alias.sprep-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{shello.by_alias.shello-comp.render.file_id}}", "file_name": "${{shello.by_alias.shello-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{sshut.by_alias.sshut-comp.render.file_id}}", "file_name": "${{sshut.by_alias.sshut-comp.render.name}}"},
+          {"kind": "media", "file_id": "${{shut.by_alias.shut-comp.render.file_id}}", "file_name": "${{shut.by_alias.shut-comp.render.name}}"},
+          {"kind": "title", "duration": 2, "text": "Prepared, opened, said hello world, closed and shut down", "color": "#1a1a1a", "background": "#e0e0e0"}
+        ],
+        "audio": []
+      }
+    rendered: true
+    renderer: auto
+    wait: 600
